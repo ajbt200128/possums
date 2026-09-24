@@ -1,0 +1,30 @@
+# Optional sidecar configuration. The gateway does not emit telemetry unless
+# explicitly enabled. Honeycomb retention/access evidence remains a release gate.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+processors:
+  filter/allowlist:
+    error_mode: propagate
+    metrics:
+      metric:
+        - 'not IsMatch(name, "^possums\\.(requests_total|responses_[245]xx_total)$")'
+  batch:
+    timeout: 60s
+exporters:
+  otlphttp/honeycomb:
+    endpoint: https://api.honeycomb.io
+    headers:
+      x-honeycomb-team: ${env:HONEYCOMB_API_KEY}
+      x-honeycomb-dataset: possums-phase0
+service:
+  telemetry:
+    logs:
+      level: "off"
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [filter/allowlist, batch]
+      exporters: [otlphttp/honeycomb]

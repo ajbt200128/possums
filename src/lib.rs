@@ -4,6 +4,7 @@ pub mod auth;
 pub mod catalog;
 pub mod inference;
 pub mod render;
+pub mod telemetry;
 pub mod web;
 
 pub const SERVICE_NAME: &str = "possums";
