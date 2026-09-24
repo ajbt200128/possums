@@ -51,20 +51,23 @@ pub fn page(body: &str) -> String {
     )
 }
 
-pub fn login_page(error: Option<&str>) -> String {
+pub fn login_page(login_challenge: &str, error: Option<&str>) -> String {
     let error = error
         .map(|message| format!("<p role=alert>{}</p>", escape(message)))
         .unwrap_or_default();
     page(&format!(
-        "<h1>Possums demo</h1>{error}<form method=post action=/login><label>Recovery credential <input name=credential type=password required autocomplete=current-password></label><button type=submit>Log in</button></form><p><a href=/claims>Claims and limitations</a></p>"
+        "<h1>Possums demo</h1>{error}<form method=post action=/login><input type=hidden name=csrf value=\"{}\"><label>Recovery credential <input name=credential type=password required autocomplete=current-password></label><button type=submit>Log in</button></form><p><a href=/claims>Claims and limitations</a></p>",
+        escape(login_challenge)
     ))
 }
 
 pub fn chat_page(
     models: &[Model],
     csrf: &str,
+    submission_token: &str,
     history: &[Message],
     notice: Option<&str>,
+    confirmation: Option<(&str, &str)>,
 ) -> String {
     let options = models
         .iter()
@@ -94,10 +97,20 @@ pub fn chat_page(
     let notice = notice
         .map(|value| format!("<p role=status>{}</p>", escape(value)))
         .unwrap_or_default();
+    let confirmation = confirmation
+        .map(|(token, model)| {
+            format!(
+                "<form method=post action=/confirm><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=model value=\"{}\"><button type=submit>Confirm response delivery</button></form>",
+                escape(csrf),
+                escape(token),
+                escape(model)
+            )
+        })
+        .unwrap_or_default();
     page(&format!(
-        "<h1>Possums demo</h1>{notice}{transcript}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model <select name=model>{options}</select></label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
+        "<h1>Possums demo</h1>{notice}{transcript}{confirmation}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model <select name=model>{options}</select></label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
         escape(csrf),
-        crate::auth::random_token(),
+        escape(submission_token),
         encoded_history,
         escape(csrf)
     ))

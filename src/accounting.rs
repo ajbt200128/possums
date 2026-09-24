@@ -1,13 +1,19 @@
 use crate::catalog::{actual_cost, CatalogError, Quote};
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
 
 const MAX_SUBMISSIONS: usize = 100_000;
 const MAX_ACCOUNT_IN_FLIGHT: u32 = 3;
+const CONFIRMATION_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     InFlight,
+    AwaitingConfirmation,
     Settled { charged: u64 },
     Refunded,
 }
@@ -18,6 +24,8 @@ struct Submission {
     request_digest: [u8; 32],
     quote: Quote,
     outcome: Outcome,
+    pending_charge: Option<u64>,
+    confirmation_deadline: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +101,7 @@ impl Accounting {
             .state
             .lock()
             .map_err(|_| AccountingError::InvalidTransition)?;
+        refund_expired_confirmations(&mut state)?;
         if let Some(existing) = state.submissions.get(&submission_id) {
             if existing.account_id != account_id || existing.request_digest != request_digest {
                 return Err(AccountingError::AlteredDuplicate);
@@ -121,12 +130,14 @@ impl Accounting {
                 request_digest,
                 quote,
                 outcome: Outcome::InFlight,
+                pending_charge: None,
+                confirmation_deadline: None,
             },
         );
         Ok(ReserveResult::Reserved)
     }
 
-    pub fn settle(
+    pub fn prepare_settlement(
         &self,
         submission_id: [u8; 32],
         input_tokens: u64,
@@ -149,6 +160,35 @@ impl Accounting {
         if charged > submission.quote.reserved_microunits {
             return Err(AccountingError::InvalidTransition);
         }
+        let submission = state
+            .submissions
+            .get_mut(&submission_id)
+            .ok_or(AccountingError::InvalidTransition)?;
+        submission.outcome = Outcome::AwaitingConfirmation;
+        submission.pending_charge = Some(charged);
+        submission.confirmation_deadline = Some(Instant::now() + CONFIRMATION_LIFETIME);
+        Ok(charged)
+    }
+
+    pub fn settle(&self, submission_id: [u8; 32]) -> Result<u64, AccountingError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AccountingError::InvalidTransition)?;
+        refund_expired_confirmations(&mut state)?;
+        let submission = state
+            .submissions
+            .get(&submission_id)
+            .ok_or(AccountingError::InvalidTransition)?;
+        if let Outcome::Settled { charged } = submission.outcome {
+            return Ok(charged);
+        }
+        if submission.outcome != Outcome::AwaitingConfirmation {
+            return Err(AccountingError::InvalidTransition);
+        }
+        let charged = submission
+            .pending_charge
+            .ok_or(AccountingError::InvalidTransition)?;
         let account_id = submission.account_id.clone();
         let refund = submission.quote.reserved_microunits - charged;
         let account = state
@@ -163,11 +203,13 @@ impl Accounting {
             .in_flight
             .checked_sub(1)
             .ok_or(AccountingError::InvalidTransition)?;
-        state
+        let submission = state
             .submissions
             .get_mut(&submission_id)
-            .ok_or(AccountingError::InvalidTransition)?
-            .outcome = Outcome::Settled { charged };
+            .ok_or(AccountingError::InvalidTransition)?;
+        submission.outcome = Outcome::Settled { charged };
+        submission.pending_charge = None;
+        submission.confirmation_deadline = None;
         Ok(charged)
     }
 
@@ -183,7 +225,7 @@ impl Accounting {
         match submission.outcome {
             Outcome::Refunded => return Ok(()),
             Outcome::Settled { .. } => return Err(AccountingError::InvalidTransition),
-            Outcome::InFlight => {}
+            Outcome::InFlight | Outcome::AwaitingConfirmation => {}
         }
         let account_id = submission.account_id.clone();
         let reserved = submission.quote.reserved_microunits;
@@ -208,13 +250,51 @@ impl Accounting {
     }
 
     pub fn available(&self, account_id: &str) -> Option<u64> {
-        self.state
-            .lock()
-            .ok()?
-            .accounts
-            .get(account_id)
-            .map(|a| a.available)
+        let mut state = self.state.lock().ok()?;
+        refund_expired_confirmations(&mut state).ok()?;
+        state.accounts.get(account_id).map(|a| a.available)
     }
+}
+
+fn refund_expired_confirmations(state: &mut State) -> Result<(), AccountingError> {
+    let now = Instant::now();
+    let expired: Vec<_> = state
+        .submissions
+        .iter()
+        .filter_map(|(id, submission)| {
+            (submission.outcome == Outcome::AwaitingConfirmation
+                && submission
+                    .confirmation_deadline
+                    .is_some_and(|deadline| deadline <= now))
+            .then_some(*id)
+        })
+        .collect();
+    for id in expired {
+        let submission = state
+            .submissions
+            .get(&id)
+            .ok_or(AccountingError::InvalidTransition)?;
+        let account = state
+            .accounts
+            .get_mut(&submission.account_id)
+            .ok_or(AccountingError::InvalidTransition)?;
+        account.available = account
+            .available
+            .checked_add(submission.quote.reserved_microunits)
+            .ok_or(AccountingError::Cost)?;
+        account.in_flight = account
+            .in_flight
+            .checked_sub(1)
+            .ok_or(AccountingError::InvalidTransition)?;
+        let submission = state
+            .submissions
+            .get_mut(&id)
+            .ok_or(AccountingError::InvalidTransition)?;
+        submission.outcome = Outcome::Refunded;
+        submission.pending_charge = None;
+        submission.confirmation_deadline = None;
+    }
+    Ok(())
 }
 
 fn map_cost(_: CatalogError) -> AccountingError {

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tinfoil::Client;
+use tokio::time::Instant;
 
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -75,7 +76,8 @@ impl TinfoilInference {
         request: tinfoil::verifier::tls::OriginBoundRequestBuilder,
         limit: usize,
     ) -> Result<Vec<u8>, InferenceError> {
-        let response = tokio::time::timeout(Duration::from_secs(300), request.send())
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let mut response = tokio::time::timeout_at(deadline, request.send())
             .await
             .map_err(|_| InferenceError::Unavailable)?
             .map_err(|_| InferenceError::Unavailable)?;
@@ -88,14 +90,26 @@ impl TinfoilInference {
         {
             return Err(InferenceError::InvalidResponse);
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| InferenceError::Unavailable)?;
-        if bytes.len() > limit {
-            return Err(InferenceError::InvalidResponse);
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or_default()
+                .min(limit as u64) as usize,
+        );
+        loop {
+            let chunk = tokio::time::timeout_at(deadline, response.chunk())
+                .await
+                .map_err(|_| InferenceError::Unavailable)?
+                .map_err(|_| InferenceError::Unavailable)?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+            if bytes.len().saturating_add(chunk.len()) > limit {
+                return Err(InferenceError::InvalidResponse);
+            }
+            bytes.extend_from_slice(&chunk);
         }
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 
     fn http(&self) -> Result<&tinfoil::verifier::tls::OriginBoundClient, InferenceError> {

@@ -1,7 +1,7 @@
 use crate::{
     accounting::{Accounting, Outcome, ReserveResult},
-    attestation::load_evidence,
-    auth::{clear_session_cookie, session_cookie, Auth, Session},
+    attestation::{load_evidence, EvidenceVerifier},
+    auth::{clear_session_cookie, login_challenge_cookie, session_cookie, Auth, Session},
     catalog::actual_cost,
     inference::{authenticated_catalog, Message, SharedInference},
     render,
@@ -33,17 +33,24 @@ pub struct AppState {
     pub accounting: Arc<Accounting>,
     pub inference: SharedInference,
     pub gateway_evidence_path: Arc<str>,
+    gateway_evidence_verifier: Arc<dyn EvidenceVerifier>,
     generation_slots: Arc<Semaphore>,
 }
 
 impl AppState {
-    pub fn new(auth: Auth, inference: SharedInference, evidence_path: impl Into<Arc<str>>) -> Self {
+    pub fn new(
+        auth: Auth,
+        inference: SharedInference,
+        evidence_path: impl Into<Arc<str>>,
+        gateway_evidence_verifier: Arc<dyn EvidenceVerifier>,
+    ) -> Self {
         let accounting = Accounting::new(auth.account_budgets());
         Self {
             auth: Arc::new(auth),
             accounting: Arc::new(accounting),
             inference,
             gateway_evidence_path: evidence_path.into(),
+            gateway_evidence_verifier,
             generation_slots: Arc::new(Semaphore::new(4)),
         }
     }
@@ -55,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/chat", post(chat))
+        .route("/confirm", post(confirm_delivery))
         .route("/recovery", get(recovery))
         .route("/claims", get(claims))
         .route("/attestation", get(attestation))
@@ -86,34 +94,58 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
     response
 }
 
-fn session_from_headers(state: &AppState, headers: &HeaderMap) -> Option<(String, Session)> {
+fn cookie_value(headers: &HeaderMap, wanted: &str) -> Option<String> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
-    let id = cookies.split(';').find_map(|cookie| {
+    cookies.split(';').find_map(|cookie| {
         let (name, value) = cookie.trim().split_once('=')?;
-        (name == "possums_session").then(|| value.to_owned())
-    })?;
+        (name == wanted).then(|| value.to_owned())
+    })
+}
+
+fn session_from_headers(state: &AppState, headers: &HeaderMap) -> Option<(String, Session)> {
+    let id = cookie_value(headers, "possums_session")?;
     state.auth.session(&id).map(|session| (id, session))
 }
 
 async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let Some((_, session)) = session_from_headers(&state, &headers) else {
-        return Html(render::login_page(None)).into_response();
+    let Some((session_id, session)) = session_from_headers(&state, &headers) else {
+        return login_page_response(&state, None);
     };
     match current_catalog(&state).await {
-        Ok(catalog) => {
-            Html(render::chat_page(&catalog.models, &session.csrf, &[], None)).into_response()
-        }
+        Ok(catalog) => match state.auth.issue_submission(&session_id) {
+            Ok(token) => Html(render::chat_page(
+                &catalog.models,
+                &session.csrf,
+                &token,
+                &[],
+                None,
+                None,
+            ))
+            .into_response(),
+            Err(_) => unavailable(),
+        },
         Err(response) => response,
     }
 }
 
 #[derive(Deserialize)]
 struct LoginForm {
+    csrf: String,
     credential: String,
 }
 
-async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Response {
-    match state.auth.authenticate(&form.credential) {
+async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    let Some(cookie_challenge) = cookie_value(&headers, "possums_login_csrf") else {
+        return unauthorized();
+    };
+    if !constant_time_equal(cookie_challenge.as_bytes(), form.csrf.as_bytes()) {
+        return unauthorized();
+    }
+    match state.auth.authenticate(&form.credential, &form.csrf) {
         Ok((id, _)) => {
             let mut response = Redirect::to("/").into_response();
             if let Ok(value) = HeaderValue::from_str(&session_cookie(&id)) {
@@ -123,11 +155,7 @@ async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Re
                 internal_error()
             }
         }
-        Err(_) => (
-            StatusCode::UNAUTHORIZED,
-            Html(render::login_page(Some("Invalid credential"))),
-        )
-            .into_response(),
+        Err(_) => (StatusCode::UNAUTHORIZED, "invalid credential").into_response(),
     }
 }
 
@@ -173,7 +201,7 @@ async fn claims() -> Html<String> {
 }
 
 async fn attestation(State(state): State<AppState>) -> Response {
-    let gateway = match load_evidence(state.gateway_evidence_path.as_ref()) {
+    let gateway = match verified_gateway_evidence(&state) {
         Ok(value) => value,
         Err(_) => return unavailable(),
     };
@@ -198,10 +226,10 @@ async fn chat(
     headers: HeaderMap,
     Form(form): Form<ChatForm>,
 ) -> Response {
-    let Some((_, session)) = session_from_headers(&state, &headers) else {
+    let Some((session_id, session)) = session_from_headers(&state, &headers) else {
         return unauthorized();
     };
-    if !Auth::verify_csrf(&session, &form.csrf) || form.token.len() < 32 || form.prompt.is_empty() {
+    if !Auth::verify_csrf(&session, &form.csrf) || form.prompt.is_empty() {
         return bad_request();
     }
     let mut history: Vec<Message> = match serde_json::from_str(&form.history) {
@@ -219,7 +247,7 @@ async fn chat(
     });
 
     // Gateway provenance and serving-key evidence is a mandatory pre-prompt gate.
-    if load_evidence(state.gateway_evidence_path.as_ref()).is_err() {
+    if verified_gateway_evidence(&state).is_err() {
         return unavailable();
     }
     let catalog = match current_catalog(&state).await {
@@ -235,7 +263,14 @@ async fn chat(
         Ok(value) => value,
         Err(_) => return bad_request(),
     };
-    let submission_id = state.auth.bind_submission(&session.account_id, &form.token);
+    let submission_id =
+        match state
+            .auth
+            .bind_submission(&session_id, &session.account_id, &form.token, &form.model)
+        {
+            Ok(value) => value,
+            Err(_) => return bad_request(),
+        };
     let request_digest: [u8; 32] = Sha256::digest(form.model.as_bytes()).into();
     match state.accounting.reserve(
         &session.account_id,
@@ -246,7 +281,9 @@ async fn chat(
         Ok(ReserveResult::Reserved) => {}
         Ok(ReserveResult::Duplicate(outcome)) => {
             let notice = match outcome {
-                Outcome::InFlight => "This submission is already in progress.",
+                Outcome::InFlight | Outcome::AwaitingConfirmation => {
+                    "This submission is already in progress."
+                }
                 Outcome::Settled { .. } => {
                     "This submission already completed and was not regenerated."
                 }
@@ -254,17 +291,24 @@ async fn chat(
                     "This submission failed and was refunded; use the new form to retry."
                 }
             };
+            let token = match state.auth.issue_submission(&session_id) {
+                Ok(value) => value,
+                Err(_) => return unavailable(),
+            };
             return Html(render::chat_page(
                 &catalog.models,
                 &session.csrf,
+                &token,
                 &history,
                 Some(notice),
+                None,
             ))
             .into_response();
         }
         Err(_) => return (StatusCode::PAYMENT_REQUIRED, "request unavailable").into_response(),
     }
 
+    let mut reservation = ReservationGuard::new(state.accounting.clone(), submission_id);
     let input_tokens = match state.inference.count_tokens(&form.model, &history).await {
         Ok(value) => value,
         Err(_) => {
@@ -299,7 +343,7 @@ async fn chat(
         || actual_cost(&quote, generation.output_tokens).is_err()
         || state
             .accounting
-            .settle(
+            .prepare_settlement(
                 submission_id,
                 generation.input_tokens,
                 generation.output_tokens,
@@ -313,13 +357,91 @@ async fn chat(
         role: "assistant".into(),
         content: generation.content,
     });
-    Html(render::chat_page(
+    let token = match state.auth.issue_submission(&session_id) {
+        Ok(value) => value,
+        Err(_) => return unavailable(),
+    };
+    let response = Html(render::chat_page(
         &catalog.models,
         &session.csrf,
+        &token,
         &history,
-        None,
+        Some("Confirm delivery to finalize the charge."),
+        Some((&form.token, &form.model)),
     ))
-    .into_response()
+    .into_response();
+    reservation.disarm();
+    response
+}
+
+#[derive(Deserialize)]
+struct ConfirmationForm {
+    csrf: String,
+    token: String,
+    model: String,
+}
+
+async fn confirm_delivery(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ConfirmationForm>,
+) -> Response {
+    let Some((session_id, session)) = session_from_headers(&state, &headers) else {
+        return unauthorized();
+    };
+    if !Auth::verify_csrf(&session, &form.csrf) {
+        return bad_request();
+    }
+    let submission_id =
+        match state
+            .auth
+            .bind_submission(&session_id, &session.account_id, &form.token, &form.model)
+        {
+            Ok(value) => value,
+            Err(_) => return bad_request(),
+        };
+    match state.accounting.settle(submission_id) {
+        Ok(_) => Redirect::to("/").into_response(),
+        Err(_) => unavailable(),
+    }
+}
+
+struct ReservationGuard {
+    accounting: Arc<Accounting>,
+    submission_id: [u8; 32],
+    armed: bool,
+}
+
+impl ReservationGuard {
+    fn new(accounting: Arc<Accounting>, submission_id: [u8; 32]) -> Self {
+        Self {
+            accounting,
+            submission_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReservationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.accounting.refund(self.submission_id);
+        }
+    }
+}
+
+fn verified_gateway_evidence(
+    state: &AppState,
+) -> Result<crate::attestation::GatewayEvidence, crate::attestation::EvidenceError> {
+    let evidence = load_evidence(state.gateway_evidence_path.as_ref())?;
+    state
+        .gateway_evidence_verifier
+        .verify(&evidence, now_unix())?;
+    Ok(evidence)
 }
 
 async fn current_catalog(state: &AppState) -> Result<crate::catalog::Catalog, Response> {
@@ -333,6 +455,25 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn login_page_response(state: &AppState, error: Option<&str>) -> Response {
+    let challenge = match state.auth.issue_login_challenge() {
+        Ok(value) => value,
+        Err(_) => return unavailable(),
+    };
+    let cookie = match HeaderValue::from_str(&login_challenge_cookie(&challenge)) {
+        Ok(value) => value,
+        Err(_) => return internal_error(),
+    };
+    let mut response = Html(render::login_page(&challenge, error)).into_response();
+    response.headers_mut().insert(header::SET_COOKIE, cookie);
+    response
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    left.len() == right.len() && bool::from(left.ct_eq(right))
 }
 
 fn unauthorized() -> Response {

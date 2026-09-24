@@ -1,4 +1,5 @@
 use possums::{
+    attestation::UnavailableEvidenceVerifier,
     auth::Auth,
     inference::TinfoilInference,
     web::{router, AppState},
@@ -25,7 +26,14 @@ async fn run() -> Result<(), ()> {
     let inference = TinfoilInference::connect(&host, &repository, api_key)
         .await
         .map_err(|_| ())?;
-    let state = AppState::new(auth, Arc::new(inference), Arc::<str>::from(evidence));
+    // No platform quote verifier is available in this build. The request path
+    // therefore fails closed before transmitting prompt bytes.
+    let state = AppState::new(
+        auth,
+        Arc::new(inference),
+        Arc::<str>::from(evidence),
+        Arc::new(UnavailableEvidenceVerifier),
+    );
     let listener = tokio::net::TcpListener::bind(bind).await.map_err(|_| ())?;
     axum::serve(listener, router(state)).await.map_err(|_| ())
 }

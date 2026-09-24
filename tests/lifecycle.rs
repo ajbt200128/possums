@@ -28,12 +28,21 @@ fn quote() -> Quote {
 
 #[test]
 fn process_epoch_invalidates_old_submission_tokens() {
+    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
     let first = Auth::from_json(&auth_config()).unwrap();
+    let challenge = first.issue_login_challenge().unwrap();
+    let (session_id, session) = first.authenticate(&credential, &challenge).unwrap();
+    let token = first.issue_submission(&session_id).unwrap();
+    assert!(first
+        .bind_submission(&session_id, &session.account_id, &token, "m")
+        .is_ok());
+
     let restarted = Auth::from_json(&auth_config()).unwrap();
-    assert_ne!(
-        first.bind_submission("a", "submission"),
-        restarted.bind_submission("a", "submission")
-    );
+    let challenge = restarted.issue_login_challenge().unwrap();
+    let (new_session_id, new_session) = restarted.authenticate(&credential, &challenge).unwrap();
+    assert!(restarted
+        .bind_submission(&new_session_id, &new_session.account_id, &token, "m")
+        .is_err());
 }
 
 #[test]

@@ -26,7 +26,9 @@ fn reserves_settles_and_refunds_remainder_once() {
         ReserveResult::Reserved
     );
     assert_eq!(ledger.available("a"), Some(48));
-    assert_eq!(ledger.settle([1; 32], 5, 4).unwrap(), 29);
+    assert_eq!(ledger.prepare_settlement([1; 32], 5, 4).unwrap(), 29);
+    assert_eq!(ledger.available("a"), Some(48));
+    assert_eq!(ledger.settle([1; 32]).unwrap(), 29);
     assert_eq!(ledger.available("a"), Some(71));
     assert_eq!(
         ledger.reserve("a", [1; 32], [2; 32], quote()).unwrap(),

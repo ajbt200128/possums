@@ -7,7 +7,8 @@
 | `/` | GET | Login or chat form and authenticated model selector |
 | `/login` | POST | Exchange a provisioned recovery credential for a session |
 | `/logout` | POST | End the session |
-| `/chat` | POST | Validate, reserve, generate, settle, and render one buffered turn |
+| `/chat` | POST | Validate, reserve, generate, and render one buffered turn |
+| `/confirm` | POST | Authenticated no-JavaScript delivery acknowledgment and settlement |
 | `/recovery` | GET | Explicitly display or download the user's recovery credential |
 | `/claims` | GET | Current scoped privacy and verification claims |
 | `/attestation` | GET | Platform quote and release/endpoint-binding evidence |
@@ -16,11 +17,11 @@ There is no public signup or inference API.
 
 ## Request limits
 
-Limits are defensive transport controls, not a product limit on conversation history. The application accepts at most 8 MiB of decoded form data, 32 concurrent requests, and 4 concurrent generations. Inference responses are limited to 16 MiB and inference calls to five minutes. Request decompression is not enabled. Header size/time, body time, and whole-process memory ceilings depend on the serving shim and remain UNKNOWN until runtime verification; production must configure and verify them. Each authenticated catalog entry supplies the model's context and maximum-output limits; the complete conversation plus requested maximum output must fit that context. The gateway does not lower a model's maximum output.
+Limits are defensive transport controls, not a product limit on conversation history. The application accepts at most 8 MiB of decoded form data, 32 concurrent requests, and 4 concurrent generations. Inference responses are read incrementally, limited to 16 MiB, and covered by one five-minute send-and-body deadline. Request decompression is not enabled. Header size/time, body time, and whole-process memory ceilings depend on the serving shim and remain UNKNOWN until runtime verification; production must configure and verify them. Each authenticated catalog entry supplies the model's context and maximum-output limits; the complete conversation plus requested maximum output must fit that context. The gateway does not lower a model's maximum output.
 
 ## Authentication
 
-An operator provisions a random credential with at least 256 bits of entropy and a demo-credit budget through a runtime secret. Credentials never belong in source, images, URLs, telemetry, or errors. Authentication comparisons are constant-time. Sessions use random opaque cookies marked `Secure`, `HttpOnly`, and `SameSite=Strict`; mutating forms require a session-bound CSRF token. The recovery page is no-store and offers explicit copy/download instructions without JavaScript.
+An operator provisions a random credential with at least 256 bits of entropy and a demo-credit budget through a runtime secret. Credentials never belong in source, images, URLs, telemetry, or errors. Authentication comparisons are constant-time. Sessions are capped, expire after twelve hours, and use random opaque cookies marked `Secure`, `HttpOnly`, and `SameSite=Strict`. Login uses a single-use, ten-minute, same-site cookie-bound CSRF challenge. Other mutating forms require a session-bound CSRF token. The recovery page is no-store and offers explicit copy/download instructions without JavaScript.
 
 ## Catalog and quote
 
@@ -30,14 +31,14 @@ The gateway fetches a bounded catalog over the verified inference channel. Authe
 
 State is single-process, short-lived, and contains no prompts or responses:
 
-1. A single-use submission token is bound to account, session epoch, and a digest of model plus prompt-free request metadata.
+1. A capped, fifteen-minute submission token is issued by the gateway and bound on first use to the account, session, process epoch, and selected model. Reusing it with changed prompt/history never regenerates, but the gateway intentionally retains no content hash and does not claim to detect which content changed.
 2. `reserve` atomically checks balance, account concurrency/quota, and duplicate status, then deducts the model-context maximum quoted cost.
 3. A duplicate token always returns its stored terminal status and never invokes inference. Tombstones remain for the process lifetime; bounded capacity fails closed rather than evicting them.
-4. Verified inference returns authenticated usage. `settle` charges actual input/output usage at the snapshotted rate and releases the remainder.
+4. Verified inference returns authenticated usage. The gateway records the prospective actual charge at the snapshotted rate, but does not settle until the authenticated browser acknowledgment.
 5. Missing/invalid usage, upstream failure, timeout, cancellation, or incomplete/uncertain HTTP delivery refunds the full user reservation exactly once. Measured upstream cost is an aggregate operator expense only.
 6. No automatic inference retry occurs after generation may have started.
 
-The HTML response is buffered and contains a safe form using a new token; an old token cannot regenerate. The current application settles before returning the body to the HTTP server. It cannot prove browser receipt or reliably distinguish a completed delivery from a disconnect, so conservative disconnect refund behavior is **not yet verified and blocks production**.
+The HTML response is buffered and contains a safe form using a new token; an old token cannot regenerate. It also contains an explicit no-JavaScript delivery-confirmation form bound to the original account, session, token, and model. Until confirmation, the maximum reservation remains held. Cancellation or panic before handoff refunds through reservation ownership; unconfirmed handoffs expire after five minutes and refund on the next accounting operation. Only authenticated confirmation settles actual usage. Deployed disconnect and expiry behavior still requires runtime fault-injection evidence.
 
 ### Restart semantics
 
