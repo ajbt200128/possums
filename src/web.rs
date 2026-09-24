@@ -465,7 +465,7 @@ async fn chat(
         Err(_) => return (StatusCode::PAYMENT_REQUIRED, "request unavailable").into_response(),
     }
 
-    let mut reservation = ReservationGuard::new(state.accounting.clone(), submission_id);
+    let reservation = ReservationGuard::new(state.accounting.clone(), submission_id);
     let input_tokens = match state.inference.count_tokens(&form.model, &history).await {
         Ok(value) => value,
         Err(_) => {
@@ -529,8 +529,8 @@ async fn chat(
     ) else {
         return unavailable();
     };
-    reservation.disarm();
-    Html(html).into_response()
+    let (parts, body) = Html(html).into_response().into_parts();
+    Response::from_parts(parts, Body::new(ReservationBody::new(body, reservation)))
 }
 
 #[derive(Deserialize)]
@@ -624,6 +624,38 @@ impl Drop for ReservationGuard {
         if self.armed {
             let _ = self.accounting.refund(self.submission_id);
         }
+    }
+}
+
+struct ReservationBody {
+    inner: Body,
+    reservation: Option<ReservationGuard>,
+}
+
+impl ReservationBody {
+    fn new(inner: Body, reservation: ReservationGuard) -> Self {
+        Self {
+            inner,
+            reservation: Some(reservation),
+        }
+    }
+}
+
+impl HttpBody for ReservationBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let result = Pin::new(&mut self.inner).poll_frame(context);
+        if matches!(result, Poll::Ready(None)) {
+            if let Some(mut reservation) = self.reservation.take() {
+                reservation.disarm();
+            }
+        }
+        result
     }
 }
 

@@ -21,7 +21,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Notify,
     time::{sleep, Duration},
@@ -68,6 +68,35 @@ impl Inference for BlockingInference {
 
     async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
         unreachable!()
+    }
+
+    fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
+        Ok(serde_json::json!({"verified": true}))
+    }
+}
+
+struct LargeResponseInference;
+
+#[async_trait]
+impl Inference for LargeResponseInference {
+    async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        Ok(format!(r#"{{"issued_at_unix":{now},"models":[{{"id":"m","context_tokens":20,"max_output_tokens":10,"input_microunits_per_token":1,"output_microunits_per_token":1}}]}}"#).into_bytes())
+    }
+
+    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+        Ok(1)
+    }
+
+    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
+        Ok(Generation {
+            content: "x".repeat(200 * 1024),
+            input_tokens: 1,
+            output_tokens: 1,
+        })
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
@@ -281,6 +310,42 @@ async fn no_javascript_chat_sets_security_headers_and_settles() {
 }
 
 #[tokio::test]
+async fn dropping_unconsumed_response_refunds_reservation() {
+    let path = std::env::temp_dir().join(format!(
+        "possums-abandoned-response-evidence-{}",
+        std::process::id()
+    ));
+    write_evidence(
+        &path,
+        serde_json::json!({"verified": true}),
+        now(),
+        EXPECTED_RELEASE,
+        EXPECTED_KEY,
+    );
+    let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=hello"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(state.accounting.available("a"), Some(74));
+    drop(response);
+    assert_eq!(state.accounting.available("a"), Some(100));
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn confirmation_failures_do_not_settle_and_retry_is_idempotent() {
     let path = std::env::temp_dir().join(format!(
         "possums-confirm-retry-evidence-{}",
@@ -310,7 +375,7 @@ async fn confirmation_failures_do_not_settle_and_retry_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    drop(response);
+    response.into_body().collect().await.unwrap();
     assert_eq!(state.accounting.available("a"), Some(74));
 
     let history = "%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22hello%22%7D%2C%7B%22role%22%3A%22assistant%22%2C%22content%22%3A%22%2A%2Asafe%2A%2A%22%7D%5D";
@@ -432,7 +497,7 @@ async fn confirmation_token_capacity_failure_does_not_settle() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    drop(response);
+    response.into_body().collect().await.unwrap();
 
     state.auth.issue_submission(&session_id).unwrap();
     let response = router(state.clone())
@@ -808,6 +873,70 @@ async fn socket_disconnect_during_inference_refunds_reservation() {
     let mut client = TcpStream::connect(address).await.unwrap();
     client.write_all(request.as_bytes()).await.unwrap();
     started.notified().await;
+    assert_eq!(state.accounting.available("a"), Some(74));
+    drop(client);
+
+    for _ in 0..100 {
+        if state.accounting.available("a") == Some(100) {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(state.accounting.available("a"), Some(100));
+    server.abort();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn socket_disconnect_after_render_refunds_reservation() {
+    let path = std::env::temp_dir().join(format!(
+        "possums-rendered-disconnect-evidence-{}",
+        std::process::id()
+    ));
+    write_evidence(
+        &path,
+        serde_json::json!({"verified": true}),
+        now(),
+        EXPECTED_RELEASE,
+        EXPECTED_KEY,
+    );
+    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+    let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
+    let auth = Auth::from_json(&format!(
+        r#"[{{"id":"a","credential_sha256":"{hash}","demo_microunits":100}}]"#
+    ))
+    .unwrap();
+    let challenge = auth.issue_login_challenge().unwrap();
+    let (session_id, session) = auth.authenticate(&credential, &challenge).unwrap();
+    let token = auth.issue_submission(&session_id).unwrap();
+    let state = AppState::new(
+        auth,
+        Arc::new(LargeResponseInference),
+        Arc::<str>::from(path.to_str().unwrap()),
+        Arc::new(TestEvidenceVerifier),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(listener, state.clone()));
+    let body = format!(
+        "csrf={}&token={token}&model=m&history=%5B%5D&prompt=hello",
+        session.csrf
+    );
+    let request = format!(
+        "POST /chat HTTP/1.1\r\nHost: local\r\nCookie: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}",
+        session_cookie(&session_id).split(';').next().unwrap(),
+        body.len(),
+        body
+    );
+    let mut client = TcpStream::connect(address).await.unwrap();
+    client.write_all(request.as_bytes()).await.unwrap();
+    let mut received = Vec::new();
+    while !received.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+        let mut chunk = [0; 1024];
+        let count = client.read(&mut chunk).await.unwrap();
+        assert_ne!(count, 0);
+        received.extend_from_slice(&chunk[..count]);
+    }
     assert_eq!(state.accounting.available("a"), Some(74));
     drop(client);
 
