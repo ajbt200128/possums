@@ -30,7 +30,7 @@ Run on 2026-09-24, aarch64-darwin, with the pinned Rust 1.88.0 Nix shell:
 |---|---|
 | `cargo fmt --all -- --check` | VERIFIED |
 | `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED |
-| `cargo test --all-targets --all-features` | VERIFIED: 37 tests passed |
+| `cargo test --all-targets --all-features` | VERIFIED: 38 tests passed |
 | `cargo test --test transport` | VERIFIED: total-body trickle deadline, total-header deadline, and oversized-header rejection |
 | `cargo test --test inference --test accounting --test web` | VERIFIED: 20 tests passed, including chunked/absent/oversized/stalled upstream bodies, fail-fast response-lifetime admission, socket disconnect, panic, confirmation expiry/race, and reauthentication replay |
 | `npm run test:browser` | VERIFIED: real Chromium with JavaScript disabled completed login, recovery download, model selection, confirmation, and a second chat turn without remote requests |
@@ -69,7 +69,7 @@ Release blockers found in review:
 | Independent image comparison absent | CI forces rebuilds in two independent Linux jobs and compares OCI manifest digests | `.github/workflows/check.yml`; successful CI evidence still required |
 | Upstream body boundary evidence absent | Local HTTP peers cover chunked, absent/oversized lengths, streamed oversize, and stalled bodies under the production collector | `tests/inference.rs` |
 | Lifecycle fault evidence absent | Local cancellation, socket disconnect, panic-after-reservation, expiry, settlement/refund race, and replay-after-reauthentication tests preserve full refunds and zero prompt calls where required | `tests/web.rs`; `tests/accounting.rs`; `tests/lifecycle.rs` |
-| Browser/deployed privacy evidence absent | A pinned Playwright test exercises the complete JavaScript-disabled local browser flow and rejects hostile-output network attempts. The production binary suppresses panic-hook payloads before serving. Runtime artifacts, platform logs, and production canaries remain release blockers | `tests/browser.mjs`, `examples/browser_fixture.rs`, and `tests/privacy.rs`; external rows above remain UNKNOWN |
+| Browser/deployed privacy evidence absent | A pinned Playwright test exercises the complete JavaScript-disabled local browser flow and rejects hostile-output network attempts. Seeded startup errors emit no canary and create no working-directory artifacts; the production binary suppresses panic-hook payloads before serving. Deployed runtime artifacts, platform logs, and production canaries remain release blockers | `tests/browser.mjs`, `examples/browser_fixture.rs`, and `tests/privacy.rs`; external rows above remain UNKNOWN |
 
 ## Independent release procedure
 
