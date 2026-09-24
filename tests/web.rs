@@ -217,6 +217,26 @@ async fn no_javascript_chat_sets_security_headers_and_settles() {
 }
 
 #[tokio::test]
+async fn oversized_request_body_is_rejected_before_upstream_calls() {
+    let (state, cookie, _, _, inference) = fixture("/unused/evidence");
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(vec![b'x'; 8 * 1024 * 1024 + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn missing_gateway_evidence_stops_before_upstream_calls() {
     let (state, cookie, csrf, token, inference) = fixture("/missing/evidence");
     let body = format!("csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary");

@@ -19,11 +19,11 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Semaphore;
 use tower::limit::ConcurrencyLimitLayer;
-use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::{catch_panic::CatchPanicLayer, timeout::RequestBodyTimeoutLayer};
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
 
@@ -67,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/claims", get(claims))
         .route("/attestation", get(attestation))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
+        .layer(RequestBodyTimeoutLayer::new(Duration::from_secs(30)))
         .layer(ConcurrencyLimitLayer::new(32))
         .layer(CatchPanicLayer::new())
         .layer(middleware::from_fn(security_headers))

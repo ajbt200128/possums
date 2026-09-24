@@ -17,7 +17,7 @@ There is no public signup or inference API.
 
 ## Request limits
 
-Limits are defensive transport controls, not a product limit on conversation history. The application accepts at most 8 MiB of decoded form data, 32 concurrent requests, and 4 concurrent generations. Inference responses are read incrementally, limited to 16 MiB, and covered by one five-minute send-and-body deadline. Request decompression is not enabled. Header size/time, body time, and whole-process memory ceilings depend on the serving shim and remain UNKNOWN until runtime verification; production must configure and verify them. Each authenticated catalog entry supplies the model's context and maximum-output limits; the complete conversation plus requested maximum output must fit that context. The gateway does not lower a model's maximum output.
+Limits are defensive transport controls, not a product limit on conversation history. The application accepts at most 8 MiB of decoded form data, times out request bodies after 30 seconds without a frame, admits at most 32 concurrent requests, and permits 4 concurrent generations. Inference responses are read incrementally, limited to 16 MiB, and covered by one five-minute send-and-body deadline. Request decompression is not enabled. Header size/time, total body time, and whole-process memory ceilings depend on the serving shim and remain UNKNOWN until runtime verification; production must configure and verify them. Each authenticated catalog entry supplies the model's context and maximum-output limits; the complete conversation plus requested maximum output must fit that context. The gateway does not lower a model's maximum output.
 
 ## Authentication
 
