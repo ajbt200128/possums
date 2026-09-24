@@ -10,7 +10,7 @@ use possums::{
     auth::{session_cookie, Auth},
     catalog::Model,
     inference::{Generation, Inference, InferenceError, Message},
-    web::{router, AppState},
+    web::{router, serve, AppState},
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -20,7 +20,12 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::Notify;
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+    sync::Notify,
+    time::{sleep, Duration},
+};
 use tower::ServiceExt;
 
 const EXPECTED_RELEASE: &str = "release";
@@ -59,6 +64,31 @@ impl Inference for BlockingInference {
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
         self.started.notify_one();
         std::future::pending().await
+    }
+
+    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
+        unreachable!()
+    }
+
+    fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
+        Ok(serde_json::json!({"verified": true}))
+    }
+}
+
+struct PanicInference;
+
+#[async_trait]
+impl Inference for PanicInference {
+    async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        Ok(format!(r#"{{"issued_at_unix":{now},"models":[{{"id":"m","context_tokens":20,"max_output_tokens":10,"input_microunits_per_token":1,"output_microunits_per_token":1}}]}}"#).into_bytes())
+    }
+
+    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+        panic!("injected post-reservation panic")
     }
 
     async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
@@ -274,6 +304,54 @@ async fn recovery_download_is_authenticated_and_never_cached() {
 }
 
 #[tokio::test]
+async fn request_admission_is_fail_fast_and_held_until_response_drop() {
+    let (state, cookie, _, _, _) = fixture("/unused/evidence");
+    let app = router(state);
+    let mut responses = Vec::new();
+    for _ in 0..8 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::COOKIE, cookie.split(';').next().unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        responses.push(response);
+    }
+
+    let overloaded = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    drop(responses.pop());
+    let admitted = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admitted.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn oversized_request_body_is_rejected_before_upstream_calls() {
     let (state, cookie, _, _, inference) = fixture("/unused/evidence");
     let response = router(state)
@@ -291,6 +369,45 @@ async fn oversized_request_body_is_rejected_before_upstream_calls() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
     assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn replay_after_reauthentication_stops_before_prompt_calls() {
+    let path = std::env::temp_dir().join(format!("possums-replay-evidence-{}", std::process::id()));
+    write_evidence(
+        &path,
+        serde_json::json!({"verified": true}),
+        now(),
+        EXPECTED_RELEASE,
+        EXPECTED_KEY,
+    );
+    let (state, _, _, token, inference) = fixture(path.to_str().unwrap());
+    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+    let challenge = state.auth.issue_login_challenge().unwrap();
+    let (new_session_id, new_session) = state.auth.authenticate(&credential, &challenge).unwrap();
+    let body = format!(
+        "csrf={}&token={token}&model=m&history=%5B%5D&prompt=canary",
+        new_session.csrf
+    );
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header(
+                    header::COOKIE,
+                    session_cookie(&new_session_id).split(';').next().unwrap(),
+                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+    std::fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]
@@ -420,6 +537,116 @@ async fn cancelled_request_refunds_reservation_and_releases_concurrency() {
     assert_eq!(state.accounting.available("a"), Some(74));
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(state.accounting.available("a"), Some(100));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn socket_disconnect_during_inference_refunds_reservation() {
+    let path = std::env::temp_dir().join(format!(
+        "possums-disconnect-evidence-{}",
+        std::process::id()
+    ));
+    write_evidence(
+        &path,
+        serde_json::json!({"verified": true}),
+        now(),
+        EXPECTED_RELEASE,
+        EXPECTED_KEY,
+    );
+    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+    let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
+    let auth = Auth::from_json(&format!(
+        r#"[{{"id":"a","credential_sha256":"{hash}","demo_microunits":100}}]"#
+    ))
+    .unwrap();
+    let challenge = auth.issue_login_challenge().unwrap();
+    let (session_id, session) = auth.authenticate(&credential, &challenge).unwrap();
+    let token = auth.issue_submission(&session_id).unwrap();
+    let started = Arc::new(Notify::new());
+    let state = AppState::new(
+        auth,
+        Arc::new(BlockingInference {
+            started: started.clone(),
+        }),
+        Arc::<str>::from(path.to_str().unwrap()),
+        Arc::new(TestEvidenceVerifier),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(listener, state.clone()));
+    let body = format!(
+        "csrf={}&token={token}&model=m&history=%5B%5D&prompt=hello",
+        session.csrf
+    );
+    let request = format!(
+        "POST /chat HTTP/1.1\r\nHost: local\r\nCookie: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}",
+        session_cookie(&session_id).split(';').next().unwrap(),
+        body.len(),
+        body
+    );
+    let mut client = TcpStream::connect(address).await.unwrap();
+    client.write_all(request.as_bytes()).await.unwrap();
+    started.notified().await;
+    assert_eq!(state.accounting.available("a"), Some(74));
+    drop(client);
+
+    for _ in 0..100 {
+        if state.accounting.available("a") == Some(100) {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(state.accounting.available("a"), Some(100));
+    server.abort();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn panic_after_reservation_refunds_before_error_response() {
+    let path = std::env::temp_dir().join(format!("possums-panic-evidence-{}", std::process::id()));
+    write_evidence(
+        &path,
+        serde_json::json!({"verified": true}),
+        now(),
+        EXPECTED_RELEASE,
+        EXPECTED_KEY,
+    );
+    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+    let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
+    let auth = Auth::from_json(&format!(
+        r#"[{{"id":"a","credential_sha256":"{hash}","demo_microunits":100}}]"#
+    ))
+    .unwrap();
+    let challenge = auth.issue_login_challenge().unwrap();
+    let (session_id, session) = auth.authenticate(&credential, &challenge).unwrap();
+    let token = auth.issue_submission(&session_id).unwrap();
+    let state = AppState::new(
+        auth,
+        Arc::new(PanicInference),
+        Arc::<str>::from(path.to_str().unwrap()),
+        Arc::new(TestEvidenceVerifier),
+    );
+    let body = format!(
+        "csrf={}&token={token}&model=m&history=%5B%5D&prompt=hello",
+        session.csrf
+    );
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header(
+                    header::COOKIE,
+                    session_cookie(&session_id).split(';').next().unwrap(),
+                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(state.accounting.available("a"), Some(100));
     std::fs::remove_file(path).unwrap();
 }

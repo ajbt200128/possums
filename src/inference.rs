@@ -77,39 +77,11 @@ impl TinfoilInference {
         limit: usize,
     ) -> Result<Vec<u8>, InferenceError> {
         let deadline = Instant::now() + Duration::from_secs(300);
-        let mut response = tokio::time::timeout_at(deadline, request.send())
+        let response = tokio::time::timeout_at(deadline, request.send())
             .await
             .map_err(|_| InferenceError::Unavailable)?
             .map_err(|_| InferenceError::Unavailable)?;
-        if !response.status().is_success() {
-            return Err(InferenceError::Unavailable);
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > limit as u64)
-        {
-            return Err(InferenceError::InvalidResponse);
-        }
-        let mut bytes = Vec::with_capacity(
-            response
-                .content_length()
-                .unwrap_or_default()
-                .min(limit as u64) as usize,
-        );
-        loop {
-            let chunk = tokio::time::timeout_at(deadline, response.chunk())
-                .await
-                .map_err(|_| InferenceError::Unavailable)?
-                .map_err(|_| InferenceError::Unavailable)?;
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if bytes.len().saturating_add(chunk.len()) > limit {
-                return Err(InferenceError::InvalidResponse);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(bytes)
+        collect_bounded_response(response, limit, deadline).await
     }
 
     fn http(&self) -> Result<&tinfoil::verifier::tls::OriginBoundClient, InferenceError> {
@@ -117,6 +89,43 @@ impl TinfoilInference {
             .http_client()
             .map_err(|_| InferenceError::Unavailable)
     }
+}
+
+#[doc(hidden)]
+pub async fn collect_bounded_response(
+    mut response: reqwest::Response,
+    limit: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>, InferenceError> {
+    if !response.status().is_success() {
+        return Err(InferenceError::Unavailable);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(InferenceError::InvalidResponse);
+    }
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(limit as u64) as usize,
+    );
+    loop {
+        let chunk = tokio::time::timeout_at(deadline, response.chunk())
+            .await
+            .map_err(|_| InferenceError::Unavailable)?
+            .map_err(|_| InferenceError::Unavailable)?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(InferenceError::InvalidResponse);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 #[derive(Deserialize)]

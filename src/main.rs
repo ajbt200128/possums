@@ -8,6 +8,7 @@ use std::{env, process::ExitCode, sync::Arc};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    std::panic::set_hook(Box::new(|_| {}));
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(()) => ExitCode::FAILURE,

@@ -7,7 +7,7 @@ use crate::{
     render,
 };
 use axum::{
-    body::{to_bytes, Body},
+    body::{to_bytes, Body, Bytes, HttpBody},
     extract::{DefaultBodyLimit, Form, State},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
@@ -23,11 +23,15 @@ use hyper_util::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{net::TcpListener, sync::Semaphore};
-use tower::limit::ConcurrencyLimitLayer;
+use tokio::{
+    net::TcpListener,
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
 use tower_http::catch_panic::CatchPanicLayer;
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -37,6 +41,8 @@ const CONNECTION_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const MAX_CONNECTIONS: usize = 64;
 const MAX_HEADERS: usize = 64;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
+const MAX_ACTIVE_REQUESTS: usize = 8;
+const MAX_RENDERED_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -45,6 +51,7 @@ pub struct AppState {
     pub inference: SharedInference,
     pub gateway_evidence_path: Arc<str>,
     gateway_evidence_verifier: Arc<dyn EvidenceVerifier>,
+    request_slots: Arc<Semaphore>,
     generation_slots: Arc<Semaphore>,
 }
 
@@ -62,6 +69,7 @@ impl AppState {
             inference,
             gateway_evidence_path: evidence_path.into(),
             gateway_evidence_verifier,
+            request_slots: Arc::new(Semaphore::new(MAX_ACTIVE_REQUESTS)),
             generation_slots: Arc::new(Semaphore::new(4)),
         }
     }
@@ -88,8 +96,11 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
             total_body_deadline(request, next, body_deadline)
         }))
         .layer(CatchPanicLayer::new())
-        .layer(ConcurrencyLimitLayer::new(8))
         .layer(middleware::from_fn(header_size_limit))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_admission,
+        ))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
@@ -124,6 +135,50 @@ pub async fn serve_with_header_deadline(
             let _ = tokio::time::timeout(CONNECTION_DEADLINE, connection).await;
             drop(permit);
         });
+    }
+}
+
+async fn request_admission(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let Ok(permit) = state.request_slots.clone().try_acquire_owned() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response();
+    };
+    let response = next.run(request).await;
+    let (parts, body) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::new(AdmissionBody {
+            inner: body,
+            _permit: permit,
+        }),
+    )
+}
+
+struct AdmissionBody {
+    inner: Body,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl HttpBody for AdmissionBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.inner).poll_frame(context)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
     }
 }
 
@@ -199,15 +254,14 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
     };
     match current_catalog(&state).await {
         Ok(catalog) => match state.auth.issue_submission(&session_id) {
-            Ok(token) => Html(render::chat_page(
+            Ok(token) => bounded_html(render::chat_page(
                 &catalog.models,
                 &session.csrf,
                 &token,
                 &[],
                 None,
                 None,
-            ))
-            .into_response(),
+            )),
             Err(_) => unavailable(),
         },
         Err(response) => response,
@@ -394,15 +448,14 @@ async fn chat(
                 Ok(value) => value,
                 Err(_) => return unavailable(),
             };
-            return Html(render::chat_page(
+            return bounded_html(render::chat_page(
                 &catalog.models,
                 &session.csrf,
                 &token,
                 &history,
                 Some(notice),
                 None,
-            ))
-            .into_response();
+            ));
         }
         Err(_) => return (StatusCode::PAYMENT_REQUIRED, "request unavailable").into_response(),
     }
@@ -460,17 +513,19 @@ async fn chat(
         Ok(value) => value,
         Err(_) => return unavailable(),
     };
-    let response = Html(render::chat_page(
+    let html = render::chat_page(
         &catalog.models,
         &session.csrf,
         &token,
         &history,
         Some("Confirm delivery to finalize the charge."),
         Some((&form.token, &form.model)),
-    ))
-    .into_response();
+    );
+    if html.len() > MAX_RENDERED_RESPONSE_BYTES {
+        return unavailable();
+    }
     reservation.disarm();
-    response
+    Html(html).into_response()
 }
 
 #[derive(Deserialize)]
@@ -515,7 +570,7 @@ async fn confirm_delivery(
         Ok(value) => value,
         Err(_) => return unavailable(),
     };
-    Html(render::chat_page(
+    bounded_html(render::chat_page(
         &catalog.models,
         &session.csrf,
         &token,
@@ -523,7 +578,6 @@ async fn confirm_delivery(
         Some("Delivery confirmed."),
         None,
     ))
-    .into_response()
 }
 
 fn parse_history(encoded: &str) -> Option<Vec<Message>> {
@@ -604,6 +658,14 @@ fn login_page_response(state: &AppState, error: Option<&str>) -> Response {
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     left.len() == right.len() && bool::from(left.ct_eq(right))
+}
+
+fn bounded_html(html: String) -> Response {
+    if html.len() > MAX_RENDERED_RESPONSE_BYTES {
+        unavailable()
+    } else {
+        Html(html).into_response()
+    }
 }
 
 fn unauthorized() -> Response {

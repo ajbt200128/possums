@@ -92,6 +92,41 @@ fn terminal_state_is_reclaimed_only_after_token_expiry() {
 }
 
 #[test]
+fn expired_confirmation_refunds_before_settlement() {
+    let ledger =
+        Accounting::with_confirmation_lifetime([("a".into(), 100)], Duration::from_millis(0));
+    ledger
+        .reserve("a", [1; 32], [2; 32], quote(), token_expiry())
+        .unwrap();
+    ledger.prepare_settlement([1; 32], 5, 4).unwrap();
+    assert_eq!(
+        ledger.settle([1; 32]),
+        Err(AccountingError::InvalidTransition)
+    );
+    assert_eq!(ledger.available("a"), Some(100));
+    assert_eq!(ledger.refund([1; 32]), Ok(()));
+}
+
+#[test]
+fn settlement_and_refund_race_has_one_terminal_balance() {
+    let ledger = Arc::new(Accounting::new([("a".into(), 100)]));
+    ledger
+        .reserve("a", [1; 32], [2; 32], quote(), token_expiry())
+        .unwrap();
+    ledger.prepare_settlement([1; 32], 5, 4).unwrap();
+
+    let settle_ledger = Arc::clone(&ledger);
+    let settle = std::thread::spawn(move || settle_ledger.settle([1; 32]));
+    let refund_ledger = Arc::clone(&ledger);
+    let refund = std::thread::spawn(move || refund_ledger.refund([1; 32]));
+    let settle = settle.join().unwrap();
+    let refund = refund.join().unwrap();
+
+    assert_ne!(settle.is_ok(), refund.is_ok());
+    assert!(matches!(ledger.available("a"), Some(71 | 100)));
+}
+
+#[test]
 fn concurrent_reservations_cannot_overspend() {
     let ledger = Arc::new(Accounting::new([("a".into(), 52)]));
     let handles: Vec<_> = (0..8)

@@ -43,6 +43,7 @@ struct State {
 
 pub struct Accounting {
     state: Mutex<State>,
+    confirmation_lifetime: Duration,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -88,7 +89,18 @@ impl Accounting {
                 accounts,
                 submissions: HashMap::new(),
             }),
+            confirmation_lifetime: CONFIRMATION_LIFETIME,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn with_confirmation_lifetime(
+        accounts: impl IntoIterator<Item = (String, u64)>,
+        confirmation_lifetime: Duration,
+    ) -> Self {
+        let mut accounting = Self::new(accounts);
+        accounting.confirmation_lifetime = confirmation_lifetime;
+        accounting
     }
 
     pub fn reserve(
@@ -175,7 +187,7 @@ impl Accounting {
             .ok_or(AccountingError::InvalidTransition)?;
         submission.outcome = Outcome::AwaitingConfirmation;
         submission.pending_charge = Some(charged);
-        submission.confirmation_deadline = Some(Instant::now() + CONFIRMATION_LIFETIME);
+        submission.confirmation_deadline = Some(Instant::now() + self.confirmation_lifetime);
         Ok(charged)
     }
 
@@ -368,6 +380,7 @@ mod tests {
                 .collect(),
                 submissions,
             }),
+            confirmation_lifetime: CONFIRMATION_LIFETIME,
         };
         assert_eq!(
             ledger
