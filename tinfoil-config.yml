@@ -1,0 +1,16 @@
+# Production release is blocked until this independently reproduced digest is replaced.
+cvm-version: 0.14.7
+cpus: 2
+memory: 8192
+containers:
+  - name: gateway
+    image: ghcr.io/example/possums-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    env:
+      - POSSUMS_BIND: "0.0.0.0:8080"
+    secrets:
+      - POSSUMS_ACCOUNTS_JSON
+      - TINFOIL_API_KEY
+shim:
+  upstream-port: 8080
+  paths:
+    - /*
