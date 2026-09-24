@@ -12,6 +12,19 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v17
       - run: nix flake check --print-build-logs
 
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v17
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: nix develop -c bash -lc 'npm run test:browser'
+
   image:
     strategy:
       matrix:

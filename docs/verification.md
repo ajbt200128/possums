@@ -32,6 +32,7 @@ Run on 2026-09-24, aarch64-darwin, with the pinned Rust 1.88.0 Nix shell:
 | `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED |
 | `cargo test --all-targets --all-features` | VERIFIED: 28 tests passed |
 | `cargo test --test transport` | VERIFIED: total-body trickle deadline, total-header deadline, and oversized-header rejection |
+| `npm run test:browser` | VERIFIED: real Chromium with JavaScript disabled completed login, recovery download, model selection, confirmation, and a second chat turn without remote requests |
 | `nix flake check --print-build-logs` | VERIFIED for aarch64-darwin checks; other systems omitted |
 | `nix build .#gateway-image --print-build-logs` | Not exposed on aarch64-darwin; the OCI derivation is Linux-only |
 | Linux OCI build and digest comparison | UNKNOWN: no Linux builder was available |
@@ -64,7 +65,7 @@ Release blockers found in review:
 | Deployment startup variables/hardening absent | Measured config now supplies SDK host/repository/evidence path, read-only/memory-only/process/egress controls; image entrypoint disables core dumps | Config/flake evaluation; deployed behavior remains UNKNOWN |
 | Incompatible Nix pins | Crane pinned to v0.21.0 for nixpkgs 25.05 | `nix flake metadata --no-write-lock-file` |
 | Independent image comparison absent | CI uses two independent Linux jobs and compares OCI manifest digests | `.github/workflows/check.yml`; successful CI evidence still required |
-| Browser/upstream/deployed fault evidence absent | Direct no-JavaScript route tests and local socket transport tests improved; real browser, provider contract, write-failure, runtime artifact, and production canaries remain external release blockers | Existing Rust tests plus `tests/transport.rs`; rows above remain UNKNOWN |
+| Browser/upstream/deployed fault evidence absent | A pinned Playwright test now exercises the complete JavaScript-disabled local browser flow and rejects hostile-output network attempts. Provider contract, write-failure, runtime artifact, and production canaries remain release blockers | `tests/browser.mjs`, `examples/browser_fixture.rs`, and `tests/transport.rs`; external rows above remain UNKNOWN |
 
 ## Independent release procedure
 
