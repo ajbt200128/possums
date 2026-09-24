@@ -68,7 +68,25 @@ pub fn chat_page(
     history: &[Message],
     notice: Option<&str>,
     confirmation: Option<(&str, &str)>,
-) -> String {
+    limit: usize,
+) -> Option<String> {
+    // JSON and HTML escaping can expand hostile input substantially. Reject it
+    // before constructing any rendering intermediates.
+    let input_bytes = models
+        .iter()
+        .try_fold(0_usize, |total, model| total.checked_add(model.id.len()))?
+        .checked_add(csrf.len())?
+        .checked_add(submission_token.len())?
+        .checked_add(history.iter().try_fold(0_usize, |total, message| {
+            total
+                .checked_add(message.role.len())?
+                .checked_add(message.content.len())
+        })?)?
+        .checked_add(notice.map_or(0, str::len))?
+        .checked_add(confirmation.map_or(0, |(token, model)| token.len() + model.len()))?;
+    if input_bytes.checked_mul(128)?.checked_add(4096)? > limit {
+        return None;
+    }
     let options = models
         .iter()
         .map(|model| {
@@ -108,13 +126,14 @@ pub fn chat_page(
             )
         })
         .unwrap_or_default();
-    page(&format!(
+    let rendered = page(&format!(
         "<h1>Possums demo</h1>{notice}{transcript}{confirmation}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model <select name=model>{options}</select></label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
         escape(csrf),
         escape(submission_token),
         encoded_history,
         escape(csrf)
-    ))
+    ));
+    (rendered.len() <= limit).then_some(rendered)
 }
 
 #[cfg(test)]

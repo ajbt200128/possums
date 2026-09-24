@@ -63,6 +63,7 @@ pub struct Auth {
     sessions: Mutex<HashMap<String, Session>>,
     login_challenges: Mutex<HashMap<String, Instant>>,
     submission_tokens: Mutex<HashMap<String, SubmissionToken>>,
+    submission_capacity: usize,
     epoch: [u8; 32],
 }
 
@@ -87,8 +88,15 @@ impl Auth {
             sessions: Mutex::new(HashMap::new()),
             login_challenges: Mutex::new(HashMap::new()),
             submission_tokens: Mutex::new(HashMap::new()),
+            submission_capacity: MAX_SUBMISSION_TOKENS,
             epoch,
         })
+    }
+
+    #[doc(hidden)]
+    pub fn with_submission_capacity(mut self, capacity: usize) -> Self {
+        self.submission_capacity = capacity.min(MAX_SUBMISSION_TOKENS);
+        self
     }
 
     pub fn issue_login_challenge(&self) -> Result<String, AuthError> {
@@ -190,7 +198,7 @@ impl Auth {
             .lock()
             .map_err(|_| AuthError::Configuration)?;
         tokens.retain(|_, token| token.expires_at > now);
-        if tokens.len() >= MAX_SUBMISSION_TOKENS {
+        if tokens.len() >= self.submission_capacity {
             return Err(AuthError::Capacity);
         }
         let token = random_token();

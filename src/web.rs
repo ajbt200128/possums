@@ -41,8 +41,9 @@ const CONNECTION_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const MAX_CONNECTIONS: usize = 64;
 const MAX_HEADERS: usize = 64;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
-const MAX_ACTIVE_REQUESTS: usize = 8;
-const MAX_RENDERED_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+const REQUEST_MEMORY_BYTES: usize = 128 * 1024 * 1024;
+const SHARED_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+const MAX_RENDERED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -51,7 +52,7 @@ pub struct AppState {
     pub inference: SharedInference,
     pub gateway_evidence_path: Arc<str>,
     gateway_evidence_verifier: Arc<dyn EvidenceVerifier>,
-    request_slots: Arc<Semaphore>,
+    request_memory: Arc<Semaphore>,
     generation_slots: Arc<Semaphore>,
 }
 
@@ -69,7 +70,7 @@ impl AppState {
             inference,
             gateway_evidence_path: evidence_path.into(),
             gateway_evidence_verifier,
-            request_slots: Arc::new(Semaphore::new(MAX_ACTIVE_REQUESTS)),
+            request_memory: Arc::new(Semaphore::new(SHARED_MEMORY_BYTES / REQUEST_MEMORY_BYTES)),
             generation_slots: Arc::new(Semaphore::new(4)),
         }
     }
@@ -143,7 +144,7 @@ async fn request_admission(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let Ok(permit) = state.request_slots.clone().try_acquire_owned() else {
+    let Ok(permit) = state.request_memory.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response();
     };
     let response = next.run(request).await;
@@ -254,14 +255,16 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
     };
     match current_catalog(&state).await {
         Ok(catalog) => match state.auth.issue_submission(&session_id) {
-            Ok(token) => bounded_html(render::chat_page(
+            Ok(token) => render::chat_page(
                 &catalog.models,
                 &session.csrf,
                 &token,
                 &[],
                 None,
                 None,
-            )),
+                MAX_RENDERED_RESPONSE_BYTES,
+            )
+            .map_or_else(unavailable, |html| Html(html).into_response()),
             Err(_) => unavailable(),
         },
         Err(response) => response,
@@ -448,14 +451,16 @@ async fn chat(
                 Ok(value) => value,
                 Err(_) => return unavailable(),
             };
-            return bounded_html(render::chat_page(
+            return render::chat_page(
                 &catalog.models,
                 &session.csrf,
                 &token,
                 &history,
                 Some(notice),
                 None,
-            ));
+                MAX_RENDERED_RESPONSE_BYTES,
+            )
+            .map_or_else(unavailable, |html| Html(html).into_response());
         }
         Err(_) => return (StatusCode::PAYMENT_REQUIRED, "request unavailable").into_response(),
     }
@@ -513,17 +518,17 @@ async fn chat(
         Ok(value) => value,
         Err(_) => return unavailable(),
     };
-    let html = render::chat_page(
+    let Some(html) = render::chat_page(
         &catalog.models,
         &session.csrf,
         &token,
         &history,
         Some("Confirm delivery to finalize the charge."),
         Some((&form.token, &form.model)),
-    );
-    if html.len() > MAX_RENDERED_RESPONSE_BYTES {
+        MAX_RENDERED_RESPONSE_BYTES,
+    ) else {
         return unavailable();
-    }
+    };
     reservation.disarm();
     Html(html).into_response()
 }
@@ -559,9 +564,6 @@ async fn confirm_delivery(
         Some(value) => value,
         None => return bad_request(),
     };
-    if state.accounting.settle(submission_id).is_err() {
-        return unavailable();
-    }
     let catalog = match current_catalog(&state).await {
         Ok(value) => value,
         Err(response) => return response,
@@ -570,14 +572,21 @@ async fn confirm_delivery(
         Ok(value) => value,
         Err(_) => return unavailable(),
     };
-    bounded_html(render::chat_page(
+    let Some(html) = render::chat_page(
         &catalog.models,
         &session.csrf,
         &token,
         &history,
         Some("Delivery confirmed."),
         None,
-    ))
+        MAX_RENDERED_RESPONSE_BYTES,
+    ) else {
+        return unavailable();
+    };
+    if state.accounting.settle(submission_id).is_err() {
+        return unavailable();
+    }
+    Html(html).into_response()
 }
 
 fn parse_history(encoded: &str) -> Option<Vec<Message>> {
@@ -658,14 +667,6 @@ fn login_page_response(state: &AppState, error: Option<&str>) -> Response {
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     left.len() == right.len() && bool::from(left.ct_eq(right))
-}
-
-fn bounded_html(html: String) -> Response {
-    if html.len() > MAX_RENDERED_RESPONSE_BYTES {
-        unavailable()
-    } else {
-        Html(html).into_response()
-    }
 }
 
 fn unauthorized() -> Response {
