@@ -30,7 +30,7 @@ Run on 2026-09-24, aarch64-darwin, with the pinned Rust 1.88.0 Nix shell:
 |---|---|
 | `cargo fmt --all -- --check` | VERIFIED |
 | `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED |
-| `cargo test --all-targets --all-features` | VERIFIED: 41 tests passed |
+| `cargo test --all-targets --all-features` | VERIFIED: 43 tests passed |
 | `cargo test --test transport` | VERIFIED: total-body trickle deadline, total-header deadline, and oversized-header rejection |
 | `cargo test --test inference --test accounting --test web` | VERIFIED: 25 tests passed, including chunked/absent/oversized/stalled upstream bodies, shared-memory response-lifetime admission, hostile render expansion, unconsumed response and post-render socket abandonment, panic, confirmation failure/retry, expiry/race, and reauthentication replay |
 | `npm run test:browser` | VERIFIED: real Chromium with JavaScript disabled completed login, recovery download, model selection, confirmation, and a second chat turn without remote requests |
