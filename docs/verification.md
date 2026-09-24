@@ -24,7 +24,32 @@ Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILE
 
 ## Local verification
 
-Record commands, dates, toolchain versions, and outcomes here when implementation exists. CI must report unavailable platform checks as blocked, never silently skip them.
+Run on 2026-09-24, aarch64-darwin, with the pinned Rust 1.88.0 Nix shell:
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | VERIFIED |
+| `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED |
+| `cargo test --all-targets --all-features` | VERIFIED: 18 tests passed |
+| `nix flake check --print-build-logs` | VERIFIED for aarch64-darwin checks; other systems omitted |
+| `nix build .#gateway-image --print-build-logs` | FAILED on aarch64-darwin: `dockerTools` fakeroot aborted because `_fstat$INODE64` was unavailable |
+| Linux OCI build and digest comparison | UNKNOWN: no Linux builder was available |
+
+The pinned crane revision warns that it expects nixpkgs 26.05 or newer while the lock uses 25.05. Updating the lock was blocked by the local execution policy, so compatibility outside the checks above remains UNKNOWN. CI must report unavailable platform checks as blocked, never silently skip them.
+
+## Independent correctness and security review
+
+The request path was traced in this order: session/CSRF and input parsing; local gateway-evidence presence/shape; authenticated catalog; maximum-cost reservation; authenticated token count and context quote; bounded generation; authenticated usage settlement; escaped/sanitized render. Tests prove gateway-evidence and reservation failures do not invoke prompt tokenization or generation, and malformed catalog/context failures do not invoke generation.
+
+Release blockers found in review:
+
+- Gateway evidence is only schema-checked locally; cryptographic platform quote, release provenance, and live TLS endpoint-key binding still require platform integration and evidence.
+- The assumed authenticated `/v1/models` pricing/freshness schema and `/v1/tokenize` contract have not been verified against Tinfoil production. Tokenization necessarily receives prompt content after reservation; model-specific tokenizer semantics remain UNKNOWN.
+- Tinfoil Rust SDK revision `34157e4` verifies attestation/provenance and pins TLS. Its documented `user_cache_secret` scopes caches but does not disable upstream persistence. The gateway uses a fresh random scope per generation and raw pinned requests, but actual cache retention remains UNKNOWN.
+- Settlement currently precedes HTTP body handoff. Browser receipt and disconnect refund behavior are not proven, so production is blocked.
+- Header/body timeouts, aggregate memory, read-only root, memory-only writes, core dumps, egress, shim logs, TLS termination, and host observability require deployed runtime evidence.
+- `tinfoil-config.yml` intentionally contains a zero placeholder image digest. It cannot deploy until two independent Linux OCI builds agree and the real digest is pinned.
+- Telemetry has no application exporter enabled. The optional collector allowlist and local sparse-bucket logic are tested, but Honeycomb region, retention, access, and end-to-end canary behavior remain UNKNOWN.
 
 ## Independent release procedure
 

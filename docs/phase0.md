@@ -16,7 +16,7 @@ There is no public signup or inference API.
 
 ## Request limits
 
-Limits are defensive transport controls, not a product limit on conversation history. The server accepts at most 1 MiB of request headers, 8 MiB of decoded form data, 16 MiB of total request allocation, 32 concurrent requests, and 4 concurrent generations. Request headers must arrive within 10 seconds, a body within 60 seconds, and inference within 5 minutes. Request decompression is disabled. Each authenticated catalog entry supplies the model's context and maximum-output limits; the complete conversation plus requested maximum output must fit that context. The gateway does not lower a model's maximum output.
+Limits are defensive transport controls, not a product limit on conversation history. The application accepts at most 8 MiB of decoded form data, 32 concurrent requests, and 4 concurrent generations. Inference responses are limited to 16 MiB and inference calls to five minutes. Request decompression is not enabled. Header size/time, body time, and whole-process memory ceilings depend on the serving shim and remain UNKNOWN until runtime verification; production must configure and verify them. Each authenticated catalog entry supplies the model's context and maximum-output limits; the complete conversation plus requested maximum output must fit that context. The gateway does not lower a model's maximum output.
 
 ## Authentication
 
@@ -24,20 +24,20 @@ An operator provisions a random credential with at least 256 bits of entropy and
 
 ## Catalog and quote
 
-The gateway fetches a bounded catalog over the verified inference channel. Authentication, freshness, unique model IDs, context/output limits, integer rate units, and overflow-safe arithmetic are mandatory. All valid supported models are displayed without substitution. At submission, the gateway snapshots the authenticated input/output rates and applies a 30% markup using checked integer arithmetic and round-up division. It reserves the quoted input cost plus the selected model's maximum possible output cost.
+The gateway fetches a bounded catalog over the verified inference channel. Authentication, freshness, unique model IDs, context/output limits, integer rate units, and overflow-safe arithmetic are mandatory. All valid supported models are displayed without substitution. At submission, the gateway snapshots the authenticated input/output rates and applies a 30% markup using checked integer arithmetic and round-up division. Because model-specific tokenization is an upstream operation, the gateway first reserves the maximum cost that can fit the model context, then tokenizes and releases the excess at settlement. This prevents insufficient credit from exposing prompt bytes upstream.
 
 ## Accounting lifecycle
 
 State is single-process, short-lived, and contains no prompts or responses:
 
 1. A single-use submission token is bound to account, session epoch, and a digest of model plus prompt-free request metadata.
-2. `reserve` atomically checks balance, account concurrency/quota, and duplicate status, then deducts the maximum quoted cost.
+2. `reserve` atomically checks balance, account concurrency/quota, and duplicate status, then deducts the model-context maximum quoted cost.
 3. A duplicate token always returns its stored terminal status and never invokes inference. Tombstones remain for the process lifetime; bounded capacity fails closed rather than evicting them.
 4. Verified inference returns authenticated usage. `settle` charges actual input/output usage at the snapshotted rate and releases the remainder.
 5. Missing/invalid usage, upstream failure, timeout, cancellation, or incomplete/uncertain HTTP delivery refunds the full user reservation exactly once. Measured upstream cost is an aggregate operator expense only.
 6. No automatic inference retry occurs after generation may have started.
 
-The initial HTML response is buffered. A complete result is committed only after the final body has been handed to the HTTP server; this cannot prove browser receipt, so uncertain delivery is refunded. The response contains a safe form using a new token; an old token cannot regenerate.
+The HTML response is buffered and contains a safe form using a new token; an old token cannot regenerate. The current application settles before returning the body to the HTTP server. It cannot prove browser receipt or reliably distinguish a completed delivery from a disconnect, so conservative disconnect refund behavior is **not yet verified and blocks production**.
 
 ### Restart semantics
 
