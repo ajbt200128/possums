@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
     flake-utils.url = "github:numtide/flake-utils";
-    crane.url = "github:ipetkov/crane";
+    crane.url = "github:ipetkov/crane/v0.21.0";
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
@@ -27,12 +27,16 @@
         common = { inherit src; strictDeps = true; };
         cargoArtifacts = craneLib.buildDepsOnly common;
         gateway = craneLib.buildPackage (common // { inherit cargoArtifacts; });
+        gatewayEntrypoint = pkgs.writeShellScriptBin "possums-entrypoint" ''
+          ulimit -c 0
+          exec ${gateway}/bin/possums
+        '';
         gatewayImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway";
           tag = "phase0";
-          contents = [ gateway pkgs.cacert ];
+          contents = [ gateway gatewayEntrypoint pkgs.cacert ];
           config = {
-            Entrypoint = [ "${gateway}/bin/possums" ];
+            Entrypoint = [ "${gatewayEntrypoint}/bin/possums-entrypoint" ];
             Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
             User = "65532:65532";
             WorkingDir = "/tmp";

@@ -11,4 +11,30 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v17
       - run: nix flake check --print-build-logs
+
+  image:
+    strategy:
+      matrix:
+        build: [a, b]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v17
       - run: nix build .#gateway-image --print-build-logs
+      - name: Record OCI manifest digest
+        run: nix shell nixpkgs#skopeo nixpkgs#jq --command sh -c 'skopeo inspect docker-archive:result | jq -r .Digest > digest'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.build }}
+          path: digest
+
+  compare-images:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-digest-*
+          path: digests
+      - name: Require independent OCI builds to agree
+        run: test "$(cat digests/image-digest-a/digest)" = "$(cat digests/image-digest-b/digest)"

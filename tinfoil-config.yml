@@ -2,11 +2,27 @@
 cvm-version: 0.14.7
 cpus: 2
 memory: 8192
+networks:
+  inference:
+    egress: allowlist
+    allow:
+      - inference.tinfoil.sh
+      - github-proxy.tinfoil.sh
+      - kds-proxy.tinfoil.sh
 containers:
   - name: gateway
     image: ghcr.io/example/possums-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000
     env:
+      - HOME: "/tmp"
       - POSSUMS_BIND: "0.0.0.0:8080"
+      - POSSUMS_GATEWAY_EVIDENCE: "/tinfoil/attestation.json"
+      - POSSUMS_TINFOIL_HOST: "inference.tinfoil.sh"
+      - POSSUMS_TINFOIL_REPOSITORY: "tinfoilsh/confidential-model-router"
+    networks: [inference]
+    pids_limit: 256
+    read_only: true
+    tmpfs:
+      /tmp: "size=64m,mode=1777"
     secrets:
       - POSSUMS_ACCOUNTS_JSON
       - TINFOIL_API_KEY
