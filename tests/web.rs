@@ -198,7 +198,8 @@ async fn no_javascript_chat_sets_security_headers_and_settles() {
     assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
     assert_eq!(state.accounting.available("a"), Some(74));
 
-    let confirmation = format!("csrf={csrf}&token={token}&model=m");
+    let carried_history = "%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22hello%22%7D%2C%7B%22role%22%3A%22assistant%22%2C%22content%22%3A%22%2A%2Asafe%2A%2A%22%7D%5D";
+    let confirmation = format!("csrf={csrf}&token={token}&model=m&history={carried_history}");
     let response = router(state.clone())
         .oneshot(
             Request::builder()
@@ -211,9 +212,65 @@ async fn no_javascript_chat_sets_security_headers_and_settles() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(state.accounting.available("a"), Some(97));
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("<strong>safe</strong>"));
+    let marker = "name=token value=\"";
+    let start = html.find(marker).unwrap() + marker.len();
+    let next_token = &html[start..html[start..].find('\"').unwrap() + start];
+    let next_body =
+        format!("csrf={csrf}&token={next_token}&model=m&history={carried_history}&prompt=again");
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(next_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 2);
     std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn recovery_download_is_authenticated_and_never_cached() {
+    let (state, cookie, _, _, _) = fixture("/unused/evidence");
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/recovery/download")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/recovery/download")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        response.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"possums-recovery.txt\""
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), URL_SAFE_NO_PAD.encode([7_u8; 32]).as_bytes());
 }
 
 #[tokio::test]

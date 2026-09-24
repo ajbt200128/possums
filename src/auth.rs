@@ -11,6 +11,7 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 const CREDENTIAL_MIN_BYTES: usize = 32;
+const CREDENTIAL_MAX_ENCODED_BYTES: usize = 128;
 const MAX_ACCOUNTS: usize = 1_000;
 const MAX_SESSIONS: usize = 10_000;
 const MAX_LOGIN_CHALLENGES: usize = 10_000;
@@ -39,6 +40,12 @@ struct SubmissionToken {
     session_id: String,
     model: Option<String>,
     expires_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BoundSubmission {
+    pub id: [u8; 32],
+    pub expires_at: Instant,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -112,6 +119,9 @@ impl Auth {
             .remove(login_challenge)
             .ok_or(AuthError::Invalid)?;
         if expires_at <= now {
+            return Err(AuthError::Invalid);
+        }
+        if credential.len() > CREDENTIAL_MAX_ENCODED_BYTES {
             return Err(AuthError::Invalid);
         }
         let decoded = URL_SAFE_NO_PAD
@@ -202,7 +212,7 @@ impl Auth {
         account_id: &str,
         token: &str,
         model: &str,
-    ) -> Result<[u8; 32], AuthError> {
+    ) -> Result<BoundSubmission, AuthError> {
         let now = Instant::now();
         let mut tokens = self
             .submission_tokens
@@ -224,7 +234,10 @@ impl Auth {
         digest.update(account_id.as_bytes());
         digest.update(token.as_bytes());
         digest.update(model.as_bytes());
-        Ok(digest.finalize().into())
+        Ok(BoundSubmission {
+            id: digest.finalize().into(),
+            expires_at: issued.expires_at,
+        })
     }
 }
 

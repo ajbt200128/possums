@@ -5,6 +5,7 @@ use possums::{
     catalog::{Model, Quote},
 };
 use sha2::{Digest, Sha256};
+use std::time::{Duration, Instant};
 
 fn auth_config() -> String {
     let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
@@ -48,12 +49,28 @@ fn process_epoch_invalidates_old_submission_tokens() {
 #[test]
 fn uncertain_delivery_refund_is_terminal_and_idempotent() {
     let ledger = Accounting::new([("a".into(), 100)]);
-    ledger.reserve("a", [1; 32], [2; 32], quote()).unwrap();
+    ledger
+        .reserve(
+            "a",
+            [1; 32],
+            [2; 32],
+            quote(),
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
     ledger.refund([1; 32]).unwrap();
     ledger.refund([1; 32]).unwrap();
     assert_eq!(ledger.available("a"), Some(100));
     assert_eq!(
-        ledger.reserve("a", [1; 32], [2; 32], quote()).unwrap(),
+        ledger
+            .reserve(
+                "a",
+                [1; 32],
+                [2; 32],
+                quote(),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap(),
         ReserveResult::Duplicate(Outcome::Refunded)
     );
 }

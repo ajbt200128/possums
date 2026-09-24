@@ -26,11 +26,17 @@ fn accepts_high_entropy_credential_and_sets_hardened_cookie() {
 }
 
 #[test]
-fn rejects_short_or_wrong_credentials() {
+fn rejects_short_oversized_or_wrong_credentials() {
     let (auth, _) = fixture();
     let challenge = auth.issue_login_challenge().unwrap();
     assert_eq!(
         auth.authenticate("short", &challenge).unwrap_err(),
+        AuthError::Invalid
+    );
+    let challenge = auth.issue_login_challenge().unwrap();
+    assert_eq!(
+        auth.authenticate(&"A".repeat(1_000_000), &challenge)
+            .unwrap_err(),
         AuthError::Invalid
     );
     let challenge = auth.issue_login_challenge().unwrap();

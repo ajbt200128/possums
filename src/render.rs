@@ -100,10 +100,11 @@ pub fn chat_page(
     let confirmation = confirmation
         .map(|(token, model)| {
             format!(
-                "<form method=post action=/confirm><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=model value=\"{}\"><button type=submit>Confirm response delivery</button></form>",
+                "<form method=post action=/confirm><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=model value=\"{}\"><input type=hidden name=history value=\"{}\"><button type=submit>Confirm response delivery</button></form>",
                 escape(csrf),
                 escape(token),
-                escape(model)
+                escape(model),
+                encoded_history
             )
         })
         .unwrap_or_default();

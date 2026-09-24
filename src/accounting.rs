@@ -26,6 +26,7 @@ struct Submission {
     outcome: Outcome,
     pending_charge: Option<u64>,
     confirmation_deadline: Option<Instant>,
+    token_expires_at: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -96,12 +97,19 @@ impl Accounting {
         submission_id: [u8; 32],
         request_digest: [u8; 32],
         quote: Quote,
+        token_expires_at: Instant,
     ) -> Result<ReserveResult, AccountingError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| AccountingError::InvalidTransition)?;
         refund_expired_confirmations(&mut state)?;
+        state.submissions.retain(|_, submission| {
+            !is_terminal(&submission.outcome) || submission.token_expires_at > Instant::now()
+        });
+        if token_expires_at <= Instant::now() {
+            return Err(AccountingError::InvalidTransition);
+        }
         if let Some(existing) = state.submissions.get(&submission_id) {
             if existing.account_id != account_id || existing.request_digest != request_digest {
                 return Err(AccountingError::AlteredDuplicate);
@@ -132,6 +140,7 @@ impl Accounting {
                 outcome: Outcome::InFlight,
                 pending_charge: None,
                 confirmation_deadline: None,
+                token_expires_at,
             },
         );
         Ok(ReserveResult::Reserved)
@@ -256,6 +265,10 @@ impl Accounting {
     }
 }
 
+fn is_terminal(outcome: &Outcome) -> bool {
+    matches!(outcome, Outcome::Settled { .. } | Outcome::Refunded)
+}
+
 fn refund_expired_confirmations(state: &mut State) -> Result<(), AccountingError> {
     let now = Instant::now();
     let expired: Vec<_> = state
@@ -299,4 +312,78 @@ fn refund_expired_confirmations(state: &mut State) -> Result<(), AccountingError
 
 fn map_cost(_: CatalogError) -> AccountingError {
     AccountingError::Cost
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::Model;
+
+    fn quote() -> Quote {
+        Quote {
+            model: Model {
+                id: "m".into(),
+                context_tokens: 2,
+                max_output_tokens: 1,
+                input_microunits_per_token: 1,
+                output_microunits_per_token: 1,
+            },
+            input_tokens: 1,
+            reserved_microunits: 3,
+        }
+    }
+
+    #[test]
+    fn full_terminal_capacity_reclaims_only_expired_tokens() {
+        let future = Instant::now() + Duration::from_secs(60);
+        let quote = quote();
+        let submissions = (0..MAX_SUBMISSIONS)
+            .map(|number| {
+                let mut id = [0_u8; 32];
+                id[..8].copy_from_slice(&(number as u64).to_le_bytes());
+                (
+                    id,
+                    Submission {
+                        account_id: "a".into(),
+                        request_digest: [1; 32],
+                        quote: quote.clone(),
+                        outcome: Outcome::Refunded,
+                        pending_charge: None,
+                        confirmation_deadline: None,
+                        token_expires_at: future,
+                    },
+                )
+            })
+            .collect();
+        let ledger = Accounting {
+            state: Mutex::new(State {
+                accounts: [(
+                    "a".into(),
+                    Account {
+                        available: 100,
+                        in_flight: 0,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                submissions,
+            }),
+        };
+        assert_eq!(
+            ledger
+                .reserve("a", [255; 32], [2; 32], quote.clone(), future)
+                .unwrap_err(),
+            AccountingError::Capacity
+        );
+        for submission in ledger.state.lock().unwrap().submissions.values_mut() {
+            submission.token_expires_at = Instant::now() - Duration::from_secs(1);
+        }
+        assert_eq!(
+            ledger
+                .reserve("a", [255; 32], [2; 32], quote, future)
+                .unwrap(),
+            ReserveResult::Reserved
+        );
+        assert_eq!(ledger.state.lock().unwrap().submissions.len(), 1);
+    }
 }

@@ -2,7 +2,7 @@ use possums::{
     attestation::UnavailableEvidenceVerifier,
     auth::Auth,
     inference::TinfoilInference,
-    web::{router, AppState},
+    web::{serve, AppState},
 };
 use std::{env, process::ExitCode, sync::Arc};
 
@@ -35,5 +35,5 @@ async fn run() -> Result<(), ()> {
         Arc::new(UnavailableEvidenceVerifier),
     );
     let listener = tokio::net::TcpListener::bind(bind).await.map_err(|_| ())?;
-    axum::serve(listener, router(state)).await.map_err(|_| ())
+    serve(listener, state).await.map_err(|_| ())
 }

@@ -7,7 +7,7 @@ use crate::{
     render,
 };
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     extract::{DefaultBodyLimit, Form, State},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
@@ -15,17 +15,28 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use hyper::server::conn::http1;
+use hyper_util::{
+    rt::{TokioIo, TokioTimer},
+    service::TowerToHyperService,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::Semaphore;
+use tokio::{net::TcpListener, sync::Semaphore};
 use tower::limit::ConcurrencyLimitLayer;
-use tower_http::{catch_panic::CatchPanicLayer, timeout::RequestBodyTimeoutLayer};
+use tower_http::catch_panic::CatchPanicLayer;
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
+const BODY_DEADLINE: Duration = Duration::from_secs(30);
+const HEADER_DEADLINE: Duration = Duration::from_secs(10);
+const CONNECTION_DEADLINE: Duration = Duration::from_secs(10 * 60);
+const MAX_CONNECTIONS: usize = 64;
+const MAX_HEADERS: usize = 64;
+const MAX_HEADER_BYTES: usize = 32 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -57,6 +68,11 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    router_with_body_deadline(state, BODY_DEADLINE)
+}
+
+#[doc(hidden)]
+pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Router {
     Router::new()
         .route("/", get(home))
         .route("/login", post(login))
@@ -64,14 +80,83 @@ pub fn router(state: AppState) -> Router {
         .route("/chat", post(chat))
         .route("/confirm", post(confirm_delivery))
         .route("/recovery", get(recovery))
+        .route("/recovery/download", get(recovery_download))
         .route("/claims", get(claims))
         .route("/attestation", get(attestation))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
-        .layer(RequestBodyTimeoutLayer::new(Duration::from_secs(30)))
-        .layer(ConcurrencyLimitLayer::new(32))
+        .layer(middleware::from_fn(move |request, next| {
+            total_body_deadline(request, next, body_deadline)
+        }))
         .layer(CatchPanicLayer::new())
+        .layer(ConcurrencyLimitLayer::new(8))
+        .layer(middleware::from_fn(header_size_limit))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+pub async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()> {
+    serve_with_header_deadline(listener, state, HEADER_DEADLINE).await
+}
+
+#[doc(hidden)]
+pub async fn serve_with_header_deadline(
+    listener: TcpListener,
+    state: AppState,
+    header_deadline: Duration,
+) -> std::io::Result<()> {
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let app = router(state);
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let Ok(permit) = connections.clone().try_acquire_owned() else {
+            drop(stream);
+            continue;
+        };
+        let service = TowerToHyperService::new(app.clone());
+        tokio::spawn(async move {
+            let mut builder = http1::Builder::new();
+            builder
+                .timer(TokioTimer::new())
+                .header_read_timeout(header_deadline)
+                .max_headers(MAX_HEADERS)
+                .max_buf_size(MAX_HEADER_BYTES);
+            let connection = builder.serve_connection(TokioIo::new(stream), service);
+            let _ = tokio::time::timeout(CONNECTION_DEADLINE, connection).await;
+            drop(permit);
+        });
+    }
+}
+
+async fn total_body_deadline(request: Request<Body>, next: Next, deadline: Duration) -> Response {
+    let (parts, body) = request.into_parts();
+    let bytes = match tokio::time::timeout(deadline, to_bytes(body, BODY_LIMIT)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response()
+        }
+        Err(_) => return (StatusCode::REQUEST_TIMEOUT, "request body timed out").into_response(),
+    };
+    next.run(Request::from_parts(parts, Body::from(bytes)))
+        .await
+}
+
+async fn header_size_limit(request: Request<Body>, next: Next) -> Response {
+    let header_bytes = request
+        .headers()
+        .iter()
+        .fold(0_usize, |total, (name, value)| {
+            total
+                .saturating_add(name.as_str().len())
+                .saturating_add(value.as_bytes().len())
+        });
+    if header_bytes > MAX_HEADER_BYTES {
+        return (
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "request headers too large",
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
@@ -189,10 +274,26 @@ async fn recovery(State(state): State<AppState>, headers: HeaderMap) -> Response
         return unauthorized();
     };
     Html(render::page(&format!(
-        "<h1>Recovery credential</h1><p>Copy or download this credential now. Anyone holding it controls this demo account.</p><pre>{}</pre><p><a href=/>Return</a></p>",
+        "<h1>Recovery credential</h1><p>Copy or download this credential now. Anyone holding it controls this demo account.</p><pre>{}</pre><p><a href=/recovery/download download=possums-recovery.txt>Download recovery credential</a></p><p><a href=/>Return</a></p>",
         render::escape(&session.recovery_credential)
     )))
     .into_response()
+}
+
+async fn recovery_download(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_, session)) = session_from_headers(&state, &headers) else {
+        return unauthorized();
+    };
+    let mut response = session.recovery_credential.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"possums-recovery.txt\""),
+    );
+    response
 }
 
 async fn claims() -> Html<String> {
@@ -233,15 +334,10 @@ async fn chat(
     if !Auth::verify_csrf(&session, &form.csrf) || form.prompt.is_empty() {
         return bad_request();
     }
-    let mut history: Vec<Message> = match serde_json::from_str(&form.history) {
-        Ok(value) => value,
-        Err(_) => return bad_request(),
+    let mut history = match parse_history(&form.history) {
+        Some(value) => value,
+        None => return bad_request(),
     };
-    if history.iter().any(|message| {
-        !matches!(message.role.as_str(), "user" | "assistant") || message.content.is_empty()
-    }) {
-        return bad_request();
-    }
     history.push(Message {
         role: "user".into(),
         content: form.prompt,
@@ -264,7 +360,7 @@ async fn chat(
         Ok(value) => value,
         Err(_) => return bad_request(),
     };
-    let submission_id =
+    let submission =
         match state
             .auth
             .bind_submission(&session_id, &session.account_id, &form.token, &form.model)
@@ -272,12 +368,14 @@ async fn chat(
             Ok(value) => value,
             Err(_) => return bad_request(),
         };
+    let submission_id = submission.id;
     let request_digest: [u8; 32] = Sha256::digest(form.model.as_bytes()).into();
     match state.accounting.reserve(
         &session.account_id,
         submission_id,
         request_digest,
         reservation_quote,
+        submission.expires_at,
     ) {
         Ok(ReserveResult::Reserved) => {}
         Ok(ReserveResult::Duplicate(outcome)) => {
@@ -380,6 +478,7 @@ struct ConfirmationForm {
     csrf: String,
     token: String,
     model: String,
+    history: String,
 }
 
 async fn confirm_delivery(
@@ -398,13 +497,43 @@ async fn confirm_delivery(
             .auth
             .bind_submission(&session_id, &session.account_id, &form.token, &form.model)
         {
-            Ok(value) => value,
+            Ok(value) => value.id,
             Err(_) => return bad_request(),
         };
-    match state.accounting.settle(submission_id) {
-        Ok(_) => Redirect::to("/").into_response(),
-        Err(_) => unavailable(),
+    let history = match parse_history(&form.history) {
+        Some(value) => value,
+        None => return bad_request(),
+    };
+    if state.accounting.settle(submission_id).is_err() {
+        return unavailable();
     }
+    let catalog = match current_catalog(&state).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let token = match state.auth.issue_submission(&session_id) {
+        Ok(value) => value,
+        Err(_) => return unavailable(),
+    };
+    Html(render::chat_page(
+        &catalog.models,
+        &session.csrf,
+        &token,
+        &history,
+        Some("Delivery confirmed."),
+        None,
+    ))
+    .into_response()
+}
+
+fn parse_history(encoded: &str) -> Option<Vec<Message>> {
+    let history: Vec<Message> = serde_json::from_str(encoded).ok()?;
+    if history.iter().any(|message| {
+        !matches!(message.role.as_str(), "user" | "assistant") || message.content.is_empty()
+    }) {
+        return None;
+    }
+    Some(history)
 }
 
 struct ReservationGuard {
