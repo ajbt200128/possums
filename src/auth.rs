@@ -68,15 +68,14 @@ impl Auth {
             return Err(AuthError::Invalid);
         }
         let candidate: [u8; 32] = Sha256::digest(credential.as_bytes()).into();
-        let account = self
-            .accounts
-            .iter()
-            .find(|account| {
-                decode_hash(&account.credential_sha256)
-                    .map(|expected| bool::from(expected.ct_eq(&candidate)))
-                    .unwrap_or(false)
-            })
-            .ok_or(AuthError::Invalid)?;
+        let mut matched = None;
+        for account in &self.accounts {
+            let expected = decode_hash(&account.credential_sha256)?;
+            if bool::from(expected.ct_eq(&candidate)) {
+                matched = Some(account);
+            }
+        }
+        let account = matched.ok_or(AuthError::Invalid)?;
         let session_id = random_token();
         let session = Session {
             account_id: account.id.clone(),

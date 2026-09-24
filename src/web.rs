@@ -226,11 +226,12 @@ async fn chat(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let input_tokens = match state.inference.count_tokens(&form.model, &history).await {
-        Ok(value) => value,
-        Err(_) => return unavailable(),
+    let model = match catalog.models.iter().find(|model| model.id == form.model) {
+        Some(model) => model,
+        None => return bad_request(),
     };
-    let quote = match catalog.quote(&form.model, input_tokens) {
+    let maximum_input = model.context_tokens - model.max_output_tokens;
+    let reservation_quote = match catalog.quote(&form.model, maximum_input) {
         Ok(value) => value,
         Err(_) => return bad_request(),
     };
@@ -240,7 +241,7 @@ async fn chat(
         &session.account_id,
         submission_id,
         request_digest,
-        quote.clone(),
+        reservation_quote,
     ) {
         Ok(ReserveResult::Reserved) => {}
         Ok(ReserveResult::Duplicate(outcome)) => {
@@ -264,6 +265,20 @@ async fn chat(
         Err(_) => return (StatusCode::PAYMENT_REQUIRED, "request unavailable").into_response(),
     }
 
+    let input_tokens = match state.inference.count_tokens(&form.model, &history).await {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = state.accounting.refund(submission_id);
+            return unavailable();
+        }
+    };
+    let quote = match catalog.quote(&form.model, input_tokens) {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = state.accounting.refund(submission_id);
+            return bad_request();
+        }
+    };
     let permit = match state.generation_slots.clone().try_acquire_owned() {
         Ok(value) => value,
         Err(_) => {

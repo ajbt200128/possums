@@ -140,11 +140,12 @@ impl Accounting {
             .submissions
             .get(&submission_id)
             .ok_or(AccountingError::InvalidTransition)?;
-        if submission.outcome != Outcome::InFlight || input_tokens != submission.quote.input_tokens
-        {
+        if submission.outcome != Outcome::InFlight || input_tokens > submission.quote.input_tokens {
             return Err(AccountingError::InvalidTransition);
         }
-        let charged = actual_cost(&submission.quote, output_tokens).map_err(map_cost)?;
+        let mut actual_quote = submission.quote.clone();
+        actual_quote.input_tokens = input_tokens;
+        let charged = actual_cost(&actual_quote, output_tokens).map_err(map_cost)?;
         if charged > submission.quote.reserved_microunits {
             return Err(AccountingError::InvalidTransition);
         }
