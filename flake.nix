@@ -27,6 +27,15 @@
         common = { inherit src; strictDeps = true; };
         cargoArtifacts = craneLib.buildDepsOnly common;
         gateway = craneLib.buildPackage (common // { inherit cargoArtifacts; });
+        browserFixture = craneLib.buildPackage (common // {
+          inherit cargoArtifacts;
+          cargoExtraArgs = "--example browser_fixture";
+          doCheck = false;
+          installPhaseCommand = ''
+            mkdir -p $out/bin
+            cp target/release/examples/browser_fixture $out/bin/
+          '';
+        });
         gatewayEntrypoint = pkgs.writeShellScriptBin "possums-entrypoint" ''
           ulimit -c 0
           exec ${gateway}/bin/possums
@@ -42,9 +51,21 @@
             WorkingDir = "/tmp";
           };
         };
+        smokeImage = pkgs.dockerTools.buildLayeredImage {
+          name = "possums-gateway-smoke";
+          tag = "phase0";
+          contents = [ browserFixture pkgs.cacert ];
+          config = {
+            Entrypoint = [ "${browserFixture}/bin/browser_fixture" ];
+            Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
+            User = "65532:65532";
+            WorkingDir = "/tmp";
+          };
+        };
       in {
         packages = { default = gateway; } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;
+          gateway-smoke-image = smokeImage;
         };
         checks = {
           inherit gateway;

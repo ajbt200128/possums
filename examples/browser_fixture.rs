@@ -72,10 +72,10 @@ fn now() -> u64 {
 async fn main() {
     let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
     let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
-    let auth = Auth::from_json(&format!(
-        r#"[{{"id":"browser","credential_sha256":"{hash}","demo_microunits":1000}}]"#
-    ))
-    .unwrap();
+    let default_accounts =
+        format!(r#"[{{"id":"browser","credential_sha256":"{hash}","demo_microunits":1000}}]"#);
+    let accounts = std::env::var("POSSUMS_ACCOUNTS_JSON").unwrap_or(default_accounts);
+    let auth = Auth::from_json(&accounts).unwrap();
     let evidence_path =
         std::env::temp_dir().join(format!("possums-browser-evidence-{}", std::process::id()));
     std::fs::write(

@@ -33,13 +33,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v17
-      - run: nix build .#gateway-image --print-build-logs
+      - run: nix build .#gateway-image --rebuild --print-build-logs
       - name: Record OCI manifest digest
         run: nix shell nixpkgs#skopeo nixpkgs#jq --command sh -c 'skopeo inspect docker-archive:result | jq -r .Digest > digest'
       - uses: actions/upload-artifact@v4
         with:
           name: image-digest-${{ matrix.build }}
           path: digest
+
+  image-startup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v17
+      - name: Build isolated test-verifier image
+        run: nix build .#gateway-smoke-image --rebuild --print-build-logs
+      - name: Smoke test read-only startup with a runtime account secret
+        run: |
+          docker load < result
+          accounts='[{"id":"startup-canary","credential_sha256":"g80hPkaKL7rbUpYj1pvTaDr7jxOh8KvDFn00a94wNxk","demo_microunits":1000}]'
+          container=$(docker run -d --network none --read-only --tmpfs /tmp:rw,size=64m \
+            -e POSSUMS_ACCOUNTS_JSON="$accounts" possums-gateway-smoke:phase0)
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 20); do
+            test "$(docker inspect -f '{{.State.Running}}' "$container")" = true && \
+              docker logs "$container" 2>&1 | grep -q '^http://127.0.0.1:' && break
+            sleep 0.25
+          done
+          test "$(docker inspect -f '{{.State.Running}}' "$container")" = true
+          docker logs "$container" 2>&1 | grep -q '^http://127.0.0.1:'
+          ! docker logs "$container" 2>&1 | grep -q 'startup-canary'
 
   compare-images:
     needs: image

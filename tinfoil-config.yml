@@ -15,6 +15,8 @@ containers:
     env:
       - HOME: "/tmp"
       - POSSUMS_BIND: "0.0.0.0:8080"
+      # This path declaration does not provision the evidence file. Release remains
+      # blocked until a supported read-only evidence delivery mechanism is configured.
       - POSSUMS_GATEWAY_EVIDENCE: "/tinfoil/attestation.json"
       - POSSUMS_TINFOIL_HOST: "inference.tinfoil.sh"
       - POSSUMS_TINFOIL_REPOSITORY: "tinfoilsh/confidential-model-router"
