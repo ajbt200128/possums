@@ -24,4 +24,4 @@ The gateway and Tinfoil inference service see prompt and response plaintext in m
 
 Before transmitting prompt bytes, production must verify gateway release provenance and serving-endpoint key binding, Tinfoil attestation and release provenance, an authenticated fresh catalog, model/context limits, and a successful credit reservation. Any missing or unknown mandatory evidence fails closed.
 
-Detailed behavior and unresolved platform claims are in [`docs/phase0.md`](docs/phase0.md) and [`docs/verification.md`](docs/verification.md).
+Detailed behavior and unresolved platform claims are in [`docs/phase0.md`](docs/phase0.md) and [`docs/verification.md`](docs/verification.md). The original long-term vision is preserved in [`OVERALL_PLAN.md`](OVERALL_PLAN.md) as non-authoritative historical context.
