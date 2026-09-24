@@ -30,12 +30,12 @@ Run on 2026-09-24, aarch64-darwin, with the pinned Rust 1.88.0 Nix shell:
 |---|---|
 | `cargo fmt --all -- --check` | VERIFIED |
 | `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED |
-| `cargo test --all-targets --all-features` | VERIFIED: 18 tests passed |
+| `cargo test --all-targets --all-features` | VERIFIED: 19 tests passed |
 | `nix flake check --print-build-logs` | VERIFIED for aarch64-darwin checks; other systems omitted |
-| `nix build .#gateway-image --print-build-logs` | FAILED on aarch64-darwin: `dockerTools` fakeroot aborted because `_fstat$INODE64` was unavailable |
+| `nix build .#gateway-image --print-build-logs` | Not exposed on aarch64-darwin; the OCI derivation is Linux-only |
 | Linux OCI build and digest comparison | UNKNOWN: no Linux builder was available |
 
-The pinned crane revision warns that it expects nixpkgs 26.05 or newer while the lock uses 25.05. Updating the lock was blocked by the local execution policy, so compatibility outside the checks above remains UNKNOWN. CI must report unavailable platform checks as blocked, never silently skip them.
+The pinned crane revision warns that it expects nixpkgs 26.05 or newer while the lock uses 25.05. A local `nix flake update nixpkgs` attempt was blocked by execution policy and did not run, so compatibility outside the checks above remains UNKNOWN. CI must report unavailable platform checks as blocked, never silently skip them.
 
 ## Independent correctness and security review
 
