@@ -39,7 +39,9 @@
           };
         };
       in {
-        packages = { default = gateway; gateway-image = gatewayImage; };
+        packages = { default = gateway; } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          gateway-image = gatewayImage;
+        };
         checks = {
           inherit gateway;
           fmt = craneLib.cargoFmt { inherit src; };
