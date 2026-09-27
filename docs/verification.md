@@ -73,12 +73,14 @@ Release blockers found in review:
 
 ## Independent release procedure
 
-1. Check out the public release revision in two independent clean environments.
-2. Run `nix flake check` and build `.#gateway-image`; compare OCI digests.
-3. Confirm that digest is pinned by the public `tinfoil-config.yml` and distinguish the image digest from the hardware measurement.
-4. Verify release provenance, measured image/config association, a fresh hardware quote, and the serving HTTPS endpoint-key binding.
-5. Fetch and authenticate a fresh catalog quote without sending a prompt.
-6. Exercise every pre-prompt failure gate and observe zero prompt bytes upstream.
-7. Inspect runtime mounts, cache paths, egress, core dumps, proxy/platform logs, and telemetry captures with seeded canaries.
+1. Run `Publish reproducible gateway image` from the `main` branch.
+2. Confirm its two clean Linux builds produced the same OCI digest and that the exact archive was published to GHCR.
+3. Review and merge its digest-pin pull request after `check` succeeds on that branch.
+4. Run `Tinfoil Release` with the next `vX.Y.Z`; confirm the measured release and Sigstore record were published from the tagged commit.
+5. Confirm the public config digest, registry digest, and measured image/config association agree; distinguish the OCI digest from the hardware measurement.
+6. Verify release provenance, a fresh hardware quote, and the serving HTTPS endpoint-key binding.
+7. Fetch and authenticate a fresh catalog quote without sending a prompt.
+8. Exercise every pre-prompt failure gate and observe zero prompt bytes upstream.
+9. Inspect runtime mounts, cache paths, egress, core dumps, proxy/platform logs, and telemetry captures with seeded canaries.
 
 No deployment/platform verification has yet occurred. Phase 0 is not production-ready while mandatory rows remain UNKNOWN.
