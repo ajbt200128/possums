@@ -24,7 +24,11 @@
             craneLib.filterCargoSources path type &&
             base != ".pi" && base != ".env";
         };
-        common = { inherit src; strictDeps = true; };
+        common = {
+          inherit src;
+          strictDeps = true;
+          SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+        };
         cargoArtifacts = craneLib.buildDepsOnly common;
         gateway = craneLib.buildPackage (common // { inherit cargoArtifacts; });
         browserFixture = craneLib.buildPackage (common // {
