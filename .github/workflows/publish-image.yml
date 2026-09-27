@@ -1,0 +1,114 @@
+name: Publish reproducible gateway image
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: publish-gateway-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        build: [a, b]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+      - name: Build OCI archive
+        run: nix build .#gateway-image --print-build-logs
+      - name: Record OCI manifest digest
+        run: |
+          cp -L result gateway-image.tar.gz
+          nix shell nixpkgs#skopeo nixpkgs#jq --command sh -c \
+            'skopeo inspect docker-archive:gateway-image.tar.gz | jq -r .Digest > digest'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-digest-${{ matrix.build }}
+          path: digest
+          retention-days: 1
+      - if: matrix.build == 'a'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gateway-image
+          path: gateway-image.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: true
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: image-digest-*
+          path: artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: gateway-image
+          path: artifacts/gateway-image
+      - name: Require independent builds to agree
+        run: |
+          digest_a=$(cat artifacts/image-digest-a/digest)
+          digest_b=$(cat artifacts/image-digest-b/digest)
+          test "$digest_a" = "$digest_b"
+          echo "IMAGE_DIGEST=$digest_a" >> "$GITHUB_ENV"
+      - name: Publish the exact verified archive
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ghcr.io/ajbt200128/possums-gateway
+        run: |
+          printf '%s' "$GHCR_TOKEN" | nix shell nixpkgs#skopeo --command \
+            skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          nix shell nixpkgs#skopeo --command skopeo copy --preserve-digests \
+            docker-archive:artifacts/gateway-image/gateway-image.tar.gz \
+            "docker://$IMAGE:${GITHUB_SHA}"
+          registry_digest=$(nix shell nixpkgs#skopeo nixpkgs#jq --command sh -c \
+            "skopeo inspect 'docker://$IMAGE:$GITHUB_SHA' | jq -r .Digest")
+          test "$registry_digest" = "$IMAGE_DIGEST"
+          echo "IMAGE_REFERENCE=$IMAGE@$registry_digest" >> "$GITHUB_ENV"
+      - name: Open digest update pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("tinfoil-config.yml")
+          text = path.read_text()
+          pattern = r"(?m)^    image: .*possums-gateway@sha256:[0-9a-f]{64}$"
+          replacement = f"    image: {os.environ['IMAGE_REFERENCE']}"
+          updated, count = re.subn(pattern, replacement, text)
+          if count != 1:
+              raise SystemExit(f"expected one gateway image reference, found {count}")
+          path.write_text(updated)
+          PY
+          branch="automation/image-${GITHUB_RUN_ID}"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git checkout -b "$branch"
+          git add tinfoil-config.yml
+          git commit -m "release: pin gateway image ${IMAGE_DIGEST}"
+          git push origin "$branch"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "release: pin gateway image ${IMAGE_DIGEST}" \
+            --body "Pins the independently reproduced and published gateway image to \`${IMAGE_REFERENCE}\`."
+          gh workflow run check.yml --ref "$branch"

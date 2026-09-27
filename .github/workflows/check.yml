@@ -2,22 +2,23 @@ name: check
 on:
   push:
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   flake:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v17
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
       - run: nix flake check --print-build-logs
 
   browser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v17
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -26,26 +27,17 @@ jobs:
       - run: nix develop -c bash -lc 'npm run test:browser'
 
   image:
-    strategy:
-      matrix:
-        build: [a, b]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v17
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
       - run: nix build .#gateway-image --print-build-logs
-      - name: Record OCI manifest digest
-        run: nix shell nixpkgs#skopeo nixpkgs#jq --command sh -c 'skopeo inspect docker-archive:result | jq -r .Digest > digest'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: image-digest-${{ matrix.build }}
-          path: digest
 
   image-startup:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v17
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
       - name: Build isolated test-verifier image
         run: nix build .#gateway-smoke-image --print-build-logs
       - name: Smoke test read-only startup with a runtime account secret
@@ -63,14 +55,3 @@ jobs:
           test "$(docker inspect -f '{{.State.Running}}' "$container")" = true
           docker logs "$container" 2>&1 | grep -q '^http://127.0.0.1:'
           ! docker logs "$container" 2>&1 | grep -q 'startup-canary'
-
-  compare-images:
-    needs: image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: image-digest-*
-          path: digests
-      - name: Require independent OCI builds to agree
-        run: test "$(cat digests/image-digest-a/digest)" = "$(cat digests/image-digest-b/digest)"
