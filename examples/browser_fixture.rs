@@ -9,6 +9,7 @@ use possums::{
 };
 use sha2::{Digest, Sha256};
 use std::{
+    io::Write,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -105,5 +106,6 @@ async fn main() {
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     println!("http://{}", listener.local_addr().unwrap());
+    std::io::stdout().flush().unwrap();
     serve(listener, state).await.unwrap();
 }
