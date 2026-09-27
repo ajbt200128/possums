@@ -7,8 +7,7 @@
 | `/` | GET | Login or chat form and authenticated model selector |
 | `/login` | POST | Exchange a provisioned recovery credential for a session |
 | `/logout` | POST | End the session |
-| `/chat` | POST | Validate, reserve, generate, and render one buffered turn |
-| `/confirm` | POST | Authenticated no-JavaScript delivery acknowledgment and settlement |
+| `/chat` | POST | Validate, reserve, generate, render, and settle one buffered turn |
 | `/recovery` | GET | Explicitly display the user's recovery credential |
 | `/recovery/download` | GET | Authenticated plain-text recovery download |
 | `/claims` | GET | Current scoped privacy and verification claims |
@@ -35,11 +34,11 @@ State is single-process, short-lived, and contains no prompts or responses:
 1. A capped, fifteen-minute submission token is issued by the gateway and bound on first use to the account, session, process epoch, and selected model. Reusing it with changed prompt/history never regenerates, but the gateway intentionally retains no content hash and does not claim to detect which content changed.
 2. `reserve` atomically checks balance, account concurrency/quota, and duplicate status, then deducts the model-context maximum quoted cost.
 3. A duplicate token always returns its stored terminal status and never invokes inference. Terminal tombstones remain until the associated token expires, then are reclaimed; authentication removes expired tokens first, so a reclaimed identifier cannot be accepted or replayed.
-4. Verified inference returns authenticated usage. The gateway records the prospective actual charge at the snapshotted rate, but does not settle until the authenticated browser acknowledgment.
-5. Missing/invalid usage, upstream failure, timeout, cancellation, or incomplete/uncertain HTTP delivery refunds the full user reservation exactly once. Measured upstream cost is an aggregate operator expense only.
+4. Verified inference returns authenticated usage. The gateway records the prospective actual charge at the snapshotted rate and settles when the complete response body is consumed by the HTTP transport.
+5. Missing/invalid usage, upstream failure, timeout, cancellation, body error, or abandonment before transport completion refunds the full user reservation exactly once. Measured upstream cost is an aggregate operator expense only.
 6. No automatic inference retry occurs after generation may have started.
 
-The HTML response is buffered and contains a safe form using a new token; an old token cannot regenerate. It also contains an explicit no-JavaScript delivery-confirmation form bound to the original account, session, token, and model. Confirmation re-renders the client-carried transcript and next-turn form rather than discarding conversation history. Until confirmation, the maximum reservation remains held. The gateway fetches the catalog, issues the next token, and completes bounded rendering before the acknowledgment atomically settles; failures remain retryable, and repeated successful acknowledgments are idempotent. Reservation ownership remains attached to the response body: cancellation, panic, body error, or abandonment before complete body consumption refunds, while a completely consumed but unconfirmed response remains reserved for at most five minutes and refunds on the next accounting operation. Local response-drop, socket, panic, expiry, rendering/catalog/token-capacity failure, retry, and settlement/refund race tests cover these transitions. Body consumption is not treated as proof of browser receipt; only authenticated confirmation settles actual usage. Deployed behavior remains a release evidence requirement.
+The buffered HTML response contains the transcript and a safe next-turn form using a new token; an old token cannot regenerate. Reservation ownership remains attached to the response body: cancellation, panic, body error, or abandonment before complete body consumption refunds, while complete body consumption atomically settles actual usage and releases the unused reservation. Local response-drop, socket, panic, rendering, catalog, token-capacity, and settlement/refund race tests cover these transitions. This server-side transport boundary does not prove browser receipt, and disconnects after it may still charge the user. Deployed write-failure behavior remains a release evidence requirement.
 
 ### Restart semantics
 
