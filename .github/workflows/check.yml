@@ -44,7 +44,7 @@ jobs:
         run: |
           docker load < result
           accounts='[{"id":"startup-canary","credential_sha256":"g80hPkaKL7rbUpYj1pvTaDr7jxOh8KvDFn00a94wNxk","demo_microunits":1000}]'
-          container=$(docker run -d --network none --read-only --tmpfs /tmp:rw,size=64m \
+          container=$(docker run -d --network none --read-only --tmpfs /tmp:rw,size=64m,mode=1777 \
             -e POSSUMS_ACCOUNTS_JSON="$accounts" possums-gateway-smoke:phase0)
           trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
           for _ in $(seq 1 20); do
