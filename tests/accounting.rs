@@ -92,23 +92,7 @@ fn terminal_state_is_reclaimed_only_after_token_expiry() {
 }
 
 #[test]
-fn expired_confirmation_refunds_before_settlement() {
-    let ledger =
-        Accounting::with_confirmation_lifetime([("a".into(), 100)], Duration::from_millis(0));
-    ledger
-        .reserve("a", [1; 32], [2; 32], quote(), token_expiry())
-        .unwrap();
-    ledger.prepare_settlement([1; 32], 5, 4).unwrap();
-    assert_eq!(
-        ledger.settle([1; 32]),
-        Err(AccountingError::InvalidTransition)
-    );
-    assert_eq!(ledger.available("a"), Some(100));
-    assert_eq!(ledger.refund([1; 32]), Ok(()));
-}
-
-#[test]
-fn settlement_and_refund_race_has_one_terminal_balance() {
+fn delivery_completion_and_abandonment_race_has_one_terminal_balance() {
     let ledger = Arc::new(Accounting::new([("a".into(), 100)]));
     ledger
         .reserve("a", [1; 32], [2; 32], quote(), token_expiry())

@@ -264,29 +264,13 @@ async fn no_javascript_chat_sets_security_headers_and_settles() {
         .unwrap()
         .contains("default-src 'none'"));
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert!(String::from_utf8_lossy(&body).contains("<strong>safe</strong>"));
-    assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
-    assert_eq!(state.accounting.available("a"), Some(74));
-
-    let carried_history = "%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22hello%22%7D%2C%7B%22role%22%3A%22assistant%22%2C%22content%22%3A%22%2A%2Asafe%2A%2A%22%7D%5D";
-    let confirmation = format!("csrf={csrf}&token={token}&model=m&history={carried_history}");
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/confirm")
-                .header(header::COOKIE, cookie.split(';').next().unwrap())
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(confirmation))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(state.accounting.available("a"), Some(97));
-    let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8_lossy(&body);
     assert!(html.contains("<strong>safe</strong>"));
+    assert!(!html.contains("Confirm response delivery"));
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
+    assert_eq!(state.accounting.available("a"), Some(97));
+
+    let carried_history = "%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22hello%22%7D%2C%7B%22role%22%3A%22assistant%22%2C%22content%22%3A%22%2A%2Asafe%2A%2A%22%7D%5D";
     let marker = "name=token value=\"";
     let start = html.find(marker).unwrap() + marker.len();
     let next_token = &html[start..html[start..].find('\"').unwrap() + start];
@@ -342,180 +326,6 @@ async fn dropping_unconsumed_response_refunds_reservation() {
     drop(response);
     assert_eq!(state.accounting.available("a"), Some(100));
     assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
-    std::fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
-async fn confirmation_failures_do_not_settle_and_retry_is_idempotent() {
-    let path = std::env::temp_dir().join(format!(
-        "possums-confirm-retry-evidence-{}",
-        std::process::id()
-    ));
-    write_evidence(
-        &path,
-        serde_json::json!({"verified": true}),
-        now(),
-        EXPECTED_RELEASE,
-        EXPECTED_KEY,
-    );
-    let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
-    let request_cookie = cookie.split(';').next().unwrap();
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/chat")
-                .header(header::COOKIE, request_cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(format!(
-                    "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=hello"
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    response.into_body().collect().await.unwrap();
-    assert_eq!(state.accounting.available("a"), Some(74));
-
-    let history = "%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22hello%22%7D%2C%7B%22role%22%3A%22assistant%22%2C%22content%22%3A%22%2A%2Asafe%2A%2A%22%7D%5D";
-    inference.catalog_failures.store(1, Ordering::SeqCst);
-    let confirmation = format!("csrf={csrf}&token={token}&model=m&history={history}");
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/confirm")
-                .header(header::COOKIE, request_cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(confirmation.clone()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(state.accounting.available("a"), Some(74));
-
-    let hostile_history = format!(r#"[{{"role":"user","content":"{}"}}]"#, "<".repeat(270_000));
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/confirm")
-                .header(header::COOKIE, request_cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(format!(
-                    "csrf={csrf}&token={token}&model=m&history={hostile_history}"
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(state.accounting.available("a"), Some(74));
-
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/confirm")
-                .header(header::COOKIE, request_cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(confirmation.clone()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(state.accounting.available("a"), Some(97));
-
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/confirm")
-                .header(header::COOKIE, request_cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(confirmation))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(state.accounting.available("a"), Some(97));
-    std::fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
-async fn confirmation_token_capacity_failure_does_not_settle() {
-    let path = std::env::temp_dir().join(format!(
-        "possums-confirm-capacity-evidence-{}",
-        std::process::id()
-    ));
-    write_evidence(
-        &path,
-        serde_json::json!({"verified": true}),
-        now(),
-        EXPECTED_RELEASE,
-        EXPECTED_KEY,
-    );
-    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
-    let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
-    let auth = Auth::from_json(&format!(
-        r#"[{{"id":"a","credential_sha256":"{hash}","demo_microunits":100}}]"#
-    ))
-    .unwrap()
-    .with_submission_capacity(3);
-    let challenge = auth.issue_login_challenge().unwrap();
-    let (session_id, session) = auth.authenticate(&credential, &challenge).unwrap();
-    let token = auth.issue_submission(&session_id).unwrap();
-    let state = AppState::new(
-        auth,
-        Arc::new(FakeInference {
-            tokenizations: AtomicUsize::new(0),
-            generations: AtomicUsize::new(0),
-            catalog_failures: AtomicUsize::new(0),
-        }),
-        Arc::<str>::from(path.to_str().unwrap()),
-        Arc::new(TestEvidenceVerifier),
-    );
-    let cookie = session_cookie(&session_id);
-    let csrf = session.csrf;
-    let request_cookie = cookie.split(';').next().unwrap();
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/chat")
-                .header(header::COOKIE, request_cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(format!(
-                    "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=hello"
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    response.into_body().collect().await.unwrap();
-
-    state.auth.issue_submission(&session_id).unwrap();
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/confirm")
-                .header(header::COOKIE, request_cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(format!(
-                    "csrf={csrf}&token={token}&model=m&history=%5B%5D"
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(state.accounting.available("a"), Some(74));
     std::fs::remove_file(path).unwrap();
 }
 
@@ -888,7 +698,7 @@ async fn socket_disconnect_during_inference_refunds_reservation() {
 }
 
 #[tokio::test]
-async fn socket_disconnect_after_render_refunds_reservation() {
+async fn disconnect_near_transport_completion_reaches_one_terminal_balance() {
     let path = std::env::temp_dir().join(format!(
         "possums-rendered-disconnect-evidence-{}",
         std::process::id()
@@ -937,16 +747,16 @@ async fn socket_disconnect_after_render_refunds_reservation() {
         assert_ne!(count, 0);
         received.extend_from_slice(&chunk[..count]);
     }
-    assert_eq!(state.accounting.available("a"), Some(74));
+    assert!(matches!(state.accounting.available("a"), Some(74 | 97)));
     drop(client);
 
     for _ in 0..100 {
-        if state.accounting.available("a") == Some(100) {
+        if matches!(state.accounting.available("a"), Some(97 | 100)) {
             break;
         }
         sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(state.accounting.available("a"), Some(100));
+    assert!(matches!(state.accounting.available("a"), Some(97 | 100)));
     server.abort();
     std::fs::remove_file(path).unwrap();
 }

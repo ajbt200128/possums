@@ -47,7 +47,7 @@ fn process_epoch_invalidates_old_submission_tokens() {
 }
 
 #[test]
-fn uncertain_delivery_refund_is_terminal_and_idempotent() {
+fn abandoned_delivery_refund_is_terminal_and_idempotent() {
     let ledger = Accounting::new([("a".into(), 100)]);
     ledger
         .reserve(

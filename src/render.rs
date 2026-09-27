@@ -67,7 +67,6 @@ pub fn chat_page(
     submission_token: &str,
     history: &[Message],
     notice: Option<&str>,
-    confirmation: Option<(&str, &str)>,
     limit: usize,
 ) -> Option<String> {
     // JSON and HTML escaping can expand hostile input substantially. Reject it
@@ -82,8 +81,7 @@ pub fn chat_page(
                 .checked_add(message.role.len())?
                 .checked_add(message.content.len())
         })?)?
-        .checked_add(notice.map_or(0, str::len))?
-        .checked_add(confirmation.map_or(0, |(token, model)| token.len() + model.len()))?;
+        .checked_add(notice.map_or(0, str::len))?;
     if input_bytes.checked_mul(128)?.checked_add(4096)? > limit {
         return None;
     }
@@ -115,19 +113,8 @@ pub fn chat_page(
     let notice = notice
         .map(|value| format!("<p role=status>{}</p>", escape(value)))
         .unwrap_or_default();
-    let confirmation = confirmation
-        .map(|(token, model)| {
-            format!(
-                "<form method=post action=/confirm><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=model value=\"{}\"><input type=hidden name=history value=\"{}\"><button type=submit>Confirm response delivery</button></form>",
-                escape(csrf),
-                escape(token),
-                escape(model),
-                encoded_history
-            )
-        })
-        .unwrap_or_default();
     let rendered = page(&format!(
-        "<h1>Possums demo</h1>{notice}{transcript}{confirmation}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model <select name=model>{options}</select></label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
+        "<h1>Possums demo</h1>{notice}{transcript}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model <select name=model>{options}</select></label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
         escape(csrf),
         escape(submission_token),
         encoded_history,

@@ -1,19 +1,14 @@
 use crate::catalog::{actual_cost, CatalogError, Quote};
-use std::{
-    collections::HashMap,
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Mutex, time::Instant};
 use thiserror::Error;
 
 const MAX_SUBMISSIONS: usize = 100_000;
 const MAX_ACCOUNT_IN_FLIGHT: u32 = 3;
-const CONFIRMATION_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     InFlight,
-    AwaitingConfirmation,
+    AwaitingDelivery,
     Settled { charged: u64 },
     Refunded,
 }
@@ -25,7 +20,6 @@ struct Submission {
     quote: Quote,
     outcome: Outcome,
     pending_charge: Option<u64>,
-    confirmation_deadline: Option<Instant>,
     token_expires_at: Instant,
 }
 
@@ -43,7 +37,6 @@ struct State {
 
 pub struct Accounting {
     state: Mutex<State>,
-    confirmation_lifetime: Duration,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -89,18 +82,7 @@ impl Accounting {
                 accounts,
                 submissions: HashMap::new(),
             }),
-            confirmation_lifetime: CONFIRMATION_LIFETIME,
         }
-    }
-
-    #[doc(hidden)]
-    pub fn with_confirmation_lifetime(
-        accounts: impl IntoIterator<Item = (String, u64)>,
-        confirmation_lifetime: Duration,
-    ) -> Self {
-        let mut accounting = Self::new(accounts);
-        accounting.confirmation_lifetime = confirmation_lifetime;
-        accounting
     }
 
     pub fn reserve(
@@ -115,7 +97,6 @@ impl Accounting {
             .state
             .lock()
             .map_err(|_| AccountingError::InvalidTransition)?;
-        refund_expired_confirmations(&mut state)?;
         state.submissions.retain(|_, submission| {
             !is_terminal(&submission.outcome) || submission.token_expires_at > Instant::now()
         });
@@ -151,7 +132,6 @@ impl Accounting {
                 quote,
                 outcome: Outcome::InFlight,
                 pending_charge: None,
-                confirmation_deadline: None,
                 token_expires_at,
             },
         );
@@ -185,9 +165,8 @@ impl Accounting {
             .submissions
             .get_mut(&submission_id)
             .ok_or(AccountingError::InvalidTransition)?;
-        submission.outcome = Outcome::AwaitingConfirmation;
+        submission.outcome = Outcome::AwaitingDelivery;
         submission.pending_charge = Some(charged);
-        submission.confirmation_deadline = Some(Instant::now() + self.confirmation_lifetime);
         Ok(charged)
     }
 
@@ -196,7 +175,6 @@ impl Accounting {
             .state
             .lock()
             .map_err(|_| AccountingError::InvalidTransition)?;
-        refund_expired_confirmations(&mut state)?;
         let submission = state
             .submissions
             .get(&submission_id)
@@ -204,7 +182,7 @@ impl Accounting {
         if let Outcome::Settled { charged } = submission.outcome {
             return Ok(charged);
         }
-        if submission.outcome != Outcome::AwaitingConfirmation {
+        if submission.outcome != Outcome::AwaitingDelivery {
             return Err(AccountingError::InvalidTransition);
         }
         let charged = submission
@@ -230,7 +208,6 @@ impl Accounting {
             .ok_or(AccountingError::InvalidTransition)?;
         submission.outcome = Outcome::Settled { charged };
         submission.pending_charge = None;
-        submission.confirmation_deadline = None;
         Ok(charged)
     }
 
@@ -246,7 +223,7 @@ impl Accounting {
         match submission.outcome {
             Outcome::Refunded => return Ok(()),
             Outcome::Settled { .. } => return Err(AccountingError::InvalidTransition),
-            Outcome::InFlight | Outcome::AwaitingConfirmation => {}
+            Outcome::InFlight | Outcome::AwaitingDelivery => {}
         }
         let account_id = submission.account_id.clone();
         let reserved = submission.quote.reserved_microunits;
@@ -271,55 +248,17 @@ impl Accounting {
     }
 
     pub fn available(&self, account_id: &str) -> Option<u64> {
-        let mut state = self.state.lock().ok()?;
-        refund_expired_confirmations(&mut state).ok()?;
-        state.accounts.get(account_id).map(|a| a.available)
+        self.state
+            .lock()
+            .ok()?
+            .accounts
+            .get(account_id)
+            .map(|account| account.available)
     }
 }
 
 fn is_terminal(outcome: &Outcome) -> bool {
     matches!(outcome, Outcome::Settled { .. } | Outcome::Refunded)
-}
-
-fn refund_expired_confirmations(state: &mut State) -> Result<(), AccountingError> {
-    let now = Instant::now();
-    let expired: Vec<_> = state
-        .submissions
-        .iter()
-        .filter_map(|(id, submission)| {
-            (submission.outcome == Outcome::AwaitingConfirmation
-                && submission
-                    .confirmation_deadline
-                    .is_some_and(|deadline| deadline <= now))
-            .then_some(*id)
-        })
-        .collect();
-    for id in expired {
-        let submission = state
-            .submissions
-            .get(&id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        let account = state
-            .accounts
-            .get_mut(&submission.account_id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        account.available = account
-            .available
-            .checked_add(submission.quote.reserved_microunits)
-            .ok_or(AccountingError::Cost)?;
-        account.in_flight = account
-            .in_flight
-            .checked_sub(1)
-            .ok_or(AccountingError::InvalidTransition)?;
-        let submission = state
-            .submissions
-            .get_mut(&id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        submission.outcome = Outcome::Refunded;
-        submission.pending_charge = None;
-        submission.confirmation_deadline = None;
-    }
-    Ok(())
 }
 
 fn map_cost(_: CatalogError) -> AccountingError {
@@ -330,6 +269,7 @@ fn map_cost(_: CatalogError) -> AccountingError {
 mod tests {
     use super::*;
     use crate::catalog::Model;
+    use std::time::Duration;
 
     fn quote() -> Quote {
         Quote {
@@ -361,7 +301,6 @@ mod tests {
                         quote: quote.clone(),
                         outcome: Outcome::Refunded,
                         pending_charge: None,
-                        confirmation_deadline: None,
                         token_expires_at: future,
                     },
                 )
@@ -380,7 +319,6 @@ mod tests {
                 .collect(),
                 submissions,
             }),
-            confirmation_lifetime: CONFIRMATION_LIFETIME,
         };
         assert_eq!(
             ledger

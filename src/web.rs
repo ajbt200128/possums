@@ -87,7 +87,6 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/chat", post(chat))
-        .route("/confirm", post(confirm_delivery))
         .route("/recovery", get(recovery))
         .route("/recovery/download", get(recovery_download))
         .route("/claims", get(claims))
@@ -260,7 +259,6 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
                 &session.csrf,
                 &token,
                 &[],
-                None,
                 None,
                 MAX_RENDERED_RESPONSE_BYTES,
             )
@@ -437,7 +435,7 @@ async fn chat(
         Ok(ReserveResult::Reserved) => {}
         Ok(ReserveResult::Duplicate(outcome)) => {
             let notice = match outcome {
-                Outcome::InFlight | Outcome::AwaitingConfirmation => {
+                Outcome::InFlight | Outcome::AwaitingDelivery => {
                     "This submission is already in progress."
                 }
                 Outcome::Settled { .. } => {
@@ -457,7 +455,6 @@ async fn chat(
                 &token,
                 &history,
                 Some(notice),
-                None,
                 MAX_RENDERED_RESPONSE_BYTES,
             )
             .map_or_else(unavailable, |html| Html(html).into_response());
@@ -523,70 +520,13 @@ async fn chat(
         &session.csrf,
         &token,
         &history,
-        Some("Confirm delivery to finalize the charge."),
-        Some((&form.token, &form.model)),
+        None,
         MAX_RENDERED_RESPONSE_BYTES,
     ) else {
         return unavailable();
     };
     let (parts, body) = Html(html).into_response().into_parts();
     Response::from_parts(parts, Body::new(ReservationBody::new(body, reservation)))
-}
-
-#[derive(Deserialize)]
-struct ConfirmationForm {
-    csrf: String,
-    token: String,
-    model: String,
-    history: String,
-}
-
-async fn confirm_delivery(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(form): Form<ConfirmationForm>,
-) -> Response {
-    let Some((session_id, session)) = session_from_headers(&state, &headers) else {
-        return unauthorized();
-    };
-    if !Auth::verify_csrf(&session, &form.csrf) {
-        return bad_request();
-    }
-    let submission_id =
-        match state
-            .auth
-            .bind_submission(&session_id, &session.account_id, &form.token, &form.model)
-        {
-            Ok(value) => value.id,
-            Err(_) => return bad_request(),
-        };
-    let history = match parse_history(&form.history) {
-        Some(value) => value,
-        None => return bad_request(),
-    };
-    let catalog = match current_catalog(&state).await {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    let token = match state.auth.issue_submission(&session_id) {
-        Ok(value) => value,
-        Err(_) => return unavailable(),
-    };
-    let Some(html) = render::chat_page(
-        &catalog.models,
-        &session.csrf,
-        &token,
-        &history,
-        Some("Delivery confirmed."),
-        None,
-        MAX_RENDERED_RESPONSE_BYTES,
-    ) else {
-        return unavailable();
-    };
-    if state.accounting.settle(submission_id).is_err() {
-        return unavailable();
-    }
-    Html(html).into_response()
 }
 
 fn parse_history(encoded: &str) -> Option<Vec<Message>> {
@@ -614,8 +554,10 @@ impl ReservationGuard {
         }
     }
 
-    fn disarm(&mut self) {
-        self.armed = false;
+    fn settle(&mut self) {
+        if self.accounting.settle(self.submission_id).is_ok() {
+            self.armed = false;
+        }
     }
 }
 
@@ -652,7 +594,7 @@ impl HttpBody for ReservationBody {
         let result = Pin::new(&mut self.inner).poll_frame(context);
         if matches!(result, Poll::Ready(None)) {
             if let Some(mut reservation) = self.reservation.take() {
-                reservation.disarm();
+                reservation.settle();
             }
         }
         result

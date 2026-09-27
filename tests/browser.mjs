@@ -43,13 +43,10 @@ try {
 
     await page.locator('textarea[name="prompt"]').fill("first turn");
     await page.getByRole("button", { name: "Send" }).click();
-    await page.getByText("Confirm delivery to finalize the charge.").waitFor();
+    await page.getByText("first turn").waitFor();
     if ((await page.locator("script, img, iframe").count()) !== 0) {
       throw new Error("hostile output rendered an active or remote element");
     }
-    await page.getByRole("button", { name: "Confirm response delivery" }).click();
-    await page.getByText("Delivery confirmed.").waitFor();
-    await page.getByText("first turn").waitFor();
     await page.getByText("safe response").waitFor();
 
     await page.locator('textarea[name="prompt"]').fill("second turn");
