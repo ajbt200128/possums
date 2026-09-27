@@ -24,17 +24,19 @@ Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILE
 
 ## Local verification
 
-Run on 2026-09-24, aarch64-darwin, with the pinned Rust 1.88.0 Nix shell:
+Run on 2026-09-26, aarch64-darwin, with the pinned Rust 1.88.0 Nix shell:
 
 | Check | Result |
 |---|---|
 | `cargo fmt --all -- --check` | VERIFIED |
 | `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED |
-| `cargo test --all-targets --all-features` | VERIFIED: 40 tests passed |
+| `cargo test --all-targets --all-features` | VERIFIED: 41 tests passed |
 | `cargo test --test transport` | VERIFIED: total-body trickle deadline, total-header deadline, and oversized-header rejection |
 | `cargo test --test inference --test accounting --test web` | VERIFIED: 22 tests passed, including chunked/absent/oversized/stalled upstream bodies, shared-memory response-lifetime admission, hostile render expansion, unconsumed-response abandonment, disconnect/completion boundary races, panic, settlement/refund races, and reauthentication replay |
 | `npm run test:browser` | VERIFIED: real Chromium with JavaScript disabled completed login, recovery download, model selection, and two chat turns without remote requests |
-| `nix flake check --print-build-logs` | VERIFIED for aarch64-darwin checks; other systems omitted |
+| `go test ./...` in `attestation-helper` | VERIFIED: nonce-bound Unix-socket request and fail-closed socket/input behavior |
+| `actionlint .github/workflows/*.yml` | VERIFIED |
+| `nix flake check --print-build-logs` | VERIFIED for aarch64-darwin checks, including the Go helper; other systems omitted |
 | `nix build .#gateway-image --print-build-logs` | Not exposed on aarch64-darwin; the OCI derivation is Linux-only |
 | Linux OCI build and digest comparison | UNKNOWN: no Linux builder was available |
 
