@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use possums::{
-    attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
+    attestation::{load_evidence, EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::Auth,
     catalog::Model,
     inference::{Generation, Inference, InferenceError, Message},
@@ -18,14 +18,21 @@ const KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 struct FixtureVerifier;
 
+#[async_trait]
 impl EvidenceVerifier for FixtureVerifier {
-    fn verify(&self, evidence: &GatewayEvidence, now: u64) -> Result<(), EvidenceError> {
+    async fn verify(
+        &self,
+        evidence_path: &str,
+        now: u64,
+    ) -> Result<GatewayEvidence, EvidenceError> {
+        let evidence = load_evidence(evidence_path)?;
         if evidence.release_digest == RELEASE
             && evidence.endpoint_key_sha256 == KEY
             && evidence.issued_at_unix <= now
             && now - evidence.issued_at_unix <= 300
+            && evidence.freshness_expires_at_unix > now
         {
-            Ok(())
+            Ok(evidence)
         } else {
             Err(EvidenceError::Invalid)
         }
@@ -85,6 +92,7 @@ async fn main() {
             "issued_at_unix": now(),
             "release_digest": RELEASE,
             "endpoint_key_sha256": KEY,
+            "freshness_expires_at_unix": now() + 300,
         }))
         .unwrap(),
     )

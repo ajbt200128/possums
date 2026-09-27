@@ -1,6 +1,6 @@
 use crate::{
     accounting::{Accounting, Outcome, ReserveResult},
-    attestation::{load_evidence, EvidenceVerifier},
+    attestation::EvidenceVerifier,
     auth::{clear_session_cookie, login_challenge_cookie, session_cookie, Auth, Session},
     catalog::actual_cost,
     inference::{authenticated_catalog, Message, SharedInference},
@@ -358,7 +358,7 @@ async fn claims() -> Html<String> {
 }
 
 async fn attestation(State(state): State<AppState>) -> Response {
-    let gateway = match verified_gateway_evidence(&state) {
+    let gateway = match verified_gateway_evidence(&state).await {
         Ok(value) => value,
         Err(_) => return unavailable(),
     };
@@ -399,7 +399,7 @@ async fn chat(
     });
 
     // Gateway provenance and serving-key evidence is a mandatory pre-prompt gate.
-    if verified_gateway_evidence(&state).is_err() {
+    if verified_gateway_evidence(&state).await.is_err() {
         return unavailable();
     }
     let catalog = match current_catalog(&state).await {
@@ -601,14 +601,13 @@ impl HttpBody for ReservationBody {
     }
 }
 
-fn verified_gateway_evidence(
+async fn verified_gateway_evidence(
     state: &AppState,
 ) -> Result<crate::attestation::GatewayEvidence, crate::attestation::EvidenceError> {
-    let evidence = load_evidence(state.gateway_evidence_path.as_ref())?;
     state
         .gateway_evidence_verifier
-        .verify(&evidence, now_unix())?;
-    Ok(evidence)
+        .verify(state.gateway_evidence_path.as_ref(), now_unix())
+        .await
 }
 
 async fn current_catalog(state: &AppState) -> Result<crate::catalog::Catalog, Response> {

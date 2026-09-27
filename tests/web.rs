@@ -6,7 +6,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use http_body_util::BodyExt;
 use possums::{
-    attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
+    attestation::{load_evidence, EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::{session_cookie, Auth},
     catalog::Model,
     inference::{Generation, Inference, InferenceError, Message},
@@ -33,17 +33,24 @@ const EXPECTED_KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 struct TestEvidenceVerifier;
 
+#[async_trait]
 impl EvidenceVerifier for TestEvidenceVerifier {
-    fn verify(&self, evidence: &GatewayEvidence, now: u64) -> Result<(), EvidenceError> {
+    async fn verify(
+        &self,
+        evidence_path: &str,
+        now: u64,
+    ) -> Result<GatewayEvidence, EvidenceError> {
+        let evidence = load_evidence(evidence_path)?;
         if evidence.quote != serde_json::json!({"verified": true})
             || evidence.release_digest != EXPECTED_RELEASE
             || evidence.endpoint_key_sha256 != EXPECTED_KEY
             || evidence.issued_at_unix > now
             || now - evidence.issued_at_unix > 300
+            || evidence.freshness_expires_at_unix <= now
         {
             return Err(EvidenceError::Invalid);
         }
-        Ok(())
+        Ok(evidence)
     }
 }
 
@@ -224,6 +231,7 @@ fn write_evidence(
             "issued_at_unix": issued_at_unix,
             "release_digest": release,
             "endpoint_key_sha256": key,
+            "freshness_expires_at_unix": issued_at_unix.saturating_add(300),
         }))
         .unwrap(),
     )

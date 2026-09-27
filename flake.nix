@@ -3,18 +3,21 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     crane.url = "github:ipetkov/crane/v0.21.0";
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
-  outputs = { self, nixpkgs, flake-utils, crane, rust-overlay }:
+  outputs = { self, nixpkgs, nixpkgs-unstable, flake-utils, crane, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
+        unstablePkgs = import nixpkgs-unstable { inherit system; };
+        buildGoModule = unstablePkgs.buildGoModule.override { go = unstablePkgs.go_1_27; };
         craneLib = (crane.mkLib pkgs).overrideToolchain
           (p: p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
         src = pkgs.lib.cleanSourceWith {
@@ -31,6 +34,15 @@
         };
         cargoArtifacts = craneLib.buildDepsOnly common;
         gateway = craneLib.buildPackage (common // { inherit cargoArtifacts; });
+        attestationHelper = buildGoModule {
+          pname = "possums-attestation";
+          version = "0.1.0";
+          src = ./attestation-helper;
+          vendorHash = "sha256-GNfWp9U27DIiKkdKehXcLFwEyHv4OeFiEhfQAB7WgXs=";
+          postInstall = ''
+            mv $out/bin/attestation-helper $out/bin/possums-attestation
+          '';
+        };
         browserFixture = craneLib.buildPackage (common // {
           inherit cargoArtifacts;
           cargoExtraArgs = "--example browser_fixture";
@@ -47,7 +59,7 @@
         gatewayImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway";
           tag = "phase0";
-          contents = [ gateway gatewayEntrypoint pkgs.cacert ];
+          contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert ];
           config = {
             Entrypoint = [ "${gatewayEntrypoint}/bin/possums-entrypoint" ];
             Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
@@ -67,7 +79,7 @@
           };
         };
       in {
-        packages = { default = gateway; } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        packages = { default = gateway; attestation-helper = attestationHelper; } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;
           gateway-smoke-image = smokeImage;
         };
@@ -79,6 +91,7 @@
             cargoClippyExtraArgs = "--all-targets --all-features -- -D warnings";
           });
           tests = craneLib.cargoTest (common // { inherit cargoArtifacts; });
+          attestation-helper = attestationHelper;
         };
         devShells.default = craneLib.devShell { checks = self.checks.${system}; };
       });

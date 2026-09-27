@@ -1,5 +1,5 @@
 # Production release is blocked until this independently reproduced digest is replaced.
-cvm-version: 0.14.7
+cvm-version: 0.14.12
 cpus: 2
 memory: 8192
 networks:
@@ -15,12 +15,12 @@ containers:
     env:
       - HOME: "/tmp"
       - POSSUMS_BIND: "0.0.0.0:8080"
-      # This path declaration does not provision the evidence file. Release remains
-      # blocked until a supported read-only evidence delivery mechanism is configured.
-      - POSSUMS_GATEWAY_EVIDENCE: "/tinfoil/attestation.json"
+      - POSSUMS_GATEWAY_ATTESTATION_SOCKET: "/tinfoil/attestation.sock"
+      - POSSUMS_GATEWAY_REPOSITORY: "ajbt200128/possums"
       - POSSUMS_TINFOIL_HOST: "inference.tinfoil.sh"
       - POSSUMS_TINFOIL_REPOSITORY: "tinfoilsh/confidential-model-router"
     networks: [inference]
+    attestation: true
     pids_limit: 256
     read_only: true
     tmpfs:
