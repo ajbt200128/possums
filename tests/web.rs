@@ -580,6 +580,70 @@ async fn unverified_gateway_evidence_stops_before_prompt_calls() {
     }
 }
 
+fn post_form(uri: &str, cookie: &str, body: String) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::COOKIE, cookie.split(';').next().unwrap())
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+fn session_id(cookie: &str) -> &str {
+    cookie.split(';').next().unwrap().split_once('=').unwrap().1
+}
+
+#[tokio::test]
+async fn new_chat_requires_csrf_and_redirects_to_empty_history_in_same_session() {
+    let (state, cookie, csrf, _, inference) = fixture("/unused/evidence");
+    let id = session_id(&cookie);
+    let original = state.auth.session(id).unwrap();
+    for (body, expected) in [
+        (String::new(), StatusCode::UNPROCESSABLE_ENTITY),
+        ("csrf=forged".into(), StatusCode::UNAUTHORIZED),
+    ] {
+        let response = router(state.clone())
+            .oneshot(post_form("/chat/new", &cookie, body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(
+            state.auth.session(id).unwrap().conversation,
+            original.conversation
+        );
+    }
+    let response = router(state.clone())
+        .oneshot(post_form("/chat/new", &cookie, format!("csrf={csrf}")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/");
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    assert_ne!(
+        state.auth.session(id).unwrap().conversation,
+        original.conversation
+    );
+    drop(response);
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("name=history value=\"[]\""));
+    assert_eq!(state.accounting.available("a"), Some(100));
+    assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

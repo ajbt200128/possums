@@ -34,19 +34,11 @@ fn process_epoch_invalidates_old_submission_tokens() {
     let challenge = first.issue_login_challenge().unwrap();
     let (session_id, session) = first.authenticate(&credential, &challenge).unwrap();
     let token = first.issue_submission(&session_id).unwrap();
-    let submission = first
-        .bind_submission(&session_id, &session.account_id, &token, "m")
-        .unwrap();
     let ledger = Accounting::new(first.account_budgets());
-    ledger
-        .reserve(
-            &session.account_id,
-            submission.id,
-            [2; 32],
-            quote(),
-            submission.expires_at,
-        )
-        .unwrap();
+    let submission = first
+        .admit_submission(&ledger, &session_id, &session.csrf, &token, quote())
+        .unwrap()
+        .submission;
     assert_eq!(ledger.available("a"), Some(74));
     drop(ledger); // Demo restart loses reservations; it is not durable accounting.
 
@@ -60,7 +52,13 @@ fn process_epoch_invalidates_old_submission_tokens() {
     let challenge = restarted.issue_login_challenge().unwrap();
     let (new_session_id, new_session) = restarted.authenticate(&credential, &challenge).unwrap();
     assert!(restarted
-        .bind_submission(&new_session_id, &new_session.account_id, &token, "m")
+        .admit_submission(
+            &restarted_ledger,
+            &new_session_id,
+            &new_session.csrf,
+            &token,
+            quote()
+        )
         .is_err());
 }
 

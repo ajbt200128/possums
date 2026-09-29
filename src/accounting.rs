@@ -94,6 +94,10 @@ impl Accounting {
         }
     }
 
+    /// Auth admission calls this while holding sessions then submission tokens.
+    /// This is the innermost lock: no callback into auth or async work is allowed.
+    /// `request_digest` is a model binding, never a prompt/history content hash.
+    /// Terminal methods release this lock before callers issue continuations.
     pub fn reserve(
         &self,
         account_id: &str,

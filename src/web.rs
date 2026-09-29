@@ -1,7 +1,9 @@
 use crate::{
     accounting::{Accounting, Outcome, ReserveResult},
     attestation::EvidenceVerifier,
-    auth::{clear_session_cookie, login_challenge_cookie, session_cookie, Auth, Session},
+    auth::{
+        clear_session_cookie, login_challenge_cookie, session_cookie, AdmissionError, Auth, Session,
+    },
     catalog::actual_cost,
     inference::{authenticated_catalog, Message, SharedInference},
     render,
@@ -21,7 +23,6 @@ use hyper_util::{
     service::TowerToHyperService,
 };
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{
     pin::Pin,
     sync::Arc,
@@ -87,6 +88,7 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/chat", post(chat))
+        .route("/chat/new", post(new_chat))
         .route("/recovery", get(recovery))
         .route("/recovery/download", get(recovery_download))
         .route("/claims", get(claims))
@@ -253,7 +255,11 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return login_page_response(&state, None);
     };
     match current_catalog(&state).await {
-        Ok(catalog) => match state.auth.issue_submission(&session_id) {
+        Ok(catalog) => match state.auth.issue_submission_for(
+            &session_id,
+            session.conversation,
+            session.selected_model.as_deref(),
+        ) {
             Ok(token) => render::chat_page(
                 &catalog.models,
                 &session.csrf,
@@ -323,6 +329,21 @@ async fn logout(
         HeaderValue::from_static(clear_session_cookie()),
     );
     response
+}
+
+async fn new_chat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<CsrfForm>,
+) -> Response {
+    let Some(id) = cookie_value(&headers, "possums_session") else {
+        return unauthorized();
+    };
+    if state.auth.new_chat(&id, &form.csrf).is_err() {
+        return unauthorized();
+    }
+    // History lives only in the submitted form; the home route starts empty.
+    Redirect::to("/").into_response()
 }
 
 async fn recovery(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -411,25 +432,32 @@ async fn chat(
         Ok(value) => value,
         Err(_) => return bad_request(),
     };
-    let submission =
-        match state
-            .auth
-            .bind_submission(&session_id, &session.account_id, &form.token, &form.model)
-        {
-            Ok(value) => value,
-            Err(_) => return bad_request(),
-        };
-    let submission_id = submission.id;
-    let request_digest: [u8; 32] = Sha256::digest(form.model.as_bytes()).into();
-    match state.accounting.reserve(
-        &session.account_id,
-        submission_id,
-        request_digest,
+    // The request-memory permit is already owned by middleware. Obtain the
+    // existing global generation permit nonblockingly before admission and any
+    // prompt-bearing tokenizer call. Failed/duplicate admission releases it.
+    let permit = match state.generation_slots.clone().try_acquire_owned() {
+        Ok(value) => value,
+        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response(),
+    };
+    let admission = match state.auth.admit_submission(
+        &state.accounting,
+        &session_id,
+        &form.csrf,
+        &form.token,
         reservation_quote,
-        submission.expires_at,
     ) {
-        Ok(ReserveResult::Reserved) => {}
-        Ok(ReserveResult::Duplicate(outcome)) => {
+        Ok(value) => value,
+        Err(AdmissionError::Auth(_)) => return bad_request(),
+        Err(AdmissionError::Accounting(_)) => {
+            return (StatusCode::PAYMENT_REQUIRED, "request unavailable").into_response()
+        }
+    };
+    let submission = admission.submission;
+    let submission_id = submission.id;
+    match admission.result {
+        ReserveResult::Reserved => {}
+        ReserveResult::Duplicate(outcome) => {
+            drop(permit);
             let notice = match outcome {
                 Outcome::InFlight | Outcome::AwaitingDelivery => {
                     "This submission is already in progress."
@@ -441,7 +469,11 @@ async fn chat(
                     "This submission failed and was refunded; use the new form to retry."
                 }
             };
-            let token = match state.auth.issue_submission(&session_id) {
+            let token = match state.auth.issue_submission_for(
+                &session_id,
+                submission.conversation,
+                Some(&form.model),
+            ) {
                 Ok(value) => value,
                 Err(_) => return unavailable(),
             };
@@ -456,7 +488,6 @@ async fn chat(
             )
             .map_or_else(unavailable, |html| Html(html).into_response());
         }
-        Err(_) => return (StatusCode::PAYMENT_REQUIRED, "request unavailable").into_response(),
     }
 
     let reservation = ReservationGuard::new(state.accounting.clone(), submission_id);
@@ -472,13 +503,6 @@ async fn chat(
         Err(_) => {
             let _ = state.accounting.refund(submission_id);
             return bad_request();
-        }
-    };
-    let permit = match state.generation_slots.clone().try_acquire_owned() {
-        Ok(value) => value,
-        Err(_) => {
-            let _ = state.accounting.refund(submission_id);
-            return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response();
         }
     };
     let generation = state.inference.generate(&quote.model, &history).await;
@@ -508,7 +532,14 @@ async fn chat(
         role: "assistant".into(),
         content: generation.content,
     });
-    let token = match state.auth.issue_submission(&session_id) {
+    // prepare_settlement has released accounting before acquiring auth locks.
+    // Compatibility remains delivery-owned: stale continuation still refunds
+    // through ReservationGuard; detached usage-owned settlement is packet 6.
+    let token = match state.auth.issue_submission_for(
+        &session_id,
+        submission.conversation,
+        Some(&form.model),
+    ) {
         Ok(value) => value,
         Err(_) => return unavailable(),
     };

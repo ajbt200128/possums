@@ -1,3 +1,7 @@
+use crate::{
+    accounting::{Accounting, AccountingError, ReserveResult},
+    catalog::Quote,
+};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use serde::Deserialize;
@@ -27,18 +31,32 @@ pub struct ProvisionedAccount {
     pub demo_microunits: u64,
 }
 
+/// Opaque identity; no history or content-derived identifier is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConversationId([u8; 32]);
+
+impl ConversationId {
+    fn new() -> Self {
+        let mut bytes = [0; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Session {
     pub account_id: String,
     pub csrf: String,
     pub recovery_credential: String,
     pub selected_model: Option<String>,
+    pub conversation: ConversationId,
     expires_at: Instant,
 }
 
 struct SubmissionToken {
     account_id: String,
     session_id: String,
+    conversation: ConversationId,
     model: Option<String>,
     expires_at: Instant,
 }
@@ -47,6 +65,21 @@ struct SubmissionToken {
 pub struct BoundSubmission {
     pub id: [u8; 32],
     pub expires_at: Instant,
+    pub conversation: ConversationId,
+}
+
+#[derive(Debug)]
+pub struct Admission {
+    pub submission: BoundSubmission,
+    pub result: ReserveResult,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AdmissionError {
+    #[error("invalid submission")]
+    Auth(#[from] AuthError),
+    #[error("reservation unavailable")]
+    Accounting(#[from] AccountingError),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -61,6 +94,8 @@ pub enum AuthError {
 
 pub struct Auth {
     accounts: Vec<ProvisionedAccount>,
+    // Nested lock order: sessions -> submission_tokens -> Accounting::state.
+    // Never await while held or call auth from an accounting-held callback.
     sessions: Mutex<HashMap<String, Session>>,
     login_challenges: Mutex<HashMap<String, Instant>>,
     submission_tokens: Mutex<HashMap<String, SubmissionToken>>,
@@ -154,6 +189,7 @@ impl Auth {
             csrf: random_token(),
             recovery_credential: credential.to_owned(),
             selected_model: None,
+            conversation: ConversationId::new(),
             expires_at: now + SESSION_LIFETIME,
         };
         let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
@@ -175,10 +211,33 @@ impl Auth {
     pub fn logout(&self, id: &str, csrf: &str) -> Result<(), AuthError> {
         let mut sessions = self.sessions.lock().map_err(|_| AuthError::Invalid)?;
         let session = sessions.get(id).ok_or(AuthError::Invalid)?;
-        if !constant_time_equal(session.csrf.as_bytes(), csrf.as_bytes()) {
+        if session.expires_at <= Instant::now() || !Self::verify_csrf(session, csrf) {
             return Err(AuthError::Invalid);
         }
+        let mut tokens = self
+            .submission_tokens
+            .lock()
+            .map_err(|_| AuthError::Configuration)?;
+        tokens.retain(|_, token| token.session_id != id);
         sessions.remove(id);
+        Ok(())
+    }
+
+    /// Reset auth state only: accepted reservations and account slots belong to
+    /// the ledger and survive both reset and logout until a terminal transition.
+    pub fn new_chat(&self, id: &str, csrf: &str) -> Result<(), AuthError> {
+        let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
+        let session = sessions.get_mut(id).ok_or(AuthError::Invalid)?;
+        if session.expires_at <= Instant::now() || !Self::verify_csrf(session, csrf) {
+            return Err(AuthError::Invalid);
+        }
+        let mut tokens = self
+            .submission_tokens
+            .lock()
+            .map_err(|_| AuthError::Configuration)?;
+        tokens.retain(|_, token| token.session_id != id);
+        session.conversation = ConversationId::new();
+        session.selected_model = None;
         Ok(())
     }
 
@@ -193,12 +252,38 @@ impl Auth {
     }
 
     pub fn issue_submission(&self, session_id: &str) -> Result<String, AuthError> {
-        let session = self.session(session_id).ok_or(AuthError::Invalid)?;
-        let now = Instant::now();
+        let sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
+        let session = sessions.get(session_id).ok_or(AuthError::Invalid)?;
+        self.insert_submission(session_id, session)
+    }
+
+    /// Home/duplicate/completion callers must supply their original snapshot.
+    /// Validation and insertion share the session/token locks with reset/logout;
+    /// stale completion can neither relock nor mint for the new conversation.
+    pub fn issue_submission_for(
+        &self,
+        session_id: &str,
+        conversation: ConversationId,
+        model: Option<&str>,
+    ) -> Result<String, AuthError> {
+        let sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
+        let session = sessions.get(session_id).ok_or(AuthError::Invalid)?;
+        if session.conversation != conversation || session.selected_model.as_deref() != model {
+            return Err(AuthError::Invalid);
+        }
+        self.insert_submission(session_id, session)
+    }
+
+    // Caller holds sessions throughout insertion (never pass a detached snapshot).
+    fn insert_submission(&self, session_id: &str, session: &Session) -> Result<String, AuthError> {
         let mut tokens = self
             .submission_tokens
             .lock()
             .map_err(|_| AuthError::Configuration)?;
+        let now = Instant::now();
+        if session.expires_at <= now {
+            return Err(AuthError::Invalid);
+        }
         tokens.retain(|_, token| token.expires_at > now);
         if tokens.len() >= self.submission_capacity {
             return Err(AuthError::Capacity);
@@ -207,61 +292,78 @@ impl Auth {
         tokens.insert(
             token.clone(),
             SubmissionToken {
-                account_id: session.account_id,
+                account_id: session.account_id.clone(),
                 session_id: session_id.to_owned(),
-                model: None,
-                expires_at: now + SUBMISSION_TOKEN_LIFETIME,
+                conversation: session.conversation,
+                model: session.selected_model.clone(),
+                expires_at: (now + SUBMISSION_TOKEN_LIFETIME).min(session.expires_at),
             },
         );
         Ok(token)
     }
 
-    pub fn bind_submission(
+    /// Synchronous admission; caller must already hold required resource permits
+    /// and have completed evidence/catalog/quote verification, before any prompt
+    /// transmission. Successful reserve is the acceptance linearization point.
+    /// Failures commit neither token nor model binding. No content/hashes enter
+    /// auth or accounting. Accounting never calls back into auth while locked.
+    pub fn admit_submission(
         &self,
+        accounting: &Accounting,
         session_id: &str,
-        account_id: &str,
+        csrf: &str,
         token: &str,
-        model: &str,
-    ) -> Result<BoundSubmission, AuthError> {
-        let now = Instant::now();
+        quote: Quote,
+    ) -> Result<Admission, AdmissionError> {
+        let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
         let mut tokens = self
             .submission_tokens
             .lock()
             .map_err(|_| AuthError::Configuration)?;
-        tokens.retain(|_, token| token.expires_at > now);
-        let issued = tokens.get_mut(token).ok_or(AuthError::Invalid)?;
-        if issued.session_id != session_id || issued.account_id != account_id {
-            return Err(AuthError::Invalid);
-        }
-        match &issued.model {
-            Some(bound_model) if bound_model != model => return Err(AuthError::Invalid),
-            Some(_) => {}
-            None => issued.model = Some(model.to_owned()),
-        }
-        let expires_at = issued.expires_at;
-        drop(tokens);
-
-        let mut sessions = self.sessions.lock().map_err(|_| AuthError::Invalid)?;
+        let now = Instant::now();
         let session = sessions.get_mut(session_id).ok_or(AuthError::Invalid)?;
-        if session.account_id != account_id {
-            return Err(AuthError::Invalid);
+        let issued = tokens.get_mut(token).ok_or(AuthError::Invalid)?;
+        let model = &quote.model.id;
+        if session.expires_at <= now
+            || !Self::verify_csrf(session, csrf)
+            || issued.expires_at <= now
+            || issued.session_id != session_id
+            || issued.account_id != session.account_id
+            || issued.conversation != session.conversation
+            || issued.model.as_ref().is_some_and(|bound| bound != model)
+            || session
+                .selected_model
+                .as_ref()
+                .is_some_and(|bound| bound != model)
+        {
+            return Err(AuthError::Invalid.into());
         }
-        match &session.selected_model {
-            Some(selected_model) if selected_model != model => return Err(AuthError::Invalid),
-            Some(_) => {}
-            None => session.selected_model = Some(model.to_owned()),
-        }
-
         let mut digest = Sha256::new();
         digest.update(self.epoch);
-        digest.update(session_id.as_bytes());
-        digest.update(account_id.as_bytes());
-        digest.update(token.as_bytes());
-        digest.update(model.as_bytes());
-        Ok(BoundSubmission {
+        digest.update(session.conversation.0);
+        for field in [session_id, &session.account_id, token, model] {
+            digest.update((field.len() as u64).to_be_bytes());
+            digest.update(field.as_bytes());
+        }
+        let submission = BoundSubmission {
             id: digest.finalize().into(),
-            expires_at,
-        })
+            expires_at: issued.expires_at,
+            conversation: session.conversation,
+        };
+        // Allocate bindings before acceptance; commit only on reserve success.
+        let selected_model = model.clone();
+        let token_model = model.clone();
+        let model_binding = Sha256::digest(model.as_bytes()).into();
+        let result = accounting.reserve(
+            &session.account_id,
+            submission.id,
+            model_binding,
+            quote,
+            submission.expires_at,
+        )?;
+        session.selected_model = Some(selected_model);
+        issued.model = Some(token_model);
+        Ok(Admission { submission, result })
     }
 }
 
