@@ -64,6 +64,151 @@ fn render_answer(answer: &str, small: bool) -> (String, RenderOutcome) {
     (html, result)
 }
 
+fn staged_answer(
+    history: &[Message],
+    prompt: &str,
+    answer: &str,
+    fail_after: Option<usize>,
+    staged: bool,
+) -> (String, RenderOutcome) {
+    let mut html = String::new();
+    let mut delivered = 0;
+    let mut sink = |part: &str| {
+        assert!(part.len() <= 8192);
+        if fail_after.is_some_and(|limit| delivered + part.len() > limit) {
+            return Err(RenderOutcome::DeliveryFailed);
+        }
+        delivered += part.len();
+        html.push_str(part);
+        Ok(())
+    };
+    let mut renderer = if staged {
+        let mut renderer =
+            IncrementalRenderer::start(history, prompt, TOKEN, "m", &mut sink).unwrap();
+        while renderer.emit_next_history(&mut sink).unwrap() {}
+        renderer.finish_start(&mut sink).unwrap();
+        renderer
+    } else {
+        IncrementalRenderer::open(history, prompt, TOKEN, "m", &mut sink).unwrap()
+    };
+    renderer.delta(answer, &mut sink);
+    let outcome = renderer.complete(Ok(usage()), || Some(TOKEN.into()), &mut sink);
+    (html, outcome)
+}
+
+#[test]
+fn staged_start_matches_open_including_failures_and_split_utf8() {
+    let cases = [
+        (
+            vec![message("user", "hello"), message("assistant", "response")],
+            "next",
+            "ok",
+        ),
+        (
+            vec![message("user", HOSTILE), message("assistant", "")],
+            HOSTILE,
+            HOSTILE,
+        ),
+        (
+            vec![
+                message("user", &format!("{}🐾", "a".repeat(1023))),
+                message("assistant", "é"),
+            ],
+            "🐾é",
+            "",
+        ),
+    ];
+    for (history, prompt, answer) in cases {
+        for fail_after in [None, Some(1200)] {
+            assert_eq!(
+                staged_answer(&history, prompt, answer, fail_after, true),
+                staged_answer(&history, prompt, answer, fail_after, false)
+            );
+        }
+    }
+    let exhausted = "a".repeat(render::max_history_decoded_bytes() + 1);
+    let staged = staged_answer(&[], "next", &exhausted, None, true);
+    assert_eq!(staged.1, RenderOutcome::TransportLimit);
+    assert_eq!(staged, staged_answer(&[], "next", &exhausted, None, false));
+}
+
+#[test]
+fn startup_sequence_cannot_be_skipped_or_replayed_into_continuation() {
+    let history = [message("user", "prior"), message("assistant", "")];
+    let mut html = String::new();
+    let mut renderer =
+        IncrementalRenderer::start(&history, "next", TOKEN, "m", capture(&mut html)).unwrap();
+    assert_eq!(
+        renderer.finish_start(capture(&mut html)),
+        Err(RenderOutcome::InvalidInput)
+    );
+    renderer.delta("ignored", capture(&mut html));
+    assert!(renderer.emit_next_history(capture(&mut html)).unwrap());
+    assert_eq!(
+        renderer.finish_start(capture(&mut html)),
+        Err(RenderOutcome::InvalidInput)
+    );
+    assert!(renderer.emit_next_history(capture(&mut html)).unwrap());
+    assert!(!renderer.emit_next_history(capture(&mut html)).unwrap());
+    renderer.finish_start(capture(&mut html)).unwrap();
+    assert_eq!(
+        renderer.finish_start(capture(&mut html)),
+        Err(RenderOutcome::InvalidInput)
+    );
+    assert_eq!(
+        renderer.emit_next_history(capture(&mut html)),
+        Err(RenderOutcome::InvalidInput)
+    );
+    assert_eq!(
+        renderer.complete(Ok(usage()), || Some(TOKEN.into()), capture(&mut html)),
+        RenderOutcome::Ready
+    );
+    assert!(!html.contains("ignored"));
+    assert!(html.contains(&format!("<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{TOKEN}\"></form><form method=post action=/chat>")));
+    let renderer = IncrementalRenderer::start(&history, "next", TOKEN, "m", |_| Ok(())).unwrap();
+    assert_eq!(
+        renderer.complete(Ok(usage()), || panic!("must not issue"), |_| Ok(())),
+        RenderOutcome::InvalidInput
+    );
+}
+
+#[test]
+fn staged_start_drains_over_16_mib_with_bounded_sink() {
+    const QUEUE: usize = 16 * 1024 * 1024;
+    let history = [
+        message("user", &"&".repeat(4 * 1024 * 1024)),
+        message("assistant", ""),
+    ];
+    assert!(serde_json::to_vec(&history).unwrap().len() <= render::max_history_decoded_bytes());
+    let mut pending = 0;
+    let mut drained = 0;
+    let mut total = 0;
+    {
+        let mut sink = |part: &str| {
+            assert!(part.len() <= 8192);
+            if pending + part.len() > QUEUE {
+                drained += pending;
+                pending = 0;
+            }
+            pending += part.len();
+            total += part.len();
+            Ok(())
+        };
+        let mut renderer =
+            IncrementalRenderer::start(&history, "next", TOKEN, "m", &mut sink).unwrap();
+        while renderer.emit_next_history(&mut sink).unwrap() {}
+        renderer.finish_start(&mut sink).unwrap();
+        assert_eq!(renderer.outcome(), RenderOutcome::Ready);
+        assert_eq!(
+            renderer.complete(Ok(usage()), || Some(TOKEN.into()), &mut sink),
+            RenderOutcome::Ready
+        );
+    }
+    assert!(total > QUEUE);
+    assert!(drained > 0);
+    assert!(pending <= QUEUE);
+}
+
 fn usage() -> stream::StreamUsage {
     stream::StreamUsage {
         input_tokens: 1,

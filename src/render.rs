@@ -235,7 +235,11 @@ pub enum RenderOutcome {
 /// return Err. Neither this renderer nor its caller may collect a full answer.
 pub type RenderSinkResult = Result<(), RenderOutcome>;
 
-pub struct IncrementalRenderer {
+pub struct IncrementalRenderer<'a> {
+    history: &'a [Message],
+    prompt: &'a str,
+    next_history: usize,
+    stage: StartupStage,
     block: [u8; HISTORY_BLOCK_BYTES],
     used: usize,
     decoded: usize,
@@ -243,10 +247,32 @@ pub struct IncrementalRenderer {
     state: RenderOutcome,
 }
 
-impl IncrementalRenderer {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartupStage {
+    History,
+    Streaming,
+}
+
+impl<'a> IncrementalRenderer<'a> {
+    /// Compatibility wrapper for callers that can drain the sink synchronously.
     pub fn open(
-        history: &[Message],
-        prompt: &str,
+        history: &'a [Message],
+        prompt: &'a str,
+        csrf: &str,
+        model: &str,
+        mut sink: impl FnMut(&str) -> RenderSinkResult,
+    ) -> Result<Self, RenderOutcome> {
+        let mut renderer = Self::start(history, prompt, csrf, model, &mut sink)?;
+        while renderer.emit_next_history(&mut sink)? {}
+        renderer.finish_start(&mut sink)?;
+        Ok(renderer)
+    }
+
+    /// Validate the accepted conversation before emitting any startup HTML.
+    /// The history and prompt are borrowed, never cloned into renderer storage.
+    pub fn start(
+        history: &'a [Message],
+        prompt: &'a str,
         csrf: &str,
         model: &str,
         mut sink: impl FnMut(&str) -> RenderSinkResult,
@@ -259,6 +285,10 @@ impl IncrementalRenderer {
             return Err(RenderOutcome::InvalidInput);
         }
         let mut renderer = Self {
+            history,
+            prompt,
+            next_history: 0,
+            stage: StartupStage::History,
             block: [0; HISTORY_BLOCK_BYTES],
             used: 0,
             decoded: 0,
@@ -269,27 +299,55 @@ impl IncrementalRenderer {
         // New chat submits only CSRF, never the potentially exhausted history.
         renderer.emit(&format!("<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{csrf}\"></form><form method=post action=/chat>"), &mut sink);
         renderer.emit(&format!("<input type=hidden name=csrf value=\"{}\"><input type=hidden name=model value=\"{}\">", escape(csrf), escape(model)), &mut sink);
-        // Only bounded incoming history is borrowed. No clone or transcript is
-        // retained; the accepted prompt is never trimmed or normalized here.
         renderer.history_bytes(b"[", &mut sink);
-        for message in history {
-            renderer.emit("<pre>", &mut sink);
-            renderer.visible(&message.content, &mut sink);
-            renderer.emit("</pre>", &mut sink);
-            renderer.message(&message.role, &message.content, &mut sink);
-            renderer.history_bytes(b",", &mut sink);
-        }
-        renderer.emit("<pre>", &mut sink);
-        renderer.visible(prompt, &mut sink);
-        renderer.emit("</pre><pre aria-label=\"Assistant\">", &mut sink);
-        renderer.message("user", prompt, &mut sink);
-        renderer.history_bytes(b",{\"role\":\"assistant\",\"content\":\"", &mut sink);
         Ok(renderer)
+    }
+
+    /// Emit one borrowed prior message. Each visible and hidden sink call is
+    /// bounded, so a blocking worker can drain between calls even for a 4 MiB
+    /// message. Returns false once all prior messages have been emitted.
+    pub fn emit_next_history(
+        &mut self,
+        mut sink: impl FnMut(&str) -> RenderSinkResult,
+    ) -> Result<bool, RenderOutcome> {
+        if self.stage != StartupStage::History {
+            return Err(RenderOutcome::InvalidInput);
+        }
+        let Some(message) = self.history.get(self.next_history) else {
+            return Ok(false);
+        };
+        self.emit("<pre>", &mut sink);
+        self.visible(&message.content, &mut sink);
+        self.emit("</pre>", &mut sink);
+        self.message(&message.role, &message.content, &mut sink);
+        self.history_bytes(b",", &mut sink);
+        self.next_history += 1;
+        Ok(true)
+    }
+
+    /// Finish the prompt and assistant opening only after all history was sent.
+    pub fn finish_start(
+        &mut self,
+        mut sink: impl FnMut(&str) -> RenderSinkResult,
+    ) -> Result<(), RenderOutcome> {
+        if self.stage != StartupStage::History || self.next_history != self.history.len() {
+            return Err(RenderOutcome::InvalidInput);
+        }
+        self.emit("<pre>", &mut sink);
+        self.visible(self.prompt, &mut sink);
+        self.emit("</pre><pre aria-label=\"Assistant\">", &mut sink);
+        self.message("user", self.prompt, &mut sink);
+        self.history_bytes(b",{\"role\":\"assistant\",\"content\":\"", &mut sink);
+        self.stage = StartupStage::Streaming;
+        Ok(())
     }
 
     /// A limit disables continuation encoding, not visible output or inference.
     /// Delivery failure disables all output; the worker must still consume upstream.
     pub fn delta(&mut self, content: &str, mut sink: impl FnMut(&str) -> RenderSinkResult) {
+        if self.stage != StartupStage::Streaming {
+            return;
+        }
         self.json_content(content, &mut sink);
         self.visible(content, &mut sink);
     }
@@ -314,6 +372,9 @@ impl IncrementalRenderer {
         issue_original_continuation: impl FnOnce() -> Option<String>,
         mut sink: impl FnMut(&str) -> RenderSinkResult,
     ) -> RenderOutcome {
+        if self.stage != StartupStage::Streaming {
+            return RenderOutcome::InvalidInput;
+        }
         self.emit("</pre>", &mut sink);
         if upstream.is_err() {
             self.notice(
