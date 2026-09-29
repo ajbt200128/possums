@@ -97,8 +97,15 @@ fn compose_with_startup(
         // delivery never cancels/replays upstream or changes its billing result.
         let receipt = settlement.finish(&result);
         let settled = matches!(receipt.outcome(), Ok(Outcome::Settled { .. }));
+        // A valid upstream EOF can still refund on invalid usage arithmetic.
+        // Render that as a failed generation, not a changed conversation.
+        let display_result = if settled {
+            result
+        } else {
+            Err(InferenceError::InvalidResponse)
+        };
         renderer.complete(
-            result,
+            display_result,
             || {
                 // complete calls this only while continuation remains usable.
                 // finish has already released the accounting lock before auth.

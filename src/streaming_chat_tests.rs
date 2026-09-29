@@ -381,6 +381,8 @@ async fn invalid_or_missing_usage_and_upstream_failure_refund_without_continuati
         f.balance(1000);
         f.no_next_token();
         assert!(!html.contains("name=token") && !html.contains(">Send<"));
+        assert!(html.contains("Generation failed; no continuation is available."));
+        assert!(!html.contains("Conversation changed"));
         assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
     }
 }
