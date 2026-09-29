@@ -1,0 +1,131 @@
+use possums::attestation::{load_evidence, EvidenceError};
+use std::io::Write;
+
+const NOW: u64 = 1_000;
+
+fn envelope(quote: &str) -> String {
+    format!(
+        r#"{{"quote":{quote},"issued_at_unix":{NOW},"release_digest":"{}","endpoint_key_sha256":"{}","freshness_expires_at_unix":{}}}"#,
+        "a".repeat(64),
+        "b".repeat(64),
+        NOW + 1
+    )
+}
+
+struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    fn new(contents: &[u8]) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "possums-attestation-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(contents).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn file_evidence_rejects_wide_and_deep_quotes_before_deserialization() {
+    // A small envelope with many tiny Values would otherwise allocate far more than its byte size.
+    let wide = TempFile::new(envelope(&format!("[{}]", "[],".repeat(65_536) + "[]")).as_bytes());
+    assert!(matches!(
+        load_evidence(&wide.0),
+        Err(EvidenceError::Invalid)
+    ));
+
+    let deep =
+        TempFile::new(envelope(&format!("{}0{}", "[".repeat(65), "]".repeat(65))).as_bytes());
+    assert!(matches!(
+        load_evidence(&deep.0),
+        Err(EvidenceError::Invalid)
+    ));
+}
+
+#[test]
+fn file_evidence_accepts_normal_and_near_limit_quotes() {
+    let normal = TempFile::new(envelope(r#"{"format":"v3"}"#).as_bytes());
+    assert!(load_evidence(&normal.0).is_ok());
+
+    // A full 1 MiB envelope with a low-cost scalar remains valid.
+    let empty = envelope("\"\"");
+    let large = TempFile::new(
+        envelope(&format!("\"{}\"", "x".repeat(1024 * 1024 - empty.len()))).as_bytes(),
+    );
+    assert!(load_evidence(&large.0).is_ok());
+}
+
+#[cfg(unix)]
+mod helper {
+    use super::*;
+    use possums::attestation::{EvidenceVerifier, TinfoilEvidenceVerifier};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn script(body: &str) -> TempFile {
+        let file = TempFile::new(format!("#!/bin/sh\n{body}\n").as_bytes());
+        let mut permissions = std::fs::metadata(&file.0).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&file.0, permissions).unwrap();
+        file
+    }
+
+    async fn verify(
+        file: &TempFile,
+    ) -> Result<possums::attestation::GatewayEvidence, EvidenceError> {
+        TinfoilEvidenceVerifier::new(file.0.to_str().unwrap(), "fixture")
+            .verify("fixture", NOW)
+            .await
+    }
+
+    #[tokio::test]
+    async fn helper_accepts_normal_fixture() {
+        let file = script(&format!("printf '%s' '{}'", envelope(r#"{"format":"v3"}"#)));
+        assert!(verify(&file).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_failed_status_without_exposing_stderr() {
+        let file = script(&format!(
+            "printf '%s' '{}'; echo private >&2; exit 1",
+            envelope(r#"{"format":"v3"}"#)
+        ));
+        assert!(matches!(verify(&file).await, Err(EvidenceError::Invalid)));
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_oversized_stdout() {
+        let file = script("printf '%1048577s' x");
+        assert!(matches!(verify(&file).await, Err(EvidenceError::Invalid)));
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_wide_quote() {
+        let file = script(&format!(
+            "printf '%s' '{}'",
+            envelope(&format!("[{}]", "[],".repeat(65_536) + "[]"))
+        ));
+        assert!(matches!(verify(&file).await, Err(EvidenceError::Invalid)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn helper_times_out() {
+        let file = script("exec sleep 60");
+        let task = tokio::spawn(async move { verify(&file).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(46)).await;
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(EvidenceError::Unavailable)
+        ));
+    }
+}

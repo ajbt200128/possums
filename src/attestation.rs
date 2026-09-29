@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path, process::Stdio, time::Duration};
+use std::{fs, io::Read, path::Path, process::Stdio, time::Duration};
 use thiserror::Error;
-use tokio::{process::Command, time::timeout};
+use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
-const MAX_EVIDENCE_BYTES: usize = 17 * 1024 * 1024;
+const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
+const MAX_JSON_NODES: usize = 65_536;
+const MAX_JSON_DEPTH: usize = 64;
 const MAX_EVIDENCE_AGE_SECONDS: u64 = 300;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -54,16 +56,29 @@ impl EvidenceVerifier for TinfoilEvidenceVerifier {
             .arg("--repo")
             .arg(&self.repository)
             .stdin(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let output = timeout(HELPER_TIMEOUT, command.output())
-            .await
-            .map_err(|_| EvidenceError::Unavailable)?
-            .map_err(|_| EvidenceError::Unavailable)?;
-        if !output.status.success() {
-            return Err(EvidenceError::Invalid);
-        }
-        parse_and_validate(&output.stdout, now_unix)
+        timeout(HELPER_TIMEOUT, async {
+            let mut child = command.spawn().map_err(|_| EvidenceError::Unavailable)?;
+            let stdout = child.stdout.take().ok_or(EvidenceError::Unavailable)?;
+            let mut bytes = Vec::new();
+            stdout
+                .take((MAX_EVIDENCE_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|_| EvidenceError::Unavailable)?;
+            if bytes.len() > MAX_EVIDENCE_BYTES {
+                return Err(EvidenceError::Invalid);
+            }
+            let status = child.wait().await.map_err(|_| EvidenceError::Unavailable)?;
+            if !status.success() {
+                return Err(EvidenceError::Invalid);
+            }
+            parse_and_validate(&bytes, now_unix)
+        })
+        .await
+        .map_err(|_| EvidenceError::Unavailable)?
     }
 }
 
@@ -94,7 +109,15 @@ pub fn load_evidence(path: impl AsRef<Path>) -> Result<GatewayEvidence, Evidence
     if length == 0 || length > MAX_EVIDENCE_BYTES {
         return Err(EvidenceError::Invalid);
     }
-    let bytes = fs::read(path).map_err(|_| EvidenceError::Unavailable)?;
+    let file = fs::File::open(path).map_err(|_| EvidenceError::Unavailable)?;
+    let mut bytes = Vec::new();
+    file.take((MAX_EVIDENCE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| EvidenceError::Unavailable)?;
+    if bytes.len() > MAX_EVIDENCE_BYTES {
+        return Err(EvidenceError::Invalid);
+    }
+    check_json_structure(&bytes)?;
     serde_json::from_slice(&bytes).map_err(|_| EvidenceError::Invalid)
 }
 
@@ -119,8 +142,73 @@ fn parse_and_validate(bytes: &[u8], now_unix: u64) -> Result<GatewayEvidence, Ev
     if bytes.is_empty() || bytes.len() > MAX_EVIDENCE_BYTES {
         return Err(EvidenceError::Invalid);
     }
+    check_json_structure(bytes)?;
     let evidence = serde_json::from_slice(bytes).map_err(|_| EvidenceError::Invalid)?;
     validate_evidence(evidence, now_unix)
+}
+
+// Count lexical JSON values (including object keys) before constructing a Value tree.
+// serde_json still handles syntax validation; this scan only enforces resource bounds.
+fn check_json_structure(bytes: &[u8]) -> Result<(), EvidenceError> {
+    let mut nodes = 0usize;
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' | b'[' => {
+                nodes += 1;
+                depth += 1;
+                if depth > MAX_JSON_DEPTH {
+                    return Err(EvidenceError::Invalid);
+                }
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b'"' => {
+                nodes += 1;
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => index = (index + 2).min(bytes.len()),
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b',' | b':' | b' ' | b'\n' | b'\r' | b'\t' => index += 1,
+            _ => {
+                nodes += 1;
+                index += 1;
+                while index < bytes.len()
+                    && !matches!(
+                        bytes[index],
+                        b'{' | b'['
+                            | b'}'
+                            | b']'
+                            | b'"'
+                            | b','
+                            | b':'
+                            | b' '
+                            | b'\n'
+                            | b'\r'
+                            | b'\t'
+                    )
+                {
+                    index += 1;
+                }
+            }
+        }
+        if nodes > MAX_JSON_NODES {
+            return Err(EvidenceError::Invalid);
+        }
+    }
+    Ok(())
 }
 
 fn is_sha256(value: &str) -> bool {
