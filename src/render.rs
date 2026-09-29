@@ -401,7 +401,7 @@ impl<'a> IncrementalRenderer<'a> {
             self.notice("Conversation changed; start a New chat.", &mut sink);
             return RenderOutcome::ContinuationUnavailable;
         };
-        self.emit(&format!("<input type=hidden name=token value=\"{token}\"><input type=hidden name=history_manifest value=\"1.{:06}.{:08}\"><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form></main></body></html>", self.blocks, self.decoded), &mut sink);
+        self.emit(&format!("<input type=hidden name=token value=\"{token}\"><input type=hidden name=history_manifest value=\"1.{:06}.{:08}\"><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><button type=submit form=new-chat>New chat</button></main></body></html>", self.blocks, self.decoded), &mut sink);
         self.state
     }
 

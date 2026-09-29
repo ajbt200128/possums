@@ -127,6 +127,18 @@ fn buffered_chat_reset_form_is_separate_and_carries_only_escaped_csrf() {
 }
 
 #[test]
+fn streamed_success_exposes_new_chat_outside_the_continuation_form() {
+    let (html, outcome) = render_answer("safe response", false);
+    assert_eq!(outcome, RenderOutcome::Ready);
+    let (chat, after_chat) = html.split_once("<form method=post action=/chat>").unwrap();
+    assert!(chat.contains("<form id=new-chat method=post action=/chat/new>"));
+    let (continuation, after_form) = after_chat.split_once("</form>").unwrap();
+    assert!(continuation.contains("history_manifest"));
+    assert!(!continuation.contains("New chat"));
+    assert!(after_form.starts_with("<button type=submit form=new-chat>New chat</button>"));
+}
+
+#[test]
 fn staged_start_matches_open_including_failures_and_split_utf8() {
     let cases = [
         (
