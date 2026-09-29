@@ -9,9 +9,9 @@ use crate::{
     render,
 };
 use axum::{
-    body::{to_bytes, Body, Bytes, HttpBody},
+    body::{Body, Bytes, HttpBody},
     extract::{DefaultBodyLimit, Form, State},
-    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -24,6 +24,7 @@ use hyper_util::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    future::poll_fn,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -42,8 +43,17 @@ const CONNECTION_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const MAX_CONNECTIONS: usize = 64;
 const MAX_HEADERS: usize = 64;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
-const REQUEST_MEMORY_BYTES: usize = 128 * 1024 * 1024;
-const SHARED_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+// Scoped admission targets, not measured RSS or a whole-process memory proof:
+// 4 * (104 MiB heavy + 16 MiB ingress) + 16 MiB New chat + 16 MiB controls.
+// Heavy is acquired BEFORE raw collection/decoding and covers decoded form/JSON,
+// tokenizer, buffered inference and rendering overlap. Ingress covers raw input
+// storage; it is NOT a standalone allowance for decoded history. SDK/TLS, shared
+// auth/accounting state and allocator overhead are outside these envelopes.
+const CHAT_LANES: usize = 4;
+// Native control forms contain only CSRF/credentials (43/128 bytes), never
+// conversation history. Apply this ceiling to fallbacks/wrong methods as well.
+const CONTROL_BODY_LIMIT: usize = 4 * 1024;
+const MAX_CONTROL_RENDERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RENDERED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ATTESTATION_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
@@ -54,7 +64,10 @@ pub struct AppState {
     pub inference: SharedInference,
     pub gateway_evidence_path: Arc<str>,
     gateway_evidence_verifier: Arc<dyn EvidenceVerifier>,
-    request_memory: Arc<Semaphore>,
+    chat_memory: Arc<Semaphore>,
+    chat_ingress: Arc<Semaphore>,
+    new_chat_memory: Arc<Semaphore>,
+    control_memory: Arc<Semaphore>,
     generation_slots: Arc<Semaphore>,
 }
 
@@ -72,8 +85,11 @@ impl AppState {
             inference,
             gateway_evidence_path: evidence_path.into(),
             gateway_evidence_verifier,
-            request_memory: Arc::new(Semaphore::new(SHARED_MEMORY_BYTES / REQUEST_MEMORY_BYTES)),
-            generation_slots: Arc::new(Semaphore::new(4)),
+            chat_memory: Arc::new(Semaphore::new(CHAT_LANES)),
+            chat_ingress: Arc::new(Semaphore::new(CHAT_LANES)),
+            new_chat_memory: Arc::new(Semaphore::new(1)),
+            control_memory: Arc::new(Semaphore::new(1)),
+            generation_slots: Arc::new(Semaphore::new(CHAT_LANES)),
         }
     }
 }
@@ -95,9 +111,10 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
         .route("/claims", get(claims))
         .route("/attestation", get(attestation))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
-        .layer(middleware::from_fn(move |request, next| {
-            total_body_deadline(request, next, body_deadline)
-        }))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            move |state, request, next| total_body_deadline(state, request, next, body_deadline),
+        ))
         .layer(CatchPanicLayer::new())
         .layer(middleware::from_fn(header_size_limit))
         .layer(middleware::from_fn_with_state(
@@ -146,23 +163,48 @@ async fn request_admission(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let Ok(permit) = state.request_memory.clone().try_acquire_owned() else {
+    // Match the router's exact method/path semantics; query strings do not
+    // affect routing. Wrong methods, trailing slashes and encoded aliases stay
+    // in the bounded control lane and cannot reach a heavy handler.
+    let lane = match (request.method(), request.uri().path()) {
+        (&Method::POST, "/chat") => &state.chat_memory,
+        (&Method::POST, "/chat/new") => &state.new_chat_memory,
+        _ => &state.control_memory,
+    };
+    let Ok(permit) = lane.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response();
     };
+    // Buffered compatibility: the handler owns the lease, then the response.
+    // A future detached worker must explicitly share/transfer this same lease;
+    // this wrapper alone does not establish detached-worker lifetime safety.
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
     Response::from_parts(
         parts,
         Body::new(AdmissionBody {
             inner: body,
-            _permit: permit,
+            lease: Arc::new(permit),
         }),
     )
 }
 
 struct AdmissionBody {
     inner: Body,
-    _permit: OwnedSemaphorePermit,
+    lease: Arc<OwnedSemaphorePermit>,
+}
+
+// Data drops BEFORE its lease. from_owner preserves the lease across frame
+// dequeue, body/EOF drop, Bytes clones and even one-byte slices, without copying
+// payload. The same owner is used for raw request bytes through Form decoding.
+struct AdmittedBytes {
+    data: Bytes,
+    _lease: Arc<OwnedSemaphorePermit>,
+}
+
+impl AsRef<[u8]> for AdmittedBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
 }
 
 impl HttpBody for AdmissionBody {
@@ -173,7 +215,18 @@ impl HttpBody for AdmissionBody {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.inner).poll_frame(context)
+        Pin::new(&mut self.inner).poll_frame(context).map(|frame| {
+            frame.map(|result| {
+                result.map(|frame| {
+                    frame.map_data(|data| {
+                        Bytes::from_owner(AdmittedBytes {
+                            data,
+                            _lease: self.lease.clone(),
+                        })
+                    })
+                })
+            })
+        })
     }
 
     fn is_end_stream(&self) -> bool {
@@ -185,17 +238,58 @@ impl HttpBody for AdmissionBody {
     }
 }
 
-async fn total_body_deadline(request: Request<Body>, next: Next, deadline: Duration) -> Response {
+async fn total_body_deadline(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+    deadline: Duration,
+) -> Response {
+    let chat = request.method() == Method::POST && request.uri().path() == "/chat";
+    // The outer heavy permit is already owned. Failure here rolls it back
+    // through the bounded error response, with no waiter or body polling.
+    let ingress = if chat {
+        match state.chat_ingress.clone().try_acquire_owned() {
+            Ok(permit) => Some(Arc::new(permit)),
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response(),
+        }
+    } else {
+        None
+    };
+    let limit = if chat { BODY_LIMIT } else { CONTROL_BODY_LIMIT };
     let (parts, body) = request.into_parts();
-    let bytes = match tokio::time::timeout(deadline, to_bytes(body, BODY_LIMIT)).await {
+    let bytes = match tokio::time::timeout(deadline, collect_request(body, limit)).await {
         Ok(Ok(bytes)) => bytes,
-        Ok(Err(_)) => {
+        Ok(Err(())) => {
             return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response()
         }
         Err(_) => return (StatusCode::REQUEST_TIMEOUT, "request body timed out").into_response(),
     };
+    let bytes = match ingress {
+        Some(lease) => Bytes::from_owner(AdmittedBytes {
+            data: bytes,
+            _lease: lease,
+        }),
+        None => bytes,
+    };
     next.run(Request::from_parts(parts, Body::from(bytes)))
         .await
+}
+
+async fn collect_request(mut body: Body, limit: usize) -> Result<Bytes, ()> {
+    // Do not collect a list of frames: an 8-MiB one-byte-fragmented request
+    // otherwise retains millions of frame headers before coalescing. One fixed
+    // allocation, one borrowed incoming frame, no growth/copy-overlap or queue.
+    let mut bytes = Vec::with_capacity(limit);
+    while let Some(frame) = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
+        let frame = frame.map_err(|_| ())?;
+        if let Ok(data) = frame.into_data() {
+            if data.len() > limit - bytes.len() {
+                return Err(());
+            }
+            bytes.extend_from_slice(&data);
+        }
+    }
+    Ok(Bytes::from(bytes))
 }
 
 async fn header_size_limit(request: Request<Body>, next: Next) -> Response {
@@ -268,7 +362,10 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
                 &[],
                 session.selected_model.as_deref(),
                 None,
-                MAX_RENDERED_RESPONSE_BYTES,
+                // Validated catalog: <=256 IDs of <=128 safe ASCII bytes;
+                // empty history. The renderer preflight bounds intermediates
+                // before allocation without excluding any supported model.
+                MAX_CONTROL_RENDERED_RESPONSE_BYTES,
             )
             .map_or_else(unavailable, |html| Html(html).into_response()),
             Err(_) => unavailable(),
@@ -437,6 +534,7 @@ async fn chat(
         Some(value) => value,
         None => return bad_request(),
     };
+    drop(form.history); // The decoded Vec now owns history; do not retain both.
     history.push(Message {
         role: "user".into(),
         content: form.prompt,
@@ -454,7 +552,7 @@ async fn chat(
         Ok(value) => value,
         Err(_) => return bad_request(),
     };
-    // The request-memory permit is already owned by middleware. Obtain the
+    // The heavy permit is already owned by middleware. Obtain the
     // existing global generation permit nonblockingly before admission and any
     // prompt-bearing tokenizer call. Failed/duplicate admission releases it.
     let permit = match state.generation_slots.clone().try_acquire_owned() {
@@ -948,6 +1046,39 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(state.generation_slots.available_permits(), 4);
+        // Failed ingress acquisition never polls/decodes a body or reserves.
+        // The heavy lease remains on the small error response until dropped.
+        let ingress = state
+            .chat_ingress
+            .clone()
+            .try_acquire_many_owned(4)
+            .unwrap();
+        let response = router(state.clone()).oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.chat_memory.available_permits(), 3);
+        assert_eq!(probe.prompts.load(Ordering::SeqCst), 0);
+        assert_eq!(state.accounting.available("a"), Some(100));
+        drop(response);
+        assert_eq!(state.chat_memory.available_permits(), 4);
+        drop(ingress);
+        // Cancellation while collecting raw input returns both admissions,
+        // without reaching a security gate, tokenizer or reservation.
+        let entered = Arc::new(Notify::new());
+        let notify = entered.clone();
+        let mut pending = request();
+        *pending.body_mut() = Body::from_stream(futures_util::stream::once(async move {
+            notify.notify_one();
+            std::future::pending::<Result<Bytes, std::io::Error>>().await
+        }));
+        let task = tokio::spawn(router(state.clone()).oneshot(pending));
+        entered.notified().await;
+        assert_eq!(state.chat_memory.available_permits(), 3);
+        assert_eq!(state.chat_ingress.available_permits(), 3);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(state.chat_memory.available_permits(), 4);
+        assert_eq!(state.chat_ingress.available_permits(), 4);
+        assert_eq!(state.accounting.available("a"), Some(100));
         let all = state
             .generation_slots
             .clone()
@@ -963,12 +1094,17 @@ mod tests {
         let task = tokio::spawn(router(state.clone()).oneshot(request()));
         probe.entered.notified().await;
         assert_eq!(state.generation_slots.available_permits(), 3);
+        assert_eq!(state.chat_memory.available_permits(), 3);
+        // Raw bytes/form parsing ended before prompt-bearing tokenizer work.
+        assert_eq!(state.chat_ingress.available_permits(), 4);
         assert_eq!(state.accounting.available("a"), Some(48));
         probe.release.notify_one();
         let response = task.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         drop(response); // Buffered compatibility refund; not a streaming worker.
         assert_eq!(state.generation_slots.available_permits(), 4);
+        assert_eq!(state.chat_memory.available_permits(), 4);
+        assert_eq!(state.chat_ingress.available_permits(), 4);
         assert_eq!(state.accounting.available("a"), Some(100));
     }
 }
