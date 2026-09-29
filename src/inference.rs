@@ -89,6 +89,13 @@ impl TinfoilInference {
             .http_client()
             .map_err(|_| InferenceError::Unavailable)
     }
+
+    fn authenticate(
+        &self,
+        request: tinfoil::verifier::tls::OriginBoundRequestBuilder,
+    ) -> tinfoil::verifier::tls::OriginBoundRequestBuilder {
+        request.bearer_auth(self.client.secure_client().api_key())
+    }
 }
 
 #[doc(hidden)]
@@ -158,14 +165,13 @@ struct Usage {
 #[async_trait]
 impl Inference for TinfoilInference {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
-        let request = self.http()?.get(format!("{}/v1/models", self.origin));
+        let request = self.authenticate(self.http()?.get(format!("{}/v1/models", self.origin)));
         self.bounded_response(request, MAX_CATALOG_BYTES).await
     }
 
     async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError> {
         let request = self
-            .http()?
-            .post(format!("{}/v1/tokenize", self.origin))
+            .authenticate(self.http()?.post(format!("{}/v1/tokenize", self.origin)))
             .json(&serde_json::json!({"model": model, "messages": messages}));
         let bytes = self.bounded_response(request, 64 * 1024).await?;
         let count: TokenCount =
@@ -184,8 +190,10 @@ impl Inference for TinfoilInference {
         let mut cache_scope = [0_u8; 32];
         rand::rng().fill_bytes(&mut cache_scope);
         let request = self
-            .http()?
-            .post(format!("{}/v1/chat/completions", self.origin))
+            .authenticate(
+                self.http()?
+                    .post(format!("{}/v1/chat/completions", self.origin)),
+            )
             .json(&serde_json::json!({
                 "model": model.id,
                 "messages": messages,
