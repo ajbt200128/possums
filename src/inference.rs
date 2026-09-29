@@ -46,6 +46,25 @@ pub trait Inference: Send + Sync {
         model: &Model,
         messages: &[Message],
     ) -> Result<Generation, InferenceError>;
+    /// Stream only after trust/catalog/reservation and context preflight.
+    /// `model` carries the full context-legal output allowance. Successful usage
+    /// is terminal, withheld until validated finish, [DONE], and transport EOF.
+    ///
+    /// The borrowed synchronous callback must not block, panic, or collect
+    /// unbounded output. On delivery failure, detach delivery in the callback and
+    /// keep polling this future to completion; never cancel upstream or retry an
+    /// uncertain generation. Callback return values cannot cancel consumption.
+    /// Implementations must not expose prompt text or raw upstream diagnostics.
+    /// The default fails closed without falling back to buffered generation.
+    async fn generate_stream(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+    ) -> Result<stream::StreamUsage, InferenceError> {
+        Err(InferenceError::Unavailable)
+    }
+
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError>;
 }
 
@@ -78,7 +97,7 @@ impl TinfoilInference {
         })
     }
 
-    /// Additive streaming entry point; the buffered route/trait is not migrated.
+    /// Verified streaming adapter; the buffered route is not migrated.
     ///
     /// Call only after trust/catalog/reservation and context preflight. `model`
     /// carries the full context-legal output allowance, not a credit-reduced cap.
@@ -754,6 +773,15 @@ impl Inference for TinfoilInference {
             input_tokens: response.usage.prompt_tokens,
             output_tokens: response.usage.completion_tokens,
         })
+    }
+
+    async fn generate_stream(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+    ) -> Result<stream::StreamUsage, InferenceError> {
+        TinfoilInference::generate_stream(self, model, messages, on_delta).await
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
