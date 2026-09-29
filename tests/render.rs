@@ -173,13 +173,14 @@ fn startup_sequence_cannot_be_skipped_or_replayed_into_continuation() {
 }
 
 #[test]
-fn staged_start_drains_over_16_mib_with_bounded_sink() {
+fn staged_start_emits_bounded_chunks_for_simulated_drain() {
     const QUEUE: usize = 16 * 1024 * 1024;
     let history = [
         message("user", &"&".repeat(4 * 1024 * 1024)),
         message("assistant", ""),
     ];
     assert!(serde_json::to_vec(&history).unwrap().len() <= render::max_history_decoded_bytes());
+    // Accounting-only sink: this is not a channel or a real consumer.
     let mut pending = 0;
     let mut drained = 0;
     let mut total = 0;
