@@ -139,6 +139,42 @@ fn streamed_success_exposes_new_chat_outside_the_continuation_form() {
 }
 
 #[test]
+fn finished_startup_detaches_borrowed_history_without_changing_streamed_html() {
+    let mut html = String::new();
+    let mut renderer: IncrementalRenderer<'static> = {
+        let history = vec![message("user", "first"), message("assistant", "answer")];
+        let prompt = String::from("next");
+        let mut renderer =
+            IncrementalRenderer::start(&history, &prompt, TOKEN, "m", capture(&mut html)).unwrap();
+        assert!(matches!(
+            IncrementalRenderer::start(&history, &prompt, TOKEN, "m", |_| Ok(()))
+                .unwrap()
+                .into_streaming(),
+            Err(RenderOutcome::InvalidInput)
+        ));
+        while renderer.emit_next_history(capture(&mut html)).unwrap() {}
+        renderer.finish_start(capture(&mut html)).unwrap();
+        renderer.into_streaming().unwrap()
+    };
+    renderer.delta("response", capture(&mut html));
+    assert_eq!(
+        renderer.complete(Ok(usage()), || Some(TOKEN.into()), capture(&mut html)),
+        RenderOutcome::Ready
+    );
+    assert_eq!(
+        html,
+        staged_answer(
+            &[message("user", "first"), message("assistant", "answer")],
+            "next",
+            "response",
+            None,
+            true
+        )
+        .0
+    );
+}
+
+#[test]
 fn staged_start_matches_open_including_failures_and_split_utf8() {
     let cases = [
         (

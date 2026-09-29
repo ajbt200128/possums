@@ -343,6 +343,26 @@ impl<'a> IncrementalRenderer<'a> {
         Ok(())
     }
 
+    /// After bounded startup, no further operation reads the borrowed history or
+    /// prompt. Release them before moving this state out of `spawn_blocking` and
+    /// back to the async inference worker; an incomplete startup cannot detach.
+    pub fn into_streaming(self) -> Result<IncrementalRenderer<'static>, RenderOutcome> {
+        if self.stage != StartupStage::Streaming {
+            return Err(RenderOutcome::InvalidInput);
+        }
+        Ok(IncrementalRenderer {
+            history: &[],
+            prompt: "",
+            next_history: 0,
+            stage: StartupStage::Streaming,
+            block: self.block,
+            used: self.used,
+            decoded: self.decoded,
+            blocks: self.blocks,
+            state: self.state,
+        })
+    }
+
     /// A limit disables continuation encoding, not visible output or inference.
     /// Delivery failure disables all output; the worker must still consume upstream.
     pub fn delta(&mut self, content: &str, mut sink: impl FnMut(&str) -> RenderSinkResult) {
