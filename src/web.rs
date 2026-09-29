@@ -1,6 +1,6 @@
 use crate::{
     accounting::{Accounting, Outcome, ReserveResult},
-    attestation::EvidenceVerifier,
+    attestation::{EvidenceVerifier, GatewayEvidence},
     auth::{
         clear_session_cookie, login_challenge_cookie, session_cookie, AdmissionError, Auth, Session,
     },
@@ -22,7 +22,7 @@ use hyper_util::{
     rt::{TokioIo, TokioTimer},
     service::TowerToHyperService,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     pin::Pin,
     sync::Arc,
@@ -45,6 +45,7 @@ const MAX_HEADER_BYTES: usize = 32 * 1024;
 const REQUEST_MEMORY_BYTES: usize = 128 * 1024 * 1024;
 const SHARED_MEMORY_BYTES: usize = 512 * 1024 * 1024;
 const MAX_RENDERED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_ATTESTATION_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -379,6 +380,12 @@ async fn claims() -> Html<String> {
     ))
 }
 
+#[derive(Serialize)]
+struct AttestationDocuments<'a> {
+    gateway: &'a GatewayEvidence,
+    upstream: &'a serde_json::Value,
+}
+
 async fn attestation(State(state): State<AppState>) -> Response {
     let gateway = match verified_gateway_evidence(&state).await {
         Ok(value) => value,
@@ -388,7 +395,22 @@ async fn attestation(State(state): State<AppState>) -> Response {
         Ok(value) => value,
         Err(_) => return unavailable(),
     };
-    axum::Json(serde_json::json!({"gateway": gateway, "upstream": upstream})).into_response()
+    let bytes = match crate::bounded_json::to_vec(
+        &AttestationDocuments {
+            gateway: &gateway,
+            upstream: &upstream,
+        },
+        MAX_ATTESTATION_RESPONSE_BYTES,
+    ) {
+        Ok(value) => value,
+        Err(_) => return unavailable(),
+    };
+    let mut response = Body::from(bytes).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 #[derive(Deserialize)]

@@ -13,6 +13,7 @@ pub mod stream;
 mod stream_support;
 
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Message {
@@ -738,7 +739,9 @@ impl Inference for TinfoilInference {
             .secure_client()
             .verification_document()
             .ok_or(InferenceError::Unavailable)?;
-        serde_json::to_value(document).map_err(|_| InferenceError::InvalidResponse)
+        let bytes = crate::bounded_json::to_vec(&document, MAX_VERIFICATION_DOCUMENT_BYTES)
+            .map_err(|_| InferenceError::InvalidResponse)?;
+        serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)
     }
 }
 

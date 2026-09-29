@@ -107,6 +107,27 @@ impl Inference for LargeResponseInference {
     }
 }
 
+struct OversizedVerificationInference;
+
+#[async_trait]
+impl Inference for OversizedVerificationInference {
+    async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
+        unreachable!()
+    }
+
+    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+        unreachable!()
+    }
+
+    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
+        unreachable!()
+    }
+
+    fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
+        Ok(serde_json::json!({"oversized": "x".repeat(2 * 1024 * 1024)}))
+    }
+}
+
 struct PanicInference;
 
 #[async_trait]
@@ -1382,6 +1403,34 @@ async fn failed_reservation_stops_before_prompt_tokenization() {
         Some("n")
     );
     assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn attestation_response_rejects_oversized_upstream_document() {
+    let path = std::env::temp_dir().join(format!(
+        "possums-large-document-evidence-{}",
+        std::process::id()
+    ));
+    write_evidence(
+        &path,
+        serde_json::json!({"verified": true}),
+        now(),
+        EXPECTED_RELEASE,
+        EXPECTED_KEY,
+    );
+    let (mut state, ..) = fixture(path.to_str().unwrap());
+    state.inference = Arc::new(OversizedVerificationInference);
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/attestation")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     std::fs::remove_file(path).unwrap();
 }
 
