@@ -171,7 +171,10 @@ impl Inference for TinfoilInference {
 
     async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError> {
         let request = self
-            .authenticate(self.http()?.post(format!("{}/v1/tokenize", self.origin)))
+            .authenticate(
+                self.http()?
+                    .post(format!("{}/v1/chat/completions/input_tokens", self.origin)),
+            )
             .json(&serde_json::json!({"model": model, "messages": messages}));
         let bytes = self.bounded_response(request, 64 * 1024).await?;
         let count: TokenCount =
