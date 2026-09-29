@@ -132,6 +132,7 @@ struct FakeInference {
     tokenizations: AtomicUsize,
     generations: AtomicUsize,
     catalog_failures: AtomicUsize,
+    catalog_override: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 #[async_trait]
@@ -146,7 +147,12 @@ impl Inference for FakeInference {
         {
             return Err(InferenceError::Unavailable);
         }
-        Ok(catalog_bytes())
+        Ok(self
+            .catalog_override
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(catalog_bytes))
     }
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
@@ -185,6 +191,7 @@ fn fixture_with_budget(
         tokenizations: AtomicUsize::new(0),
         generations: AtomicUsize::new(0),
         catalog_failures: AtomicUsize::new(0),
+        catalog_override: std::sync::Mutex::new(None),
     });
     let state = AppState::new(
         auth,
@@ -318,7 +325,7 @@ async fn dropping_unconsumed_response_refunds_reservation() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(state.accounting.available("a"), Some(74));
+    assert_eq!(state.accounting.available("a"), Some(48));
     drop(response);
     assert_eq!(state.accounting.available("a"), Some(100));
     assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
@@ -625,7 +632,7 @@ async fn cancelled_request_refunds_reservation_and_releases_concurrency() {
         .unwrap();
     let task = tokio::spawn(router(state.clone()).oneshot(request));
     started.notified().await;
-    assert_eq!(state.accounting.available("a"), Some(74));
+    assert_eq!(state.accounting.available("a"), Some(48));
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     assert_eq!(state.accounting.available("a"), Some(100));
@@ -679,7 +686,7 @@ async fn socket_disconnect_during_inference_refunds_reservation() {
     let mut client = TcpStream::connect(address).await.unwrap();
     client.write_all(request.as_bytes()).await.unwrap();
     started.notified().await;
-    assert_eq!(state.accounting.available("a"), Some(74));
+    assert_eq!(state.accounting.available("a"), Some(48));
     drop(client);
 
     for _ in 0..100 {
@@ -743,7 +750,7 @@ async fn disconnect_near_transport_completion_reaches_one_terminal_balance() {
         assert_ne!(count, 0);
         received.extend_from_slice(&chunk[..count]);
     }
-    assert!(matches!(state.accounting.available("a"), Some(74 | 97)));
+    assert!(matches!(state.accounting.available("a"), Some(48 | 97)));
     drop(client);
 
     for _ in 0..100 {
@@ -822,9 +829,10 @@ async fn failed_reservation_stops_before_prompt_tokenization() {
         EXPECTED_RELEASE,
         EXPECTED_KEY,
     );
-    let (state, cookie, csrf, token, inference) = fixture_with_budget(path.to_str().unwrap(), 1);
+    // Old endpoint-only quote was 26; the full operational reservation is 52.
+    let (state, cookie, csrf, token, inference) = fixture_with_budget(path.to_str().unwrap(), 51);
     let body = format!("csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary");
-    let response = router(state)
+    let response = router(state.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -837,7 +845,57 @@ async fn failed_reservation_stops_before_prompt_tokenization() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(state.accounting.available("a"), Some(51));
     assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
     assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn invalid_catalog_and_unrepresentable_quote_stop_before_prompt_calls() {
+    let path = std::env::temp_dir().join(format!("possums-quote-evidence-{}", std::process::id()));
+    write_evidence(
+        &path,
+        serde_json::json!({"verified": true}),
+        now(),
+        EXPECTED_RELEASE,
+        EXPECTED_KEY,
+    );
+    for (context, extra_fee, expected) in [
+        (
+            serde_json::Value::Null,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (serde_json::json!(0), false, StatusCode::SERVICE_UNAVAILABLE),
+        (serde_json::json!(20), true, StatusCode::SERVICE_UNAVAILABLE),
+        (serde_json::json!(u64::MAX), false, StatusCode::BAD_REQUEST),
+    ] {
+        let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
+        let mut catalog: serde_json::Value = serde_json::from_slice(&catalog_bytes()).unwrap();
+        catalog["data"][0]["context_window"] = context;
+        if extra_fee {
+            catalog["data"][0]["pricing"]["unknownFee"] = serde_json::json!(1);
+        }
+        *inference.catalog_override.lock().unwrap() = Some(serde_json::to_vec(&catalog).unwrap());
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chat")
+                    .header(header::COOKIE, cookie.split(';').next().unwrap())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(state.accounting.available("a"), Some(100));
+        assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
+        assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+    }
     std::fs::remove_file(path).unwrap();
 }

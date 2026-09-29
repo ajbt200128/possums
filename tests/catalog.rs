@@ -17,11 +17,11 @@ fn quote_snapshots_rate_and_uses_remaining_context_for_output() {
 }
 
 #[test]
-fn reservation_covers_the_most_expensive_context_allocation() {
+fn reservation_covers_operational_input_and_output_bounds_together() {
     let quote = catalog().reservation_quote("model-a").unwrap();
     assert_eq!(quote.input_tokens, 100);
     assert_eq!(quote.model.max_output_tokens, 100);
-    assert_eq!(quote.reserved_microunits, 390);
+    assert_eq!(quote.reserved_microunits, 650);
 }
 
 #[test]
@@ -107,4 +107,140 @@ fn rejects_cost_overflow() {
         catalog.quote("x", u64::MAX - 1).unwrap_err(),
         CatalogError::Overflow
     );
+    assert_eq!(catalog.reservation_quote("x"), Err(CatalogError::Overflow));
+}
+
+#[test]
+fn distinct_normalized_output_bound_and_context_allowance_preserve_snapshot() {
+    let mut catalog = catalog();
+    // Synthetic normalized bound, not an observed Tinfoil catalog field.
+    catalog.models[0].max_output_tokens = 40;
+    let reservation = catalog.reservation_quote("model-a").unwrap();
+    assert_eq!(reservation.reserved_microunits, 416);
+    for (input, output) in [(0, 40), (59, 40), (60, 40), (61, 39), (99, 1)] {
+        let request = catalog.quote("model-a", input).unwrap();
+        assert_eq!(request.model.max_output_tokens, output);
+        assert_eq!(reservation.input_tokens, 100);
+        assert_eq!(reservation.model.max_output_tokens, 40);
+        assert!(request.reserved_microunits <= reservation.reserved_microunits);
+    }
+    for input in [100, 101, u64::MAX] {
+        assert_eq!(
+            catalog.quote("model-a", input),
+            Err(CatalogError::ContextExceeded)
+        );
+    }
+    catalog.models[0].input_microunits_per_million_tokens *= 2;
+    catalog.models[0].output_microunits_per_million_tokens *= 2;
+    assert_eq!(
+        catalog
+            .reservation_quote("model-a")
+            .unwrap()
+            .reserved_microunits,
+        832
+    );
+    assert_eq!(reservation.reserved_microunits, 416);
+    assert_eq!(
+        reservation.model.input_microunits_per_million_tokens,
+        2_000_000
+    );
+    assert_eq!(
+        reservation.model.output_microunits_per_million_tokens,
+        3_000_000
+    );
+}
+
+#[test]
+fn reservation_rounds_the_combined_numerator_once_and_rejects_unrepresentable_cost() {
+    let mut catalog = catalog();
+    catalog.models[0].context_tokens = 1;
+    catalog.models[0].max_output_tokens = 1;
+    catalog.models[0].input_microunits_per_million_tokens = 1;
+    catalog.models[0].output_microunits_per_million_tokens = 1;
+    assert_eq!(
+        catalog
+            .reservation_quote("model-a")
+            .unwrap()
+            .reserved_microunits,
+        1
+    );
+    catalog.models[0].context_tokens = u64::MAX;
+    catalog.models[0].max_output_tokens = u64::MAX;
+    catalog.models[0].input_microunits_per_million_tokens = 1_000_000;
+    catalog.models[0].output_microunits_per_million_tokens = 1_000_000;
+    // Fits the u128 numerator, but not the u64 monetary representation.
+    assert_eq!(
+        catalog.reservation_quote("model-a"),
+        Err(CatalogError::Overflow)
+    );
+}
+
+#[test]
+fn invalid_normalized_bounds_and_prices_cannot_be_quoted() {
+    for (context, output, input_price, output_price) in [
+        (0, 1, 1, 1),
+        (100, 0, 1, 1),
+        (100, 101, 1, 1),
+        (100, 100, 0, 1),
+        (100, 100, 1, 0),
+    ] {
+        let mut catalog = catalog();
+        let model = &mut catalog.models[0];
+        model.context_tokens = context;
+        model.max_output_tokens = output;
+        model.input_microunits_per_million_tokens = input_price;
+        model.output_microunits_per_million_tokens = output_price;
+        assert_eq!(
+            catalog.reservation_quote("model-a"),
+            Err(CatalogError::Invalid)
+        );
+        assert_eq!(catalog.quote("model-a", 1), Err(CatalogError::Invalid));
+    }
+}
+
+#[test]
+fn unusable_catalog_fields_fail_closed() {
+    let base = serde_json::json!({"object":"list","data":[{
+        "id":"m", "type":"chat", "context_window":100,
+        "endpoints":["/v1/chat/completions"],
+        "pricing":{"inputTokenPricePer1M":2,"outputTokenPricePer1M":3,"requestPrice":0}
+    }]});
+    for context in [
+        serde_json::Value::Null,
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+    ] {
+        let mut value = base.clone();
+        value["data"][0]["context_window"] = context;
+        assert!(Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0).is_err());
+    }
+    let mut missing = base.clone();
+    missing["data"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("context_window");
+    assert!(Catalog::parse_authenticated(&serde_json::to_vec(&missing).unwrap(), 0).is_err());
+    for field in [
+        "inputTokenPricePer1M",
+        "outputTokenPricePer1M",
+        "requestPrice",
+    ] {
+        let mut value = base.clone();
+        value["data"][0]["pricing"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0).is_err());
+        value["data"][0]["pricing"][field] = serde_json::json!(-1);
+        assert!(Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0).is_err());
+    }
+    for extra in ["cachedInputTokenPricePer1M", "imagePrice", "unknownFee"] {
+        let mut value = base.clone();
+        value["data"][0]["pricing"][extra] = serde_json::json!(0);
+        assert_eq!(
+            Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0),
+            Err(CatalogError::Invalid)
+        );
+    }
 }

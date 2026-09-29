@@ -206,3 +206,17 @@ Policy-commit baseline: `0737651e6b9783c095d16827d1b65ecd2137352c`; `eb54021` an
 - `git diff --check` — PASS, including after policy append.
 
 This first commit records policy, not implemented streaming. Subsequent packet-1 commits add operational quoting and a receipt-independent ledger primitive; production remains buffered until the later route migration. No deployment, release, invoice, streaming, browser-progress, or resource-budget correctness is established by these checks. Telemetry stays disabled.
+
+### Packet 1 operational reservation — local implementation evidence
+
+Parent revision `e415561` plus implementation changes in `src/catalog.rs`, `tests/catalog.rs`, `tests/web.rs` and this appended record; original dirty/untracked paths remain preserved. The reservation now rounds the combined `C*p+M*q` numerator once (650 for C=M=100, p=2,000,000, q=3,000,000). Both quote entry points validate normalized bounds/prices, and unknown pricing components fail closed. The Tinfoil schema still supplies only context; distinct output-bound tests are synthetic normalized models, not a claimed provider field. Original reservation and context-legal request quotes are separate snapshots; prices and bounds in the reservation survive later catalog changes.
+
+Commands run locally on aarch64-darwin with the pinned Nix shell:
+
+- `nix develop -c cargo fmt --all` — PASS.
+- `nix develop -c cargo test --test catalog --test accounting --test lifecycle` — PASS (10/5/2 tests).
+- `nix develop -c cargo test --lib` — PASS (6 tests).
+- `nix develop -c cargo test --test web` — PASS (15 tests): invalid/missing context, unsupported fee, unrepresentable quote and insufficient credit cause zero tokenizer/generation calls and no debit. Existing buffered delivery regressions use the increased reservation.
+- `nix develop -c cargo fmt --all -- --check` and `git diff --check` — PASS.
+
+These tests cover distinct output bounds, context edges, snapshot stability, fractional round-up, invalid prices/bounds, checked u128 overflow and u64 quote overflow. They verify local gateway arithmetic/admission, not provider billable maxima or invoice coverage. Production `/chat` has not migrated and still uses its buffered delivery-owned settlement. No funded, browser, live or deployed check was run.

@@ -59,6 +59,7 @@ struct TinfoilModel {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TinfoilPricing {
     #[serde(rename = "inputTokenPricePer1M")]
     input: Option<Number>,
@@ -103,6 +104,8 @@ impl Catalog {
             let model = Model {
                 id: upstream_model.id,
                 context_tokens,
+                // No separate output bound is advertised by this catalog schema.
+                // M=C is an operational assumption, not a proven billing bound.
                 max_output_tokens: context_tokens,
                 input_microunits_per_million_tokens: scaled_price(&input_price)?,
                 output_microunits_per_million_tokens: scaled_price(&output_price)?,
@@ -125,14 +128,11 @@ impl Catalog {
             .find(|model| model.id == model_id)
             .ok_or(CatalogError::UnknownModel)?
             .clone();
-        let maximum_input_cost = marked_up_cost(
+        if !valid_model(&model) {
+            return Err(CatalogError::Invalid);
+        }
+        let reserved_microunits = marked_up_cost(
             model.context_tokens,
-            0,
-            model.input_microunits_per_million_tokens,
-            model.output_microunits_per_million_tokens,
-        )?;
-        let maximum_output_cost = marked_up_cost(
-            0,
             model.max_output_tokens,
             model.input_microunits_per_million_tokens,
             model.output_microunits_per_million_tokens,
@@ -140,7 +140,7 @@ impl Catalog {
         Ok(Quote {
             input_tokens: model.context_tokens,
             model,
-            reserved_microunits: maximum_input_cost.max(maximum_output_cost),
+            reserved_microunits,
         })
     }
 
@@ -151,6 +151,9 @@ impl Catalog {
             .find(|model| model.id == model_id)
             .ok_or(CatalogError::UnknownModel)?
             .clone();
+        if !valid_model(&model) {
+            return Err(CatalogError::Invalid);
+        }
         let remaining_context = model
             .context_tokens
             .checked_sub(input_tokens)
