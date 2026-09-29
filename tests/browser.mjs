@@ -58,6 +58,39 @@ try {
     await page.locator('textarea[name="prompt"]').fill("second turn");
     await page.getByRole("button", { name: "Send" }).click();
     await page.getByText("second turn").waitFor();
+
+    const resetForm = page.locator('form[action="/chat/new"]');
+    assert.equal(await resetForm.count(), 1);
+    assert.deepEqual(await resetForm.locator("input").evaluateAll(
+      (inputs) => inputs.map((input) => input.name),
+    ), ["csrf"]);
+    assert.equal(await resetForm.locator('input[name="csrf"]').inputValue(),
+      await page.locator('form[action="/chat"] input[name="csrf"]').inputValue());
+    await resetForm.getByRole("button", { name: "New chat" }).click();
+    await page.waitForURL(`${origin}/`);
+    assert.equal(await page.locator("article").count(), 0);
+    assert.equal(await page.locator('form[action="/chat"] input[name="history"]').inputValue(), "[]");
+    assert.equal(await page.locator('select[name="model"]').isEnabled(), true);
+    assert.equal(await page.locator('form[action="/chat"] input[name="model"]').count(), 0);
+    await page.locator('select[name="model"]').selectOption(FIXTURE_MODELS[1]);
+    await page.locator('textarea[name="prompt"]').fill("after reset");
+    await page.getByRole("button", { name: "Send" }).click();
+    await page.getByText("after reset").waitFor();
+    assert.equal(await page.locator("article").count(), 2);
+    assert.equal(await page.getByText("first turn").count(), 0);
+    assert.equal(await page.getByText("second turn").count(), 0);
+    assert.equal(await page.locator("select").isDisabled(), true);
+    assert.equal(await page.locator('input[name="model"]').inputValue(), FIXTURE_MODELS[1]);
+
+    await page.getByRole("button", { name: "Log out" }).click();
+    await page.waitForURL(`${origin}/`);
+    await page.locator('input[name="credential"]').fill(credential);
+    await page.getByRole("button", { name: "Log in" }).click();
+    assert.equal(await page.locator('select[name="model"]').isEnabled(), true);
+    assert.equal(await page.locator("article").count(), 0);
+    assert.deepEqual(await page.locator('select[name="model"] option').evaluateAll(
+      (options) => options.map((option) => option.value),
+    ), FIXTURE_MODELS);
     if (remoteRequests.length !== 0) {
       throw new Error(`remote browser requests observed: ${remoteRequests.join(", ")}`);
     }

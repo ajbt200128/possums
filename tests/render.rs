@@ -97,6 +97,36 @@ fn staged_answer(
 }
 
 #[test]
+fn buffered_chat_reset_form_is_separate_and_carries_only_escaped_csrf() {
+    let csrf = "token&\"<";
+    let html = render::chat_page(
+        &[],
+        csrf,
+        TOKEN,
+        &[message("user", "previous prompt")],
+        None,
+        None,
+        100_000,
+    )
+    .unwrap();
+    let (_, after_chat) = html.split_once("<form method=post action=/chat>").unwrap();
+    let (chat, after_chat) = after_chat.split_once("</form>").unwrap();
+    let (before_reset, after_reset) = after_chat
+        .split_once("<form method=post action=/chat/new>")
+        .unwrap();
+    assert!(before_reset.is_empty());
+    let (reset, after_reset) = after_reset.split_once("</form>").unwrap();
+    assert_eq!(
+        reset,
+        "<input type=hidden name=csrf value=\"token&amp;&quot;&lt;\"><button type=submit>New chat</button>"
+    );
+    assert!(chat.contains("name=history"));
+    assert!(chat.contains("name=token"));
+    assert!(after_reset.contains("<form method=post action=/logout>"));
+    assert_eq!(html.matches("<form ").count(), 3);
+}
+
+#[test]
 fn staged_start_matches_open_including_failures_and_split_utf8() {
     let cases = [
         (

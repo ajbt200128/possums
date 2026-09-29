@@ -133,10 +133,11 @@ pub fn chat_page(
         .map(|value| format!("<p role=status>{}</p>", escape(value)))
         .unwrap_or_default();
     let rendered = page(&format!(
-        "<h1>Possums demo</h1>{notice}{transcript}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model {model_field}</label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
+        "<h1>Possums demo</h1>{notice}{transcript}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model {model_field}</label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><form method=post action=/chat/new><input type=hidden name=csrf value=\"{}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
         escape(csrf),
         escape(submission_token),
         encoded_history,
+        escape(csrf),
         escape(csrf)
     ));
     (rendered.len() <= limit).then_some(rendered)
