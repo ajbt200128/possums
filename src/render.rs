@@ -93,9 +93,11 @@ pub fn chat_page(
     let options = models
         .iter()
         .map(|model| {
-            let selected = (selected_model == Some(model.id.as_str()))
-                .then_some(" selected")
-                .unwrap_or_default();
+            let selected = if selected_model == Some(model.id.as_str()) {
+                " selected"
+            } else {
+                ""
+            };
             format!(
                 "<option value=\"{}\"{selected}>{}</option>",
                 escape(&model.id),
