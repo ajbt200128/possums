@@ -192,3 +192,17 @@ Exact arithmetic-only check (system Python, not a provider request or pinned-Rus
 `python3 -c 'from itertools import product; cost=lambda i,o,p,q:(130*(i*p+o*q)+100000000-1)//100000000; vectors=[(100,100,2000000,3000000,390),(100,40,2000000,3000000,312),(100,40,3000000,2000000,390),(100,40,1000000,1000000,130),(1,1,1,1,1)]; assert all(max(cost(i,o,p,q) for i,o in product(range(c+1),range(m+1)) if i+o<=c)==expected for c,m,p,q,expected in vectors); assert cost(60,40,2000000,3000000)==312>max(cost(100,0,2000000,3000000),cost(0,40,2000000,3000000))==260; assert cost(99,1,2000000,3000000)==262; assert cost(60,70,2000000,3000000)==429>390; assert ((2**64-1)**2)*130>2**128-1; print("5 exhaustive conditional envelopes, mixed-extremum/context/reasoning counterexamples and overflow vector: PASS (not a provider proof)")'`
 
 Result: PASS for the stated conditional envelopes/counterexamples only. **Required to unblock:** provider-authoritative final versus continuous usage/error billing semantics (including extra fields and Kimi/GPT-OSS reasoning representation), general tokenizer-to-billable-usage rules and authoritative maximum constraints for every model/backend; then targeted sanitized live/error observations and a reviewed reservation proof. No downstream implementation, browser/model-reset work, release, or deployment verification is implied.
+
+## 2026-09-29 — packet 1 revised policy (supersedes historical stop gate)
+
+The user explicitly replaced the provider-contract prerequisite with the [gateway settlement policy](phase0.md#packet-1--superseding-user-settlement-decision). The historical BLOCKED decision and failed single-usage probe above remain observations, not current implementation prerequisites. No new funded probe was run. LAST authenticated usage after successful finish, `[DONE]`, EOF and no upstream error is the chosen settlement authority; invalid/missing usage or unsuccessful termination refunds once. User liability is capped at the original operational reservation. Provider-to-invoice semantics and maximum billable-token bounds remain **UNVERIFIED operator risk**, not evidence supplied by catalog validation or tests.
+
+Policy-commit baseline: `0737651e6b9783c095d16827d1b65ecd2137352c`; `eb54021` and `0737651` confirmed ancestors. Original dirty documents (`AGENTS.md`, `OVERALL_PLAN.md`, `SPEC.md`, `docs/phase0.md`, `docs/verification.md`) and untracked client notes/`node_modules/` preserved; only appended implementation-owned documentation is staged. Local aarch64-darwin checks at that baseline plus original dirty paths, before these append-only policy sections:
+
+- `nix develop -c cargo test --test catalog --test accounting --test lifecycle` — PASS (6/5/2 tests).
+- `nix develop -c cargo test --lib` — PASS (6 tests).
+- `nix develop -c cargo test --test web` — PASS (14 existing buffered-route tests).
+- `nix develop -c cargo fmt --all -- --check` — PASS.
+- `git diff --check` — PASS, including after policy append.
+
+This first commit records policy, not implemented streaming. Subsequent packet-1 commits add operational quoting and a receipt-independent ledger primitive; production remains buffered until the later route migration. No deployment, release, invoice, streaming, browser-progress, or resource-budget correctness is established by these checks. Telemetry stays disabled.
