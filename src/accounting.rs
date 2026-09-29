@@ -324,6 +324,11 @@ impl Accounting {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn hold_test_lock(&self) -> impl Drop + '_ {
+        self.state.lock().unwrap()
+    }
+
     pub fn available(&self, account_id: &str) -> Option<u64> {
         self.state
             .lock()

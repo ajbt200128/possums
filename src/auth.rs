@@ -101,6 +101,8 @@ pub struct Auth {
     submission_tokens: Mutex<HashMap<String, SubmissionToken>>,
     submission_capacity: usize,
     epoch: [u8; 32],
+    #[cfg(test)]
+    pause: Mutex<Option<(tests::PausePoint, std::sync::Arc<tests::Pause>)>>,
 }
 
 impl Auth {
@@ -126,6 +128,8 @@ impl Auth {
             submission_tokens: Mutex::new(HashMap::new()),
             submission_capacity: MAX_SUBMISSION_TOKENS,
             epoch,
+            #[cfg(test)]
+            pause: Mutex::new(None),
         })
     }
 
@@ -214,6 +218,8 @@ impl Auth {
         if session.expires_at <= Instant::now() || !Self::verify_csrf(session, csrf) {
             return Err(AuthError::Invalid);
         }
+        #[cfg(test)]
+        self.pause_at(tests::PausePoint::Invalidation);
         let mut tokens = self
             .submission_tokens
             .lock()
@@ -231,6 +237,8 @@ impl Auth {
         if session.expires_at <= Instant::now() || !Self::verify_csrf(session, csrf) {
             return Err(AuthError::Invalid);
         }
+        #[cfg(test)]
+        self.pause_at(tests::PausePoint::Invalidation);
         let mut tokens = self
             .submission_tokens
             .lock()
@@ -288,6 +296,8 @@ impl Auth {
         if tokens.len() >= self.submission_capacity {
             return Err(AuthError::Capacity);
         }
+        #[cfg(test)]
+        self.pause_at(tests::PausePoint::Insertion);
         let token = random_token();
         tokens.insert(
             token.clone(),
@@ -354,6 +364,8 @@ impl Auth {
         let selected_model = model.clone();
         let token_model = model.clone();
         let model_binding = Sha256::digest(model.as_bytes()).into();
+        #[cfg(test)]
+        self.pause_at(tests::PausePoint::Reservation);
         let result = accounting.reserve(
             &session.account_id,
             submission.id,
@@ -364,6 +376,25 @@ impl Auth {
         session.selected_model = Some(selected_model);
         issued.model = Some(token_model);
         Ok(Admission { submission, result })
+    }
+
+    #[cfg(test)]
+    fn pause_at(&self, point: tests::PausePoint) {
+        let pause = {
+            let mut slot = self.pause.lock().unwrap();
+            if slot
+                .as_ref()
+                .is_some_and(|(expected, _)| *expected == point)
+            {
+                slot.take().map(|(_, pause)| pause)
+            } else {
+                None
+            }
+        };
+        if let Some(pause) = pause {
+            pause.entered.wait();
+            pause.release.wait();
+        }
     }
 }
 
@@ -396,4 +427,268 @@ pub fn login_challenge_cookie(value: &str) -> String {
 
 pub fn clear_session_cookie() -> &'static str {
     "possums_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{accounting::Outcome, catalog::Model};
+    use std::{
+        sync::{Arc, Barrier, TryLockError},
+        thread,
+    };
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum PausePoint {
+        Invalidation,
+        Reservation,
+        Insertion,
+    }
+
+    pub(super) struct Pause {
+        pub entered: Barrier,
+        pub release: Barrier,
+    }
+
+    fn pause(auth: &Auth, point: PausePoint) -> Arc<Pause> {
+        let pause = Arc::new(Pause {
+            entered: Barrier::new(2),
+            release: Barrier::new(2),
+        });
+        *auth.pause.lock().unwrap() = Some((point, pause.clone()));
+        pause
+    }
+
+    fn fixture() -> (Auth, Accounting, String, Session, String) {
+        let credential = URL_SAFE_NO_PAD.encode([7; 32]);
+        let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
+        let auth = Auth::from_json(&format!(
+            r#"[{{"id":"a","credential_sha256":"{hash}","demo_microunits":1000}}]"#
+        ))
+        .unwrap();
+        let (id, session) = auth
+            .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+            .unwrap();
+        let token = auth.issue_submission(&id).unwrap();
+        let ledger = Accounting::new(auth.account_budgets());
+        (auth, ledger, id, session, token)
+    }
+
+    fn quote() -> Quote {
+        Quote {
+            model: Model {
+                id: "m".into(),
+                context_tokens: 20,
+                max_output_tokens: 10,
+                input_microunits_per_million_tokens: 1_000_000,
+                output_microunits_per_million_tokens: 1_000_000,
+            },
+            input_tokens: 10,
+            reserved_microunits: 26,
+        }
+    }
+
+    fn invalidate(auth: &Auth, id: &str, csrf: &str, logout: bool) {
+        if logout {
+            auth.logout(id, csrf).unwrap();
+        } else {
+            auth.new_chat(id, csrf).unwrap();
+        }
+    }
+
+    fn assert_invalidated(auth: &Auth, id: &str, original: ConversationId, logout: bool) {
+        if logout {
+            assert!(auth.session(id).is_none());
+        } else {
+            let current = auth.session(id).unwrap();
+            assert_ne!(current.conversation, original);
+            assert_eq!(current.selected_model, None);
+        }
+        assert!(auth.submission_tokens.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_or_logout_winning_session_lock_prevents_admission_and_continuation() {
+        for logout in [false, true] {
+            let (auth, ledger, id, session, token) = fixture();
+            let held = pause(&auth, PausePoint::Invalidation);
+            let start = Barrier::new(3);
+            thread::scope(|scope| {
+                let reset = scope.spawn(|| invalidate(&auth, &id, &session.csrf, logout));
+                held.entered.wait();
+                assert!(matches!(
+                    auth.sessions.try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ));
+                // Reset has sessions but has not acquired tokens or touched accounting.
+                assert!(auth.submission_tokens.try_lock().is_ok());
+                assert_eq!(ledger.available("a"), Some(1000));
+                let admission = scope.spawn(|| {
+                    start.wait();
+                    auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                });
+                let continuation = scope.spawn(|| {
+                    start.wait();
+                    auth.issue_submission_for(&id, session.conversation, None)
+                });
+                start.wait();
+                held.release.wait();
+                reset.join().unwrap();
+                assert_eq!(
+                    admission.join().unwrap().unwrap_err(),
+                    AdmissionError::Auth(AuthError::Invalid)
+                );
+                assert_eq!(continuation.join().unwrap(), Err(AuthError::Invalid));
+            });
+            assert_eq!(ledger.available("a"), Some(1000));
+            assert_invalidated(&auth, &id, session.conversation, logout);
+        }
+    }
+
+    #[test]
+    fn validation_through_reserve_holds_session_then_tokens_even_while_accounting_is_busy() {
+        for logout in [false, true] {
+            let (auth, ledger, id, session, token) = fixture();
+            let held = pause(&auth, PausePoint::Reservation);
+            let start = Barrier::new(2);
+            thread::scope(|scope| {
+                let accounting_lock = ledger.hold_test_lock();
+                let admission = scope
+                    .spawn(|| auth.admit_submission(&ledger, &id, &session.csrf, &token, quote()));
+                held.entered.wait();
+                assert!(matches!(
+                    auth.sessions.try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ));
+                assert!(matches!(
+                    auth.submission_tokens.try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ));
+                let reset = scope.spawn(|| {
+                    start.wait();
+                    invalidate(&auth, &id, &session.csrf, logout);
+                });
+                start.wait();
+                held.release.wait();
+                // No reverse acquisition: accounting's owner can release without
+                // any auth access, allowing reserve then invalidation to finish.
+                drop(accounting_lock);
+                let accepted = admission.join().unwrap().unwrap();
+                assert_eq!(accepted.result, ReserveResult::Reserved);
+                reset.join().unwrap();
+                assert_eq!(ledger.available("a"), Some(974));
+                assert_invalidated(&auth, &id, session.conversation, logout);
+                assert_eq!(
+                    ledger.finish(accepted.submission.id, None).unwrap(),
+                    Outcome::Refunded
+                );
+                assert_eq!(
+                    ledger.finish(accepted.submission.id, None).unwrap(),
+                    Outcome::Refunded
+                );
+                assert_eq!(ledger.available("a"), Some(1000));
+            });
+        }
+    }
+
+    #[test]
+    fn insertion_winning_session_lock_is_invalidated_by_later_reset_or_logout() {
+        for logout in [false, true] {
+            let (auth, ledger, id, session, token) = fixture();
+            let accepted = auth
+                .admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                .unwrap();
+            let held = pause(&auth, PausePoint::Insertion);
+            let start = Barrier::new(2);
+            thread::scope(|scope| {
+                let issue = scope.spawn(|| {
+                    auth.issue_submission_for(&id, accepted.submission.conversation, Some("m"))
+                });
+                held.entered.wait();
+                assert!(matches!(
+                    auth.sessions.try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ));
+                assert!(matches!(
+                    auth.submission_tokens.try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ));
+                // Terminal operations need no auth locks, even during issuance.
+                assert_eq!(
+                    ledger.finish(accepted.submission.id, None).unwrap(),
+                    Outcome::Refunded
+                );
+                let reset = scope.spawn(|| {
+                    start.wait();
+                    invalidate(&auth, &id, &session.csrf, logout);
+                });
+                start.wait();
+                held.release.wait();
+                let continuation = issue.join().unwrap().unwrap();
+                reset.join().unwrap();
+                assert_invalidated(&auth, &id, session.conversation, logout);
+                assert!(auth
+                    .admit_submission(&ledger, &id, &session.csrf, &continuation, quote())
+                    .is_err());
+            });
+        }
+    }
+
+    #[test]
+    fn expired_sessions_and_tokens_are_revalidated_without_committing_bindings() {
+        for expire_session in [false, true] {
+            let (auth, ledger, id, session, token) = fixture();
+            let past = Instant::now() - Duration::from_secs(1);
+            if expire_session {
+                auth.sessions
+                    .lock()
+                    .unwrap()
+                    .get_mut(&id)
+                    .unwrap()
+                    .expires_at = past;
+                assert_eq!(auth.new_chat(&id, &session.csrf), Err(AuthError::Invalid));
+                assert_eq!(auth.logout(&id, &session.csrf), Err(AuthError::Invalid));
+                assert_eq!(
+                    auth.issue_submission_for(&id, session.conversation, None),
+                    Err(AuthError::Invalid)
+                );
+            } else {
+                auth.submission_tokens
+                    .lock()
+                    .unwrap()
+                    .get_mut(&token)
+                    .unwrap()
+                    .expires_at = past;
+            }
+            assert_eq!(
+                auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                    .unwrap_err(),
+                AdmissionError::Auth(AuthError::Invalid)
+            );
+            assert_eq!(auth.sessions.lock().unwrap()[&id].selected_model, None);
+            assert_eq!(auth.submission_tokens.lock().unwrap()[&token].model, None);
+            assert_eq!(ledger.available("a"), Some(1000));
+        }
+    }
+
+    #[test]
+    fn mismatched_account_or_conversation_token_is_rejected_before_reservation() {
+        for wrong_account in [false, true] {
+            let (auth, ledger, id, session, token) = fixture();
+            {
+                let mut tokens = auth.submission_tokens.lock().unwrap();
+                let issued = tokens.get_mut(&token).unwrap();
+                if wrong_account {
+                    issued.account_id = "other".into();
+                } else {
+                    issued.conversation = ConversationId::new();
+                }
+            }
+            assert!(auth
+                .admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                .is_err());
+            assert_eq!(auth.session(&id).unwrap().selected_model, None);
+            assert_eq!(ledger.available("a"), Some(1000));
+        }
+    }
 }

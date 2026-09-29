@@ -1,11 +1,15 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use possums::{
     accounting::{Accounting, AccountingError, Outcome, ReserveResult},
-    auth::Auth,
+    auth::{AdmissionError, Auth},
     catalog::{Model, Quote},
 };
 use sha2::{Digest, Sha256};
-use std::time::{Duration, Instant};
+use std::{
+    sync::Barrier,
+    thread,
+    time::{Duration, Instant},
+};
 
 fn auth_config() -> String {
     let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
@@ -60,6 +64,126 @@ fn process_epoch_invalidates_old_submission_tokens() {
             quote()
         )
         .is_err());
+}
+
+#[test]
+fn three_slots_survive_reset_and_logout_until_old_work_finishes_once() {
+    for logout in [false, true] {
+        let auth = Auth::from_json(&auth_config()).unwrap();
+        let ledger = Accounting::new(auth.account_budgets());
+        let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        let (mut id, mut session) = auth
+            .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+            .unwrap();
+        let mut accepted = Vec::new();
+        for _ in 0..3 {
+            let token = auth.issue_submission(&id).unwrap();
+            accepted.push(
+                auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                    .unwrap()
+                    .submission,
+            );
+            if logout {
+                auth.logout(&id, &session.csrf).unwrap();
+                (id, session) = auth
+                    .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+                    .unwrap();
+            } else {
+                auth.new_chat(&id, &session.csrf).unwrap();
+                session = auth.session(&id).unwrap();
+            }
+        }
+        assert_eq!(ledger.available("a"), Some(22));
+        let token = auth.issue_submission(&id).unwrap();
+        let mut new_quote = quote();
+        new_quote.model.id = "new".into();
+        assert_eq!(
+            auth.admit_submission(&ledger, &id, &session.csrf, &token, new_quote.clone())
+                .unwrap_err(),
+            AdmissionError::Accounting(AccountingError::Concurrency)
+        );
+        assert_eq!(auth.session(&id).unwrap().selected_model, None);
+        // An old accepted reservation may settle after reset/logout. Auth state
+        // is not needed for either terminal outcome and cannot gain extra slots.
+        ledger.prepare_settlement(accepted[0].id, 1, 1).unwrap();
+        assert_eq!(ledger.settle(accepted[0].id).unwrap(), 3);
+        assert_eq!(ledger.settle(accepted[0].id).unwrap(), 3);
+        assert!(ledger.refund(accepted[0].id).is_err());
+        assert_eq!(ledger.available("a"), Some(45));
+        // The previously rejected token/model was not half-bound: another model
+        // can now use it, without needing a reset to clear failed admission.
+        new_quote.model.id = "other".into();
+        let new = auth
+            .admit_submission(&ledger, &id, &session.csrf, &token, new_quote)
+            .unwrap();
+        assert_eq!(new.result, ReserveResult::Reserved);
+        for old in &accepted[1..] {
+            ledger.refund(old.id).unwrap();
+            ledger.refund(old.id).unwrap();
+            assert!(auth
+                .issue_submission_for(&id, old.conversation, Some("m"))
+                .is_err());
+        }
+        ledger.refund(new.submission.id).unwrap();
+        assert_eq!(ledger.available("a"), Some(97));
+        let current = auth.session(&id).unwrap();
+        assert_eq!(current.conversation, session.conversation);
+        assert_eq!(current.selected_model.as_deref(), Some("other"));
+    }
+}
+
+#[test]
+fn concurrent_completions_issue_only_original_conversation_continuations() {
+    let auth = Auth::from_json(&auth_config()).unwrap();
+    let ledger = Accounting::new(auth.account_budgets());
+    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+    let (id, session) = auth
+        .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+        .unwrap();
+    let accepted: Vec<_> = (0..3)
+        .map(|_| {
+            let token = auth.issue_submission(&id).unwrap();
+            auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                .unwrap()
+                .submission
+        })
+        .collect();
+    let start = Barrier::new(4);
+    let tokens = thread::scope(|scope| {
+        let handles: Vec<_> = accepted
+            .iter()
+            .map(|submission| {
+                scope.spawn(|| {
+                    ledger.prepare_settlement(submission.id, 1, 1).unwrap();
+                    ledger.settle(submission.id).unwrap();
+                    start.wait();
+                    auth.issue_submission_for(&id, submission.conversation, Some("m"))
+                        .unwrap()
+                })
+            })
+            .collect();
+        start.wait();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        tokens
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert_eq!(ledger.available("a"), Some(91));
+    auth.new_chat(&id, &session.csrf).unwrap();
+    for token in tokens {
+        assert!(auth
+            .admit_submission(&ledger, &id, &session.csrf, &token, quote())
+            .is_err());
+    }
+    assert_eq!(ledger.available("a"), Some(91));
+    assert_eq!(auth.session(&id).unwrap().selected_model, None);
 }
 
 #[test]
