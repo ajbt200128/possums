@@ -56,6 +56,68 @@ async fn production_client_authenticates_catalog_tokenization_and_generation() {
     actual_cost(&quote, generation.output_tokens).expect("live usage exceeded the catalog quote");
 }
 
+/// Diagnostic only. The buffered canary above is historical coverage, not stream evidence.
+#[tokio::test]
+#[ignore = "funded opt-in: up to eight fixed-input streaming requests, 64 output tokens each"]
+async fn streaming_contract_probe_all_catalog_models() {
+    assert!(
+        env::var("TINFOIL_STREAM_PROBE_FUNDED").as_deref() == Ok("yes"),
+        "set TINFOIL_STREAM_PROBE_FUNDED=yes to authorize the small operator-funded probe"
+    );
+    let inference = TinfoilInference::connect(HOST, REPOSITORY, load_api_key())
+        .await
+        .expect("live attested Tinfoil connection failed");
+    let catalog = authenticated_catalog(
+        &inference,
+        SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs(),
+    )
+    .await
+    .expect("live catalog authentication or validation failed");
+    // Never silently spend against an unexpectedly enlarged catalog.
+    assert!(
+        catalog.models.len() <= 8,
+        "catalog exceeds this probe's funded request budget"
+    );
+    let mut matches_candidate_contract = true;
+    for model in &catalog.models {
+        let probe = inference
+            .probe_streaming_contract(&model.id)
+            .await
+            .expect("stream probe connection or tokenization unavailable; no automatic retry");
+        // Model IDs have passed the catalog's length/character validation. The
+        // report exposes only allowlisted numeric/enum observations, never text.
+        println!(
+            "model={} context={} probe={probe:?}",
+            model.id, model.context_tokens
+        );
+        matches_candidate_contract &= probe.failure.is_none()
+            && probe.sse_content_type
+            && probe.eof
+            && probe.finish_events == 1
+            && probe.usage_events == 1
+            && !probe.unknown_usage_fields
+            && probe
+                .finish_event
+                .zip(probe.usage_event)
+                .is_some_and(|(finish, usage)| finish <= usage)
+            && probe
+                .usage_event
+                .zip(probe.done_event)
+                .is_some_and(|(usage, done)| usage < done)
+            && probe.usage.as_ref().is_some_and(|usage| {
+                usage.prompt_tokens == probe.tokenizer_tokens
+                    && usage.completion_tokens <= CANARY_MAX_OUTPUT_TOKENS
+                    && usage.prompt_tokens.checked_add(usage.completion_tokens)
+                        == Some(usage.total_tokens)
+            });
+        if probe.failure.is_some() {
+            break; // Stop spending on transport/provider failures; do not replay.
+        }
+    }
+    assert!(matches_candidate_contract,
+        "stream observations do not establish the candidate contract; financial gate remains BLOCKED");
+}
+
 fn load_api_key() -> String {
     env::var("TINFOIL_API_KEY")
         .ok()
