@@ -1,9 +1,10 @@
 //! Staged, detached generation ownership; deliberately not wired to `/chat`.
 //!
 //! Admission supplies the existing global-four generation permit and a separate
-//! resource lease. Delivery owns neither. This is a lifetime guarantee, not an
-//! aggregate memory bound. The process must install a content-suppressing panic
-//! hook (as `main` does): Tokio catches unwinds only AFTER the hook runs.
+//! heavy resource lease shared with delivery. Delivery owns no generation slot.
+//! This is staged lifetime plumbing, not an aggregate memory bound. The process
+//! must install a content-suppressing panic hook (as `main` does): Tokio catches
+//! unwinds only AFTER the hook runs.
 
 use crate::{
     accounting::{Accounting, AccountingError, FinalUsage, Outcome},
@@ -101,7 +102,7 @@ impl SettledReceipt {
 /// Field order keeps the resource and generation leases until terminal cleanup.
 pub(crate) struct ReservedGeneration {
     terminal: Terminal,
-    _resources: OwnedSemaphorePermit,
+    _resources: Arc<OwnedSemaphorePermit>,
     _generation: OwnedSemaphorePermit,
 }
 
@@ -121,7 +122,7 @@ impl ReservedGeneration {
         accounting: Arc<Accounting>,
         id: [u8; 32],
         generation: OwnedSemaphorePermit,
-        resources: OwnedSemaphorePermit,
+        resources: impl Into<Arc<OwnedSemaphorePermit>>,
     ) -> Self {
         Self {
             terminal: Terminal {
@@ -129,7 +130,7 @@ impl ReservedGeneration {
                 id,
                 armed: true,
             },
-            _resources: resources,
+            _resources: resources.into(),
             _generation: generation,
         }
     }
@@ -219,7 +220,7 @@ impl ReservedGeneration {
 // Do not rely on the unspecified field order of an async block's captures.
 struct Worker<Fut> {
     work: Pin<Box<Fut>>,
-    _resources: OwnedSemaphorePermit,
+    _resources: Arc<OwnedSemaphorePermit>,
     _generation: OwnedSemaphorePermit,
 }
 

@@ -135,6 +135,82 @@ async fn bounded<T>(future: impl Future<Output = T>) -> T {
         .unwrap()
 }
 
+// Staged composition only: the buffered /chat handler does not spawn this owner.
+#[tokio::test]
+async fn shared_heavy_admission_returns_only_after_worker_body_and_slices_release() {
+    for last_owner in ["worker", "body", "slice"] {
+        let f = Fixture::new();
+        // Leave exactly one heavy slot: constructing BOTH owners must not need
+        // a second permit. The independent four-slot work lease is unchanged.
+        let other_heavy = f.resources.clone().try_acquire_many_owned(3).unwrap();
+        let heavy = Arc::new(f.resources.clone().try_acquire_owned().unwrap());
+        let generation = f.generations.clone().try_acquire_owned().unwrap();
+        assert_eq!(f.reserve(ACCOUNT, 1).unwrap(), ReserveResult::Reserved);
+        let pending = ReservedGeneration::new(f.ledger.clone(), [1; 32], generation, heavy.clone());
+        let (startup, mut body) = delivery(
+            heavy,
+            Limits {
+                frames: 1,
+                payload_bytes: 8,
+                chunk_bytes: 8,
+            },
+            Duration::from_secs(1),
+        );
+        let (started_tx, started) = oneshot::channel();
+        let (finish_tx, finish) = oneshot::channel();
+        let completion = pending.spawn(startup.into_streaming(), move |mut tx| async move {
+            tx.try_send(b"partial").unwrap();
+            // Detach sender ownership, so only the worker/body/frame can pin it.
+            assert_eq!(tx.try_send(b"tail"), Err(DeliveryError::Full));
+            started_tx.send(()).unwrap();
+            finish.await.unwrap();
+            Ok(usage())
+        });
+        bounded(started).await.unwrap();
+        let frame = bounded(body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let clone = frame.clone();
+        let slice = clone.slice(1..2);
+        drop(frame);
+        drop(clone);
+        assert!(bounded(body.frame()).await.is_none());
+        assert_eq!(f.resources.available_permits(), 0);
+        assert_eq!(f.generations.available_permits(), 3);
+        let mut body = Some(body);
+        let mut slice = Some(slice);
+        if last_owner == "worker" {
+            drop(body.take());
+            drop(slice.take());
+            assert_eq!(f.resources.available_permits(), 0);
+            f.outcome(1, Outcome::InFlight, 948);
+        }
+        finish_tx.send(()).unwrap();
+        assert_eq!(
+            bounded(completion).await.unwrap(),
+            Ok(Outcome::Settled { charged: 29 })
+        );
+        assert_eq!(f.generations.available_permits(), 4);
+        if last_owner == "body" {
+            drop(slice.take());
+            assert_eq!(f.resources.available_permits(), 0);
+            drop(body.take());
+        } else if last_owner == "slice" {
+            drop(body.take());
+            assert_eq!(f.resources.available_permits(), 0);
+            drop(slice.take());
+        }
+        assert_eq!(f.resources.available_permits(), 1);
+        assert_eq!(f.lanes.available_permits(), 4); // No second delivery lane.
+        drop(other_heavy);
+        f.leases_returned();
+        f.account_slots_returned(971);
+    }
+}
+
 #[tokio::test]
 async fn pre_handoff_request_cancellation_refunds_and_never_starts_work() {
     let f = Fixture::new();

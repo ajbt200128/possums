@@ -160,7 +160,7 @@ pub async fn serve_with_header_deadline(
 
 async fn request_admission(
     State(state): State<AppState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     // Match the router's exact method/path semantics; query strings do not
@@ -174,18 +174,16 @@ async fn request_admission(
     let Ok(permit) = lane.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response();
     };
-    // Buffered compatibility: the handler owns the lease, then the response.
-    // A future detached worker must explicitly share/transfer this same lease;
-    // this wrapper alone does not establish detached-worker lifetime safety.
+    let lease = Arc::new(permit);
+    if request.method() == Method::POST && request.uri().path() == "/chat" {
+        // Staged plumbing: a future detached worker and delivery body must share
+        // THIS heavy admission, not acquire another. The buffered handler does
+        // not use this extension yet; this is not a streaming safety proof.
+        request.extensions_mut().insert(lease.clone());
+    }
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
-    Response::from_parts(
-        parts,
-        Body::new(AdmissionBody {
-            inner: body,
-            lease: Arc::new(permit),
-        }),
-    )
+    Response::from_parts(parts, Body::new(AdmissionBody { inner: body, lease }))
 }
 
 struct AdmissionBody {
@@ -1017,6 +1015,131 @@ mod tests {
                 freshness_expires_at_unix: now + 60,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn chat_extension_shares_admission_without_using_control_or_new_chat_lanes() {
+        use http_body_util::BodyExt;
+
+        let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(crate::auth::random_token().as_bytes()));
+        let auth = Auth::from_json(&format!(
+            r#"[{{"id":"a","credential_sha256":"{hash}","demo_microunits":100}}]"#
+        ))
+        .unwrap();
+        let probe = Arc::new(PermitProbe::default());
+        let state = AppState::new(auth, probe.clone(), "unused", probe);
+        // Test-only handler observes staged plumbing through raw-body collection;
+        // production /chat remains buffered and does not consume the extension.
+        let app = Router::new()
+            .fallback(|request: Request<Body>| async move {
+                let lease = request.extensions().get::<Arc<OwnedSemaphorePermit>>();
+                assert_eq!(
+                    lease.is_some(),
+                    request.method() == Method::POST && request.uri().path() == "/chat"
+                );
+                let mut response = "frame".into_response();
+                if let Some(lease) = lease {
+                    response.extensions_mut().insert(lease.clone());
+                }
+                response
+            })
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                |state, request, next| total_body_deadline(state, request, next, BODY_DEADLINE),
+            ))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                request_admission,
+            ));
+        let request = |method, uri| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let others = state.chat_memory.clone().try_acquire_many_owned(3).unwrap();
+        let mut response = app
+            .clone()
+            .oneshot(request(Method::POST, "/chat?test=1"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK); // Only one free heavy slot needed.
+        let lease = response
+            .extensions_mut()
+            .remove::<Arc<OwnedSemaphorePermit>>()
+            .unwrap();
+        assert_eq!(state.chat_memory.available_permits(), 0);
+        assert_eq!(state.chat_ingress.available_permits(), 4);
+        assert_eq!(state.generation_slots.available_permits(), 4);
+        assert_eq!(
+            app.clone()
+                .oneshot(request(Method::POST, "/chat"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // Heavy saturation leaves both small lanes usable and independent.
+        let control = app
+            .clone()
+            .oneshot(request(Method::GET, "/claims"))
+            .await
+            .unwrap();
+        assert_eq!(control.status(), StatusCode::OK);
+        assert_eq!(state.control_memory.available_permits(), 0);
+        let new_chat = app
+            .clone()
+            .oneshot(request(Method::POST, "/chat/new"))
+            .await
+            .unwrap();
+        assert_eq!(new_chat.status(), StatusCode::OK);
+        assert_eq!(state.new_chat_memory.available_permits(), 0);
+        assert_eq!(
+            app.clone()
+                .oneshot(request(Method::GET, "/claims"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(request(Method::POST, "/chat/new"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(control);
+        drop(new_chat);
+        for (method, uri) in [
+            (Method::GET, "/chat"),
+            (Method::POST, "/chat/"),
+            (Method::POST, "/%63hat"),
+        ] {
+            let control = app.clone().oneshot(request(method, uri)).await.unwrap();
+            assert_eq!(control.status(), StatusCode::OK);
+            assert_eq!(state.control_memory.available_permits(), 0);
+            assert_eq!(state.new_chat_memory.available_permits(), 1);
+            drop(control);
+        }
+        let mut body = response.into_body();
+        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let clone = frame.clone();
+        let slice = clone.slice(1..2);
+        drop(frame);
+        drop(clone);
+        drop(body);
+        assert_eq!(state.chat_memory.available_permits(), 0);
+        drop(slice);
+        assert_eq!(state.chat_memory.available_permits(), 0); // Handler extension still pins it.
+        drop(lease);
+        assert_eq!(state.chat_memory.available_permits(), 1);
+        drop(others);
+        assert_eq!(state.chat_memory.available_permits(), 4);
+        assert_eq!(state.control_memory.available_permits(), 1);
+        assert_eq!(state.new_chat_memory.available_permits(), 1);
     }
 
     #[tokio::test]

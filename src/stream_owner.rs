@@ -2,7 +2,8 @@
 //!
 //! Payload bytes and outstanding chunk owners (including dequeued frames) are
 //! bounded independently. This is not an RSS/allocator or whole-worker budget.
-//! Delivery owns only a lane lease, never a reservation or inference task.
+//! Delivery shares a heavy admission lease, never a reservation or inference task.
+//! This is staged plumbing; the buffered route does not use it yet.
 
 use axum::body::{Bytes, HttpBody};
 use std::{
@@ -71,14 +72,14 @@ pub(crate) struct StartupTx {
 }
 
 pub(crate) fn delivery(
-    lease: OwnedSemaphorePermit,
+    lease: impl Into<Arc<OwnedSemaphorePermit>>,
     limits: Limits,
     startup_timeout: Duration,
 ) -> (StartupTx, DeliveryBody) {
     assert!(limits.frames > 0 && limits.chunk_bytes > 0);
     assert!(limits.chunk_bytes <= limits.payload_bytes);
     let (sender, rx) = mpsc::channel(limits.frames);
-    let lease = Arc::new(lease);
+    let lease = lease.into();
     let budget = Arc::new(Budget {
         bytes: Arc::new(Semaphore::new(limits.payload_bytes as usize)),
         frames: Arc::new(Semaphore::new(limits.frames)),
