@@ -10,7 +10,7 @@ networks:
       - kds-proxy.tinfoil.sh
 containers:
   - name: gateway
-    image: ghcr.io/ajbt200128/possums-gateway@sha256:cd8075a02ebcfec9c04973196bfee5cf81b4aaf0a693d20c4130cbba41e1946c
+    image: ghcr.io/ajbt200128/possums-gateway@sha256:f01fd85ba757960c84584d66bacd4a89c007d801248ef22ce665e4a870fc907f
     env:
       - HOME: "/tmp"
       - POSSUMS_BIND: "0.0.0.0:8080"
