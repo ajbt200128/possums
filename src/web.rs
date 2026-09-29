@@ -35,7 +35,7 @@ use tokio::{
 };
 use tower_http::catch_panic::CatchPanicLayer;
 
-const BODY_LIMIT: usize = 8 * 1024 * 1024;
+pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const BODY_DEADLINE: Duration = Duration::from_secs(30);
 const HEADER_DEADLINE: Duration = Duration::from_secs(10);
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(10 * 60);
@@ -556,6 +556,163 @@ async fn chat(
     };
     let (parts, body) = Html(html).into_response().into_parts();
     Response::from_parts(parts, Body::new(ReservationBody::new(body, reservation)))
+}
+
+/// Additive decoder, deliberately not wired to production ChatForm yet.
+/// No Debug implementation: this value contains prompts and authentication data.
+pub struct ContinuationForm {
+    pub csrf: String,
+    pub token: String,
+    pub model: String,
+    pub prompt: String,
+    pub history: Vec<Message>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidContinuation;
+
+/// Strict application/x-www-form-urlencoded boundary. History field names and
+/// base64url values are unescaped ASCII in canonical browser submissions. Reject
+/// aliases rather than allocating a map or silently accepting duplicate fields.
+pub fn decode_continuation(body: &[u8]) -> Result<ContinuationForm, InvalidContinuation> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use render::{HISTORY_BLOCK_BYTES, MAX_HISTORY_FIELDS};
+    if body.len() > BODY_LIMIT {
+        return Err(InvalidContinuation);
+    }
+    let body = std::str::from_utf8(body).map_err(|_| InvalidContinuation)?;
+    let mut manifest = None;
+    let mut fields = 0_usize;
+    for field in body.split('&') {
+        fields = fields.checked_add(1).ok_or(InvalidContinuation)?;
+        if fields > MAX_HISTORY_FIELDS + 5 {
+            return Err(InvalidContinuation);
+        }
+        let (name, value) = field.split_once('=').ok_or(InvalidContinuation)?;
+        if name == "history_manifest" && manifest.replace(value).is_some() {
+            return Err(InvalidContinuation);
+        }
+    }
+    let manifest = manifest.ok_or(InvalidContinuation)?;
+    if manifest.len() != 17 {
+        return Err(InvalidContinuation);
+    }
+    let parts: Vec<_> = manifest.split('.').collect(); // At most 17 bytes.
+    if parts.len() != 3 || parts[0] != "1" {
+        return Err(InvalidContinuation);
+    }
+    let count: usize = parts[1].parse().map_err(|_| InvalidContinuation)?;
+    let decoded_len: usize = parts[2].parse().map_err(|_| InvalidContinuation)?;
+    if manifest != format!("1.{count:06}.{decoded_len:08}")
+        || count == 0
+        || count > MAX_HISTORY_FIELDS
+        || decoded_len > render::max_history_decoded_bytes()
+        || decoded_len.div_ceil(HISTORY_BLOCK_BYTES) != count
+    {
+        return Err(InvalidContinuation);
+    }
+    let mut json = Vec::with_capacity(decoded_len);
+    let (mut csrf, mut token, mut model, mut prompt) = (None, None, None, None);
+    let mut index = 0_usize;
+    for field in body.split('&') {
+        let (name, value) = field.split_once('=').ok_or(InvalidContinuation)?;
+        let (slot, limit) = match name {
+            "csrf" => (&mut csrf, render::TOKEN_FIELD_BYTES),
+            "token" => (&mut token, render::TOKEN_FIELD_BYTES),
+            "model" => (&mut model, render::MAX_MODEL_FIELD_BYTES),
+            "prompt" => (&mut prompt, BODY_LIMIT),
+            "history_manifest" => continue,
+            _ => {
+                if index >= count || name != format!("h{index:06}") {
+                    return Err(InvalidContinuation);
+                }
+                let expected = (decoded_len - json.len()).min(HISTORY_BLOCK_BYTES);
+                if value.len() != (expected * 4).div_ceil(3) {
+                    return Err(InvalidContinuation);
+                }
+                let mut block = [0; HISTORY_BLOCK_BYTES];
+                let size = URL_SAFE_NO_PAD
+                    .decode_slice(value, &mut block)
+                    .map_err(|_| InvalidContinuation)?;
+                if size != expected || URL_SAFE_NO_PAD.encode(&block[..size]) != value {
+                    return Err(InvalidContinuation);
+                }
+                json.extend_from_slice(&block[..size]);
+                index += 1;
+                continue;
+            }
+        };
+        if slot.is_some() {
+            return Err(InvalidContinuation);
+        }
+        *slot = Some(decode_form_value(value, limit)?);
+    }
+    if index != count || json.len() != decoded_len {
+        return Err(InvalidContinuation);
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct HistoryMessage {
+        role: String,
+        content: String,
+    }
+    // Serde's depth limit also bounds hostile nested JSON; schema denies unknown
+    // and duplicate fields. The decoded input and message allocation are bounded
+    // separately from the renderer; later admission must budget both.
+    let parsed: Vec<HistoryMessage> =
+        serde_json::from_slice(&json).map_err(|_| InvalidContinuation)?;
+    let history: Vec<Message> = parsed
+        .into_iter()
+        .map(|m| Message {
+            role: m.role,
+            content: m.content,
+        })
+        .collect();
+    if !render::valid_history(&history) {
+        return Err(InvalidContinuation);
+    }
+    let form = ContinuationForm {
+        csrf: csrf.ok_or(InvalidContinuation)?,
+        token: token.ok_or(InvalidContinuation)?,
+        model: model.ok_or(InvalidContinuation)?,
+        prompt: prompt.ok_or(InvalidContinuation)?,
+        history,
+    };
+    if !render::valid_form_token(&form.csrf)
+        || !render::valid_form_token(&form.token)
+        || !render::valid_form_model(&form.model)
+        || form.prompt.is_empty()
+    {
+        return Err(InvalidContinuation);
+    }
+    Ok(form)
+}
+
+fn decode_form_value(value: &str, limit: usize) -> Result<String, InvalidContinuation> {
+    if value.len() > limit.checked_mul(3).ok_or(InvalidContinuation)? {
+        return Err(InvalidContinuation);
+    }
+    let mut bytes = Vec::with_capacity(value.len().min(limit));
+    let mut input = value.bytes();
+    while let Some(byte) = input.next() {
+        if bytes.len() == limit {
+            return Err(InvalidContinuation);
+        }
+        bytes.push(match byte {
+            b'+' => b' ',
+            b'%' => {
+                let hi = (input.next().ok_or(InvalidContinuation)? as char)
+                    .to_digit(16)
+                    .ok_or(InvalidContinuation)?;
+                let lo = (input.next().ok_or(InvalidContinuation)? as char)
+                    .to_digit(16)
+                    .ok_or(InvalidContinuation)?;
+                (hi * 16 + lo) as u8
+            }
+            other => other,
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| InvalidContinuation)
 }
 
 fn parse_history(encoded: &str) -> Option<Vec<Message>> {

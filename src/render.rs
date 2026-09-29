@@ -142,6 +142,327 @@ pub fn chat_page(
     (rendered.len() <= limit).then_some(rendered)
 }
 
+/// Additive continuation format; production ChatForm remains buffered for now.
+/// All limits are transport defenses, not model output or product history caps.
+pub const HISTORY_BLOCK_BYTES: usize = 4096;
+pub const MAX_MODEL_FIELD_BYTES: usize = 256;
+pub const TOKEN_FIELD_BYTES: usize = 43;
+/// Space for at least 1024 next-prompt UTF-8 bytes, even if each byte is a LF
+/// normalized to CRLF and then percent encoded. Larger prompts may not fit.
+pub const MIN_NEXT_PROMPT_BYTES: usize = 1024;
+// Manifest: 1.NNNNNN.LLLLLLLL. First field has no separator; each subsequent
+// field includes '&'. Model percent expansion is <=3 (no CR/LF/NUL/non-ASCII).
+const MANIFEST_BYTES: usize = 17;
+const FIXED_FORM_WIRE_BYTES: usize = 5
+    + TOKEN_FIELD_BYTES
+    + 7
+    + TOKEN_FIELD_BYTES
+    + 7
+    + 3 * MAX_MODEL_FIELD_BYTES
+    + 8
+    + 6 * MIN_NEXT_PROMPT_BYTES
+    + 18
+    + MANIFEST_BYTES;
+const FULL_BLOCK_WIRE_BYTES: usize = 9 + HISTORY_BLOCK_BYTES.div_ceil(3) * 4 - 2;
+pub const MAX_HISTORY_FIELDS: usize =
+    (crate::web::BODY_LIMIT - FIXED_FORM_WIRE_BYTES).div_ceil(FULL_BLOCK_WIRE_BYTES);
+
+/// Conservative predicted URL-encoded next form size, including metadata,
+/// separators, fixed fields and the minimum prompt allowance. Checked even
+/// though current constants fit usize. No generated content is retained here.
+pub fn continuation_wire_bytes(decoded: usize) -> Option<usize> {
+    let full = decoded / HISTORY_BLOCK_BYTES;
+    let partial = decoded % HISTORY_BLOCK_BYTES;
+    let partial_wire = if partial == 0 {
+        0
+    } else {
+        9_usize.checked_add(partial.checked_mul(4)?.div_ceil(3))?
+    };
+    FIXED_FORM_WIRE_BYTES
+        .checked_add(full.checked_mul(FULL_BLOCK_WIRE_BYTES)?)?
+        .checked_add(partial_wire)
+}
+
+pub fn max_history_decoded_bytes() -> usize {
+    let mut low = 0;
+    let mut high = crate::web::BODY_LIMIT;
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if continuation_wire_bytes(mid).is_some_and(|n| n <= crate::web::BODY_LIMIT) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    low
+}
+
+pub fn valid_form_token(value: &str) -> bool {
+    value.len() == TOKEN_FIELD_BYTES
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+pub fn valid_form_model(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_MODEL_FIELD_BYTES
+        && value.bytes().all(|b| b.is_ascii_graphic())
+}
+
+pub fn valid_history(history: &[Message]) -> bool {
+    history.len().is_multiple_of(2)
+        && history.iter().enumerate().all(|(index, message)| {
+            if index.is_multiple_of(2) {
+                message.role == "user" && !message.content.is_empty()
+            } else {
+                message.role == "assistant"
+            }
+        })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderOutcome {
+    Ready,
+    TransportLimit,
+    DeliveryFailed,
+    UpstreamFailed,
+    ContinuationUnavailable,
+    InvalidInput,
+}
+
+/// A synchronous, nonblocking sink must copy into bounded delivery storage or
+/// return Err. Neither this renderer nor its caller may collect a full answer.
+pub type RenderSinkResult = Result<(), RenderOutcome>;
+
+pub struct IncrementalRenderer {
+    block: [u8; HISTORY_BLOCK_BYTES],
+    used: usize,
+    decoded: usize,
+    blocks: usize,
+    state: RenderOutcome,
+}
+
+impl IncrementalRenderer {
+    pub fn open(
+        history: &[Message],
+        prompt: &str,
+        csrf: &str,
+        model: &str,
+        mut sink: impl FnMut(&str) -> RenderSinkResult,
+    ) -> Result<Self, RenderOutcome> {
+        if !valid_history(history)
+            || prompt.is_empty()
+            || !valid_form_token(csrf)
+            || !valid_form_model(model)
+        {
+            return Err(RenderOutcome::InvalidInput);
+        }
+        let mut renderer = Self {
+            block: [0; HISTORY_BLOCK_BYTES],
+            used: 0,
+            decoded: 0,
+            blocks: 0,
+            state: RenderOutcome::Ready,
+        };
+        renderer.emit("<!doctype html><html lang=en><head><meta charset=utf-8><title>Possums</title></head><body><main>", &mut sink);
+        // New chat submits only CSRF, never the potentially exhausted history.
+        renderer.emit(&format!("<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{csrf}\"></form><form method=post action=/chat>"), &mut sink);
+        renderer.emit(&format!("<input type=hidden name=csrf value=\"{}\"><input type=hidden name=model value=\"{}\">", escape(csrf), escape(model)), &mut sink);
+        // Only bounded incoming history is borrowed. No clone or transcript is
+        // retained; the accepted prompt is never trimmed or normalized here.
+        renderer.history_bytes(b"[", &mut sink);
+        for message in history {
+            renderer.emit("<pre>", &mut sink);
+            renderer.visible(&message.content, &mut sink);
+            renderer.emit("</pre>", &mut sink);
+            renderer.message(&message.role, &message.content, &mut sink);
+            renderer.history_bytes(b",", &mut sink);
+        }
+        renderer.emit("<pre>", &mut sink);
+        renderer.visible(prompt, &mut sink);
+        renderer.emit("</pre><pre aria-label=\"Assistant\">", &mut sink);
+        renderer.message("user", prompt, &mut sink);
+        renderer.history_bytes(b",{\"role\":\"assistant\",\"content\":\"", &mut sink);
+        Ok(renderer)
+    }
+
+    /// A limit disables continuation encoding, not visible output or inference.
+    /// Delivery failure disables all output; the worker must still consume upstream.
+    pub fn delta(&mut self, content: &str, mut sink: impl FnMut(&str) -> RenderSinkResult) {
+        self.json_content(content, &mut sink);
+        self.visible(content, &mut sink);
+    }
+
+    pub fn outcome(&self) -> RenderOutcome {
+        self.state
+    }
+
+    /// Retained renderer/coalescer byte storage only, not RSS, incoming history,
+    /// transient escaped/encoded blocks, parser JSON trees or delivery queues.
+    pub fn retained_buffer_capacity(&self) -> usize {
+        self.block.len()
+    }
+
+    /// Invoke only with the authenticated adapter's terminal result, after EOF
+    /// and settlement. The callback MUST call issue_submission_for with the
+    /// original accepted conversation/model; it is never called on failure.
+    /// Settlement deliberately lives outside this API. UI failure cannot refund.
+    pub fn complete(
+        mut self,
+        upstream: Result<crate::inference::stream::StreamUsage, crate::inference::InferenceError>,
+        issue_original_continuation: impl FnOnce() -> Option<String>,
+        mut sink: impl FnMut(&str) -> RenderSinkResult,
+    ) -> RenderOutcome {
+        self.emit("</pre>", &mut sink);
+        if upstream.is_err() {
+            self.notice(
+                "Generation failed; no continuation is available.",
+                &mut sink,
+            );
+            return RenderOutcome::UpstreamFailed;
+        }
+        // The three closing bytes were reserved during every append.
+        if self.state == RenderOutcome::Ready {
+            self.write_history(b"\"}]", 0, &mut sink);
+            self.flush_block(&mut sink);
+        }
+        if self.state != RenderOutcome::Ready {
+            let outcome = self.state;
+            self.notice(
+                "Continuation exceeds a transport limit or delivery failed. Start a New chat.",
+                &mut sink,
+            );
+            return outcome;
+        }
+        let Some(token) = issue_original_continuation().filter(|v| valid_form_token(v)) else {
+            self.notice("Conversation changed; start a New chat.", &mut sink);
+            return RenderOutcome::ContinuationUnavailable;
+        };
+        self.emit(&format!("<input type=hidden name=token value=\"{token}\"><input type=hidden name=history_manifest value=\"1.{:06}.{:08}\"><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form></main></body></html>", self.blocks, self.decoded), &mut sink);
+        self.state
+    }
+
+    fn notice(&mut self, message: &str, sink: &mut impl FnMut(&str) -> RenderSinkResult) {
+        self.emit(&format!("</form><p role=status>{message}</p><button type=submit form=new-chat>New chat</button></main></body></html>"), sink);
+    }
+
+    fn emit(&mut self, html: &str, sink: &mut impl FnMut(&str) -> RenderSinkResult) {
+        if self.state != RenderOutcome::DeliveryFailed && sink(html).is_err() {
+            self.state = RenderOutcome::DeliveryFailed;
+            self.used = 0;
+        }
+    }
+
+    fn visible(&mut self, content: &str, sink: &mut impl FnMut(&str) -> RenderSinkResult) {
+        // Chunk at UTF-8 boundaries before allocating escaped HTML (<= 6 KiB).
+        let mut rest = content;
+        while !rest.is_empty() && self.state != RenderOutcome::DeliveryFailed {
+            let mut end = rest.len().min(1024);
+            while !rest.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.emit(&escape(&rest[..end]), sink);
+            rest = &rest[end..];
+        }
+    }
+
+    fn message(
+        &mut self,
+        role: &str,
+        content: &str,
+        sink: &mut impl FnMut(&str) -> RenderSinkResult,
+    ) {
+        self.history_bytes(b"{\"role\":\"", sink);
+        self.history_bytes(role.as_bytes(), sink);
+        self.history_bytes(b"\",\"content\":\"", sink);
+        self.json_content(content, sink);
+        self.history_bytes(b"\"}", sink);
+    }
+
+    fn json_content(&mut self, content: &str, sink: &mut impl FnMut(&str) -> RenderSinkResult) {
+        for character in content.chars() {
+            if self.state != RenderOutcome::Ready {
+                break;
+            }
+            let mut utf8 = [0; 4];
+            let mut control = *b"\\u0000";
+            let bytes = match character {
+                '"' => b"\\\"".as_slice(),
+                '\\' => b"\\\\",
+                '\n' => b"\\n",
+                '\r' => b"\\r",
+                '\t' => b"\\t",
+                '\u{08}' => b"\\b",
+                '\u{0c}' => b"\\f",
+                c if c <= '\u{1f}' => {
+                    let byte = c as u8;
+                    control[4] = b"0123456789abcdef"[(byte >> 4) as usize];
+                    control[5] = b"0123456789abcdef"[(byte & 15) as usize];
+                    &control
+                }
+                c => c.encode_utf8(&mut utf8).as_bytes(),
+            };
+            self.history_bytes(bytes, sink);
+        }
+    }
+
+    fn history_bytes(&mut self, bytes: &[u8], sink: &mut impl FnMut(&str) -> RenderSinkResult) {
+        self.write_history(bytes, 3, sink);
+    }
+
+    fn write_history(
+        &mut self,
+        mut bytes: &[u8],
+        tail: usize,
+        sink: &mut impl FnMut(&str) -> RenderSinkResult,
+    ) {
+        if self.state != RenderOutcome::Ready {
+            return;
+        }
+        let Some(next) = self.decoded.checked_add(bytes.len()) else {
+            self.state = RenderOutcome::TransportLimit;
+            return;
+        };
+        if next
+            .checked_add(tail)
+            .and_then(continuation_wire_bytes)
+            .is_none_or(|n| n > crate::web::BODY_LIMIT)
+        {
+            self.state = RenderOutcome::TransportLimit;
+            self.used = 0;
+            return;
+        }
+        self.decoded = next;
+        while !bytes.is_empty() && self.state == RenderOutcome::Ready {
+            let size = bytes.len().min(HISTORY_BLOCK_BYTES - self.used);
+            self.block[self.used..self.used + size].copy_from_slice(&bytes[..size]);
+            self.used += size;
+            bytes = &bytes[size..];
+            if self.used == HISTORY_BLOCK_BYTES {
+                self.flush_block(sink);
+            }
+        }
+    }
+
+    fn flush_block(&mut self, sink: &mut impl FnMut(&str) -> RenderSinkResult) {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        if self.used == 0 || self.state != RenderOutcome::Ready {
+            return;
+        }
+        let encoded = URL_SAFE_NO_PAD.encode(&self.block[..self.used]);
+        self.emit(
+            &format!(
+                "<input type=hidden name=h{:06} value=\"{encoded}\">",
+                self.blocks
+            ),
+            sink,
+        );
+        self.blocks += 1;
+        self.used = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
