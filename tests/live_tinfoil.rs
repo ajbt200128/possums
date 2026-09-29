@@ -19,10 +19,22 @@ async fn production_client_authenticates_catalog_tokenization_and_generation() {
     let catalog = authenticated_catalog(&inference, now)
         .await
         .expect("live Tinfoil catalog authentication or validation failed");
-    let model = catalog
-        .models
-        .first()
-        .expect("live Tinfoil catalog contained no supported chat model");
+    let requested_model = env::var("TINFOIL_LIVE_MODEL").ok();
+    let model = requested_model
+        .as_deref()
+        .map(|id| {
+            catalog
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .expect("requested live model was not in the authenticated catalog")
+        })
+        .unwrap_or_else(|| {
+            catalog
+                .models
+                .first()
+                .expect("live Tinfoil catalog contained no supported chat model")
+        });
     let messages = [Message {
         role: "user".into(),
         content: "Reply with exactly: possums-live-canary".into(),
