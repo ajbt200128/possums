@@ -46,6 +46,31 @@ impl Drop for Terminal {
     }
 }
 
+/// Linear, synchronous access to the original reservation's terminal guard.
+/// Dropping without `finish` refunds, including pre-poll cancellation and unwind.
+/// This owns no resource/generation leases: those stay with the worker until ALL
+/// captured input and rendering state is destroyed, even after settlement.
+pub(crate) struct Settlement {
+    terminal: Terminal,
+}
+
+impl Settlement {
+    /// Consume verified adapter completion, not an intermediate usage event.
+    /// `Ok` is trusted ONLY after successful finish, DONE and EOF with no upstream
+    /// error; this capability cannot establish stream authenticity itself.
+    /// Accounting rechecks arithmetic and refunds invalid usage. No error text
+    /// is retained or formatted. Even accounting failure is a single attempt.
+    pub(crate) fn finish(mut self, result: &Result<StreamUsage, InferenceError>) -> Completion {
+        self.terminal
+            .finish(result.as_ref().ok().map(|usage| FinalUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                total_tokens: usage.total_tokens,
+            }))
+            .map_err(OwnerError::Accounting)
+    }
+}
+
 /// Construct immediately after a *new* successful `Accounting::reserve`, without
 /// an intervening await. Never construct for Duplicate or share refund ownership
 /// with another guard. No second reservation is created here.
@@ -115,14 +140,56 @@ impl ReservedGeneration {
         supervise(self.spawn_worker(delivery, work))
     }
 
+    /// Like `spawn`, but lets the owned future settle before completing a renderer
+    /// that borrows its captured history. Consume the verified adapter to EOF,
+    /// call `settlement.finish(&result)` synchronously, then ONLY on
+    /// `Ok(Outcome::Settled { .. })` complete rendering / issue a next-turn token
+    /// bound to the snapshotted model and conversation. Return that completion.
+    /// Refunds and accounting errors must not mint tokens. Accounting releases
+    /// its lock before `finish` returns; token issuance must not run under it.
+    ///
+    /// No lease is transferred to the capability or observer. Dropping delivery
+    /// or observation cannot abort work. Dropping an unused capability refunds;
+    /// after a terminal attempt, panic/cancel cannot undo it or attempt a refund.
+    pub(crate) fn spawn_settling<F, Fut>(
+        self,
+        delivery: DeliveryTx,
+        work: F,
+    ) -> oneshot::Receiver<Completion>
+    where
+        F: FnOnce(DeliveryTx, Settlement) -> Fut + Send + 'static,
+        Fut: Future<Output = Completion> + Send + 'static,
+    {
+        supervise(self.spawn_settling_worker(delivery, work))
+    }
+
     fn spawn_worker<F, Fut>(self, delivery: DeliveryTx, work: F) -> JoinHandle<Completion>
     where
         F: FnOnce(DeliveryTx) -> Fut + Send + 'static,
         Fut: Future<Output = Result<StreamUsage, InferenceError>> + Send + 'static,
     {
+        self.spawn_settling_worker(delivery, move |delivery, settlement| async move {
+            let result = work(delivery).await;
+            settlement.finish(&result)
+        })
+    }
+
+    fn spawn_settling_worker<F, Fut>(self, delivery: DeliveryTx, work: F) -> JoinHandle<Completion>
+    where
+        F: FnOnce(DeliveryTx, Settlement) -> Fut + Send + 'static,
+        Fut: Future<Output = Completion> + Send + 'static,
+    {
+        let Self {
+            terminal,
+            _resources,
+            _generation,
+        } = self;
+        let settlement = Settlement { terminal };
         tokio::spawn(Worker {
-            work: Box::pin(async move { work(delivery).await }),
-            owner: self,
+            // The SAME guard moves into Worker before the factory can run.
+            work: Box::pin(async move { work(delivery, settlement).await }),
+            _resources,
+            _generation,
         })
     }
 }
@@ -132,28 +199,18 @@ impl ReservedGeneration {
 // Do not rely on the unspecified field order of an async block's captures.
 struct Worker<Fut> {
     work: Pin<Box<Fut>>,
-    owner: ReservedGeneration,
+    _resources: OwnedSemaphorePermit,
+    _generation: OwnedSemaphorePermit,
 }
 
 impl<Fut> Future for Worker<Fut>
 where
-    Fut: Future<Output = Result<StreamUsage, InferenceError>>,
+    Fut: Future<Output = Completion>,
 {
     type Output = Completion;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let result = std::task::ready!(this.work.as_mut().poll(cx));
-        Poll::Ready(
-            this.owner
-                .terminal
-                .finish(result.ok().map(|usage| FinalUsage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    total_tokens: usage.total_tokens,
-                }))
-                .map_err(OwnerError::Accounting),
-        )
+        self.get_mut().work.as_mut().poll(cx)
     }
 }
 

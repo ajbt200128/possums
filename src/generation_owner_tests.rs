@@ -556,6 +556,264 @@ async fn conflicting_terminal_orders_are_absorbing_but_do_not_release_active_wor
     }
 }
 
+// Synthetic sequencing only: this is not a production renderer/adapter or a
+// route integration claim. In particular, these fabricated usages are not proof
+// of upstream verification. The eventual route must use only the verified adapter.
+struct BorrowedRenderer<'a> {
+    model: &'a str,
+    history: &'a str,
+}
+
+impl BorrowedRenderer<'_> {
+    fn complete(self, issue_token: impl FnOnce(&str, &str)) {
+        issue_token(self.model, self.history);
+    }
+}
+
+#[tokio::test]
+async fn settling_callback_observes_charge_before_token_and_keeps_inputs_leased() {
+    let f = Fixture::new();
+    let pending = f.pending(1);
+    let (tx, body) = f.delivery();
+    let (probe, held, drops) = probe(&f);
+    let ledger = f.ledger.clone();
+    let tokens = Arc::new(AtomicUsize::new(0));
+    let issued = tokens.clone();
+    let (rendered_tx, rendered) = oneshot::channel();
+    let (release_tx, release) = oneshot::channel();
+    let completion = pending.spawn_settling(tx, move |_, settlement| async move {
+        let _resource = probe;
+        let model = String::from("m");
+        let history = String::from("synthetic conversation snapshot");
+        let renderer = BorrowedRenderer {
+            model: &model,
+            history: &history,
+        };
+        let result = Ok(usage()); // Synthetic stand-in for verified adapter EOF.
+        let outcome = settlement.finish(&result)?;
+        if matches!(outcome, Outcome::Settled { .. }) {
+            renderer.complete(|model, history| {
+                // Re-entering accounting here also checks that its lock has
+                // been released before a continuation/token callback runs.
+                assert_eq!(ledger.available(ACCOUNT), Some(971));
+                assert_eq!(
+                    ledger.reserve(
+                        ACCOUNT,
+                        [1; 32],
+                        BINDING,
+                        quote(),
+                        Instant::now() + Duration::from_secs(60),
+                    ),
+                    Ok(ReserveResult::Duplicate(Outcome::Settled { charged: 29 }))
+                );
+                assert_eq!(model, "m");
+                assert_eq!(history, "synthetic conversation snapshot");
+                issued.fetch_add(1, Ordering::SeqCst); // Token issuance simulation.
+            });
+        }
+        rendered_tx.send(()).unwrap();
+        release.await.unwrap();
+        Ok(outcome)
+    });
+    bounded(rendered).await.unwrap();
+    f.outcome(1, Outcome::Settled { charged: 29 }, 971);
+    assert_eq!(tokens.load(Ordering::SeqCst), 1);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert_eq!(f.generations.available_permits(), 3);
+    assert_eq!(f.resources.available_permits(), 3);
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        bounded(completion).await.unwrap(),
+        Ok(Outcome::Settled { charged: 29 })
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(held.load(Ordering::SeqCst));
+    f.leases_returned();
+    drop(body);
+    f.account_slots_returned(971);
+}
+
+#[tokio::test]
+async fn settling_failed_or_invalid_usage_refunds_without_token() {
+    for result in [
+        Err(InferenceError::Unavailable),
+        Err(InferenceError::InvalidResponse),
+        Ok(StreamUsage {
+            total_tokens: 8,
+            ..usage()
+        }),
+        Ok(StreamUsage {
+            input_tokens: u64::MAX,
+            output_tokens: 1,
+            total_tokens: 0,
+        }),
+        Ok(StreamUsage {
+            input_tokens: u64::MAX,
+            output_tokens: 0,
+            total_tokens: u64::MAX,
+        }),
+    ] {
+        let f = Fixture::new();
+        let pending = f.pending(1);
+        let (tx, body) = f.delivery();
+        let tokens = Arc::new(AtomicUsize::new(0));
+        let issued = tokens.clone();
+        let completion = pending.spawn_settling(tx, move |_, settlement| async move {
+            let outcome = settlement.finish(&result)?;
+            if matches!(outcome, Outcome::Settled { .. }) {
+                issued.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(outcome)
+        });
+        assert_eq!(bounded(completion).await.unwrap(), Ok(Outcome::Refunded));
+        assert_eq!(tokens.load(Ordering::SeqCst), 0);
+        f.outcome(1, Outcome::Refunded, 1000);
+        f.leases_returned();
+        drop(body);
+        f.account_slots_returned(1000);
+    }
+}
+
+#[tokio::test]
+async fn settling_pre_poll_or_held_cancellation_drops_inputs_before_leases_and_refunds() {
+    for poll_first in [false, true] {
+        let f = Fixture::new();
+        let pending = f.pending(1);
+        let (tx, body) = f.delivery();
+        let (probe, held, drops) = probe(&f);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        let (started_tx, started) = oneshot::channel();
+        let worker = pending.spawn_settling_worker(tx, move |_, settlement| {
+            called.fetch_add(1, Ordering::SeqCst);
+            async move {
+                let _resource = probe;
+                started_tx.send(()).unwrap();
+                let result = std::future::pending::<Result<StreamUsage, InferenceError>>().await;
+                settlement.finish(&result)
+            }
+        });
+        // No await yet on this current-thread runtime: the guard must already
+        // belong to Worker, even though the factory has not run.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        if poll_first {
+            bounded(started).await.unwrap();
+        }
+        let abort = worker.abort_handle();
+        let completion = supervise(worker);
+        abort.abort();
+        assert_eq!(
+            bounded(completion).await.unwrap(),
+            Err(OwnerError::Cancelled)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), usize::from(poll_first));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(held.load(Ordering::SeqCst));
+        f.outcome(1, Outcome::Refunded, 1000);
+        f.leases_returned();
+        drop(body);
+        f.account_slots_returned(1000);
+    }
+}
+
+#[tokio::test]
+async fn settling_unused_capability_refunds_on_drop_or_normal_return() {
+    for explicit_drop in [false, true] {
+        let f = Fixture::new();
+        let pending = f.pending(1);
+        let (tx, body) = f.delivery();
+        let completion = pending.spawn_settling(tx, move |_, settlement| async move {
+            if explicit_drop {
+                drop(settlement);
+            }
+            // Deliberately omit finish. The original guard must still refund.
+            Ok(Outcome::Refunded)
+        });
+        assert_eq!(bounded(completion).await.unwrap(), Ok(Outcome::Refunded));
+        f.outcome(1, Outcome::Refunded, 1000);
+        f.leases_returned();
+        drop(body);
+        f.account_slots_returned(1000);
+    }
+}
+
+#[tokio::test]
+async fn settling_factory_or_future_panic_refunds_but_post_finish_panic_keeps_charge() {
+    for stage in 0..3 {
+        let f = Fixture::new();
+        let pending = f.pending(1);
+        let (tx, body) = f.delivery();
+        let (probe, held, drops) = probe(&f);
+        let completion = pending.spawn_settling(tx, move |_, settlement| {
+            assert_ne!(stage, 0, "synthetic settling factory failure");
+            async move {
+                let _resource = probe;
+                assert_ne!(stage, 1, "synthetic settling poll failure");
+                assert_eq!(
+                    settlement.finish(&Ok(usage())),
+                    Ok(Outcome::Settled { charged: 29 })
+                );
+                panic!("synthetic post-settlement failure");
+            }
+        });
+        assert_eq!(
+            bounded(completion).await.unwrap(),
+            Err(OwnerError::Panicked)
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(held.load(Ordering::SeqCst));
+        let (outcome, balance) = if stage == 2 {
+            (Outcome::Settled { charged: 29 }, 971)
+        } else {
+            (Outcome::Refunded, 1000)
+        };
+        f.outcome(1, outcome, balance);
+        f.leases_returned();
+        drop(body);
+        f.account_slots_returned(balance);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settling_observer_and_body_loss_while_held_never_abort_work() {
+    let f = Fixture::new();
+    let pending = f.pending(1);
+    let (tx, body) = f.delivery();
+    let (probe, held, drops) = probe(&f);
+    let (started_tx, started) = oneshot::channel();
+    let (finish_tx, finish) = oneshot::channel();
+    let (dropped_tx, dropped) = oneshot::channel();
+    let completion = pending.spawn_settling(tx, move |mut tx, settlement| async move {
+        let resource = probe;
+        started_tx.send(()).unwrap();
+        finish.await.unwrap();
+        assert_eq!(tx.try_send(b"tail"), Err(DeliveryError::Closed));
+        let outcome = settlement.finish(&Ok(usage()));
+        drop(resource);
+        dropped_tx.send(()).unwrap();
+        outcome
+    });
+    bounded(started).await.unwrap();
+    drop((completion, body));
+    f.outcome(1, Outcome::InFlight, 948);
+    assert_eq!(f.generations.available_permits(), 3);
+    assert_eq!(f.resources.available_permits(), 3);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    finish_tx.send(()).unwrap();
+    // Wait for the probe before reserving permits for this barrier: a queued
+    // acquire_many itself reduces available_permits and would distort the probe.
+    bounded(dropped).await.unwrap();
+    let all = bounded(f.generations.clone().acquire_many_owned(4))
+        .await
+        .unwrap();
+    f.outcome(1, Outcome::Settled { charged: 29 }, 971);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(held.load(Ordering::SeqCst));
+    drop(all);
+    f.leases_returned();
+    f.account_slots_returned(971);
+}
+
 #[test]
 fn panic_payload_is_not_exported_with_the_service_panic_hook() {
     const CHILD: &str = "POSSUMS_OWNER_PANIC_CHILD";
