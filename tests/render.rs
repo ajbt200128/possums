@@ -199,6 +199,27 @@ fn exact_body_decoded_and_field_boundaries() {
         let body = json_form(&json);
         assert_eq!(decode_continuation(&body).is_ok(), length <= max);
     }
+    // Worst-case fixed fields plus the promised minimum next prompt exactly
+    // fill the predicted form ceiling, including browser LF -> CRLF expansion.
+    let maximum = serde_json::to_vec(&[
+        message("user", "x"),
+        message("assistant", &"a".repeat(max - shell.len())),
+    ])
+    .unwrap();
+    let worst = String::from_utf8(json_form(&maximum))
+        .unwrap()
+        .replace(
+            "model=m&",
+            &format!("model={}&", "%25".repeat(render::MAX_MODEL_FIELD_BYTES)),
+        )
+        .replace(
+            "prompt=next",
+            &format!("prompt={}", "%0D%0A".repeat(render::MIN_NEXT_PROMPT_BYTES)),
+        );
+    assert_eq!(worst.len(), render::continuation_wire_bytes(max).unwrap());
+    assert_eq!(worst.len(), BODY_LIMIT);
+    assert!(decode_continuation(worst.as_bytes()).is_ok());
+    assert!(decode_continuation(format!("{worst}x").as_bytes()).is_err());
     let mut body = json_form(&shell);
     body.extend(std::iter::repeat_n(b'a', BODY_LIMIT - body.len()));
     assert_eq!(body.len(), BODY_LIMIT);
@@ -410,6 +431,70 @@ fn production_parser_visible_before_done_but_success_only_after_eof() {
         let result = renderer.complete(terminal, || Some(TOKEN.into()), capture(&mut html));
         assert_eq!(result == RenderOutcome::Ready, ending == 0);
         assert_eq!(html.contains("history_manifest"), ending == 0);
+    }
+}
+
+#[test]
+fn completion_uses_conditional_original_conversation_issuance_without_settlement() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use possums::{
+        accounting::Accounting,
+        auth::Auth,
+        catalog::{Model, Quote},
+    };
+    use sha2::{Digest, Sha256};
+    for invalidation in 0..3 {
+        let credential = possums::auth::random_token();
+        let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
+        let auth = Auth::from_json(&format!(
+            r#"[{{"id":"a","credential_sha256":"{hash}","demo_microunits":1000}}]"#
+        ))
+        .unwrap();
+        let (id, session) = auth
+            .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+            .unwrap();
+        let ledger = Accounting::new(auth.account_budgets());
+        let token = auth.issue_submission(&id).unwrap();
+        let admission = auth
+            .admit_submission(
+                &ledger,
+                &id,
+                &session.csrf,
+                &token,
+                Quote {
+                    model: Model {
+                        id: "m".into(),
+                        context_tokens: 20,
+                        max_output_tokens: 10,
+                        input_microunits_per_million_tokens: 1_000_000,
+                        output_microunits_per_million_tokens: 1_000_000,
+                    },
+                    input_tokens: 10,
+                    reserved_microunits: 26,
+                },
+            )
+            .unwrap();
+        let mut html = String::new();
+        let renderer =
+            IncrementalRenderer::open(&[], "x", &session.csrf, "m", capture(&mut html)).unwrap();
+        match invalidation {
+            1 => auth.new_chat(&id, &session.csrf).unwrap(),
+            2 => auth.logout(&id, &session.csrf).unwrap(),
+            _ => {}
+        }
+        let balance = ledger.available("a");
+        let outcome = renderer.complete(
+            Ok(usage()),
+            || {
+                auth.issue_submission_for(&id, admission.submission.conversation, Some("m"))
+                    .ok()
+            },
+            capture(&mut html),
+        );
+        assert_eq!(outcome == RenderOutcome::Ready, invalidation == 0);
+        assert_eq!(html.contains("history_manifest"), invalidation == 0);
+        // The caller must settle separately; rendering cannot charge or refund.
+        assert_eq!(ledger.available("a"), balance);
     }
 }
 
