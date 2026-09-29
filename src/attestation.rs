@@ -5,7 +5,7 @@ use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
 const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
-const MAX_JSON_NODES: usize = 65_536;
+const MAX_JSON_NODES: usize = 4_096;
 const MAX_JSON_DEPTH: usize = 64;
 const MAX_EVIDENCE_AGE_SECONDS: u64 = 300;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(45);

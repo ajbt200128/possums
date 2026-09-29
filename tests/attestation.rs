@@ -38,7 +38,7 @@ impl Drop for TempFile {
 #[test]
 fn file_evidence_rejects_wide_and_deep_quotes_before_deserialization() {
     // A small envelope with many tiny Values would otherwise allocate far more than its byte size.
-    let wide = TempFile::new(envelope(&format!("[{}]", "[],".repeat(65_536) + "[]")).as_bytes());
+    let wide = TempFile::new(envelope(&format!("[{}]", "[],".repeat(4_096) + "[]")).as_bytes());
     assert!(matches!(
         load_evidence(&wide.0),
         Err(EvidenceError::Invalid)
@@ -48,6 +48,20 @@ fn file_evidence_rejects_wide_and_deep_quotes_before_deserialization() {
         TempFile::new(envelope(&format!("{}0{}", "[".repeat(65), "]".repeat(65))).as_bytes());
     assert!(matches!(
         load_evidence(&deep.0),
+        Err(EvidenceError::Invalid)
+    ));
+}
+
+#[test]
+fn file_evidence_enforces_4096_lexical_node_boundary() {
+    // Envelope: 1 root object + 5 keys + 4 scalar metadata values + 1 quote array.
+    // Each array element adds one lexical node.
+    let accepted = TempFile::new(envelope(&format!("[{}]", vec!["0"; 4_085].join(","))).as_bytes());
+    assert!(load_evidence(&accepted.0).is_ok());
+
+    let rejected = TempFile::new(envelope(&format!("[{}]", vec!["0"; 4_086].join(","))).as_bytes());
+    assert!(matches!(
+        load_evidence(&rejected.0),
         Err(EvidenceError::Invalid)
     ));
 }
@@ -112,7 +126,7 @@ mod helper {
     async fn helper_rejects_wide_quote() {
         let file = script(&format!(
             "printf '%s' '{}'",
-            envelope(&format!("[{}]", "[],".repeat(65_536) + "[]"))
+            envelope(&format!("[{}]", "[],".repeat(4_096) + "[]"))
         ));
         assert!(matches!(verify(&file).await, Err(EvidenceError::Invalid)));
     }

@@ -81,16 +81,11 @@ mod allocation_probe {
 static ALLOCATOR: allocation_probe::Allocator = allocation_probe::Allocator;
 
 #[test]
-fn accepted_gateway_evidence_exceeds_proposed_control_lane() {
-    use possums::attestation::{load_evidence, validate_evidence};
+fn oversized_nested_gateway_evidence_is_rejected() {
+    use possums::attestation::load_evidence;
 
-    // 520 chains of 62 singleton objects: legal depth 64 including the root
-    // object and quote array; 65,011 lexical nodes, below the 65,536 guard.
-    // BTreeMap storage, not serialized length, dominates this accepted input.
-    // load_evidence + validate_evidence exercise the same structural scan,
-    // deserialization and metadata checks as the production helper-output path.
-    // This blocks the proposed 16-MiB control lane before response allocation;
-    // it is not a whole-process memory measurement or a safe partition proof.
+    // Previously accepted: 520 chains of 62 singleton objects, depth 64 and
+    // 65,011 lexical nodes. Reject before constructing BTreeMap-heavy Values.
     let chain = format!("{}0{}", "{\"a\":".repeat(62), "}".repeat(62));
     let quote = vec![chain; 520].join(",");
     let document = format!(
@@ -105,18 +100,80 @@ fn accepted_gateway_evidence_exceeds_proposed_control_lane() {
         std::process::id()
     ));
     std::fs::write(&path, &document).unwrap();
+    assert!(matches!(
+        load_evidence(&path),
+        Err(possums::attestation::EvidenceError::Invalid)
+    ));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn near_cap_nested_gateway_evidence_stays_below_control_lane_for_tested_shape() {
+    use possums::attestation::{load_evidence, validate_evidence};
+
+    // Depth 64 including root object and quote array. Each chain contributes
+    // 125 lexical nodes; each singleton object contributes 3. With 11 envelope
+    // nodes, 32 chains and 28 singletons total 4,095 (cap: 4,096).
+    let chain = format!("{}0{}", "{\"a\":".repeat(62), "}".repeat(62));
+    let quote = std::iter::repeat_n(chain, 32)
+        .chain(std::iter::repeat_n("{\"a\":0}".to_owned(), 28))
+        .collect::<Vec<_>>()
+        .join(",");
+    let document = format!(
+        r#"{{"quote":[{quote}],"issued_at_unix":1,"release_digest":"{}","endpoint_key_sha256":"{}","freshness_expires_at_unix":2}}"#,
+        "a".repeat(64),
+        "b".repeat(64),
+    );
+    let path = std::env::temp_dir().join(format!(
+        "possums-control-envelope-near-cap-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, &document).unwrap();
+    // Fixture construction is outside this measurement; add raw document bytes
+    // explicitly. Probe counts requested allocations on this thread, not RSS,
+    // allocator overhead, transport, helper or response serialization.
     let (evidence, retained, peak) =
         allocation_probe::measure(|| validate_evidence(load_evidence(&path).unwrap(), 1).unwrap());
     std::fs::remove_file(path).unwrap();
-    assert_eq!(evidence.quote.as_array().unwrap().len(), 520);
+    assert_eq!(evidence.quote.as_array().unwrap().len(), 60);
     println!(
-        "accepted evidence: wire={} retained={retained} peak={peak} bytes",
+        "near-cap evidence: wire={} retained={retained} peak={peak} bytes",
         document.len()
     );
-    assert!(retained > 16 * 1024 * 1024, "retained {retained} bytes");
-    assert!(peak >= retained);
-    // This is an accepted Rust evidence-boundary counterexample, not a claim
-    // that synthetic evidence passes cryptographic appraisal by the helper.
+    assert!(retained <= peak);
+    assert!(document.len() + peak < 16 * 1024 * 1024);
+    // This synthetic Rust parsing/schema fixture is not cryptographically
+    // appraised; the measured shape is not a universal allocation bound.
+}
+
+#[test]
+fn near_byte_cap_scalar_gateway_evidence_stays_below_control_lane_for_tested_shape() {
+    use possums::attestation::{load_evidence, validate_evidence};
+
+    let envelope = |quote: &str| {
+        format!(
+            r#"{{"quote":{quote},"issued_at_unix":1,"release_digest":"{}","endpoint_key_sha256":"{}","freshness_expires_at_unix":2}}"#,
+            "a".repeat(64),
+            "b".repeat(64),
+        )
+    };
+    let empty = envelope("\"\"");
+    let document = envelope(&format!("\"{}\"", "x".repeat(1024 * 1024 - empty.len())));
+    assert_eq!(document.len(), 1024 * 1024);
+    let path = std::env::temp_dir().join(format!(
+        "possums-control-envelope-byte-cap-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, &document).unwrap();
+    let (_, retained, peak) =
+        allocation_probe::measure(|| validate_evidence(load_evidence(&path).unwrap(), 1).unwrap());
+    std::fs::remove_file(path).unwrap();
+    println!(
+        "byte-cap evidence: wire={} retained={retained} peak={peak} bytes",
+        document.len()
+    );
+    assert!(retained <= peak);
+    assert!(document.len() + peak < 16 * 1024 * 1024);
 }
 
 struct UnusedInference;
