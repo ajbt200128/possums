@@ -128,16 +128,56 @@ impl Inference for PanicInference {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HoldPoint {
+    Catalog,
+    Tokenization,
+}
+
+#[derive(Default)]
+struct Gate {
+    entered: Notify,
+    release: Notify,
+}
+
 struct FakeInference {
+    hold: std::sync::Mutex<Option<(HoldPoint, Arc<Gate>)>>,
     tokenizations: AtomicUsize,
     generations: AtomicUsize,
     catalog_failures: AtomicUsize,
     catalog_override: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
+impl FakeInference {
+    fn hold(&self, point: HoldPoint) -> Arc<Gate> {
+        let gate = Arc::new(Gate::default());
+        *self.hold.lock().unwrap() = Some((point, gate.clone()));
+        gate
+    }
+
+    async fn pause_at(&self, point: HoldPoint) {
+        let gate = {
+            let mut hold = self.hold.lock().unwrap();
+            if hold
+                .as_ref()
+                .is_some_and(|(expected, _)| *expected == point)
+            {
+                hold.take().map(|(_, gate)| gate)
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+}
+
 #[async_trait]
 impl Inference for FakeInference {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
+        self.pause_at(HoldPoint::Catalog).await;
         if self
             .catalog_failures
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -157,6 +197,7 @@ impl Inference for FakeInference {
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
         self.tokenizations.fetch_add(1, Ordering::SeqCst);
+        self.pause_at(HoldPoint::Tokenization).await;
         Ok(1)
     }
 
@@ -188,6 +229,7 @@ fn fixture_with_budget(
     let (session_id, session) = auth.authenticate(&credential, &challenge).unwrap();
     let submission_token = auth.issue_submission(&session_id).unwrap();
     let inference = Arc::new(FakeInference {
+        hold: std::sync::Mutex::new(None),
         tokenizations: AtomicUsize::new(0),
         generations: AtomicUsize::new(0),
         catalog_failures: AtomicUsize::new(0),
@@ -644,6 +686,402 @@ async fn new_chat_requires_csrf_and_redirects_to_empty_history_in_same_session()
     assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
 }
 
+fn valid_evidence(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("possums-{label}-{}", std::process::id()));
+    write_evidence(
+        &path,
+        serde_json::json!({"verified": true}),
+        now(),
+        EXPECTED_RELEASE,
+        EXPECTED_KEY,
+    );
+    path
+}
+
+fn two_model_catalog(inference: &FakeInference) {
+    let mut catalog: serde_json::Value = serde_json::from_slice(&catalog_bytes()).unwrap();
+    let mut other = catalog["data"][0].clone();
+    other["id"] = serde_json::json!("n");
+    other["pricing"]["inputTokenPricePer1M"] = serde_json::json!(0.1);
+    other["pricing"]["outputTokenPricePer1M"] = serde_json::json!(0.1);
+    catalog["data"].as_array_mut().unwrap().push(other);
+    *inference.catalog_override.lock().unwrap() = Some(serde_json::to_vec(&catalog).unwrap());
+}
+
+fn chat_request(cookie: &str, csrf: &str, token: &str) -> Request<Body> {
+    post_form(
+        "/chat",
+        cookie,
+        format!("csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=hello"),
+    )
+}
+
+#[tokio::test]
+async fn reset_and_logout_before_admission_prevent_all_prompt_transmission() {
+    let path = valid_evidence("reset-preflight");
+    for control in ["/chat/new", "/logout"] {
+        let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
+        let gate = inference.hold(HoldPoint::Catalog);
+        let request =
+            tokio::spawn(router(state.clone()).oneshot(chat_request(&cookie, &csrf, &token)));
+        gate.entered.notified().await;
+        let reset = router(state.clone())
+            .oneshot(post_form(control, &cookie, format!("csrf={csrf}")))
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::SEE_OTHER);
+        drop(reset);
+        gate.release.notify_one();
+        assert_eq!(
+            request.await.unwrap().unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(state.accounting.available("a"), Some(100));
+        assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
+        assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn home_snapshot_cannot_issue_for_a_conversation_reset_during_catalog_fetch() {
+    for control in ["/chat/new", "/logout"] {
+        let (state, cookie, csrf, _, inference) = fixture("/unused/evidence");
+        let gate = inference.hold(HoldPoint::Catalog);
+        let home = tokio::spawn(
+            router(state.clone()).oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::COOKIE, cookie.split(';').next().unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        );
+        gate.entered.notified().await;
+        let reset = router(state.clone())
+            .oneshot(post_form(control, &cookie, format!("csrf={csrf}")))
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::SEE_OTHER);
+        drop(reset);
+        gate.release.notify_one();
+        let response = home.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&body).contains("name=token"));
+    }
+}
+
+#[tokio::test]
+async fn accepted_work_continues_after_reset_or_logout_but_cannot_issue_stale_completion() {
+    let path = valid_evidence("reset-accepted");
+    for control in ["/chat/new", "/logout"] {
+        let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
+        let gate = inference.hold(HoldPoint::Tokenization);
+        let request =
+            tokio::spawn(router(state.clone()).oneshot(chat_request(&cookie, &csrf, &token)));
+        gate.entered.notified().await;
+        assert_eq!(state.accounting.available("a"), Some(48));
+        let reset = router(state.clone())
+            .oneshot(post_form(control, &cookie, format!("csrf={csrf}")))
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::SEE_OTHER);
+        drop(reset);
+        assert_eq!(state.accounting.available("a"), Some(48));
+        gate.release.notify_one();
+        let response = request.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&body).contains("name=token"));
+        assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 1);
+        assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
+        // Packet 3 intentionally preserves the buffered delivery policy: failed
+        // continuation delivery refunds. Packet 6 replaces this with usage settlement.
+        assert_eq!(state.accounting.available("a"), Some(100));
+        if control == "/chat/new" {
+            assert_eq!(
+                state
+                    .auth
+                    .session(session_id(&cookie))
+                    .unwrap()
+                    .selected_model,
+                None
+            );
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn reset_after_continuation_insertion_invalidates_token_without_cancelling_delivery() {
+    let path = valid_evidence("reset-delivery");
+    for control in ["/chat/new", "/logout"] {
+        let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
+        let response = router(state.clone())
+            .oneshot(chat_request(&cookie, &csrf, &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.accounting.available("a"), Some(48));
+        let reset = router(state.clone())
+            .oneshot(post_form(control, &cookie, format!("csrf={csrf}")))
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::SEE_OTHER);
+        drop(reset);
+        assert_eq!(state.accounting.available("a"), Some(48));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(state.accounting.available("a"), Some(97));
+        let html = String::from_utf8_lossy(&body);
+        let continuation = html
+            .split("name=token value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let stale = router(state.clone())
+            .oneshot(chat_request(&cookie, &csrf, continuation))
+            .await
+            .unwrap();
+        assert_eq!(
+            stale.status(),
+            if control == "/logout" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+        assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
+        assert_eq!(state.accounting.available("a"), Some(97));
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn changed_prompt_and_history_duplicates_never_regenerate_or_reserve_again() {
+    let path = valid_evidence("changed-duplicate");
+    for deliver in [false, true] {
+        let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
+        let gate = inference.hold(HoldPoint::Tokenization);
+        let first =
+            tokio::spawn(router(state.clone()).oneshot(chat_request(&cookie, &csrf, &token)));
+        gate.entered.notified().await;
+        let changed_history =
+            "%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22changed-history%22%7D%5D";
+        for _ in 0..6 {
+            let response = router(state.clone()).oneshot(post_form("/chat", &cookie, format!("csrf={csrf}&token={token}&model=m&history={changed_history}&prompt=different"))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(String::from_utf8_lossy(&body).contains("already in progress"));
+            assert_eq!(state.accounting.available("a"), Some(48));
+        }
+        gate.release.notify_one();
+        let response = first.await.unwrap().unwrap();
+        if deliver {
+            response.into_body().collect().await.unwrap();
+        } else {
+            drop(response);
+        }
+        let expected = if deliver { 97 } else { 100 };
+        for _ in 0..6 {
+            let response = router(state.clone()).oneshot(post_form("/chat", &cookie, format!("csrf={csrf}&token={token}&model=m&history={changed_history}&prompt=changed-again"))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            response.into_body().collect().await.unwrap();
+            assert_eq!(state.accounting.available("a"), Some(expected));
+        }
+        assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 1);
+        assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn same_session_model_switch_needs_new_chat_and_old_tabs_stay_invalid() {
+    let path = valid_evidence("model-switch");
+    let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
+    two_model_catalog(&inference);
+    for (body, expected) in [
+        (
+            format!("token={token}&model=m&history=%5B%5D&prompt=hello"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            format!("csrf=forged&token={token}&model=m&history=%5B%5D&prompt=hello"),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = router(state.clone())
+            .oneshot(post_form("/chat", &cookie, body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .auth
+                .session(session_id(&cookie))
+                .unwrap()
+                .selected_model,
+            None
+        );
+    }
+    let response = router(state.clone())
+        .oneshot(chat_request(&cookie, &csrf, &token))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&body);
+    let stale = html
+        .split("name=token value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let switch = format!("csrf={csrf}&token={stale}&model=n&history=%5B%5D&prompt=switch");
+    let response = router(state.clone())
+        .oneshot(post_form("/chat", &cookie, switch.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    drop(response);
+    let response = router(state.clone())
+        .oneshot(post_form("/chat/new", &cookie, format!("csrf={csrf}")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    drop(response);
+    let response = router(state.clone())
+        .oneshot(post_form("/chat", &cookie, switch))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    drop(response);
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("name=history value=\"[]\""));
+    let fresh = html
+        .split("name=token value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let response = router(state.clone())
+        .oneshot(post_form(
+            "/chat",
+            &cookie,
+            format!("csrf={csrf}&token={fresh}&model=n&history=%5B%5D&prompt=switched"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    assert_eq!(
+        state
+            .auth
+            .session(session_id(&cookie))
+            .unwrap()
+            .selected_model
+            .as_deref(),
+        Some("n")
+    );
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 2);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_prompt() {
+    let path = valid_evidence("reset-account-capacity");
+    let (state, cookie, csrf, _, inference) = fixture_with_budget(path.to_str().unwrap(), 1000);
+    two_model_catalog(&inference);
+    let mut pending = Vec::new();
+    for _ in 0..3 {
+        let token = state.auth.issue_submission(session_id(&cookie)).unwrap();
+        let gate = inference.hold(HoldPoint::Tokenization);
+        let task =
+            tokio::spawn(router(state.clone()).oneshot(chat_request(&cookie, &csrf, &token)));
+        gate.entered.notified().await;
+        pending.push((gate, task));
+    }
+    assert_eq!(state.accounting.available("a"), Some(844));
+    let response = router(state.clone())
+        .oneshot(post_form("/chat/new", &cookie, format!("csrf={csrf}")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    drop(response);
+    assert_eq!(state.accounting.available("a"), Some(844));
+    let token = state.auth.issue_submission(session_id(&cookie)).unwrap();
+    // Repeated rejection cannot leak the fourth generation permit.
+    for _ in 0..6 {
+        let response = router(state.clone())
+            .oneshot(chat_request(&cookie, &csrf, &token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(
+            state
+                .auth
+                .session(session_id(&cookie))
+                .unwrap()
+                .selected_model,
+            None
+        );
+        assert_eq!(state.accounting.available("a"), Some(844));
+        assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 3);
+    }
+    let (gate, task) = pending.pop().unwrap();
+    gate.release.notify_one();
+    let response = task.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(response);
+    assert_eq!(state.accounting.available("a"), Some(896));
+    let response = router(state.clone())
+        .oneshot(post_form(
+            "/chat",
+            &cookie,
+            format!("csrf={csrf}&token={token}&model=n&history=%5B%5D&prompt=new-conversation"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    for (gate, task) in pending {
+        gate.release.notify_one();
+        assert_eq!(
+            task.await.unwrap().unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+    assert_eq!(state.accounting.available("a"), Some(999));
+    assert_eq!(
+        state
+            .auth
+            .session(session_id(&cookie))
+            .unwrap()
+            .selected_model
+            .as_deref(),
+        Some("n")
+    );
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 4);
+    std::fs::remove_file(path).unwrap();
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -912,6 +1350,38 @@ async fn failed_reservation_stops_before_prompt_tokenization() {
     assert_eq!(state.accounting.available("a"), Some(51));
     assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
     assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        state
+            .auth
+            .session(session_id(&cookie))
+            .unwrap()
+            .selected_model,
+        None
+    );
+    drop(response);
+    // An explicit user-selected cheaper model can use the same uncommitted
+    // token. The gateway did not substitute or reduce the original request.
+    two_model_catalog(&inference);
+    let response = router(state.clone())
+        .oneshot(post_form(
+            "/chat",
+            &cookie,
+            format!("csrf={csrf}&token={token}&model=n&history=%5B%5D&prompt=retry"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    assert_eq!(
+        state
+            .auth
+            .session(session_id(&cookie))
+            .unwrap()
+            .selected_model
+            .as_deref(),
+        Some("n")
+    );
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -960,6 +1430,27 @@ async fn invalid_catalog_and_unrepresentable_quote_stop_before_prompt_calls() {
         assert_eq!(state.accounting.available("a"), Some(100));
         assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
         assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .auth
+                .session(session_id(&cookie))
+                .unwrap()
+                .selected_model,
+            None
+        );
+        drop(response);
+        two_model_catalog(&inference);
+        let response = router(state.clone())
+            .oneshot(post_form(
+                "/chat",
+                &cookie,
+                format!("csrf={csrf}&token={token}&model=n&history=%5B%5D&prompt=retry"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await.unwrap();
+        assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
     }
     std::fs::remove_file(path).unwrap();
 }

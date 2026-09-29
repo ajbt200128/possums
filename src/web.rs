@@ -683,3 +683,113 @@ fn unavailable() -> Response {
 fn internal_error() -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        attestation::{EvidenceError, GatewayEvidence},
+        catalog::Model,
+        inference::{Generation, Inference, InferenceError},
+    };
+    use async_trait::async_trait;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    #[derive(Default)]
+    struct PermitProbe {
+        prompts: AtomicUsize,
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl Inference for PermitProbe {
+        async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
+            Ok(br#"{"object":"list","data":[{"id":"m","type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":1,"outputTokenPricePer1M":1,"requestPrice":0}}]}"#.to_vec())
+        }
+        async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(1)
+        }
+        async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
+            Ok(Generation {
+                content: "answer".into(),
+                input_tokens: 1,
+                output_tokens: 1,
+            })
+        }
+        fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
+            Ok(serde_json::json!({"verified":true}))
+        }
+    }
+
+    #[async_trait]
+    impl EvidenceVerifier for PermitProbe {
+        async fn verify(&self, _: &str, now: u64) -> Result<GatewayEvidence, EvidenceError> {
+            Ok(GatewayEvidence {
+                quote: serde_json::json!({"test":true}),
+                issued_at_unix: now,
+                release_digest: "test".into(),
+                endpoint_key_sha256: "test".into(),
+                freshness_expires_at_unix: now + 60,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn four_global_permits_gate_reservation_and_are_held_during_tokenization() {
+        let credential = crate::auth::random_token();
+        let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
+        let auth = Auth::from_json(&format!(
+            r#"[{{"id":"a","credential_sha256":"{hash}","demo_microunits":100}}]"#
+        ))
+        .unwrap();
+        let (id, session) = auth
+            .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+            .unwrap();
+        let token = auth.issue_submission(&id).unwrap();
+        let probe = Arc::new(PermitProbe::default());
+        let state = AppState::new(auth, probe.clone(), "unused", probe.clone());
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header(header::COOKIE, session_cookie(&id))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf={}&token={token}&model=m&history=%5B%5D&prompt=hello",
+                    session.csrf
+                )))
+                .unwrap()
+        };
+        assert_eq!(state.generation_slots.available_permits(), 4);
+        let all = state
+            .generation_slots
+            .clone()
+            .try_acquire_many_owned(4)
+            .unwrap();
+        let response = router(state.clone()).oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(probe.prompts.load(Ordering::SeqCst), 0);
+        assert_eq!(state.accounting.available("a"), Some(100));
+        assert_eq!(state.auth.session(&id).unwrap().selected_model, None);
+        drop(response);
+        drop(all);
+        let task = tokio::spawn(router(state.clone()).oneshot(request()));
+        probe.entered.notified().await;
+        assert_eq!(state.generation_slots.available_permits(), 3);
+        assert_eq!(state.accounting.available("a"), Some(48));
+        probe.release.notify_one();
+        let response = task.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response); // Buffered compatibility refund; not a streaming worker.
+        assert_eq!(state.generation_slots.available_permits(), 4);
+        assert_eq!(state.accounting.available("a"), Some(100));
+    }
+}
