@@ -14,6 +14,7 @@ mod stream_support;
 
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 1024 * 1024;
+const MAX_TOKENIZER_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Message {
@@ -620,6 +621,22 @@ mod stream_probe_tests {
             Err(ProbeFailure::FramingOrLimit)
         );
     }
+
+    #[test]
+    fn tokenizer_request_is_bounded_before_transport() {
+        let messages = [Message {
+            role: "user".into(),
+            content: "x".repeat(MAX_TOKENIZER_REQUEST_BYTES),
+        }];
+        assert!(crate::bounded_json::to_vec(
+            &TokenCountRequest {
+                model: "fixture",
+                messages: &messages,
+            },
+            MAX_TOKENIZER_REQUEST_BYTES,
+        )
+        .is_err());
+    }
 }
 
 #[derive(Serialize)]
@@ -672,12 +689,18 @@ impl Inference for TinfoilInference {
     }
 
     async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError> {
+        let bytes = crate::bounded_json::to_vec(
+            &TokenCountRequest { model, messages },
+            MAX_TOKENIZER_REQUEST_BYTES,
+        )
+        .map_err(|_| InferenceError::InvalidResponse)?;
         let request = self
             .authenticate(
                 self.http()?
                     .post(format!("{}/v1/chat/completions/input_tokens", self.origin)),
             )
-            .json(&TokenCountRequest { model, messages });
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(reqwest::Body::wrap(reqwest::Body::from(bytes)));
         let bytes = self.bounded_response(request, 64 * 1024).await?;
         let count: TokenCount =
             serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)?;
