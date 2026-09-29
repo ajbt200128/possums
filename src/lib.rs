@@ -11,6 +11,9 @@ pub mod render;
 // Staged internal primitive; route/worker integration is a separate packet.
 #[allow(dead_code)]
 mod stream_owner;
+// Internal accepted-request composition; no production route cutover.
+#[allow(dead_code)]
+mod streaming_chat;
 pub mod telemetry;
 pub mod web;
 
