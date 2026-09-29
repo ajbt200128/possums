@@ -135,6 +135,41 @@ async fn bounded<T>(future: impl Future<Output = T>) -> T {
         .unwrap()
 }
 
+#[tokio::test]
+async fn settling_handoff_accepts_owned_startup_before_any_blocking_write() {
+    let f = Fixture::new();
+    let pending = f.pending(1);
+    let (startup, mut body) = delivery(
+        f.lanes.clone().try_acquire_owned().unwrap(),
+        Limits {
+            frames: 1,
+            payload_bytes: 8,
+            chunk_bytes: 8,
+        },
+        Duration::from_secs(1),
+    );
+    let (finish_tx, finish) = oneshot::channel();
+    let completion = pending.spawn_settling(startup, move |mut startup, settlement| async move {
+        let _delivery = tokio::task::spawn_blocking(move || {
+            startup.send_blocking(b"startup").unwrap();
+            startup.into_streaming()
+        })
+        .await
+        .unwrap();
+        finish.await.unwrap();
+        settlement.finish(&Ok(usage()))
+    });
+    let frame = bounded(body.frame()).await.unwrap().unwrap();
+    assert_eq!(frame.into_data().unwrap(), "startup");
+    f.outcome(1, Outcome::InFlight, 948);
+    finish_tx.send(()).unwrap();
+    assert_eq!(
+        bounded(completion).await.unwrap(),
+        Ok(Outcome::Settled { charged: 29 })
+    );
+    f.leases_returned();
+}
+
 // Staged composition only: the buffered /chat handler does not spawn this owner.
 #[tokio::test]
 async fn shared_heavy_admission_returns_only_after_worker_body_and_slices_release() {

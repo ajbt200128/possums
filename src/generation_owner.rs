@@ -172,13 +172,16 @@ impl ReservedGeneration {
     /// No lease is transferred to the capability or observer. Dropping delivery
     /// or observation cannot abort work. Dropping an unused capability refunds;
     /// after a terminal attempt, panic/cancel cannot undo it or attempt a refund.
-    pub(crate) fn spawn_settling<F, Fut>(
+    /// The owned delivery input may still be in its bounded startup phase; work
+    /// (including startup) begins only after handoff to the detached worker.
+    pub(crate) fn spawn_settling<T, F, Fut>(
         self,
-        delivery: DeliveryTx,
+        delivery: T,
         work: F,
     ) -> oneshot::Receiver<Completion>
     where
-        F: FnOnce(DeliveryTx, Settlement) -> Fut + Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(T, Settlement) -> Fut + Send + 'static,
         Fut: Future<Output = SettledReceipt> + Send + 'static,
     {
         supervise(self.spawn_settling_worker(delivery, work))
@@ -195,9 +198,10 @@ impl ReservedGeneration {
         })
     }
 
-    fn spawn_settling_worker<F, Fut>(self, delivery: DeliveryTx, work: F) -> JoinHandle<Completion>
+    fn spawn_settling_worker<T, F, Fut>(self, delivery: T, work: F) -> JoinHandle<Completion>
     where
-        F: FnOnce(DeliveryTx, Settlement) -> Fut + Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(T, Settlement) -> Fut + Send + 'static,
         Fut: Future<Output = SettledReceipt> + Send + 'static,
     {
         let Self {
