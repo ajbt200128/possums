@@ -2,13 +2,17 @@
 //!
 //! `ProtocolParser` authenticates nothing. Only the origin-bound adapter may
 //! treat its terminal counts as authenticated. No answer or event list is kept.
+use super::{InferenceError, Message};
+use crate::catalog::Model;
+use rand::RngCore;
 use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
     Deserialize,
 };
 use serde_json::Value;
-use std::{collections::BTreeSet, fmt};
+use std::{collections::BTreeSet, fmt, time::Duration};
 use thiserror::Error;
+use tokio::time::Instant;
 
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
@@ -16,6 +20,82 @@ pub const MAX_JSON_DEPTH: usize = 16;
 pub const MAX_JSON_NODES: usize = 8192;
 pub const MAX_OPTIONAL_BYTES: usize = 16 * 1024;
 pub const MAX_TRAILER_BYTES: usize = 64 * 1024;
+/// Maximum accepted transport chunk, checked before retaining/copying into parser
+/// state. Reqwest/TLS internals have separate buffers, not measured by this limit.
+pub const MAX_TRANSPORT_BUFFER_BYTES: usize = 256 * 1024;
+pub const STREAM_DEADLINE: Duration = Duration::from_secs(300);
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub(super) fn request_body(
+    model: &Model,
+    messages: &[Message],
+) -> Result<reqwest::Body, InferenceError> {
+    let mut cache_scope = [0_u8; 32];
+    rand::rng().fill_bytes(&mut cache_scope);
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "model": model.id,
+        "messages": messages,
+        "max_tokens": model.max_output_tokens,
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "n": 1,
+        "user_cache_secret": base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD, cache_scope
+        )
+    }))
+    .map_err(|_| InferenceError::InvalidResponse)?;
+    // An ordinary JSON/bytes body is cloneable: reqwest could replay it on a
+    // same-origin 307/308 or retry. Wrapping as a streaming body disables cloning.
+    Ok(reqwest::Body::wrap(reqwest::Body::from(bytes)))
+}
+
+// Private: arbitrary unauthenticated Responses must never become an inference
+// entry point. Unit tests alone may inject raw HTTP here; ProtocolParser itself
+// remains reusable but makes no authentication claim.
+pub(super) async fn consume_response(
+    mut response: reqwest::Response,
+    deadline: Instant,
+    idle_timeout: Duration,
+    mut on_delta: impl FnMut(&str),
+) -> Result<StreamUsage, InferenceError> {
+    if !response.status().is_success() {
+        return Err(InferenceError::Unavailable); // Do not read error bodies.
+    }
+    let sse = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(';')
+                .next()
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+        });
+    if !sse {
+        return Err(InferenceError::InvalidResponse);
+    }
+    let mut parser = ProtocolParser::default();
+    loop {
+        let next_deadline = deadline.min(Instant::now() + idle_timeout);
+        let chunk = tokio::time::timeout_at(next_deadline, response.chunk())
+            .await
+            .map_err(|_| InferenceError::Unavailable)?
+            .map_err(|_| InferenceError::Unavailable)?;
+        if Instant::now() >= next_deadline {
+            return Err(InferenceError::Unavailable);
+        }
+        match chunk {
+            Some(bytes) => {
+                if bytes.len() > MAX_TRANSPORT_BUFFER_BYTES {
+                    return Err(InferenceError::InvalidResponse);
+                }
+                parser
+                    .feed(&bytes, &mut on_delta)
+                    .map_err(|_| InferenceError::InvalidResponse)?;
+            }
+            None => return parser.eof().map_err(|_| InferenceError::InvalidResponse),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamUsage {
@@ -425,6 +505,249 @@ impl<'de> Visitor<'de> for JsonGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::stream_support::{choice, event, raw_response, successful, usage};
+    use http_body_util::BodyExt;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn model() -> Model {
+        Model {
+            id: "fixture".into(),
+            context_tokens: 100,
+            max_output_tokens: 99,
+            input_microunits_per_million_tokens: 1,
+            output_microunits_per_million_tokens: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_request_has_full_allowance_usage_single_choice_and_fresh_cache_scope() {
+        let messages = [Message {
+            role: "user".into(),
+            content: "private request".into(),
+        }];
+        let mut scopes = Vec::new();
+        for _ in 0..2 {
+            let body = request_body(&model(), &messages)
+                .unwrap()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["stream"], true);
+            assert_eq!(value["stream_options"]["include_usage"], true);
+            assert_eq!(value["n"], 1);
+            assert_eq!(value["max_tokens"], 99);
+            assert_eq!(value["messages"][0]["content"], "private request");
+            scopes.push(value["user_cache_secret"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(scopes[0].len(), 43);
+        assert_ne!(scopes[0], scopes[1]);
+    }
+
+    #[tokio::test]
+    async fn noncloneable_prompt_body_is_not_replayed_on_redirect_or_service_error() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        for status in [307, 308, 503] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let url = format!("http://{address}/");
+            let location = url.clone();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let server = tokio::spawn(async move {
+                while let Ok(Ok((mut socket, _))) =
+                    tokio::time::timeout(Duration::from_millis(100), listener.accept()).await
+                {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 1024];
+                    loop {
+                        let size = socket.read(&mut buffer).await.unwrap();
+                        assert!(size > 0 && request.len() + size <= 4096);
+                        request.extend_from_slice(&buffer[..size]);
+                        if let Some(end) = request.windows(4).position(|b| b == b"\r\n\r\n") {
+                            let headers = std::str::from_utf8(&request[..end]).unwrap();
+                            let length: usize = headers
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length: "))
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            if request.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    socket.write_all(format!("HTTP/1.1 {status} Test\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                }
+            });
+            let body = request_body(&model(), &[]).unwrap();
+            let request = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .post(url)
+                .body(body)
+                .build()
+                .unwrap();
+            assert!(request.try_clone().is_none());
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .execute(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status);
+            server.await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_adapter_emits_before_done_and_withholds_success_until_eof() {
+        let (response, peer) = raw_response().await;
+        let seen = Arc::new(tokio::sync::Notify::new());
+        let notified = seen.clone();
+        let mut task = tokio::spawn(async move {
+            consume_response(
+                response,
+                Instant::now() + Duration::from_secs(2),
+                Duration::from_secs(1),
+                |delta| {
+                    assert_eq!(delta, "é🐾");
+                    notified.notify_one();
+                },
+            )
+            .await
+        });
+        let progress = event(choice(Some("é🐾"), None));
+        peer.send(&progress, 1).await;
+        seen.notified().await;
+        assert!(!task.is_finished());
+        peer.send(&successful(""), 2).await;
+        assert!(tokio::time::timeout(Duration::from_millis(25), &mut task)
+            .await
+            .is_err());
+        peer.eof().await;
+        assert_eq!(task.await.unwrap().unwrap().total_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn raw_adapter_refuses_faults_deadlines_and_invalid_final_usage_even_after_done() {
+        for fault in [
+            "transport",
+            "total_deadline",
+            "idle_deadline",
+            "protocol",
+            "usage",
+            "missing_done",
+        ] {
+            let (response, peer) = raw_response().await;
+            let deadline = if fault == "total_deadline" {
+                Duration::from_millis(40)
+            } else {
+                Duration::from_secs(2)
+            };
+            let idle = if fault == "idle_deadline" {
+                Duration::from_millis(40)
+            } else {
+                Duration::from_secs(1)
+            };
+            let task = tokio::spawn(async move {
+                consume_response(response, Instant::now() + deadline, idle, |_| {}).await
+            });
+            if ["usage", "missing_done"].contains(&fault) {
+                peer.send(&event(choice(None, Some("stop"))), 10).await;
+                peer.send(&event(usage(2, 3)), 10).await;
+                if fault == "usage" {
+                    peer.send(b"data: {\"choices\":[],\"usage\":{}}\n\n", 10)
+                        .await;
+                }
+                peer.eof().await;
+            } else {
+                peer.send(&successful("partial"), 16).await;
+                match fault {
+                    "transport" => peer.fault().await,
+                    "protocol" => {
+                        peer.send(b"data: {\"error\":\"secret\"}\n\n", 64).await;
+                        peer.eof().await;
+                    }
+                    _ => {} // Explicitly hold open past the ordinary transport deadline.
+                }
+            }
+            let result = task.await.unwrap();
+            assert!(result.is_err());
+            assert!(!format!("{result:?}").contains("secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn response_headers_and_transport_buffer_limits_fail_without_error_body_collection() {
+        use futures_util::stream;
+        for (status, mime) in [(500, "text/event-stream"), (200, "application/json")] {
+            let body = reqwest::Body::wrap_stream(stream::poll_fn(
+                |_| -> std::task::Poll<Option<Result<Vec<u8>, std::io::Error>>> {
+                    panic!("error body was read");
+                },
+            ));
+            let response = reqwest::Response::from(
+                http::Response::builder()
+                    .status(status)
+                    .header("content-type", mime)
+                    .body(body)
+                    .unwrap(),
+            );
+            assert!(consume_response(
+                response,
+                Instant::now() + Duration::from_secs(1),
+                STREAM_IDLE_TIMEOUT,
+                |_| panic!()
+            )
+            .await
+            .is_err());
+        }
+        for size in [MAX_TRANSPORT_BUFFER_BYTES, MAX_TRANSPORT_BUFFER_BYTES + 1] {
+            let mut bytes = successful("");
+            // Blank lines before DONE do not impose a cumulative answer limit.
+            bytes.splice(0..0, vec![b'\n'; size - bytes.len()]);
+            let body = reqwest::Body::wrap_stream(stream::iter([Ok::<_, std::io::Error>(bytes)]));
+            let response = reqwest::Response::from(
+                http::Response::builder()
+                    .header("content-type", "text/event-stream; charset=utf-8")
+                    .body(body)
+                    .unwrap(),
+            );
+            let result = consume_response(
+                response,
+                Instant::now() + Duration::from_secs(1),
+                STREAM_IDLE_TIMEOUT,
+                |_| {},
+            )
+            .await;
+            assert_eq!(result.is_ok(), size == MAX_TRANSPORT_BUFFER_BYTES);
+        }
+        // An already expired total deadline rejects even an immediately ready EOF.
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(reqwest::Body::from(successful("")))
+                .unwrap(),
+        );
+        assert!(consume_response(
+            response,
+            Instant::now() - Duration::from_secs(1),
+            STREAM_IDLE_TIMEOUT,
+            |_| panic!()
+        )
+        .await
+        .is_err());
+    }
 
     #[test]
     fn json_depth_and_node_boundaries_are_enforced_before_value_allocation() {

@@ -1,13 +1,14 @@
 use possums::inference::{collect_bounded_response, InferenceError};
 #[path = "support/stream.rs"]
-mod stream;
+mod stream_support;
+use possums::inference::stream;
 use possums::inference::stream::{
     ProtocolParser, StreamError, MAX_FRAME_BYTES, MAX_JSON_DEPTH, MAX_JSON_NODES, MAX_LINE_BYTES,
     MAX_OPTIONAL_BYTES, MAX_TRAILER_BYTES,
 };
 use serde_json::json;
 use std::time::Duration;
-use stream::{choice, event, parse, successful, usage};
+use stream_support::{choice, event, parse, successful, usage};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -70,6 +71,33 @@ async fn rejects_declared_and_chunked_responses_over_the_limit() {
         collect_bounded_response(chunked, 5, Instant::now() + Duration::from_secs(1)).await,
         Err(InferenceError::InvalidResponse)
     ));
+}
+
+#[tokio::test]
+async fn real_upstream_client_exposes_no_transport_before_verification_and_refuses_http() {
+    let client =
+        tinfoil::SecureClient::new("127.0.0.1", "invalid/test-fixture", "credential-canary");
+    assert!(!client.is_verified());
+    assert!(client.verification_document().is_none());
+    assert!(client.http_client().is_err());
+
+    // Exercise the real TLS transport's HTTPS gate, not the raw-peer injection.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = tinfoil::verifier::tls::create_pinned_client(&"00".repeat(32)).unwrap();
+    assert!(client
+        .post(format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        ))
+        .body("prompt-canary")
+        .send()
+        .await
+        .is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
 }
 
 #[test]

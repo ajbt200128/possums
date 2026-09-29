@@ -8,6 +8,9 @@ use tinfoil::Client;
 use tokio::time::Instant;
 
 pub mod stream;
+#[cfg(test)]
+#[path = "../tests/support/stream.rs"]
+mod stream_support;
 
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -71,6 +74,39 @@ impl TinfoilInference {
             origin: format!("https://{host}"),
             client,
         })
+    }
+
+    /// Additive streaming entry point; the buffered route/trait is not migrated.
+    ///
+    /// Call only after trust/catalog/reservation and context preflight. `model`
+    /// carries the full context-legal output allowance, not a credit-reduced cap.
+    /// Deltas are borrowed, bounded, and validated before this synchronous callback;
+    /// it must not block or collect unbounded output. The one returned Result is
+    /// terminal: successful usage is withheld until finish, DONE and transport EOF.
+    /// Delivery failure is not a reason to stop calling/consuming this future.
+    pub async fn generate_stream(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        on_delta: impl FnMut(&str) + Send,
+    ) -> Result<stream::StreamUsage, InferenceError> {
+        let http = self.http()?;
+        let url = format!("{}/v1/chat/completions", self.origin);
+        let deadline = Instant::now() + stream::STREAM_DEADLINE;
+        let request = self
+            .authenticate(http.post(&url))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .body(stream::request_body(model, messages)?);
+        // Use the origin-bound raw transport, not the SDK's retrying chat layer.
+        let response = tokio::time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| InferenceError::Unavailable)?
+            .map_err(|_| InferenceError::Unavailable)?;
+        if response.url().as_str() != url {
+            return Err(InferenceError::InvalidResponse);
+        }
+        stream::consume_response(response, deadline, stream::STREAM_IDLE_TIMEOUT, on_delta).await
     }
 
     /// Funded diagnostic only: fixed non-user input, no gateway accounting or route.
