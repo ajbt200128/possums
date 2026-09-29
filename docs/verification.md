@@ -42,6 +42,10 @@ Run on 2026-09-26, aarch64-darwin, with the pinned Rust 1.88.0 Nix shell:
 
 Crane is pinned to v0.21.0, compatible with the pinned nixpkgs 25.05; lock evaluation no longer emits the prior crane/nixpkgs compatibility warning. CI must report unavailable platform checks as blocked, never silently skip them.
 
+### Opt-in live Tinfoil test
+
+`tests/live_tinfoil.rs` uses the exact production attested client to fetch and validate the live catalog, authenticate tokenization, and make one fixed 64-token-maximum canary generation. It is ignored by default because it requires a funded credential and incurs upstream cost. Copy `.env.example` to the Git-ignored `.env`, set mode `0600`, populate `TINFOIL_API_KEY`, and run `nix develop -c cargo test --test live_tinfoil -- --ignored`. The test never prints the credential or sends user content.
+
 ## Independent correctness and security review
 
 The request path was traced in this order: expiring session/CSRF and issued submission-token validation; input parsing; verified gateway evidence; authenticated catalog; maximum-cost reservation; authenticated token count and context quote; bounded generation; prospective authenticated-usage charge; escaped/sanitized render; response-body completion and settlement. Tests prove gateway-evidence and reservation failures do not invoke prompt tokenization or generation, and malformed catalog/context failures do not invoke generation.
