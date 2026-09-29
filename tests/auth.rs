@@ -71,6 +71,16 @@ fn rejects_replayed_login_and_forged_cross_session_or_altered_model_tokens() {
             .unwrap_err(),
         AuthError::Invalid
     );
+    let next_token = auth.issue_submission(&first_id).unwrap();
+    assert_eq!(
+        auth.bind_submission(&first_id, &first.account_id, &next_token, "model-b")
+            .unwrap_err(),
+        AuthError::Invalid
+    );
+    assert_eq!(
+        auth.session(&first_id).unwrap().selected_model.as_deref(),
+        Some("model-a")
+    );
 
     let challenge = auth.issue_login_challenge().unwrap();
     let (second_id, second) = auth.authenticate(&credential, &challenge).unwrap();

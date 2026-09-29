@@ -48,6 +48,12 @@ try {
       throw new Error("hostile output rendered an active or remote element");
     }
     await page.getByText("safe response").waitFor();
+    if (!(await page.locator("select").isDisabled())) {
+      throw new Error("model selector remained enabled after the first turn");
+    }
+    if ((await page.locator('input[name="model"]').inputValue()) !== "fixture-model") {
+      throw new Error("locked model was not preserved");
+    }
 
     await page.locator('textarea[name="prompt"]').fill("second turn");
     await page.getByRole("button", { name: "Send" }).click();

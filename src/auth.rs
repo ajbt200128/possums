@@ -32,6 +32,7 @@ pub struct Session {
     pub account_id: String,
     pub csrf: String,
     pub recovery_credential: String,
+    pub selected_model: Option<String>,
     expires_at: Instant,
 }
 
@@ -152,6 +153,7 @@ impl Auth {
             account_id: account.id.clone(),
             csrf: random_token(),
             recovery_credential: credential.to_owned(),
+            selected_model: None,
             expires_at: now + SESSION_LIFETIME,
         };
         let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
@@ -236,6 +238,20 @@ impl Auth {
             Some(_) => {}
             None => issued.model = Some(model.to_owned()),
         }
+        let expires_at = issued.expires_at;
+        drop(tokens);
+
+        let mut sessions = self.sessions.lock().map_err(|_| AuthError::Invalid)?;
+        let session = sessions.get_mut(session_id).ok_or(AuthError::Invalid)?;
+        if session.account_id != account_id {
+            return Err(AuthError::Invalid);
+        }
+        match &session.selected_model {
+            Some(selected_model) if selected_model != model => return Err(AuthError::Invalid),
+            Some(_) => {}
+            None => session.selected_model = Some(model.to_owned()),
+        }
+
         let mut digest = Sha256::new();
         digest.update(self.epoch);
         digest.update(session_id.as_bytes());
@@ -244,7 +260,7 @@ impl Auth {
         digest.update(model.as_bytes());
         Ok(BoundSubmission {
             id: digest.finalize().into(),
-            expires_at: issued.expires_at,
+            expires_at,
         })
     }
 }

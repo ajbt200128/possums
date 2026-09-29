@@ -259,6 +259,7 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
                 &session.csrf,
                 &token,
                 &[],
+                session.selected_model.as_deref(),
                 None,
                 MAX_RENDERED_RESPONSE_BYTES,
             )
@@ -449,6 +450,7 @@ async fn chat(
                 &session.csrf,
                 &token,
                 &history,
+                Some(&form.model),
                 Some(notice),
                 MAX_RENDERED_RESPONSE_BYTES,
             )
@@ -515,6 +517,7 @@ async fn chat(
         &session.csrf,
         &token,
         &history,
+        Some(&form.model),
         None,
         MAX_RENDERED_RESPONSE_BYTES,
     ) else {

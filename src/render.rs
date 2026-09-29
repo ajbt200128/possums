@@ -66,6 +66,7 @@ pub fn chat_page(
     csrf: &str,
     submission_token: &str,
     history: &[Message],
+    selected_model: Option<&str>,
     notice: Option<&str>,
     limit: usize,
 ) -> Option<String> {
@@ -76,6 +77,7 @@ pub fn chat_page(
         .try_fold(0_usize, |total, model| total.checked_add(model.id.len()))?
         .checked_add(csrf.len())?
         .checked_add(submission_token.len())?
+        .checked_add(selected_model.map_or(0, str::len))?
         .checked_add(history.iter().try_fold(0_usize, |total, message| {
             total
                 .checked_add(message.role.len())?
@@ -85,16 +87,31 @@ pub fn chat_page(
     if input_bytes.checked_mul(128)?.checked_add(4096)? > limit {
         return None;
     }
+    if selected_model.is_some_and(|selected| !models.iter().any(|model| model.id == selected)) {
+        return None;
+    }
     let options = models
         .iter()
         .map(|model| {
+            let selected = (selected_model == Some(model.id.as_str()))
+                .then_some(" selected")
+                .unwrap_or_default();
             format!(
-                "<option value=\"{}\">{}</option>",
+                "<option value=\"{}\"{selected}>{}</option>",
                 escape(&model.id),
                 escape(&model.id)
             )
         })
         .collect::<String>();
+    let model_field = selected_model.map_or_else(
+        || format!("<select name=model>{options}</select>"),
+        |selected| {
+            format!(
+                "<select disabled>{options}</select><input type=hidden name=model value=\"{}\">",
+                escape(selected)
+            )
+        },
+    );
     let transcript = history
         .iter()
         .map(|message| {
@@ -114,7 +131,7 @@ pub fn chat_page(
         .map(|value| format!("<p role=status>{}</p>", escape(value)))
         .unwrap_or_default();
     let rendered = page(&format!(
-        "<h1>Possums demo</h1>{notice}{transcript}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model <select name=model>{options}</select></label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
+        "<h1>Possums demo</h1>{notice}{transcript}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model {model_field}</label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
         escape(csrf),
         escape(submission_token),
         encoded_history,
