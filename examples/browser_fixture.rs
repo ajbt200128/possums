@@ -4,15 +4,19 @@ use possums::{
     attestation::{load_evidence, EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::Auth,
     catalog::Model,
-    inference::{Generation, Inference, InferenceError, Message},
+    inference::{stream, Generation, Inference, InferenceError, Message},
     web::{serve, AppState},
 };
 use sha2::{Digest, Sha256};
 use std::{
     io::Write,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[path = "../tests/support/stream.rs"]
+mod fixture_support;
+use fixture_support::{FixtureCapture, FIXTURE_MODELS, FIXTURE_TEXT};
 
 const RELEASE: &str = "browser-fixture";
 const KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -40,21 +44,40 @@ impl EvidenceVerifier for FixtureVerifier {
     }
 }
 
-struct FixtureInference;
+#[derive(Default)]
+struct FixtureInference {
+    capture: Mutex<FixtureCapture>,
+}
 
 #[async_trait]
 impl Inference for FixtureInference {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
-        Ok(br#"{"object":"list","data":[{"id":"fixture-model","type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":1,"outputTokenPricePer1M":1,"requestPrice":0}}]}"#.to_vec())
+        Ok(serde_json::to_vec(&serde_json::json!({"object":"list", "data": FIXTURE_MODELS.map(|id| {
+            serde_json::json!({"id": id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":1,"outputTokenPricePer1M":1,"requestPrice":0}})
+        })})).unwrap())
     }
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
         Ok(1)
     }
 
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
+    async fn generate(
+        &self,
+        model: &Model,
+        messages: &[Message],
+    ) -> Result<Generation, InferenceError> {
+        self.capture
+            .lock()
+            .unwrap()
+            .record(
+                &model.id,
+                messages
+                    .iter()
+                    .map(|m| (m.role.as_str(), m.content.as_str())),
+            )
+            .map_err(|_| InferenceError::InvalidResponse)?;
         Ok(Generation {
-            content: "<script>fetch('https://browser-canary.invalid')</script> ![pixel](https://browser-canary.invalid/pixel) **safe response**".into(),
+            content: FIXTURE_TEXT.into(),
             input_tokens: 1,
             output_tokens: 2,
         })
@@ -96,7 +119,7 @@ async fn main() {
     .unwrap();
     let state = AppState::new(
         auth,
-        Arc::new(FixtureInference),
+        Arc::new(FixtureInference::default()),
         Arc::<str>::from(evidence_path.to_str().unwrap()),
         Arc::new(FixtureVerifier),
     );

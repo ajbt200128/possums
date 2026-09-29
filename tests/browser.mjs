@@ -1,17 +1,14 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
+import assert from "node:assert/strict";
 import { chromium } from "playwright";
+import { fixtureOrigin, startBufferedFixture, FIXTURE_MODELS } from "./browser_support.mjs";
 
-const server = spawn("cargo", ["run", "--quiet", "--example", "browser_fixture"], {
-  stdio: ["ignore", "pipe", "inherit"],
-});
-
+// Direct helper boundary checks; no prompt/credential data in process diagnostics.
+assert.equal(fixtureOrigin(Buffer.from("http://127.0.0.1:1234\n")), "http://127.0.0.1:1234");
+for (const invalid of ["https://remote.invalid", "http://127.0.0.1:65536", "x".repeat(129)]) {
+  assert.throws(() => fixtureOrigin(Buffer.from(invalid)));
+}
+const { origin, stop } = await startBufferedFixture();
 try {
-  const [chunk] = await once(server.stdout, "data");
-  const origin = chunk.toString().trim();
-  if (!origin.startsWith("http://127.0.0.1:")) {
-    throw new Error(`fixture did not report an origin: ${origin}`);
-  }
 
   const browser = await chromium.launch({ headless: true });
   try {
@@ -30,7 +27,10 @@ try {
       page.waitForURL(`${origin}/`),
       page.getByRole("button", { name: "Log in" }).click(),
     ]);
-    await page.locator('select[name="model"]').selectOption("fixture-model");
+    assert.deepEqual(await page.locator('select[name="model"] option').evaluateAll(
+      (options) => options.map((option) => option.value),
+    ), FIXTURE_MODELS);
+    await page.locator('select[name="model"]').selectOption(FIXTURE_MODELS[0]);
 
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("link", { name: "Recovery credential" }).click();
@@ -66,6 +66,5 @@ try {
     await browser.close();
   }
 } finally {
-  server.kill("SIGTERM");
-  await once(server, "exit").catch(() => {});
+  await stop();
 }

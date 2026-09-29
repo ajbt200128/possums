@@ -414,6 +414,154 @@ fn production_parser_visible_before_done_but_success_only_after_eof() {
 }
 
 #[test]
+fn fixture_capture_is_resettable_capped_and_model_specific() {
+    let mut capture = wire::FixtureCapture::default();
+    for model in wire::FIXTURE_MODELS {
+        capture
+            .record(model, [("user", HOSTILE), ("assistant", "")].into_iter())
+            .unwrap();
+        assert_eq!(capture.get().0, Some(model));
+        assert_eq!(capture.get().1[0].1, HOSTILE);
+        assert!(capture.retained_bytes() <= wire::MAX_CAPTURE_BYTES);
+        capture.reset();
+        assert_eq!(capture.retained_bytes(), 0);
+        assert!(capture.get().1.is_empty());
+    }
+    let content = "a".repeat(wire::MAX_CAPTURE_BYTES - std::mem::size_of::<(String, String)>() - 4);
+    capture
+        .record(
+            wire::FIXTURE_MODELS[0],
+            [("user", content.as_str())].into_iter(),
+        )
+        .unwrap();
+    assert_eq!(capture.retained_bytes(), wire::MAX_CAPTURE_BYTES);
+    assert!(capture
+        .record(
+            wire::FIXTURE_MODELS[0],
+            [("user", format!("{content}x").as_str())].into_iter()
+        )
+        .is_err());
+    assert_eq!(capture.retained_bytes(), 0);
+    assert!(capture.get().0.is_none());
+    assert!(capture
+        .record("unknown", [("user", "x")].into_iter())
+        .is_err());
+    capture
+        .record(
+            wire::FIXTURE_MODELS[1],
+            std::iter::repeat_n(("user", "x"), wire::MAX_CAPTURE_MESSAGES),
+        )
+        .unwrap();
+    assert!(capture
+        .record(
+            wire::FIXTURE_MODELS[1],
+            std::iter::repeat_n(("user", "x"), wire::MAX_CAPTURE_MESSAGES + 1)
+        )
+        .is_err());
+    assert!(capture.get().1.is_empty());
+}
+
+#[tokio::test]
+async fn bounded_fixture_controls_hold_release_finish_eof_and_fault() {
+    use std::time::Duration;
+    use wire::{FixtureAnswer, FixtureControl};
+    let (controls, mut commands) = wire::fixture_controls();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), commands.recv())
+            .await
+            .is_err()
+    );
+    controls.send(FixtureControl::Release).unwrap();
+    controls.send(FixtureControl::Finish).unwrap();
+    assert!(controls.send(FixtureControl::Eof).is_err());
+    assert_eq!(commands.recv().await, Some(FixtureControl::Release));
+    assert_eq!(commands.recv().await, Some(FixtureControl::Finish));
+    drop(commands);
+    assert!(controls.send(FixtureControl::Fail).is_err());
+
+    for (answer, fail) in [
+        (FixtureAnswer::Text, false),
+        (FixtureAnswer::Empty, false),
+        (FixtureAnswer::Text, true),
+    ] {
+        let (mut response, peer) = wire::raw_response().await;
+        let (controls, mut commands) = wire::fixture_controls();
+        let driver = tokio::spawn(async move {
+            while let Some(control) = commands.recv().await {
+                match control {
+                    FixtureControl::Release => peer.send(&answer.release(), 1).await,
+                    FixtureControl::Finish => peer.send(&answer.finish(), 32).await,
+                    FixtureControl::Eof => {
+                        peer.eof().await;
+                        break;
+                    }
+                    FixtureControl::Fail => {
+                        peer.fault().await;
+                        break;
+                    }
+                }
+            }
+            // Wait for the raw server to consume its terminal command before
+            // dropping its abort guard. The test below owns the receive deadline.
+            peer.finished().await;
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), response.chunk())
+                .await
+                .is_err()
+        );
+        controls.send(FixtureControl::Release).unwrap();
+        controls.send(FixtureControl::Finish).unwrap();
+        let mut parser = stream::ProtocolParser::default();
+        let mut visible_bytes = 0;
+        // The complete DONE frame arrives while raw transport EOF stays held.
+        let mut received = 0;
+        let expected = answer.release().len() + answer.finish().len();
+        while received < expected {
+            let bytes = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            received += bytes.len();
+            parser
+                .feed(&bytes, |delta| visible_bytes += delta.len())
+                .unwrap();
+        }
+        assert_eq!(
+            visible_bytes,
+            if matches!(answer, FixtureAnswer::Empty) {
+                0
+            } else {
+                wire::FIXTURE_TEXT.len()
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), response.chunk())
+                .await
+                .is_err()
+        );
+        controls
+            .send(if fail {
+                FixtureControl::Fail
+            } else {
+                FixtureControl::Eof
+            })
+            .unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+            .await
+            .unwrap();
+        if fail {
+            assert!(terminal.is_err());
+        } else {
+            assert!(terminal.unwrap().is_none());
+            assert!(parser.eof().is_ok());
+        }
+        driver.await.unwrap();
+    }
+}
+
+#[test]
 fn long_stream_parser_and_renderer_retained_capacity_is_constant() {
     let mut parser = stream::ProtocolParser::default();
     let mut emitted = 0;

@@ -48,6 +48,10 @@ impl RawPeer {
     pub async fn fault(&self) {
         self.sender.send(Step::Fault).await.unwrap();
     }
+
+    pub async fn finished(mut self) {
+        (&mut self.task).await.unwrap();
+    }
 }
 
 pub async fn raw_response() -> (reqwest::Response, RawPeer) {
@@ -121,6 +125,120 @@ pub fn successful(content: &str) -> Vec<u8> {
         b"data: [DONE]\n\n".to_vec(),
     ]
     .concat()
+}
+
+pub const FIXTURE_MODELS: [&str; 2] = ["fixture-model", "fixture-model-two"];
+pub const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+pub const MAX_CAPTURE_MESSAGES: usize = 64;
+pub const FIXTURE_TEXT: &str = "<script>fetch('https://browser-canary.invalid')</script> ![pixel](https://browser-canary.invalid/pixel) **safe response**";
+
+/// Empty/text scenario data for later streaming fixture wiring. Protocol faults
+/// still use the raw peer/events above, not a parallel parser or alternate route.
+#[derive(Clone, Copy)]
+pub enum FixtureAnswer {
+    Text,
+    Empty,
+}
+
+impl FixtureAnswer {
+    pub fn release(self) -> Vec<u8> {
+        event(choice(
+            Some(match self {
+                Self::Text => FIXTURE_TEXT,
+                Self::Empty => "",
+            }),
+            None,
+        ))
+    }
+
+    pub fn finish(self) -> Vec<u8> {
+        [
+            event(choice(None, Some("stop"))),
+            event(usage(1, 2)),
+            b"data: [DONE]\n\n".to_vec(),
+        ]
+        .concat()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixtureControl {
+    Release,
+    Finish,
+    Eof,
+    Fail,
+}
+
+/// Holding means no command has been sent. Nonblocking two-command control
+/// queue: callers cannot accumulate pending send futures or content in controls.
+/// These primitives are test/example-only and expose no HTTP control route.
+pub struct FixtureController(mpsc::Sender<FixtureControl>);
+
+impl FixtureController {
+    pub fn send(&self, control: FixtureControl) -> Result<(), &'static str> {
+        self.0
+            .try_send(control)
+            .map_err(|_| "fixture control unavailable")
+    }
+}
+
+pub fn fixture_controls() -> (FixtureController, mpsc::Receiver<FixtureControl>) {
+    let (sender, receiver) = mpsc::channel(2);
+    (FixtureController(sender), receiver)
+}
+
+/// Resettable, capped capture of one upstream request. Never Debug/log this
+/// content; production does not compile this helper. Reset also drops capacity.
+#[derive(Default)]
+pub struct FixtureCapture {
+    model: Option<&'static str>,
+    messages: Vec<(String, String)>,
+    bytes: usize,
+}
+
+impl FixtureCapture {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn record<'a>(
+        &mut self,
+        model: &str,
+        messages: impl ExactSizeIterator<Item = (&'a str, &'a str)> + Clone,
+    ) -> Result<(), &'static str> {
+        self.reset(); // A failed capture must not leave stale successful evidence.
+        let model = FIXTURE_MODELS
+            .into_iter()
+            .find(|id| *id == model)
+            .ok_or("invalid fixture model")?;
+        if messages.len() > MAX_CAPTURE_MESSAGES {
+            return Err("fixture capture full");
+        }
+        let slots = messages.len() * std::mem::size_of::<(String, String)>();
+        let bytes = messages
+            .clone()
+            .try_fold(slots, |total, (role, content)| {
+                total.checked_add(role.len())?.checked_add(content.len())
+            })
+            .ok_or("fixture capture full")?;
+        if bytes > MAX_CAPTURE_BYTES {
+            return Err("fixture capture full");
+        }
+        self.messages = messages
+            .map(|(role, content)| (role.to_owned(), content.to_owned()))
+            .collect();
+        self.model = Some(model);
+        self.bytes = bytes;
+        Ok(())
+    }
+
+    pub fn get(&self) -> (Option<&str>, &[(String, String)]) {
+        (self.model, &self.messages)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.bytes
+    }
 }
 
 /// Capture is intentionally capped and test-only, unlike the production adapter.
