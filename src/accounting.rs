@@ -1,4 +1,4 @@
-use crate::catalog::{actual_cost, CatalogError, Quote};
+use crate::catalog::{actual_cost, marked_up_cost, CatalogError, Quote};
 use std::{collections::HashMap, sync::Mutex, time::Instant};
 use thiserror::Error;
 
@@ -11,6 +11,15 @@ pub enum Outcome {
     AwaitingDelivery,
     Settled { charged: u64 },
     Refunded,
+}
+
+/// Counts from the last authenticated usage event. The caller must establish
+/// successful finish, [DONE], EOF, and absence of upstream errors before use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinalUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -138,6 +147,70 @@ impl Accounting {
         Ok(ReserveResult::Reserved)
     }
 
+    /// Atomically finish a future streaming reservation, independently of receipt.
+    /// Pass None for any protocol/upstream failure or missing/invalid usage.
+    /// Invalid totals or unrepresentable charges also refund. Terminal outcomes
+    /// are absorbing: repeated or conflicting calls return the original outcome.
+    pub fn finish(
+        &self,
+        submission_id: [u8; 32],
+        usage: Option<FinalUsage>,
+    ) -> Result<Outcome, AccountingError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AccountingError::InvalidTransition)?;
+        let State {
+            accounts,
+            submissions,
+        } = &mut *state;
+        let submission = submissions
+            .get_mut(&submission_id)
+            .ok_or(AccountingError::InvalidTransition)?;
+        if is_terminal(&submission.outcome) {
+            return Ok(submission.outcome.clone());
+        }
+        let reserved = submission.quote.reserved_microunits;
+        let charge = usage.and_then(|usage| {
+            if usage.input_tokens.checked_add(usage.output_tokens) != Some(usage.total_tokens) {
+                return None;
+            }
+            marked_up_cost(
+                usage.input_tokens,
+                usage.output_tokens,
+                submission.quote.model.input_microunits_per_million_tokens,
+                submission.quote.model.output_microunits_per_million_tokens,
+            )
+            .ok()
+        });
+        // Operational token bounds are not billable-token validation. The
+        // reservation alone caps user liability; the operator absorbs excess.
+        let outcome = charge.map_or(Outcome::Refunded, |charge| Outcome::Settled {
+            charged: charge.min(reserved),
+        });
+        let charged = match outcome {
+            Outcome::Settled { charged } => charged,
+            _ => 0,
+        };
+        let account = accounts
+            .get_mut(&submission.account_id)
+            .ok_or(AccountingError::InvalidTransition)?;
+        let available = account
+            .available
+            .checked_add(reserved - charged)
+            .ok_or(AccountingError::Cost)?;
+        let in_flight = account
+            .in_flight
+            .checked_sub(1)
+            .ok_or(AccountingError::InvalidTransition)?;
+        account.available = available;
+        account.in_flight = in_flight;
+        submission.outcome = outcome.clone();
+        submission.pending_charge = None;
+        Ok(outcome)
+    }
+
+    // Temporary buffered-route compatibility. Streaming uses finish instead.
     pub fn prepare_settlement(
         &self,
         submission_id: [u8; 32],
@@ -283,6 +356,97 @@ mod tests {
             input_tokens: 1,
             reserved_microunits: 3,
         }
+    }
+
+    #[test]
+    fn usage_terminal_retains_only_prompt_free_tombstone_through_expiry() {
+        let ledger = Accounting::new([("a".into(), 100)]);
+        let expiry = Instant::now() + Duration::from_secs(60);
+        let binding = [2; 32]; // Model binding only; never a prompt/history hash.
+        let original = quote();
+        ledger
+            .reserve("a", [1; 32], binding, original.clone(), expiry)
+            .unwrap();
+        ledger
+            .finish(
+                [1; 32],
+                Some(FinalUsage {
+                    input_tokens: 100,
+                    output_tokens: 101,
+                    total_tokens: 201,
+                }),
+            )
+            .unwrap();
+        {
+            let state = ledger.state.lock().unwrap();
+            // Exhaustive retained-state schema: no content, content hashes, or
+            // final usage event is added to the terminal tombstone.
+            let Submission {
+                account_id,
+                request_digest,
+                quote,
+                outcome,
+                pending_charge,
+                token_expires_at,
+            } = &state.submissions[&[1; 32]];
+            assert_eq!(account_id, "a");
+            assert_eq!(*request_digest, binding);
+            assert_eq!(*quote, original);
+            assert_eq!(*outcome, Outcome::Settled { charged: 3 });
+            assert_eq!(*pending_charge, None);
+            assert_eq!(*token_expires_at, expiry);
+            assert_eq!(state.accounts["a"].in_flight, 0);
+        }
+        assert_eq!(
+            ledger
+                .reserve("a", [1; 32], binding, original.clone(), expiry)
+                .unwrap(),
+            ReserveResult::Duplicate(Outcome::Settled { charged: 3 })
+        );
+        let expired = Instant::now() - Duration::from_secs(1);
+        ledger
+            .state
+            .lock()
+            .unwrap()
+            .submissions
+            .get_mut(&[1; 32])
+            .unwrap()
+            .token_expires_at = expired;
+        assert_eq!(
+            ledger.reserve("a", [1; 32], binding, original, expired),
+            Err(AccountingError::InvalidTransition)
+        );
+        assert!(ledger.state.lock().unwrap().submissions.is_empty());
+        assert_eq!(ledger.available("a"), Some(97));
+    }
+
+    #[test]
+    fn expired_in_flight_reservation_is_retained_until_terminal_completion() {
+        let ledger = Accounting::new([("a".into(), 100)]);
+        let expiry = Instant::now() + Duration::from_secs(60);
+        ledger
+            .reserve("a", [1; 32], [2; 32], quote(), expiry)
+            .unwrap();
+        ledger
+            .state
+            .lock()
+            .unwrap()
+            .submissions
+            .get_mut(&[1; 32])
+            .unwrap()
+            .token_expires_at = Instant::now() - Duration::from_secs(1);
+        ledger
+            .reserve("a", [3; 32], [2; 32], quote(), expiry)
+            .unwrap();
+        assert_eq!(ledger.state.lock().unwrap().submissions.len(), 2);
+        assert_eq!(ledger.finish([1; 32], None).unwrap(), Outcome::Refunded);
+        assert_eq!(ledger.available("a"), Some(97));
+        ledger
+            .reserve("a", [4; 32], [2; 32], quote(), expiry)
+            .unwrap();
+        let state = ledger.state.lock().unwrap();
+        assert!(!state.submissions.contains_key(&[1; 32]));
+        assert_eq!(state.accounts["a"].in_flight, 2);
     }
 
     #[test]

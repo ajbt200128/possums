@@ -220,3 +220,28 @@ Commands run locally on aarch64-darwin with the pinned Nix shell:
 - `nix develop -c cargo fmt --all -- --check` and `git diff --check` — PASS.
 
 These tests cover distinct output bounds, context edges, snapshot stability, fractional round-up, invalid prices/bounds, checked u128 overflow and u64 quote overflow. They verify local gateway arithmetic/admission, not provider billable maxima or invoice coverage. Production `/chat` has not migrated and still uses its buffered delivery-owned settlement. No funded, browser, live or deployed check was run.
+
+### Packet 1 capped terminal ledger — local implementation evidence
+
+Parent revision `e05ac49` plus changes in `src/accounting.rs`, crate-private cost-helper visibility in `src/catalog.rs`, `tests/accounting.rs`, `tests/lifecycle.rs`, and appended implementation sections in this record and `docs/phase0.md`. `Accounting::finish` is additive, synchronous and atomic under one mutex, with checked account updates computed before mutation. It accepts only counts and an existing submission identifier; protocol authentication/termination is a documented caller responsibility, not yet integrated. It retains the original quote, terminal outcome and existing model-only binding, not final usage, prompt/answer content or content hashes. No auth, inference or production route migration occurred.
+
+Exact synthetic ledger observations (not provider evidence):
+
+| C / M; p / q | Initial / reserved | Final I / O / T | Calculated | User charge / final balance | Quoted excess not charged |
+|---|---|---|---:|---|---:|
+| 100 / 100; 2,000,000 / 3,000,000 | 1000 / 650 | 100 / 101 / 201 | 654 | 650 / 350 | 4 |
+| same | 1000 / 650 | 101 / 101 / 202 | 657 | 650 / 350 | 7 |
+
+Repeated and conflicting terminal calls preserve these outcomes; excess is operator risk. Other tests cover partial refunds, zero completion (including zero total), changed live prices, malformed and overflowing totals, unrepresentable u64 charges and overflowing u128 markup, conflicting terminal races, reserve/terminal races, three-per-account capacity, prompt-free tombstone schema and expiry, retaining expired active reservations until terminal completion, and memory-only demo restart/epoch invalidation. Buffered APIs remain temporarily available and cannot reverse a terminal outcome.
+
+Actual commands on local aarch64-darwin at the implementation state above:
+
+- `nix develop -c cargo fmt --all` — PASS.
+- `nix develop -c cargo test --test catalog --test accounting --test lifecycle` — PASS (10/11/2 tests).
+- `nix develop -c cargo test --lib` — PASS (8 tests).
+- `nix develop -c cargo test --test web` — PASS (15 buffered-route compatibility/pre-prompt tests).
+- `nix develop -c cargo fmt --all -- --check` — PASS.
+- `nix develop -c cargo clippy --all-targets --all-features -- -D warnings` — PASS (additional check).
+- `git diff --check` — PASS, including appended documentation.
+
+Scope: packet 1 only, **not a release candidate**. No stream adapter, detached workers, conversation redesign, UI/client work, telemetry enablement, funded probes, new release or deployment. JavaScript-disabled progressive rendering, disconnect-independent route settlement, real stream authentication/termination, and deployment correctness remain **UNKNOWN** pending later packets and release gates. Provider invoice agreement and maximum billable-token bounds remain **UNVERIFIED operator risk** even when local ledger tests pass. Historical `v0.0.5` buffered/refund-on-incomplete-delivery observations and failed probes remain unchanged. Only implementation-owned documentation additions are staged; all original user-owned dirty/untracked paths are preserved.

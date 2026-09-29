@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use possums::{
-    accounting::{Accounting, Outcome, ReserveResult},
+    accounting::{Accounting, AccountingError, Outcome, ReserveResult},
     auth::Auth,
     catalog::{Model, Quote},
 };
@@ -34,11 +34,29 @@ fn process_epoch_invalidates_old_submission_tokens() {
     let challenge = first.issue_login_challenge().unwrap();
     let (session_id, session) = first.authenticate(&credential, &challenge).unwrap();
     let token = first.issue_submission(&session_id).unwrap();
-    assert!(first
+    let submission = first
         .bind_submission(&session_id, &session.account_id, &token, "m")
-        .is_ok());
+        .unwrap();
+    let ledger = Accounting::new(first.account_budgets());
+    ledger
+        .reserve(
+            &session.account_id,
+            submission.id,
+            [2; 32],
+            quote(),
+            submission.expires_at,
+        )
+        .unwrap();
+    assert_eq!(ledger.available("a"), Some(74));
+    drop(ledger); // Demo restart loses reservations; it is not durable accounting.
 
     let restarted = Auth::from_json(&auth_config()).unwrap();
+    let restarted_ledger = Accounting::new(restarted.account_budgets());
+    assert_eq!(restarted_ledger.available("a"), Some(100));
+    assert_eq!(
+        restarted_ledger.finish(submission.id, None),
+        Err(AccountingError::InvalidTransition)
+    );
     let challenge = restarted.issue_login_challenge().unwrap();
     let (new_session_id, new_session) = restarted.authenticate(&credential, &challenge).unwrap();
     assert!(restarted

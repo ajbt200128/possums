@@ -1,6 +1,6 @@
 use possums::{
-    accounting::{Accounting, AccountingError, Outcome, ReserveResult},
-    catalog::{Model, Quote},
+    accounting::{Accounting, AccountingError, FinalUsage, Outcome, ReserveResult},
+    catalog::{actual_cost, Catalog, Model, Quote},
 };
 use std::{
     sync::Arc,
@@ -128,4 +128,246 @@ fn concurrent_reservations_cannot_overspend() {
         .count();
     assert_eq!(successes, 1);
     assert_eq!(ledger.available("a"), Some(0));
+}
+
+fn operational_quote() -> Quote {
+    let mut model = quote().model;
+    model.max_output_tokens = 100;
+    Catalog {
+        models: vec![model],
+    }
+    .reservation_quote("m")
+    .unwrap()
+}
+
+fn usage(input_tokens: u64, output_tokens: u64) -> Option<FinalUsage> {
+    Some(FinalUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens: input_tokens.checked_add(output_tokens).unwrap(),
+    })
+}
+
+#[test]
+fn usage_above_operational_bounds_is_capped_not_refunded_and_never_reversed() {
+    for (input, calculated) in [(100, 654), (101, 657)] {
+        let ledger = Accounting::new([("a".into(), 1000)]);
+        let reservation = operational_quote();
+        assert_eq!(reservation.reserved_microunits, 650);
+        // Check the same cost arithmetic without the old output-bound veto.
+        let mut expanded = reservation.clone();
+        expanded.input_tokens = input;
+        expanded.model.max_output_tokens = 101;
+        assert_eq!(actual_cost(&expanded, 101).unwrap(), calculated);
+        ledger
+            .reserve("a", [1; 32], [2; 32], reservation, token_expiry())
+            .unwrap();
+        assert_eq!(ledger.available("a"), Some(350));
+        let settled = Outcome::Settled { charged: 650 };
+        for terminal in [usage(input, 101), usage(input, 101), usage(0, 0), None] {
+            assert_eq!(ledger.finish([1; 32], terminal).unwrap(), settled);
+            assert_eq!(ledger.available("a"), Some(350));
+        }
+        assert_eq!(
+            ledger.refund([1; 32]),
+            Err(AccountingError::InvalidTransition)
+        );
+        assert_eq!(ledger.settle([1; 32]).unwrap(), 650);
+        assert_eq!(
+            ledger
+                .reserve("a", [1; 32], [2; 32], operational_quote(), token_expiry())
+                .unwrap(),
+            ReserveResult::Duplicate(settled)
+        );
+        assert_eq!(ledger.available("a"), Some(350));
+    }
+}
+
+#[test]
+fn terminal_partial_refunds_zero_completion_and_price_snapshots() {
+    for (input, output, charge) in [(5, 4, 29), (5, 0, 13), (0, 0, 0)] {
+        let ledger = Accounting::new([("a".into(), 1000)]);
+        let mut catalog = Catalog {
+            models: vec![operational_quote().model],
+        };
+        let reservation = catalog.reservation_quote("m").unwrap();
+        ledger
+            .reserve("a", [1; 32], [2; 32], reservation, token_expiry())
+            .unwrap();
+        catalog.models[0].input_microunits_per_million_tokens *= 10;
+        catalog.models[0].output_microunits_per_million_tokens *= 10;
+        assert_eq!(
+            catalog.reservation_quote("m").unwrap().reserved_microunits,
+            6500
+        );
+        assert_eq!(
+            ledger.finish([1; 32], usage(input, output)).unwrap(),
+            Outcome::Settled { charged: charge }
+        );
+        assert_eq!(ledger.available("a"), Some(1000 - charge));
+        assert_eq!(
+            ledger.finish([1; 32], None).unwrap(),
+            Outcome::Settled { charged: charge }
+        );
+    }
+}
+
+#[test]
+fn malformed_totals_and_charge_overflow_refund_once_even_if_later_usage_is_valid() {
+    for (price, terminal) in [
+        (2_000_000, None),
+        (
+            2_000_000,
+            Some(FinalUsage {
+                input_tokens: 5,
+                output_tokens: 4,
+                total_tokens: 10,
+            }),
+        ),
+        (
+            2_000_000,
+            Some(FinalUsage {
+                input_tokens: u64::MAX,
+                output_tokens: 1,
+                total_tokens: 0,
+            }),
+        ),
+        // Representable total, but monetary u64 result overflow.
+        (1_000_000, usage(u64::MAX, 0)),
+        // Representable total, but u128 markup numerator overflow.
+        (u64::MAX, usage(u64::MAX, 0)),
+    ] {
+        let mut model = operational_quote().model;
+        model.context_tokens = 1;
+        model.max_output_tokens = 1;
+        model.input_microunits_per_million_tokens = price;
+        model.output_microunits_per_million_tokens = price;
+        let reservation = Catalog {
+            models: vec![model],
+        }
+        .reservation_quote("m")
+        .unwrap();
+        let budget = reservation.reserved_microunits;
+        let ledger = Accounting::new([("a".into(), budget)]);
+        ledger
+            .reserve("a", [1; 32], [2; 32], reservation, token_expiry())
+            .unwrap();
+        assert_eq!(ledger.available("a"), Some(0));
+        for terminal in [terminal, terminal, usage(1, 0)] {
+            assert_eq!(ledger.finish([1; 32], terminal).unwrap(), Outcome::Refunded);
+            assert_eq!(ledger.available("a"), Some(budget));
+        }
+        ledger.refund([1; 32]).unwrap();
+        assert_eq!(
+            ledger.settle([1; 32]),
+            Err(AccountingError::InvalidTransition)
+        );
+    }
+}
+
+#[test]
+fn conflicting_terminal_calls_return_one_outcome_and_release_capacity_once() {
+    let ledger = Arc::new(Accounting::new([("a".into(), 10_000)]));
+    for id in 1..=3 {
+        ledger
+            .reserve("a", [id; 32], [2; 32], operational_quote(), token_expiry())
+            .unwrap();
+    }
+    assert_eq!(
+        ledger.reserve("a", [4; 32], [2; 32], operational_quote(), token_expiry()),
+        Err(AccountingError::Concurrency)
+    );
+    let barrier = Arc::new(std::sync::Barrier::new(12));
+    let handles: Vec<_> = (0..12)
+        .map(|n| {
+            let ledger = Arc::clone(&ledger);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                ledger
+                    .finish([1; 32], if n % 2 == 0 { usage(5, 4) } else { None })
+                    .unwrap()
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    assert!(outcomes.iter().all(|outcome| outcome == &outcomes[0]));
+    let charge = match outcomes[0] {
+        Outcome::Settled { charged: 29 } => 29,
+        Outcome::Refunded => 0,
+        _ => panic!("unexpected outcome"),
+    };
+    assert_eq!(ledger.available("a"), Some(10_000 - 2 * 650 - charge));
+    ledger
+        .reserve("a", [4; 32], [2; 32], operational_quote(), token_expiry())
+        .unwrap();
+    assert_eq!(
+        ledger.reserve("a", [5; 32], [2; 32], operational_quote(), token_expiry()),
+        Err(AccountingError::Concurrency)
+    );
+}
+
+#[test]
+fn reserve_racing_terminal_transition_preserves_three_account_slots() {
+    for _ in 0..32 {
+        let ledger = Arc::new(Accounting::new([("a".into(), 10_000)]));
+        for id in 1..=3 {
+            ledger
+                .reserve("a", [id; 32], [2; 32], operational_quote(), token_expiry())
+                .unwrap();
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let finishing = Arc::clone(&ledger);
+        let ready = Arc::clone(&barrier);
+        let terminal = std::thread::spawn(move || {
+            ready.wait();
+            finishing.finish([1; 32], usage(5, 4)).unwrap()
+        });
+        barrier.wait();
+        let reserve = ledger.reserve("a", [4; 32], [2; 32], operational_quote(), token_expiry());
+        assert_eq!(terminal.join().unwrap(), Outcome::Settled { charged: 29 });
+        match reserve {
+            Ok(ReserveResult::Reserved) => {}
+            Err(AccountingError::Concurrency) => {
+                ledger
+                    .reserve("a", [4; 32], [2; 32], operational_quote(), token_expiry())
+                    .unwrap();
+            }
+            other => panic!("unexpected reservation {other:?}"),
+        }
+        assert_eq!(ledger.available("a"), Some(10_000 - 3 * 650 - 29));
+        assert_eq!(
+            ledger.reserve("a", [5; 32], [2; 32], operational_quote(), token_expiry()),
+            Err(AccountingError::Concurrency)
+        );
+        assert_eq!(
+            ledger
+                .reserve("a", [1; 32], [2; 32], operational_quote(), token_expiry())
+                .unwrap(),
+            ReserveResult::Duplicate(Outcome::Settled { charged: 29 })
+        );
+    }
+}
+
+#[test]
+fn terminal_cannot_create_a_reservation_and_legacy_pending_charge_cannot_override_it() {
+    let ledger = Accounting::new([("a".into(), 1000)]);
+    assert_eq!(
+        ledger.finish([1; 32], usage(5, 4)),
+        Err(AccountingError::InvalidTransition)
+    );
+    assert_eq!(ledger.available("a"), Some(1000));
+    ledger
+        .reserve("a", [1; 32], [2; 32], operational_quote(), token_expiry())
+        .unwrap();
+    ledger.prepare_settlement([1; 32], 5, 4).unwrap();
+    assert_eq!(
+        ledger.finish([1; 32], usage(100, 101)).unwrap(),
+        Outcome::Settled { charged: 650 }
+    );
+    assert_eq!(ledger.settle([1; 32]).unwrap(), 650);
+    assert_eq!(ledger.available("a"), Some(350));
 }

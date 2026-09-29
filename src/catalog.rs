@@ -200,7 +200,7 @@ fn valid_model(model: &Model) -> bool {
         && model.output_microunits_per_million_tokens > 0
 }
 
-fn marked_up_cost(
+pub(crate) fn marked_up_cost(
     input_tokens: u64,
     output_tokens: u64,
     input_price: u64,
