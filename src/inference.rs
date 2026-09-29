@@ -621,6 +621,21 @@ mod stream_probe_tests {
     }
 }
 
+#[derive(Serialize)]
+struct TokenCountRequest<'a> {
+    model: &'a str,
+    messages: &'a [Message],
+}
+
+#[derive(Serialize)]
+struct BufferedRequest<'a> {
+    model: &'a str,
+    messages: &'a [Message],
+    max_tokens: u64,
+    stream: bool,
+    user_cache_secret: &'a str,
+}
+
 #[derive(Deserialize)]
 struct TokenCount {
     input_tokens: u64,
@@ -661,7 +676,7 @@ impl Inference for TinfoilInference {
                 self.http()?
                     .post(format!("{}/v1/chat/completions/input_tokens", self.origin)),
             )
-            .json(&serde_json::json!({"model": model, "messages": messages}));
+            .json(&TokenCountRequest { model, messages });
         let bytes = self.bounded_response(request, 64 * 1024).await?;
         let count: TokenCount =
             serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)?;
@@ -678,21 +693,22 @@ impl Inference for TinfoilInference {
     ) -> Result<Generation, InferenceError> {
         let mut cache_scope = [0_u8; 32];
         rand::rng().fill_bytes(&mut cache_scope);
+        let cache_secret = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            cache_scope,
+        );
         let request = self
             .authenticate(
                 self.http()?
                     .post(format!("{}/v1/chat/completions", self.origin)),
             )
-            .json(&serde_json::json!({
-                "model": model.id,
-                "messages": messages,
-                "max_tokens": model.max_output_tokens,
-                "stream": false,
-                "user_cache_secret": base64::Engine::encode(
-                    &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-                    cache_scope
-                )
-            }));
+            .json(&BufferedRequest {
+                model: &model.id,
+                messages,
+                max_tokens: model.max_output_tokens,
+                stream: false,
+                user_cache_secret: &cache_secret,
+            });
         let bytes = self
             .bounded_response(request, MAX_UPSTREAM_RESPONSE_BYTES)
             .await?;

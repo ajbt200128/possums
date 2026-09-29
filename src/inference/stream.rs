@@ -6,10 +6,10 @@ use super::{InferenceError, Message};
 use rand::RngCore;
 use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
-    Deserialize,
+    Deserialize, Serialize,
 };
 use serde_json::Value;
-use std::{collections::BTreeSet, fmt, time::Duration};
+use std::{collections::BTreeSet, fmt, io::Write, time::Duration};
 use thiserror::Error;
 use tokio::time::Instant;
 
@@ -22,8 +22,43 @@ pub const MAX_TRAILER_BYTES: usize = 64 * 1024;
 /// Maximum accepted transport chunk, checked before retaining/copying into parser
 /// state. Reqwest/TLS internals have separate buffers, not measured by this limit.
 pub const MAX_TRANSPORT_BUFFER_BYTES: usize = 256 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub const STREAM_DEADLINE: Duration = Duration::from_secs(300);
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Serialize)]
+struct StreamRequest<'a> {
+    model: &'a str,
+    messages: &'a [Message],
+    max_tokens: u64,
+    stream: bool,
+    stream_options: StreamOptions,
+    n: u8,
+    user_cache_secret: &'a str,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+struct BoundedJson(Vec<u8>);
+
+impl Write for BoundedJson {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.0.len().saturating_add(bytes.len()) > MAX_REQUEST_BODY_BYTES {
+            return Err(std::io::Error::other(
+                "inference request exceeds transport limit",
+            ));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 pub(super) fn request_body(
     model: &str,
@@ -32,21 +67,29 @@ pub(super) fn request_body(
 ) -> Result<reqwest::Body, InferenceError> {
     let mut cache_scope = [0_u8; 32];
     rand::rng().fill_bytes(&mut cache_scope);
-    let bytes = serde_json::to_vec(&serde_json::json!({
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_output_tokens,
-        "stream": true,
-        "stream_options": {"include_usage": true},
-        "n": 1,
-        "user_cache_secret": base64::Engine::encode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD, cache_scope
-        )
-    }))
+    let cache_secret = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        cache_scope,
+    );
+    let mut bytes = BoundedJson(Vec::new());
+    serde_json::to_writer(
+        &mut bytes,
+        &StreamRequest {
+            model,
+            messages,
+            max_tokens: max_output_tokens,
+            stream: true,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
+            n: 1,
+            user_cache_secret: &cache_secret,
+        },
+    )
     .map_err(|_| InferenceError::InvalidResponse)?;
     // An ordinary JSON/bytes body is cloneable: reqwest could replay it on a
     // same-origin 307/308 or retry. Wrapping as a streaming body disables cloning.
-    Ok(reqwest::Body::wrap(reqwest::Body::from(bytes)))
+    Ok(reqwest::Body::wrap(reqwest::Body::from(bytes.0)))
 }
 
 // Private: arbitrary unauthenticated Responses must never become an inference
@@ -537,6 +580,18 @@ mod tests {
         }
         assert_eq!(scopes[0].len(), 43);
         assert_ne!(scopes[0], scopes[1]);
+    }
+
+    #[test]
+    fn oversized_streaming_request_is_rejected_before_transport() {
+        let messages = [Message {
+            role: "user".into(),
+            content: "x".repeat(MAX_REQUEST_BODY_BYTES),
+        }];
+        assert!(matches!(
+            request_body("fixture", 99, &messages),
+            Err(InferenceError::InvalidResponse)
+        ));
     }
 
     #[tokio::test]
