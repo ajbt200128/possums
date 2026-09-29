@@ -202,3 +202,267 @@ async fn closed_sink_and_empty_body_have_explicit_lifetimes() {
     drop(body);
     assert_eq!(lane.available_permits(), 1);
 }
+
+use possums::{
+    inference::{stream::StreamUsage, Message},
+    render::{IncrementalRenderer, RenderOutcome, HISTORY_BLOCK_BYTES},
+    web::{decode_continuation, BODY_LIMIT},
+};
+use sha2::{Digest, Sha256};
+
+const TOKEN: &str = "ccccccccccccccccccccccccccccccccccccccccccc";
+
+fn accepted_escape_history() -> Vec<Message> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let json = format!(
+        r#"[{{"role":"user","content":"{}"}},{{"role":"assistant","content":""}}]"#,
+        "<".repeat(4 * 1024 * 1024)
+    );
+    let mut body = format!(
+        "csrf={TOKEN}&token={TOKEN}&model=m&prompt=x&history_manifest=1.{:06}.{:08}",
+        json.len().div_ceil(HISTORY_BLOCK_BYTES),
+        json.len()
+    );
+    for (index, block) in json.as_bytes().chunks(HISTORY_BLOCK_BYTES).enumerate() {
+        body.push_str(&format!("&h{index:06}={}", URL_SAFE_NO_PAD.encode(block)));
+    }
+    assert_eq!(body.len(), 5_602_549);
+    assert!(body.len() < BODY_LIMIT);
+    // Fixture JSON/raw form allocations die here, before either rendering pass.
+    let accepted = decode_continuation(body.as_bytes()).unwrap();
+    assert_eq!(accepted.prompt, "x");
+    accepted.history
+}
+
+#[tokio::test]
+async fn accepted_over_16_mib_startup_really_drains_through_bounded_http_body() {
+    let history = accepted_escape_history();
+    // Independent compatibility reference: count and hash only, never collect.
+    let mut expected_bytes = 0;
+    let mut expected_hash = Sha256::new();
+    let reference = IncrementalRenderer::open(&history, "x", TOKEN, "m", |part| {
+        expected_bytes += part.len();
+        expected_hash.update(part.as_bytes());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(reference.outcome(), RenderOutcome::Ready);
+    assert_eq!(expected_bytes, 22_412_733);
+
+    let (lane, lease) = lane();
+    // Intentionally much smaller than 16 MiB. Outstanding HTTP frames, not just
+    // channel entries, count against both limits; no test capture of the HTML.
+    let limits = Limits {
+        frames: 8,
+        payload_bytes: 64 * 1024,
+        chunk_bytes: 8192,
+    };
+    let (mut startup, mut body) = delivery(lease, limits, Duration::from_secs(30));
+    let (filled, fill) = tokio::sync::oneshot::channel();
+    let producer = tokio::task::spawn_blocking(move || {
+        let mut filled = Some(filled);
+        let mut frames = 0;
+        let mut bytes = 0;
+        let mut hash = Sha256::new();
+        let mut sink = |part: &str| {
+            startup
+                .send_blocking(part.as_bytes())
+                .map_err(|_| RenderOutcome::DeliveryFailed)?;
+            bytes += part.len();
+            hash.update(part.as_bytes());
+            frames += 1;
+            if frames == limits.frames {
+                filled.take().unwrap().send(()).unwrap();
+            }
+            Ok(())
+        };
+        let mut renderer =
+            IncrementalRenderer::start(&history, "x", TOKEN, "m", &mut sink).unwrap();
+        while renderer.emit_next_history(&mut sink).unwrap() {}
+        renderer.finish_start(&mut sink).unwrap();
+        assert_eq!(renderer.outcome(), RenderOutcome::Ready);
+        let tx = startup.into_streaming();
+        assert_eq!(tx.failure(), None);
+        (bytes, hash.finalize(), tx.usage())
+        // Sender closes here. The HTTP consumer must drain accepted frames to EOF.
+    });
+    // Deliberately withhold ALL body polling until the outstanding-frame limit
+    // is reached. The ninth write cannot succeed until this consumer drops data.
+    tokio::time::timeout(Duration::from_secs(5), fill)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body.usage().frames, limits.frames);
+    assert_eq!(body.usage().high_frames, limits.frames);
+    let mut received = 0;
+    let mut received_hash = Sha256::new();
+    let mut frames = 0;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(frame) = body.frame().await {
+            let bytes = frame.unwrap().into_data().unwrap();
+            assert!(bytes.len() <= limits.chunk_bytes as usize);
+            received += bytes.len();
+            received_hash.update(&bytes);
+            frames += 1;
+            // This is a real slow async consumer. Keep the frame (and therefore
+            // its credit) through a scheduler yield, then actually drop it.
+            tokio::task::yield_now().await;
+            drop(bytes);
+        }
+    })
+    .await
+    .unwrap();
+    let (produced, produced_hash, high) = producer.await.unwrap();
+    assert_eq!(received, expected_bytes);
+    assert_eq!(produced, expected_bytes);
+    assert_eq!(received_hash.finalize(), produced_hash);
+    assert_eq!(expected_hash.finalize(), produced_hash);
+    assert!(frames > limits.frames);
+    assert!(received > 16 * 1024 * 1024);
+    assert!(high.high_bytes <= limits.payload_bytes as usize);
+    assert_eq!(high.high_frames, limits.frames);
+    assert_eq!(body.usage().bytes, 0);
+    assert_eq!(body.usage().frames, 0);
+    assert_eq!(lane.available_permits(), 0); // EOF does not drop the body lease.
+    drop(body);
+    assert_eq!(lane.available_permits(), 1);
+    println!(
+        "accepted form=5602549 emitted={received} frames={frames} high_bytes={} high_frames={} sha256={produced_hash:x}",
+        high.high_bytes, high.high_frames
+    );
+}
+
+fn usage() -> StreamUsage {
+    StreamUsage {
+        input_tokens: 1,
+        output_tokens: 1,
+        total_tokens: 2,
+    }
+}
+
+#[tokio::test]
+async fn small_rendered_responses_are_byte_exact_through_real_delivery() {
+    for answer in ["", "hello", "\0\r\n\"'\\🐾é</pre><script>bad()</script>"] {
+        let history = vec![
+            Message {
+                role: "user".into(),
+                content: "prior<&🐾".into(),
+            },
+            Message {
+                role: "assistant".into(),
+                content: String::new(),
+            },
+        ];
+        let mut expected = Vec::new();
+        let mut capture = |part: &str| {
+            assert!(expected.len() + part.len() <= 8192); // Small fixture ONLY.
+            expected.extend_from_slice(part.as_bytes());
+            Ok(())
+        };
+        let mut renderer =
+            IncrementalRenderer::open(&history, "x", TOKEN, "m", &mut capture).unwrap();
+        renderer.delta(answer, &mut capture);
+        assert_eq!(
+            renderer.complete(Ok(usage()), || Some(TOKEN.into()), &mut capture),
+            RenderOutcome::Ready
+        );
+        let (_, lease) = lane();
+        let (mut startup, mut body) = delivery(
+            lease,
+            Limits {
+                frames: 64,
+                payload_bytes: 8192,
+                chunk_bytes: 8192,
+            },
+            Duration::from_secs(5),
+        );
+        let producer = tokio::task::spawn_blocking(move || {
+            let mut sink = |part: &str| {
+                startup
+                    .send_blocking(part.as_bytes())
+                    .map_err(|_| RenderOutcome::DeliveryFailed)
+            };
+            let mut renderer =
+                IncrementalRenderer::start(&history, "x", TOKEN, "m", &mut sink).unwrap();
+            while renderer.emit_next_history(&mut sink).unwrap() {}
+            renderer.finish_start(&mut sink).unwrap();
+            let mut tx = startup.into_streaming();
+            let mut sink = |part: &str| {
+                tx.try_send(part.as_bytes())
+                    .map_err(|_| RenderOutcome::DeliveryFailed)
+            };
+            renderer.delta(answer, &mut sink);
+            assert_eq!(
+                renderer.complete(Ok(usage()), || Some(TOKEN.into()), &mut sink),
+                RenderOutcome::Ready
+            );
+        });
+        let mut actual = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let data = frame.unwrap().into_data().unwrap();
+            assert!(actual.len() + data.len() <= 8192);
+            actual.extend_from_slice(&data);
+        }
+        producer.await.unwrap();
+        assert_eq!(actual, expected);
+        assert!(body.usage().high_bytes <= 8192);
+        assert_eq!(body.usage().bytes, 0);
+    }
+}
+
+#[tokio::test]
+async fn failed_startup_renderer_still_accepts_future_upstream_completion() {
+    for disconnected in [false, true] {
+        let (_, lease) = lane();
+        // Zero deadline deterministically expires, independent of scheduler speed.
+        let (mut startup, body) = delivery(
+            lease,
+            Limits {
+                frames: 2,
+                payload_bytes: 8192,
+                chunk_bytes: 8192,
+            },
+            Duration::ZERO,
+        );
+        let body = if disconnected {
+            drop(body);
+            None
+        } else {
+            Some(body)
+        };
+        let result = tokio::task::spawn_blocking(move || {
+            let mut sink = |part: &str| {
+                startup
+                    .send_blocking(part.as_bytes())
+                    .map_err(|_| RenderOutcome::DeliveryFailed)
+            };
+            let mut renderer = IncrementalRenderer::start(&[], "x", TOKEN, "m", &mut sink).unwrap();
+            assert!(!renderer.emit_next_history(&mut sink).unwrap());
+            renderer.finish_start(&mut sink).unwrap();
+            assert_eq!(renderer.outcome(), RenderOutcome::DeliveryFailed);
+            let tx = startup.into_streaming();
+            assert_eq!(
+                tx.failure(),
+                Some(if disconnected {
+                    DeliveryError::Closed
+                } else {
+                    DeliveryError::TimedOut
+                })
+            );
+            // Delivery failure is not an upstream terminal result. The worker can
+            // continue using the renderer and reach authenticated usage later.
+            for _ in 0..1000 {
+                renderer.delta("future inference", |_| panic!("must remain detached"));
+            }
+            renderer.complete(
+                Ok(usage()),
+                || panic!("no continuation"),
+                |_| panic!("no delivery"),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, RenderOutcome::DeliveryFailed);
+        drop(body);
+    }
+}
