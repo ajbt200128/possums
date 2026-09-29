@@ -9,7 +9,7 @@ use serde::{
     Deserialize, Serialize,
 };
 use serde_json::Value;
-use std::{collections::BTreeSet, fmt, io::Write, time::Duration};
+use std::{collections::BTreeSet, fmt, time::Duration};
 use thiserror::Error;
 use tokio::time::Instant;
 
@@ -42,24 +42,6 @@ struct StreamOptions {
     include_usage: bool,
 }
 
-struct BoundedJson(Vec<u8>);
-
-impl Write for BoundedJson {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.0.len().saturating_add(bytes.len()) > MAX_REQUEST_BODY_BYTES {
-            return Err(std::io::Error::other(
-                "inference request exceeds transport limit",
-            ));
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 pub(super) fn request_body(
     model: &str,
     max_output_tokens: u64,
@@ -71,9 +53,7 @@ pub(super) fn request_body(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
         cache_scope,
     );
-    let mut bytes = BoundedJson(Vec::new());
-    serde_json::to_writer(
-        &mut bytes,
+    let bytes = crate::bounded_json::to_vec(
         &StreamRequest {
             model,
             messages,
@@ -85,11 +65,12 @@ pub(super) fn request_body(
             n: 1,
             user_cache_secret: &cache_secret,
         },
+        MAX_REQUEST_BODY_BYTES,
     )
     .map_err(|_| InferenceError::InvalidResponse)?;
     // An ordinary JSON/bytes body is cloneable: reqwest could replay it on a
     // same-origin 307/308 or retry. Wrapping as a streaming body disables cloning.
-    Ok(reqwest::Body::wrap(reqwest::Body::from(bytes.0)))
+    Ok(reqwest::Body::wrap(reqwest::Body::from(bytes)))
 }
 
 // Private: arbitrary unauthenticated Responses must never become an inference

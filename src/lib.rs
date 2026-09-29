@@ -1,6 +1,7 @@
 pub mod accounting;
 pub mod attestation;
 pub mod auth;
+mod bounded_json;
 pub mod catalog;
 pub mod inference;
 pub mod render;
