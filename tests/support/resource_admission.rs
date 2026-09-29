@@ -58,11 +58,19 @@ impl Admission {
     }
 
     pub fn try_new_chat(&self) -> Option<ResponseAdmission> {
-        self.new_chat.clone().try_acquire_owned().ok().map(ResponseAdmission)
+        self.new_chat
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(ResponseAdmission)
     }
 
     pub fn try_control(&self) -> Option<ResponseAdmission> {
-        self.controls.clone().try_acquire_owned().ok().map(ResponseAdmission)
+        self.controls
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(ResponseAdmission)
     }
 
     pub fn available(&self) -> (usize, usize) {
