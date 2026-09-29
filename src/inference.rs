@@ -97,7 +97,11 @@ impl TinfoilInference {
             .authenticate(http.post(&url))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "text/event-stream")
-            .body(stream::request_body(model, messages)?);
+            .body(stream::request_body(
+                &model.id,
+                model.max_output_tokens,
+                messages,
+            )?);
         // Use the origin-bound raw transport, not the SDK's retrying chat layer.
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
@@ -122,23 +126,14 @@ impl TinfoilInference {
                 content: "Reply with exactly: possums-live-canary".into(),
             }];
             let input_tokens = self.count_tokens(model, &messages).await?;
-            let mut cache_scope = [0_u8; 32];
-            rand::rng().fill_bytes(&mut cache_scope);
             let request = self
                 .authenticate(
                     self.http()?
                         .post(format!("{}/v1/chat/completions", self.origin)),
                 )
-                .json(&serde_json::json!({
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": 64,
-                    "stream": true,
-                    "stream_options": {"include_usage": true},
-                    "user_cache_secret": base64::Engine::encode(
-                        &base64::engine::general_purpose::URL_SAFE_NO_PAD, cache_scope
-                    )
-                }));
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .body(stream::request_body(model, 64, &messages)?);
             let deadline = Instant::now() + Duration::from_secs(90);
             let mut probe = StreamProbe {
                 tokenizer_tokens: input_tokens,
@@ -559,6 +554,31 @@ mod stream_probe_tests {
             assert_eq!(probe.done_event, Some(4));
             assert!(probe.crlf && probe.line.is_empty() && probe.payload.is_empty());
         }
+    }
+
+    #[test]
+    fn diagnostic_retains_last_decreasing_usage_without_tokenizer_or_reasoning_equality() {
+        let mut probe = StreamProbe {
+            tokenizer_tokens: 99,
+            ..Default::default()
+        };
+        probe.feed(concat!(
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":9,\"total_tokens\":17}}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":0,\"total_tokens\":1,\"completion_tokens_details\":{\"reasoning_tokens\":30}}}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
+            "data: [DONE]\n\n"
+        ).as_bytes()).unwrap();
+        assert_eq!(probe.usage_events, 2);
+        let usage = probe.usage.unwrap();
+        assert_eq!(
+            (
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens
+            ),
+            (1, 0, 1)
+        );
+        assert!(probe.usage_event < probe.finish_event);
     }
 
     #[test]

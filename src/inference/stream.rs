@@ -3,7 +3,6 @@
 //! `ProtocolParser` authenticates nothing. Only the origin-bound adapter may
 //! treat its terminal counts as authenticated. No answer or event list is kept.
 use super::{InferenceError, Message};
-use crate::catalog::Model;
 use rand::RngCore;
 use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
@@ -27,15 +26,16 @@ pub const STREAM_DEADLINE: Duration = Duration::from_secs(300);
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(super) fn request_body(
-    model: &Model,
+    model: &str,
+    max_output_tokens: u64,
     messages: &[Message],
 ) -> Result<reqwest::Body, InferenceError> {
     let mut cache_scope = [0_u8; 32];
     rand::rng().fill_bytes(&mut cache_scope);
     let bytes = serde_json::to_vec(&serde_json::json!({
-        "model": model.id,
+        "model": model,
         "messages": messages,
-        "max_tokens": model.max_output_tokens,
+        "max_tokens": max_output_tokens,
         "stream": true,
         "stream_options": {"include_usage": true},
         "n": 1,
@@ -513,16 +513,6 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn model() -> Model {
-        Model {
-            id: "fixture".into(),
-            context_tokens: 100,
-            max_output_tokens: 99,
-            input_microunits_per_million_tokens: 1,
-            output_microunits_per_million_tokens: 1,
-        }
-    }
-
     #[tokio::test]
     async fn streaming_request_has_full_allowance_usage_single_choice_and_fresh_cache_scope() {
         let messages = [Message {
@@ -531,7 +521,7 @@ mod tests {
         }];
         let mut scopes = Vec::new();
         for _ in 0..2 {
-            let body = request_body(&model(), &messages)
+            let body = request_body("fixture", 99, &messages)
                 .unwrap()
                 .collect()
                 .await
@@ -586,7 +576,7 @@ mod tests {
                     socket.write_all(format!("HTTP/1.1 {status} Test\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
                 }
             });
-            let body = request_body(&model(), &[]).unwrap();
+            let body = request_body("fixture", 99, &[]).unwrap();
             let request = reqwest::Client::builder()
                 .no_proxy()
                 .build()
