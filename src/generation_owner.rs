@@ -60,14 +60,33 @@ impl Settlement {
     /// error; this capability cannot establish stream authenticity itself.
     /// Accounting rechecks arithmetic and refunds invalid usage. No error text
     /// is retained or formatted. Even accounting failure is a single attempt.
-    pub(crate) fn finish(mut self, result: &Result<StreamUsage, InferenceError>) -> Completion {
-        self.terminal
-            .finish(result.as_ref().ok().map(|usage| FinalUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                total_tokens: usage.total_tokens,
-            }))
-            .map_err(OwnerError::Accounting)
+    pub(crate) fn finish(mut self, result: &Result<StreamUsage, InferenceError>) -> SettledReceipt {
+        SettledReceipt {
+            completion: self
+                .terminal
+                .finish(result.as_ref().ok().map(|usage| FinalUsage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    total_tokens: usage.total_tokens,
+                }))
+                .map_err(OwnerError::Accounting),
+        }
+    }
+}
+
+/// Evidence of a terminal accounting attempt, including refunds and errors.
+/// Only `Settlement::finish` constructs this non-cloneable receipt. Work can
+/// inspect but cannot replace its completion; only the owner unwraps it. Thus a
+/// normal work return cannot report a fabricated success while its guard refunds.
+/// This seal does NOT authenticate usage supplied to `finish`.
+#[must_use = "return the receipt to the generation owner after inspecting its outcome"]
+pub(crate) struct SettledReceipt {
+    completion: Completion,
+}
+
+impl SettledReceipt {
+    pub(crate) fn outcome(&self) -> &Completion {
+        &self.completion
     }
 }
 
@@ -142,9 +161,10 @@ impl ReservedGeneration {
 
     /// Like `spawn`, but lets the owned future settle before completing a renderer
     /// that borrows its captured history. Consume the verified adapter to EOF,
-    /// call `settlement.finish(&result)` synchronously, then ONLY on
-    /// `Ok(Outcome::Settled { .. })` complete rendering / issue a next-turn token
-    /// bound to the snapshotted model and conversation. Return that completion.
+    /// call `settlement.finish(&result)` synchronously, then ONLY when the
+    /// receipt's `outcome()` is `Ok(Outcome::Settled { .. })` complete rendering /
+    /// issue a next-turn token bound to the snapshotted model and conversation.
+    /// Return that same receipt, not a work-supplied completion.
     /// Refunds and accounting errors must not mint tokens. Accounting releases
     /// its lock before `finish` returns; token issuance must not run under it.
     ///
@@ -158,7 +178,7 @@ impl ReservedGeneration {
     ) -> oneshot::Receiver<Completion>
     where
         F: FnOnce(DeliveryTx, Settlement) -> Fut + Send + 'static,
-        Fut: Future<Output = Completion> + Send + 'static,
+        Fut: Future<Output = SettledReceipt> + Send + 'static,
     {
         supervise(self.spawn_settling_worker(delivery, work))
     }
@@ -177,7 +197,7 @@ impl ReservedGeneration {
     fn spawn_settling_worker<F, Fut>(self, delivery: DeliveryTx, work: F) -> JoinHandle<Completion>
     where
         F: FnOnce(DeliveryTx, Settlement) -> Fut + Send + 'static,
-        Fut: Future<Output = Completion> + Send + 'static,
+        Fut: Future<Output = SettledReceipt> + Send + 'static,
     {
         let Self {
             terminal,
@@ -205,12 +225,13 @@ struct Worker<Fut> {
 
 impl<Fut> Future for Worker<Fut>
 where
-    Fut: Future<Output = Completion>,
+    Fut: Future<Output = SettledReceipt>,
 {
     type Output = Completion;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.get_mut().work.as_mut().poll(cx)
+        let receipt = std::task::ready!(self.get_mut().work.as_mut().poll(cx));
+        Poll::Ready(receipt.completion)
     }
 }
 

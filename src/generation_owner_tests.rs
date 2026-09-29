@@ -590,8 +590,8 @@ async fn settling_callback_observes_charge_before_token_and_keeps_inputs_leased(
             history: &history,
         };
         let result = Ok(usage()); // Synthetic stand-in for verified adapter EOF.
-        let outcome = settlement.finish(&result)?;
-        if matches!(outcome, Outcome::Settled { .. }) {
+        let receipt = settlement.finish(&result);
+        if matches!(receipt.outcome(), Ok(Outcome::Settled { .. })) {
             renderer.complete(|model, history| {
                 // Re-entering accounting here also checks that its lock has
                 // been released before a continuation/token callback runs.
@@ -613,7 +613,7 @@ async fn settling_callback_observes_charge_before_token_and_keeps_inputs_leased(
         }
         rendered_tx.send(()).unwrap();
         release.await.unwrap();
-        Ok(outcome)
+        receipt
     });
     bounded(rendered).await.unwrap();
     f.outcome(1, Outcome::Settled { charged: 29 }, 971);
@@ -659,11 +659,12 @@ async fn settling_failed_or_invalid_usage_refunds_without_token() {
         let tokens = Arc::new(AtomicUsize::new(0));
         let issued = tokens.clone();
         let completion = pending.spawn_settling(tx, move |_, settlement| async move {
-            let outcome = settlement.finish(&result)?;
-            if matches!(outcome, Outcome::Settled { .. }) {
+            let receipt = settlement.finish(&result);
+            assert_eq!(receipt.outcome(), &Ok(Outcome::Refunded));
+            if matches!(receipt.outcome(), Ok(Outcome::Settled { .. })) {
                 issued.fetch_add(1, Ordering::SeqCst);
             }
-            Ok(outcome)
+            receipt
         });
         assert_eq!(bounded(completion).await.unwrap(), Ok(Outcome::Refunded));
         assert_eq!(tokens.load(Ordering::SeqCst), 0);
@@ -717,24 +718,37 @@ async fn settling_pre_poll_or_held_cancellation_drops_inputs_before_leases_and_r
 }
 
 #[tokio::test]
-async fn settling_unused_capability_refunds_on_drop_or_normal_return() {
-    for explicit_drop in [false, true] {
-        let f = Fixture::new();
-        let pending = f.pending(1);
-        let (tx, body) = f.delivery();
-        let completion = pending.spawn_settling(tx, move |_, settlement| async move {
-            if explicit_drop {
-                drop(settlement);
-            }
-            // Deliberately omit finish. The original guard must still refund.
-            Ok(Outcome::Refunded)
-        });
-        assert_eq!(bounded(completion).await.unwrap(), Ok(Outcome::Refunded));
-        f.outcome(1, Outcome::Refunded, 1000);
-        f.leases_returned();
-        drop(body);
-        f.account_slots_returned(1000);
-    }
+async fn settling_unused_capability_refunds_on_drop_but_cannot_return_success() {
+    let f = Fixture::new();
+    let pending = f.pending(1);
+    let (tx, body) = f.delivery();
+    let (dropped_tx, dropped) = oneshot::channel();
+    let worker = pending.spawn_settling_worker(tx, move |_, settlement| async move {
+        drop(settlement);
+        dropped_tx.send(()).unwrap();
+        // Without finish there is no receipt to return. An arbitrary Completion
+        // is no longer a valid output; this future can only stall or diverge.
+        std::future::pending::<SettledReceipt>().await
+    });
+    let abort = worker.abort_handle();
+    let mut completion = supervise(worker);
+    bounded(dropped).await.unwrap();
+    f.outcome(1, Outcome::Refunded, 1000);
+    assert_eq!(
+        completion.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    assert_eq!(f.generations.available_permits(), 3);
+    assert_eq!(f.resources.available_permits(), 3);
+    abort.abort();
+    assert_eq!(
+        bounded(completion).await.unwrap(),
+        Err(OwnerError::Cancelled)
+    );
+    f.outcome(1, Outcome::Refunded, 1000);
+    f.leases_returned();
+    drop(body);
+    f.account_slots_returned(1000);
 }
 
 #[tokio::test]
@@ -750,8 +764,8 @@ async fn settling_factory_or_future_panic_refunds_but_post_finish_panic_keeps_ch
                 let _resource = probe;
                 assert_ne!(stage, 1, "synthetic settling poll failure");
                 assert_eq!(
-                    settlement.finish(&Ok(usage())),
-                    Ok(Outcome::Settled { charged: 29 })
+                    settlement.finish(&Ok(usage())).outcome(),
+                    &Ok(Outcome::Settled { charged: 29 })
                 );
                 panic!("synthetic post-settlement failure");
             }
@@ -788,10 +802,10 @@ async fn settling_observer_and_body_loss_while_held_never_abort_work() {
         started_tx.send(()).unwrap();
         finish.await.unwrap();
         assert_eq!(tx.try_send(b"tail"), Err(DeliveryError::Closed));
-        let outcome = settlement.finish(&Ok(usage()));
+        let receipt = settlement.finish(&Ok(usage()));
         drop(resource);
         dropped_tx.send(()).unwrap();
-        outcome
+        receipt
     });
     bounded(started).await.unwrap();
     drop((completion, body));
