@@ -183,6 +183,31 @@ async fn startup_timeout_and_disconnect_detach_without_vetoing_inference() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn startup_deadline_is_total_across_successful_writes() {
+    let (_, lease) = lane();
+    let (mut startup, mut body) = delivery(lease, LIMITS, Duration::from_millis(50));
+    let (first_sent, first) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    let producer = tokio::task::spawn_blocking(move || {
+        startup.send_blocking(b"first").unwrap();
+        first_sent.send(()).unwrap();
+        resumed.blocking_recv().unwrap();
+        let second = startup.send_blocking(b"next");
+        (second, startup.into_streaming().failure())
+    });
+    first.await.unwrap();
+    let first_frame = body.frame().await.unwrap().unwrap();
+    tokio::time::advance(Duration::from_millis(51)).await;
+    drop(first_frame); // Capacity is free, but the original deadline has passed.
+    resume.send(()).unwrap();
+    assert_eq!(
+        producer.await.unwrap(),
+        (Err(DeliveryError::TimedOut), Some(DeliveryError::TimedOut))
+    );
+    assert!(body.frame().await.is_none());
+}
+
 #[tokio::test]
 async fn closed_sink_and_empty_body_have_explicit_lifetimes() {
     let (lane, lease) = lane();
@@ -237,7 +262,8 @@ fn accepted_escape_history() -> Vec<Message> {
 #[tokio::test]
 async fn accepted_over_16_mib_startup_really_drains_through_bounded_http_body() {
     let history = accepted_escape_history();
-    // Independent compatibility reference: count and hash only, never collect.
+    // Direct-render compatibility reference, not an external HTML oracle.
+    // Count and hash only; never collect the large response.
     let mut expected_bytes = 0;
     let mut expected_hash = Sha256::new();
     let reference = IncrementalRenderer::open(&history, "x", TOKEN, "m", |part| {
