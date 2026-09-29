@@ -406,12 +406,7 @@ async fn chat(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let model = match catalog.models.iter().find(|model| model.id == form.model) {
-        Some(model) => model,
-        None => return bad_request(),
-    };
-    let maximum_input = model.context_tokens - model.max_output_tokens;
-    let reservation_quote = match catalog.quote(&form.model, maximum_input) {
+    let reservation_quote = match catalog.reservation_quote(&form.model) {
         Ok(value) => value,
         Err(_) => return bad_request(),
     };

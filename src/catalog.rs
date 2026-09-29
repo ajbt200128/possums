@@ -1,23 +1,24 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Number;
 use std::collections::HashSet;
 use thiserror::Error;
 
 pub const MAX_CATALOG_BYTES: usize = 256 * 1024;
 pub const MAX_MODELS: usize = 256;
-pub const MAX_CATALOG_AGE_SECONDS: u64 = 300;
+const PRICE_SCALE: u128 = 1_000_000;
+const MARKUP_PERCENT: u128 = 130;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Model {
     pub id: String,
     pub context_tokens: u64,
     pub max_output_tokens: u64,
-    pub input_microunits_per_token: u64,
-    pub output_microunits_per_token: u64,
+    pub input_microunits_per_million_tokens: u64,
+    pub output_microunits_per_million_tokens: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Catalog {
-    pub issued_at_unix: u64,
     pub models: Vec<Model>,
 }
 
@@ -32,8 +33,6 @@ pub struct Quote {
 pub enum CatalogError {
     #[error("catalog is malformed or outside limits")]
     Invalid,
-    #[error("catalog is stale")]
-    Stale,
     #[error("unknown model")]
     UnknownModel,
     #[error("conversation exceeds model context")]
@@ -42,71 +41,128 @@ pub enum CatalogError {
     Overflow,
 }
 
+#[derive(Deserialize)]
+struct TinfoilCatalog {
+    object: String,
+    data: Vec<TinfoilModel>,
+}
+
+#[derive(Deserialize)]
+struct TinfoilModel {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    context_window: Option<u64>,
+    #[serde(default)]
+    endpoints: Vec<String>,
+    pricing: TinfoilPricing,
+}
+
+#[derive(Deserialize)]
+struct TinfoilPricing {
+    #[serde(rename = "inputTokenPricePer1M")]
+    input: Option<Number>,
+    #[serde(rename = "outputTokenPricePer1M")]
+    output: Option<Number>,
+    #[serde(rename = "requestPrice")]
+    request: Option<Number>,
+}
+
 impl Catalog {
-    pub fn parse_authenticated(bytes: &[u8], now_unix: u64) -> Result<Self, CatalogError> {
+    pub fn parse_authenticated(bytes: &[u8], _now_unix: u64) -> Result<Self, CatalogError> {
         if bytes.is_empty() || bytes.len() > MAX_CATALOG_BYTES {
             return Err(CatalogError::Invalid);
         }
-        let catalog: Self = serde_json::from_slice(bytes).map_err(|_| CatalogError::Invalid)?;
-        catalog.validate(now_unix)?;
-        Ok(catalog)
-    }
-
-    pub fn validate(&self, now_unix: u64) -> Result<(), CatalogError> {
-        let age = now_unix
-            .checked_sub(self.issued_at_unix)
-            .ok_or(CatalogError::Invalid)?;
-        if age > MAX_CATALOG_AGE_SECONDS {
-            return Err(CatalogError::Stale);
-        }
-        if self.models.is_empty() || self.models.len() > MAX_MODELS {
+        let upstream: TinfoilCatalog =
+            serde_json::from_slice(bytes).map_err(|_| CatalogError::Invalid)?;
+        if upstream.object != "list" || upstream.data.len() > MAX_MODELS {
             return Err(CatalogError::Invalid);
         }
+
         let mut ids = HashSet::new();
-        for model in &self.models {
-            if model.id.is_empty()
-                || model.id.len() > 128
-                || !model
-                    .id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-:/".contains(&byte))
-                || !ids.insert(&model.id)
-                || model.context_tokens == 0
-                || model.max_output_tokens == 0
-                || model.max_output_tokens > model.context_tokens
-                || model.input_microunits_per_token == 0
-                || model.output_microunits_per_token == 0
+        let mut models = Vec::new();
+        for upstream_model in upstream.data {
+            if upstream_model.kind != "chat"
+                || !upstream_model
+                    .endpoints
+                    .iter()
+                    .any(|endpoint| endpoint == "/v1/chat/completions")
             {
+                continue;
+            }
+            let context_tokens = upstream_model.context_window.ok_or(CatalogError::Invalid)?;
+            let input_price = upstream_model.pricing.input.ok_or(CatalogError::Invalid)?;
+            let output_price = upstream_model.pricing.output.ok_or(CatalogError::Invalid)?;
+            let request_price = upstream_model
+                .pricing
+                .request
+                .ok_or(CatalogError::Invalid)?;
+            if scaled_amount(&request_price)? != 0 {
                 return Err(CatalogError::Invalid);
             }
+            let model = Model {
+                id: upstream_model.id,
+                context_tokens,
+                max_output_tokens: context_tokens,
+                input_microunits_per_million_tokens: scaled_price(&input_price)?,
+                output_microunits_per_million_tokens: scaled_price(&output_price)?,
+            };
+            if !valid_model(&model) || !ids.insert(model.id.clone()) {
+                return Err(CatalogError::Invalid);
+            }
+            models.push(model);
         }
-        Ok(())
+        if models.is_empty() {
+            return Err(CatalogError::Invalid);
+        }
+        Ok(Self { models })
     }
 
-    pub fn quote(&self, model_id: &str, input_tokens: u64) -> Result<Quote, CatalogError> {
+    pub fn reservation_quote(&self, model_id: &str) -> Result<Quote, CatalogError> {
         let model = self
             .models
             .iter()
             .find(|model| model.id == model_id)
             .ok_or(CatalogError::UnknownModel)?
             .clone();
-        if input_tokens
-            .checked_add(model.max_output_tokens)
-            .ok_or(CatalogError::Overflow)?
-            > model.context_tokens
-        {
-            return Err(CatalogError::ContextExceeded);
-        }
-        let input = input_tokens
-            .checked_mul(model.input_microunits_per_token)
-            .ok_or(CatalogError::Overflow)?;
-        let output = model
-            .max_output_tokens
-            .checked_mul(model.output_microunits_per_token)
-            .ok_or(CatalogError::Overflow)?;
-        let upstream = input.checked_add(output).ok_or(CatalogError::Overflow)?;
-        let marked_up = upstream.checked_mul(130).ok_or(CatalogError::Overflow)?;
-        let reserved_microunits = marked_up.checked_add(99).ok_or(CatalogError::Overflow)? / 100;
+        let maximum_input_cost = marked_up_cost(
+            model.context_tokens,
+            0,
+            model.input_microunits_per_million_tokens,
+            model.output_microunits_per_million_tokens,
+        )?;
+        let maximum_output_cost = marked_up_cost(
+            0,
+            model.max_output_tokens,
+            model.input_microunits_per_million_tokens,
+            model.output_microunits_per_million_tokens,
+        )?;
+        Ok(Quote {
+            input_tokens: model.context_tokens,
+            model,
+            reserved_microunits: maximum_input_cost.max(maximum_output_cost),
+        })
+    }
+
+    pub fn quote(&self, model_id: &str, input_tokens: u64) -> Result<Quote, CatalogError> {
+        let mut model = self
+            .models
+            .iter()
+            .find(|model| model.id == model_id)
+            .ok_or(CatalogError::UnknownModel)?
+            .clone();
+        let remaining_context = model
+            .context_tokens
+            .checked_sub(input_tokens)
+            .filter(|remaining| *remaining > 0)
+            .ok_or(CatalogError::ContextExceeded)?;
+        model.max_output_tokens = model.max_output_tokens.min(remaining_context);
+        let reserved_microunits = marked_up_cost(
+            input_tokens,
+            model.max_output_tokens,
+            model.input_microunits_per_million_tokens,
+            model.output_microunits_per_million_tokens,
+        )?;
         Ok(Quote {
             model,
             input_tokens,
@@ -119,17 +175,103 @@ pub fn actual_cost(quote: &Quote, output_tokens: u64) -> Result<u64, CatalogErro
     if output_tokens > quote.model.max_output_tokens {
         return Err(CatalogError::Invalid);
     }
-    let input = quote
-        .input_tokens
-        .checked_mul(quote.model.input_microunits_per_token)
+    marked_up_cost(
+        quote.input_tokens,
+        output_tokens,
+        quote.model.input_microunits_per_million_tokens,
+        quote.model.output_microunits_per_million_tokens,
+    )
+}
+
+fn valid_model(model: &Model) -> bool {
+    !model.id.is_empty()
+        && model.id.len() <= 128
+        && model
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-:/".contains(&byte))
+        && model.context_tokens > 0
+        && model.max_output_tokens > 0
+        && model.max_output_tokens <= model.context_tokens
+        && model.input_microunits_per_million_tokens > 0
+        && model.output_microunits_per_million_tokens > 0
+}
+
+fn marked_up_cost(
+    input_tokens: u64,
+    output_tokens: u64,
+    input_price: u64,
+    output_price: u64,
+) -> Result<u64, CatalogError> {
+    let input = u128::from(input_tokens)
+        .checked_mul(u128::from(input_price))
         .ok_or(CatalogError::Overflow)?;
-    let output = output_tokens
-        .checked_mul(quote.model.output_microunits_per_token)
+    let output = u128::from(output_tokens)
+        .checked_mul(u128::from(output_price))
         .ok_or(CatalogError::Overflow)?;
-    input
+    let numerator = input
         .checked_add(output)
-        .and_then(|value| value.checked_mul(130))
-        .and_then(|value| value.checked_add(99))
-        .map(|value| value / 100)
-        .ok_or(CatalogError::Overflow)
+        .and_then(|value| value.checked_mul(MARKUP_PERCENT))
+        .ok_or(CatalogError::Overflow)?;
+    let denominator = PRICE_SCALE * 100;
+    let rounded = numerator
+        .checked_add(denominator - 1)
+        .ok_or(CatalogError::Overflow)?
+        / denominator;
+    u64::try_from(rounded).map_err(|_| CatalogError::Overflow)
+}
+
+fn scaled_price(number: &Number) -> Result<u64, CatalogError> {
+    let scaled = scaled_amount(number)?;
+    if scaled == 0 {
+        return Err(CatalogError::Invalid);
+    }
+    Ok(scaled)
+}
+
+fn scaled_amount(number: &Number) -> Result<u64, CatalogError> {
+    let text = number.to_string();
+    let (mantissa, exponent) =
+        text.split_once(['e', 'E'])
+            .map_or((text.as_str(), 0_i32), |(mantissa, exponent)| {
+                exponent
+                    .parse::<i32>()
+                    .map(|value| (mantissa, value))
+                    .unwrap_or((mantissa, i32::MIN))
+            });
+    if exponent == i32::MIN || mantissa.starts_with('-') {
+        return Err(CatalogError::Invalid);
+    }
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(CatalogError::Invalid);
+    }
+    let digits = format!("{whole}{fraction}")
+        .parse::<u128>()
+        .map_err(|_| CatalogError::Overflow)?;
+    let decimal_shift = exponent
+        .checked_sub(i32::try_from(fraction.len()).map_err(|_| CatalogError::Overflow)?)
+        .and_then(|value| value.checked_add(6))
+        .ok_or(CatalogError::Overflow)?;
+    let scaled = if decimal_shift >= 0 {
+        digits
+            .checked_mul(
+                10_u128
+                    .checked_pow(decimal_shift as u32)
+                    .ok_or(CatalogError::Overflow)?,
+            )
+            .ok_or(CatalogError::Overflow)?
+    } else {
+        let divisor = 10_u128
+            .checked_pow(decimal_shift.unsigned_abs())
+            .ok_or(CatalogError::Overflow)?;
+        digits
+            .checked_add(divisor - 1)
+            .ok_or(CatalogError::Overflow)?
+            / divisor
+    };
+    u64::try_from(scaled).map_err(|_| CatalogError::Overflow)
 }

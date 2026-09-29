@@ -45,11 +45,7 @@ struct FixtureInference;
 #[async_trait]
 impl Inference for FixtureInference {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
-        Ok(format!(
-            r#"{{"issued_at_unix":{},"models":[{{"id":"fixture-model","context_tokens":20,"max_output_tokens":10,"input_microunits_per_token":1,"output_microunits_per_token":1}}]}}"#,
-            now()
-        )
-        .into_bytes())
+        Ok(br#"{"object":"list","data":[{"id":"fixture-model","type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":1,"outputTokenPricePer1M":1,"requestPrice":0}}]}"#.to_vec())
     }
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {

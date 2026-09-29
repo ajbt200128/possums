@@ -54,6 +54,10 @@ impl EvidenceVerifier for TestEvidenceVerifier {
     }
 }
 
+fn catalog_bytes() -> Vec<u8> {
+    br#"{"object":"list","data":[{"id":"m","type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":1,"outputTokenPricePer1M":1,"requestPrice":0}}]}"#.to_vec()
+}
+
 struct BlockingInference {
     started: Arc<Notify>,
 }
@@ -61,11 +65,7 @@ struct BlockingInference {
 #[async_trait]
 impl Inference for BlockingInference {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        Ok(format!(r#"{{"issued_at_unix":{now},"models":[{{"id":"m","context_tokens":20,"max_output_tokens":10,"input_microunits_per_token":1,"output_microunits_per_token":1}}]}}"#).into_bytes())
+        Ok(catalog_bytes())
     }
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
@@ -87,11 +87,7 @@ struct LargeResponseInference;
 #[async_trait]
 impl Inference for LargeResponseInference {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        Ok(format!(r#"{{"issued_at_unix":{now},"models":[{{"id":"m","context_tokens":20,"max_output_tokens":10,"input_microunits_per_token":1,"output_microunits_per_token":1}}]}}"#).into_bytes())
+        Ok(catalog_bytes())
     }
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
@@ -116,11 +112,7 @@ struct PanicInference;
 #[async_trait]
 impl Inference for PanicInference {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        Ok(format!(r#"{{"issued_at_unix":{now},"models":[{{"id":"m","context_tokens":20,"max_output_tokens":10,"input_microunits_per_token":1,"output_microunits_per_token":1}}]}}"#).into_bytes())
+        Ok(catalog_bytes())
     }
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
@@ -154,11 +146,7 @@ impl Inference for FakeInference {
         {
             return Err(InferenceError::Unavailable);
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        Ok(format!(r#"{{"issued_at_unix":{now},"models":[{{"id":"m","context_tokens":20,"max_output_tokens":10,"input_microunits_per_token":1,"output_microunits_per_token":1}}]}}"#).into_bytes())
+        Ok(catalog_bytes())
     }
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
