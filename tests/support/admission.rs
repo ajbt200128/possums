@@ -6,14 +6,9 @@
 //! Ingress cannot be budgeted as just the raw-body limit. Reservation handoff,
 //! authenticated upstream draining and exactly-once finalization remain unwired.
 
-use axum::body::{Bytes, HttpBody};
-use std::{
-    convert::Infallible,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use crate::stream_owner::{delivery, DeliveryBody, DeliveryTx, Limits};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub struct Admission {
     work: Arc<Semaphore>,
@@ -101,97 +96,7 @@ impl Admitted {
 
 impl ResponseAdmission {
     pub fn into_delivery(self, limits: Limits) -> (DeliveryTx, DeliveryBody) {
-        assert!(limits.frames > 0 && limits.chunk_bytes > 0);
-        assert!(limits.chunk_bytes <= limits.payload_bytes);
-        let (tx, rx) = mpsc::channel(limits.frames);
-        let lease = Arc::new(self.0);
-        (
-            DeliveryTx {
-                tx,
-                lease: lease.clone(),
-                bytes: Arc::new(Semaphore::new(limits.payload_bytes as usize)),
-                chunk_bytes: limits.chunk_bytes,
-            },
-            DeliveryBody { rx, _lease: lease },
-        )
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct Limits {
-    pub frames: usize,
-    pub payload_bytes: u32,
-    pub chunk_bytes: u32,
-}
-
-pub struct DeliveryTx {
-    tx: mpsc::Sender<Bytes>,
-    lease: Arc<OwnedSemaphorePermit>,
-    bytes: Arc<Semaphore>,
-    chunk_bytes: u32,
-}
-
-struct Chunk {
-    data: Box<[u8]>,
-    _bytes: OwnedSemaphorePermit,
-    _lease: Arc<OwnedSemaphorePermit>,
-}
-
-impl AsRef<[u8]> for Chunk {
-    fn as_ref(&self) -> &[u8] {
-        &self.data
-    }
-}
-
-impl DeliveryTx {
-    /// Bound payload allocations (not allocator/Bytes/channel overhead). Both
-    /// permits are acquired before copying. Dequeue does NOT release byte credit:
-    /// Bytes clones/slices must retain it, even after body and sender are gone.
-    /// Queue saturation/disconnect is a delivery error, never an upstream result.
-    pub fn try_send(&self, data: &[u8]) -> Result<(), ()> {
-        // Do not create arbitrarily many zero-credit owners outside the queue.
-        if data.is_empty() {
-            return Ok(());
-        }
-        let size = u32::try_from(data.len()).map_err(|_| ())?;
-        if size > self.chunk_bytes {
-            return Err(());
-        }
-        let slot = self.tx.try_reserve().map_err(|_| ())?;
-        let bytes = self
-            .bytes
-            .clone()
-            .try_acquire_many_owned(size)
-            .map_err(|_| ())?;
-        let chunk = Bytes::from_owner(Chunk {
-            data: data.into(),
-            _bytes: bytes,
-            _lease: self.lease.clone(),
-        });
-        slot.send(chunk);
-        Ok(())
-    }
-
-    pub fn available_bytes(&self) -> usize {
-        self.bytes.available_permits()
-    }
-}
-
-pub struct DeliveryBody {
-    rx: mpsc::Receiver<Bytes>,
-    _lease: Arc<OwnedSemaphorePermit>,
-}
-
-impl HttpBody for DeliveryBody {
-    type Data = Bytes;
-    type Error = Infallible;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<http_body::Frame<Bytes>, Infallible>>> {
-        self.rx
-            .poll_recv(cx)
-            .map(|part| part.map(|bytes| Ok(http_body::Frame::data(bytes))))
+        let (startup, body) = delivery(self.0, limits, Duration::from_secs(1));
+        (startup.into_streaming(), body)
     }
 }
