@@ -7,6 +7,8 @@ use thiserror::Error;
 use tinfoil::Client;
 use tokio::time::Instant;
 
+pub mod stream;
+
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
