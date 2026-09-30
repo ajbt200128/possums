@@ -1,9 +1,8 @@
-//! Bounded delivery storage, deliberately not wired to `/chat` yet.
+//! Bounded delivery storage for streamed `/chat`.
 //!
 //! Payload bytes and outstanding chunk owners (including dequeued frames) are
 //! bounded independently. This is not an RSS/allocator or whole-worker budget.
 //! Delivery shares a heavy admission lease, never a reservation or inference task.
-//! This is staged plumbing; the buffered route does not use it yet.
 
 use axum::body::{Bytes, HttpBody};
 use std::{

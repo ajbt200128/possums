@@ -166,7 +166,7 @@ pub fn chat_page(
     (rendered.len() <= limit).then_some(rendered)
 }
 
-/// Additive continuation format; production ChatForm remains buffered for now.
+/// Canonical continuation format for streamed chat and control pages.
 /// All limits are transport defenses, not model output or product history caps.
 pub const HISTORY_BLOCK_BYTES: usize = 4096;
 pub const MAX_MODEL_FIELD_BYTES: usize = 256;
