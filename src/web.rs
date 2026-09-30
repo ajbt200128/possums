@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::catch_panic::CatchPanicLayer;
 
 #[cfg(test)]
-mod resource_streaming_tests;
+pub(crate) mod resource_streaming_tests;
 
 pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const BODY_DEADLINE: Duration = Duration::from_secs(30);
@@ -275,6 +275,11 @@ async fn total_body_deadline(
         }),
         None => bytes,
     };
+    #[cfg(test)]
+    if chat {
+        state.preflight_hooks.resources.raw(&bytes);
+        state.preflight_hooks.resources.at("ingress").await;
+    }
     next.run(Request::from_parts(parts, Body::from(bytes)))
         .await
 }
@@ -547,6 +552,11 @@ async fn chat(
         Ok(form) => form,
         Err(_) => return bad_request(),
     };
+    #[cfg(test)]
+    {
+        state.preflight_hooks.resources.input("decoded", &form);
+        state.preflight_hooks.resources.at("decoded").await;
+    }
     drop(body); // Decoded storage is heavy-owned; the raw ingress owner ends here.
     let Some((session_id, session)) = session_from_headers(&state, &headers) else {
         return unauthorized();
@@ -646,6 +656,11 @@ async fn chat(
                     role: "user".into(),
                     content: std::mem::take(&mut job.form.prompt),
                 });
+                #[cfg(test)]
+                state
+                    .preflight_hooks
+                    .resources
+                    .input("preflight", &job.form);
                 let tokens = state
                     .inference
                     .count_tokens(&job.form.model, &job.form.history)
@@ -679,6 +694,8 @@ async fn chat(
                 csrf: job.form.csrf,
                 session_id,
                 conversation: submission.conversation,
+                #[cfg(test)]
+                resource_hooks: Some(state.preflight_hooks.resources.clone()),
             };
             // This synchronous handoff is unconditional, even with no receiver.
             let (body, observer) =

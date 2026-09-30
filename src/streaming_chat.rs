@@ -35,6 +35,8 @@ pub(crate) struct AcceptedChat {
     pub session_id: String,
     pub csrf: String,
     pub conversation: ConversationId,
+    #[cfg(test)]
+    pub resource_hooks: Option<Arc<crate::web::resource_streaming_tests::ResourceHooks>>,
 }
 
 /// `heavy` MUST be the same Arc supplied to `owner`, not a second acquisition.
@@ -61,6 +63,10 @@ fn compose_with_startup(
     startup: impl FnOnce(Startup) -> Started + Send + 'static,
 ) -> (DeliveryBody, Observer) {
     let (tx, body) = delivery(heavy.clone(), LIMITS, timeout);
+    #[cfg(test)]
+    if let Some(hooks) = &input.resource_hooks {
+        hooks.delivery(&body);
+    }
     let observer = owner.spawn_settling(tx, move |tx, settlement| async move {
         // spawn_blocking outlives cancellation of its async waiter. Carry the
         // SAME heavy lease with both its input AND its unclaimed return value,
@@ -70,7 +76,14 @@ fn compose_with_startup(
             tx,
             _heavy: heavy,
         };
-        let Ok(started) = tokio::task::spawn_blocking(move || startup(job)).await else {
+        #[cfg(test)]
+        let hooks = job.input.resource_hooks.clone();
+        let started = tokio::task::spawn_blocking(move || startup(job));
+        #[cfg(test)]
+        if let Some(hooks) = &hooks {
+            hooks.queued(&started).await;
+        }
+        let Ok(started) = started.await else {
             // Never format/resume a panic payload; refund without sending input.
             return settlement.finish(&Err(InferenceError::Unavailable));
         };
@@ -152,6 +165,10 @@ struct Started {
 }
 
 fn start(mut job: Startup) -> Started {
+    #[cfg(test)]
+    if let Some(hooks) = &job.input.resource_hooks {
+        tokio::runtime::Handle::current().block_on(hooks.at("startup-input"));
+    }
     let renderer = (|| {
         let mut sink = |html: &str| {
             job.tx
@@ -171,6 +188,10 @@ fn start(mut job: Startup) -> Started {
         renderer.finish_start(&mut sink)?;
         renderer.into_streaming()
     })();
+    #[cfg(test)]
+    if let Some(hooks) = &job.input.resource_hooks {
+        tokio::runtime::Handle::current().block_on(hooks.at("startup-result"));
+    }
     Started {
         renderer,
         input: job.input,

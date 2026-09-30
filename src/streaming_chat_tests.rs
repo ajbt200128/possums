@@ -112,6 +112,7 @@ impl Fixture {
                 session_id: self.session_id.clone(),
                 csrf: self.csrf.clone(),
                 conversation: self.conversation,
+                resource_hooks: None,
             },
         )
     }

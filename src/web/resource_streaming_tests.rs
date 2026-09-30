@@ -1,10 +1,10 @@
-//! Packet-3 proof target, NOT an implemented/passing aggregate gate.
+//! Packet-3 combined production-route resource gate (local synthetic evidence).
 //!
 //! Exact identity: web::resource_streaming_tests::combined_resource_gate
 //! Command (fresh test process; assert harness reports exactly ONE selected test):
 //! nix develop -c cargo test --lib web::resource_streaming_tests::combined_resource_gate -- --exact --test-threads=1 --nocapture
-//! No test with that name exists until the route workload is implemented. A
-//! zero-selected-test exit is NOT evidence. The seam tests below are not the gate.
+//! The exact command must select ONE test. A zero-selected-test exit is NOT
+//! evidence. Independent instrumentation/ownership review remains required.
 //!
 //! Workload contract:
 //! - One multi-thread Tokio runtime (four workers plus blocking workers), real
@@ -24,16 +24,16 @@
 //!   phases. The latter must execute resource_fixtures::consume_response with
 //!   separately held finish, DONE and EOF. Never fabricate terminal StreamUsage.
 //! - One-shot Pause/Checkpoint below at tokenization, before compose and just
-//!   after compose. Packet 2 adds optional per-request cfg(test) hooks, carried
-//!   from AppState into detached preflight, never process-global hooks. At pre-
+//!   after compose. Optional per-AppState cfg(test) hook queues are carried
+//!   into detached preflight, never installed process-globally. At pre-
 //!   compose pause the original owner/input/permit live; at post-compose pause
 //!   only the queued body owns delivery while generation runs independently.
 //!   Observer abort/drop must not abort those tasks. Release/dropped test hooks
 //!   cannot veto generation; production has NO corresponding await gap.
 //! - Child module reads AppState semaphores directly. Ledger assertions use real
 //!   accounting snapshots/outcomes and fixture call counts, not a copied ledger.
-//!   Add cfg(test) ledger events only if public prompt-free snapshots cannot prove
-//!   exactly-once finish. Never put identifiers/content in exported diagnostics.
+//!   No new ledger events are needed: balances, call counts and admissions prove
+//!   the exercised terminal outcomes. No identifying/content diagnostics export.
 //! - Probe actual delivery budgets before wrapping bodies. Keep bodies, dequeued
 //!   Bytes clones and one-byte slices after generation ends. Generation/account
 //!   slots release earlier; heavy stays unavailable until its LAST owner drops.
@@ -62,27 +62,67 @@
 //!   fixture queues and evidence/catalog data separately. Never subtract an
 //!   unexplained residual; report absolute totals alongside scoped attribution.
 //!
-//! Conservative capacity ALLOCATIONS TO JUSTIFY at the gate, not proven limits:
+//! Scoped capacity derivation (pinned 64-bit Rust/serde, NOT an RSS bound):
 //! | Owner / maximum simultaneous lanes | MiB each | MiB total |
-//! | heavy (decoded/vector/preflight/startup/parser/delivery) x4 | 104 | 416 |
-//! | raw ingress (including collection capacity) x4            |  16 |  64 |
-//! | complete New chat lane x1                                 |  16 |  16 |
-//! | ordinary controls lane x1                                 |  16 |  16 |
-//! | scoped admission TOTAL                                   |     | 512 |
-//! Heavy worksheet per lane: 40 MiB decoded strings/message vector capacities
-//! (including conversion/growth overlap); 8 MiB decode JSON/staging; 32 MiB
-//! serializer capacity/transients (16-MiB logical limit is NOT capacity proof);
-//! 8 MiB renderer/parser/delivery incl. 64-KiB/eight-frame owners; 8 MiB bounded
-//! catalog/evidence/model metadata; 8 MiB task/channel/blocking-result slack.
-//! Derive actual capacities from accepted form shapes and allocator/growth code,
-//! not just observed peaks. Mutually exclusive phases may share allowances only
-//! when destruction/barrier evidence proves non-overlap. Startup inputs and
-//! unclaimed results retain heavy, not an uncharged fifth lane. Account for
-//! payload capacity versus length, and retained slices charging full allocation.
-//! Shared runtime/auth/ledger/catalog state and fixture overhead need explicit
-//! separate attribution; they are not magically inside the 512-MiB lane sum.
-//! If justified overlap exceeds a lane or 512 MiB, record command/input/phase/bytes
-//! and STOP for a decision: no target increase or allowance/concurrency reduction.
+//! | heavy (owned input + exclusive transients + bounded work) x4 | 104 | 416 |
+//! | raw ingress (collection plus one incoming frame) x4         |  16 |  64 |
+//! | complete New chat lane x1                                   |  16 |  16 |
+//! | ordinary controls lane x1                                   |  16 |  16 |
+//! | scoped admission TOTAL                                     |     | 512 |
+//!
+//! Heavy = 32 owned input + 48 exclusive transient + 8 renderer/parser/delivery
+//! + 8 catalog/evidence + 8 task/channel/result allowance = 104 MiB:
+//! - History JSON <=6 MiB. Even before valid_history, the two required String
+//!   fields require >=25 wire bytes/element including separator. <=251659
+//!   elements, hence a doubling Vec capacity <=262144 * 48 = 12 MiB. Legal
+//!   histories are smaller still. Strings own at most twice their JSON spans
+//!   (12 MiB conservatively); prompt capacity <=8 MiB. Total <=32 MiB. Empty
+//!   Strings allocate nothing. Appending the prompt can grow the message vector;
+//!   any old/new overlap fits the transient allowance, not a second input copy.
+//! - Decode: JSON <=6 MiB, serde escaped-string scratch <=12 MiB, old message
+//!   vector during growth <=6 MiB, and even a non-reusing conversion <=12 MiB:
+//!   <=36 MiB transient. All die BEFORE borrowed serialization. Serializer
+//!   logical limit 16 MiB gives Vec capacity <32 MiB; conservatively charge
+//!   an additional old <16-MiB allocation during growth: <=48 MiB. Tokenizer
+//!   body dies before pre-compose; generation body is constructed only AFTER
+//!   startup. These are mutually exclusive, witnessed by the phase barriers.
+//! - Renderer owns a 4096-byte block, borrows input, and emits <=6144-byte visible
+//!   / <5600-byte hidden chunks. Escape replacement old/new temporaries stay
+//!   below 32 KiB. Delivery is <=65536 payload bytes and eight owner records;
+//!   dequeued clones/slices retain those SAME owners, not additional payloads.
+//!   Parser buffers are 64+256 KiB, transport fragment <=256 KiB, at most 8192
+//!   JSON nodes/depth 16 and 16-KiB optional strings: conservative <8 MiB with
+//!   JSON map/vector growth. There is never a complete collected answer.
+//! - Catalog input <=256 KiB. The densest stored unvalidated field is an array
+//!   of empty endpoint strings (>=3 bytes/24-byte String): doubling storage
+//!   <=3 MiB plus <=1.5 MiB old capacity. Other model fields, input and scratch
+//!   fit the remaining 3.5 MiB. Validated output is <=256 models/128-byte IDs.
+//!   Gateway evidence is <=1 MiB and <=4096 nodes; its temporary parse/growth
+//!   fits 8 MiB and ends before catalog parsing. SDK/helper internals excluded.
+//! - Eight MiB task allowance is deliberately loose: bounded one-shot/channel
+//!   records, Arc owners, model/token/session strings and the two blocking
+//!   input/result envelopes are <1 MiB per lane; the history moves, never copies.
+//!   Queued input AND unclaimed result own the original heavy lease. Generation
+//!   slots release at accounting, heavy/ingress only at their final owners.
+//! - Ingress uses one fixed 8-MiB Vec plus at most one 8-MiB incoming frame;
+//!   no vector of fragments. New chat/ordinary selectors use <=8-MiB catalog
+//!   work, then <=256 safe 128-byte IDs (<80 KiB options, conservative <2 MiB
+//!   rendered intermediates); 4-KiB input and bounded chrome fit 16 MiB.
+//!   Attestation controls borrow two bounded documents and serialize <=2 MiB
+//!   (capacity <4 MiB plus old <2 MiB); gateway <=4096 nodes and the pinned
+//!   SDK document schema are assumptions, NOT arbitrary unbounded Value inputs.
+//!
+//! Baseline runtime/auth/ledger/shared provider state is separate from admission.
+//! Fixture construction retains ONE 8-MiB wire plus <=6-MiB source JSON, releasing
+//! JSON before ingress; subsequent source wire dies in collection. Retained raw
+//! clones/slices share the actual charged allocation. Four loopback peers have
+//! two queued <=1024-byte fragments each here; one <=64-KiB event is constructed
+//! at a time. Serializer HTTP sinks discard frames immediately and return only
+//! a decimal byte count. reqwest/Hyper runtime buffers and test bookkeeping are
+//! INCLUDED in absolute/live/delta observations, never silently subtracted.
+//! The 512-MiB assertion includes fixture deltas and is stricter than subtracting
+//! them. It cannot establish SDK/TLS/helper or allocator/RSS universal bounds.
+//! Independent review must validate this derivation as well as measurements.
 //! SDK/TLS/helper universal bounds, allocator overhead and whole-process RSS remain
 //! unproven even if local requested allocation fits. Synthetic transport proves
 //! neither live Tinfoil authentication nor invoice/billable-cost bounds.
@@ -131,10 +171,101 @@ impl Pause {
 pub(super) struct PreflightHooks {
     before: std::sync::Mutex<Option<Pause>>,
     after: std::sync::Mutex<Option<Pause>>,
+    pub(crate) resources: Arc<ResourceHooks>,
+}
+
+#[derive(Default)]
+pub(crate) struct ResourceHooks {
+    pauses: std::sync::Mutex<
+        std::collections::BTreeMap<&'static str, std::collections::VecDeque<Pause>>,
+    >,
+    capture: std::sync::atomic::AtomicBool,
+    raw: std::sync::Mutex<Vec<axum::body::Bytes>>,
+    deliveries: std::sync::Mutex<Vec<stream_owner::DeliveryProbe>>,
+    capacities: std::sync::Mutex<Vec<InputCapacity>>,
+}
+
+#[derive(Debug)]
+struct InputCapacity {
+    phase: &'static str,
+    messages: usize,
+    vector_bytes: usize,
+    strings: usize,
+    prompt: usize,
+}
+
+impl ResourceHooks {
+    fn arm(&self, phase: &'static str) -> Checkpoint {
+        let (pause, checkpoint) = checkpoint();
+        self.pauses
+            .lock()
+            .unwrap()
+            .entry(phase)
+            .or_default()
+            .push_back(pause);
+        checkpoint
+    }
+
+    pub(crate) async fn at(&self, phase: &'static str) {
+        let pause = self
+            .pauses
+            .lock()
+            .unwrap()
+            .get_mut(phase)
+            .and_then(|q| q.pop_front());
+        if let Some(pause) = pause {
+            pause.wait().await;
+        }
+    }
+
+    pub(crate) async fn queued<T>(&self, job: &tokio::task::JoinHandle<T>) {
+        let pause = self
+            .pauses
+            .lock()
+            .unwrap()
+            .get_mut("startup-queued")
+            .and_then(|q| q.pop_front());
+        if let Some(pause) = pause {
+            while !job.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            pause.wait().await;
+        }
+    }
+
+    pub(crate) fn input(&self, phase: &'static str, form: &super::ContinuationForm) {
+        if self.capture.load(std::sync::atomic::Ordering::SeqCst) {
+            self.capacities.lock().unwrap().push(InputCapacity {
+                phase,
+                messages: form.history.len(),
+                vector_bytes: form.history.capacity()
+                    * std::mem::size_of::<crate::inference::Message>(),
+                strings: form
+                    .history
+                    .iter()
+                    .map(|m| m.role.capacity() + m.content.capacity())
+                    .sum(),
+                prompt: form.prompt.capacity(),
+            });
+        }
+    }
+
+    pub(crate) fn raw(&self, bytes: &axum::body::Bytes) {
+        if self.capture.load(std::sync::atomic::Ordering::SeqCst) {
+            self.raw.lock().unwrap().push(bytes.clone());
+        }
+    }
+
+    pub(crate) fn delivery(&self, body: &stream_owner::DeliveryBody) {
+        if self.capture.load(std::sync::atomic::Ordering::SeqCst) {
+            self.deliveries.lock().unwrap().push(body.probe());
+        }
+    }
 }
 
 impl PreflightHooks {
     pub(super) async fn before_compose(&self) {
+        self.resources.at("pre-compose").await;
         let pause = self.before.lock().unwrap().take();
         if let Some(pause) = pause {
             pause.wait().await;
@@ -146,6 +277,27 @@ impl PreflightHooks {
             pause.wait().await;
         }
     }
+}
+
+#[path = "resource_gate.rs"]
+mod combined;
+
+#[test]
+fn combined_resource_gate() {
+    let startup = crate::process_alloc_tests::ALLOCATOR.begin_phase();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .max_blocking_threads(8)
+        .enable_all()
+        .build()
+        .unwrap();
+    let initialized = crate::process_alloc_tests::ALLOCATOR.begin_phase();
+    runtime.block_on(combined::run(startup, initialized));
+    drop(runtime);
+    println!(
+        "resource runtime-released={:?}",
+        crate::process_alloc_tests::ALLOCATOR.snapshot()
+    );
 }
 
 // These are production-route lifecycle proofs, NOT the aggregate resource gate.
