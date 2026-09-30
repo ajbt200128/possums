@@ -3,6 +3,8 @@ pub mod attestation;
 pub mod auth;
 mod bounded_json;
 pub mod catalog;
+#[cfg(test)]
+mod process_alloc_tests;
 // Staged ownership only; buffered /chat remains unchanged.
 #[allow(dead_code)]
 mod generation_owner;

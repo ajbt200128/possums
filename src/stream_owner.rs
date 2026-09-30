@@ -290,6 +290,33 @@ impl DeliveryBody {
     pub(crate) fn usage(&self) -> Usage {
         self.budget.usage()
     }
+
+    #[cfg(test)]
+    pub(crate) fn probe(&self) -> DeliveryProbe {
+        DeliveryProbe {
+            budget: self.budget.clone(),
+            heavy: Arc::downgrade(&self._lease),
+        }
+    }
+}
+
+// Observe the ACTUAL budget even after body drop, without extending admission.
+// Weak heavy observation is asserted only at deterministic quiescent barriers.
+#[cfg(test)]
+pub(crate) struct DeliveryProbe {
+    budget: Arc<Budget>,
+    heavy: std::sync::Weak<OwnedSemaphorePermit>,
+}
+
+#[cfg(test)]
+impl DeliveryProbe {
+    pub(crate) fn usage(&self) -> Usage {
+        self.budget.usage()
+    }
+
+    pub(crate) fn heavy_alive(&self) -> bool {
+        self.heavy.strong_count() != 0
+    }
 }
 
 impl HttpBody for DeliveryBody {

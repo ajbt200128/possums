@@ -36,6 +36,9 @@ use tokio::{
 };
 use tower_http::catch_panic::CatchPanicLayer;
 
+#[cfg(test)]
+mod resource_streaming_tests;
+
 pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const BODY_DEADLINE: Duration = Duration::from_secs(30);
 const HEADER_DEADLINE: Duration = Duration::from_secs(10);

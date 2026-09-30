@@ -647,14 +647,7 @@ mod stream_probe_tests {
             role: "user".into(),
             content: "x".repeat(MAX_TOKENIZER_REQUEST_BYTES),
         }];
-        assert!(crate::bounded_json::to_vec(
-            &TokenCountRequest {
-                model: "fixture",
-                messages: &messages,
-            },
-            MAX_TOKENIZER_REQUEST_BYTES,
-        )
-        .is_err());
+        assert!(tokenizer_request_bytes("fixture", &messages).is_err());
     }
 }
 
@@ -662,6 +655,48 @@ mod stream_probe_tests {
 struct TokenCountRequest<'a> {
     model: &'a str,
     messages: &'a [Message],
+}
+
+// Both production and in-crate resource fixtures borrow the route's messages;
+// never clone a transcript merely to serialize a tokenizer request.
+fn tokenizer_request_bytes(model: &str, messages: &[Message]) -> Result<Vec<u8>, InferenceError> {
+    crate::bounded_json::to_vec(
+        &TokenCountRequest { model, messages },
+        MAX_TOKENIZER_REQUEST_BYTES,
+    )
+    .map_err(|_| InferenceError::InvalidResponse)
+}
+
+// Synthetic transport access only: this neither bypasses nor proves production
+// provider authentication, endpoint binding or release provenance.
+#[cfg(test)]
+pub(crate) mod resource_fixtures {
+    use super::*;
+
+    pub(crate) fn tokenizer_body(
+        model: &str,
+        messages: &[Message],
+    ) -> Result<reqwest::Body, InferenceError> {
+        let bytes = tokenizer_request_bytes(model, messages)?;
+        Ok(reqwest::Body::wrap(reqwest::Body::from(bytes)))
+    }
+
+    pub(crate) fn stream_body(
+        model: &str,
+        max_output_tokens: u64,
+        messages: &[Message],
+    ) -> Result<reqwest::Body, InferenceError> {
+        stream::request_body(model, max_output_tokens, messages)
+    }
+
+    pub(crate) async fn consume_response(
+        response: reqwest::Response,
+        deadline: Instant,
+        idle_timeout: Duration,
+        on_delta: impl FnMut(&str),
+    ) -> Result<stream::StreamUsage, InferenceError> {
+        stream::consume_response(response, deadline, idle_timeout, on_delta).await
+    }
 }
 
 #[derive(Serialize)]
@@ -708,11 +743,7 @@ impl Inference for TinfoilInference {
     }
 
     async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError> {
-        let bytes = crate::bounded_json::to_vec(
-            &TokenCountRequest { model, messages },
-            MAX_TOKENIZER_REQUEST_BYTES,
-        )
-        .map_err(|_| InferenceError::InvalidResponse)?;
+        let bytes = tokenizer_request_bytes(model, messages)?;
         let request = self
             .authenticate(
                 self.http()?
