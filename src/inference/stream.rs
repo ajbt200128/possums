@@ -766,6 +766,24 @@ mod tests {
                 "a valid stream must not depend on DATA fragmentation"
             );
         }
+        // Splitting DATA must not reset the protocol's cross-slice line limit.
+        let oversized = vec![b'x'; MAX_TRANSPORT_BUFFER_BYTES + 1];
+        let oversized_line =
+            reqwest::Body::wrap_stream(stream::iter([Ok::<_, std::io::Error>(oversized)]));
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(oversized_line)
+                .unwrap(),
+        );
+        assert!(consume_response(
+            response,
+            Instant::now() + Duration::from_secs(1),
+            STREAM_IDLE_TIMEOUT,
+            |_| panic!("oversized line must not emit content")
+        )
+        .await
+        .is_err());
         // An already expired total deadline rejects even an immediately ready EOF.
         let response = reqwest::Response::from(
             http::Response::builder()
