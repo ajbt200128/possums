@@ -325,3 +325,48 @@ async fn oversized_headers_are_rejected_before_routing() {
     assert!(read == 0 || !response[..read].starts_with(b"HTTP/1.1 200"));
     server.abort();
 }
+
+#[tokio::test]
+async fn zero_idle_pool_opens_a_new_http1_connection_for_each_request() {
+    // Runtime check of the pinned reqwest/Hyper setting used by the SDK's TLS
+    // builder. Plain loopback cannot establish production certificate pinning.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let peer = tokio::spawn(async move {
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut headers = Vec::new();
+            let mut block = [0_u8; 1024];
+            while !headers.windows(4).any(|part| part == b"\r\n\r\n") {
+                let read = socket.read(&mut block).await.unwrap();
+                assert!(read > 0 && headers.len() + read <= 8192);
+                headers.extend_from_slice(&block[..read]);
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            held.push(socket); // Keep the first peer alive to expose reuse.
+        }
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .http1_only()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap();
+    for _ in 0..2 {
+        let response = tokio::time::timeout(Duration::from_secs(5), client.get(&url).send())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+    }
+    peer.await.unwrap();
+}
