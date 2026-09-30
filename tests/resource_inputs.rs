@@ -128,6 +128,29 @@ fn dense_invalid_sequence_history_rejects_before_vector_growth() {
 }
 
 #[test]
+fn near_body_limit_valid_sequence_history_stays_accepted() {
+    // Sequence-form entries are denser than object-form entries. A long valid
+    // prefix must still be accepted, even though invalid entries fail early.
+    const PAIRS: usize = 208_000;
+    let pair = r#"["user","x"],["assistant",""]"#;
+    let json = format!("[{}]", vec![pair; PAIRS].join(","));
+    let body = history_form(&json, "x");
+    assert!(body.len() > BODY_LIMIT - 64 * 1024 && body.len() <= BODY_LIMIT);
+    let (result, allocated) = allocation_probe::measure(|| decode_continuation(&body));
+    let form = result.unwrap_or_else(|_| panic!("valid sequence history rejected"));
+    assert_eq!(form.history.len(), 2 * PAIRS);
+    assert_eq!(form.history.first().unwrap().content, "x");
+    assert_eq!(form.history.last().unwrap().role, "assistant");
+    assert_eq!(form.prompt, "x");
+    // Fixture-only cumulative requested bytes, not a worst-case peak or RSS.
+    println!(
+        "valid sequence decoded={} body={} requested={allocated}",
+        json.len(),
+        body.len()
+    );
+}
+
+#[test]
 fn sequence_history_preserves_exact_multi_turn_messages() {
     let expected = vec![
         Message {
