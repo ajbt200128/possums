@@ -1,16 +1,17 @@
 use crate::{
-    accounting::{Accounting, Outcome, ReserveResult},
+    accounting::{Accounting, AccountingError, Outcome, ReserveResult},
     attestation::{EvidenceVerifier, GatewayEvidence},
     auth::{
         clear_session_cookie, login_challenge_cookie, session_cookie, AdmissionError, Auth, Session,
     },
-    catalog::actual_cost,
+    generation_owner::ReservedGeneration,
     inference::{authenticated_catalog, Message, SharedInference},
     render,
+    streaming_chat::{self, AcceptedChat},
 };
 use axum::{
     body::{Body, Bytes, HttpBody},
-    extract::{DefaultBodyLimit, Form, State},
+    extract::{DefaultBodyLimit, Extension, Form, State},
     http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
@@ -49,7 +50,7 @@ const MAX_HEADER_BYTES: usize = 32 * 1024;
 // Scoped admission targets, not measured RSS or a whole-process memory proof:
 // 4 * (104 MiB heavy + 16 MiB ingress) + 16 MiB New chat + 16 MiB controls.
 // Heavy is acquired BEFORE raw collection/decoding and covers decoded form/JSON,
-// tokenizer, buffered inference and rendering overlap. Ingress covers raw input
+// tokenizer, streaming inference and rendering overlap. Ingress covers raw input
 // storage; it is NOT a standalone allowance for decoded history. SDK/TLS, shared
 // auth/accounting state and allocator overhead are outside these envelopes.
 const CHAT_LANES: usize = 4;
@@ -57,7 +58,7 @@ const CHAT_LANES: usize = 4;
 // conversation history. Apply this ceiling to fallbacks/wrong methods as well.
 const CONTROL_BODY_LIMIT: usize = 4 * 1024;
 const MAX_CONTROL_RENDERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_RENDERED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const PREFLIGHT_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_ATTESTATION_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -72,6 +73,8 @@ pub struct AppState {
     new_chat_memory: Arc<Semaphore>,
     control_memory: Arc<Semaphore>,
     generation_slots: Arc<Semaphore>,
+    #[cfg(test)]
+    preflight_hooks: Arc<resource_streaming_tests::PreflightHooks>,
 }
 
 impl AppState {
@@ -93,6 +96,8 @@ impl AppState {
             new_chat_memory: Arc::new(Semaphore::new(1)),
             control_memory: Arc::new(Semaphore::new(1)),
             generation_slots: Arc::new(Semaphore::new(CHAT_LANES)),
+            #[cfg(test)]
+            preflight_hooks: Arc::default(),
         }
     }
 }
@@ -179,9 +184,7 @@ async fn request_admission(
     };
     let lease = Arc::new(permit);
     if request.method() == Method::POST && request.uri().path() == "/chat" {
-        // Staged plumbing: a future detached worker and delivery body must share
-        // THIS heavy admission, not acquire another. The buffered handler does
-        // not use this extension yet; this is not a streaming safety proof.
+        // Detached preflight, generation and delivery share THIS heavy admission.
         request.extensions_mut().insert(lease.clone());
     }
     let response = next.run(request).await;
@@ -430,10 +433,7 @@ async fn logout(
     response
 }
 
-// Cutover contract: after CSRF validation/reset, render the COMPLETE bounded
-// empty continuation + authenticated model selector directly in this lane,
-// preserving every supported model and catalog fail-closed behavior. Redirecting
-// through GET / below is buffered compatibility, NOT independent availability.
+// Render the complete selector in this lane, without entering GET / admission.
 // No availability promise applies while the New chat lane itself is retained.
 async fn new_chat(
     State(state): State<AppState>,
@@ -446,8 +446,7 @@ async fn new_chat(
     if state.auth.new_chat(&id, &form.csrf).is_err() {
         return unauthorized();
     }
-    // History lives only in the submitted form; the home route starts empty.
-    Redirect::to("/").into_response()
+    home(State(state), headers).await
 }
 
 async fn recovery(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -516,78 +515,45 @@ async fn attestation(State(state): State<AppState>) -> Response {
     response
 }
 
-#[derive(Deserialize)]
-struct ChatForm {
-    csrf: String,
-    token: String,
-    model: String,
-    history: String,
-    prompt: String,
-}
-
-// PACKET-2 HANDOFF CONTRACT (not implemented by this buffered handler):
-// 1. Bounded raw decode, trust/catalog validation, CSRF/model/conversation checks,
-//    global-four permit and session->submission->accounting reserve (three/account).
-//    Insufficient credit/concurrency/duplicate paths send no prompt, even to the
-//    tokenizer. Keep the submitted authenticated quote in the ledger unchanged.
-// 2. New Reserved is accounting acceptance. With NO intervening await or prompt
-//    operation: construct ReservedGeneration and synchronously spawn detached
-//    preflight with owned decoded input + the SAME middleware heavy Arc + permit.
-//    Never create ReservationGuard as well, disarm/rearm, or automatically replay.
-// 3. Preflight owns tokenization and context checks under a finite overall
-//    deadline (30s, including tokenization). Move prompt into the message vector
-//    for borrowed serialization, then move it back for compose; do not clone it.
-//    Use the submitted catalog snapshot to compute the full context-legal output
-//    allowance; this must NOT replace/reprice the ledger's original reservation.
-//    On failure/deadline drop the sole owner to refund once before reporting a
-//    fixed rejection. On success synchronously call streaming_chat::compose with
-//    that SAME owner regardless of whether the result receiver is still open.
-// 4. Result is oneshot::Receiver<Result<DeliveryBody, PreflightRejection>>:
-//    one bounded body handle OR a content-free Context/Unavailable rejection.
-//    Attached clients await this BEFORE streaming headers. The detached task
-//    drops compose's settlement observer; it conveys no cancellation authority.
-//    A failed send drops delivery ONLY; it never vetoes compose or settlement.
-//    Receiver disappearance after acceptance must never abort the preflight task.
-// 5. Use explicit field order in the detached envelope: pinned work/input first,
-//    ReservedGeneration second, heavy Arc last. Work can take the owner only for
-//    the synchronous compose call. All prompt storage dies before the last heavy
-//    lease, including on pre-poll cancellation/unwind. A queued success is the
-//    DeliveryBody (already owns heavy); rejection holds no prompt. spawn_blocking
-//    inputs AND unclaimed results carry heavy last, as Startup/Started already do.
-//    Generation/account slots release at worker/terminal boundaries, independently
-//    of retained delivery. Body, queued chunks and Bytes clones/slices keep heavy
-//    until their last owner drops. Raw ingress keeps its SEPARATE lease through
-//    AdmittedBytes until its final owner drops; decoding does not release it early.
-// 6. Test-only one-shot reached/release barriers: inside tokenizer after actual
-//    serialization (body retained), after tokenization/context before compose,
-//    and immediately after synchronous compose before sending its body. Await
-//    barriers only under cfg(test); production has no await in either handoff.
-//    Tests cancel the HTTP waiter at each point, then release accepted work and
-//    assert one generation/settlement or zero generations/one preflight refund.
-//    Additional blocking-startup/parser gates belong to fixtures, not production.
-// The delivery contract remains 64 KiB / eight outstanding frame owners, including
-// dequeued clones/slices. This contract is not an aggregate resource proof.
+// Reserve before either prompt-bearing call. Acceptance transfers one guard to
+// detached preflight, then synchronously to compose even after observer loss.
+// Session -> submission -> accounting lock order stays inside admit_submission.
+// The submitted quote never changes; tokenization only sets context-legal output.
+// Delivery (64 KiB/eight outstanding frame owners) cannot cancel/reprice work.
 async fn chat(
     State(state): State<AppState>,
+    Extension(heavy): Extension<Arc<OwnedSemaphorePermit>>,
     headers: HeaderMap,
-    Form(form): Form<ChatForm>,
+    body: Bytes,
 ) -> Response {
+    if !headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| {
+            h.split(';').next().is_some_and(|media| {
+                media
+                    .trim()
+                    .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+            })
+        })
+    {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "form content type required",
+        )
+            .into_response();
+    }
+    let form = match decode_continuation(&body) {
+        Ok(form) => form,
+        Err(_) => return bad_request(),
+    };
+    drop(body); // Decoded storage is heavy-owned; the raw ingress owner ends here.
     let Some((session_id, session)) = session_from_headers(&state, &headers) else {
         return unauthorized();
     };
     if !Auth::verify_csrf(&session, &form.csrf) || form.prompt.is_empty() {
         return bad_request();
     }
-    let mut history = match parse_history(&form.history) {
-        Some(value) => value,
-        None => return bad_request(),
-    };
-    drop(form.history); // The decoded Vec now owns history; do not retain both.
-    history.push(Message {
-        role: "user".into(),
-        content: form.prompt,
-    });
-
     // Gateway provenance and serving-key evidence is a mandatory pre-prompt gate.
     if verified_gateway_evidence(&state).await.is_err() {
         return unavailable();
@@ -616,9 +582,21 @@ async fn chat(
     ) {
         Ok(value) => value,
         Err(AdmissionError::Auth(_)) => return bad_request(),
-        Err(AdmissionError::Accounting(_)) => {
-            return (StatusCode::PAYMENT_REQUIRED, "request unavailable").into_response()
+        Err(AdmissionError::Accounting(AccountingError::InsufficientCredit)) => {
+            return (
+                StatusCode::PAYMENT_REQUIRED,
+                "insufficient demo credit for selected model maximum reservation",
+            )
+                .into_response()
         }
+        Err(AdmissionError::Accounting(AccountingError::Concurrency)) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "account concurrency limit reached",
+            )
+                .into_response()
+        }
+        Err(AdmissionError::Accounting(_)) => return unavailable(),
     };
     let submission = admission.submission;
     let submission_id = submission.id;
@@ -634,99 +612,125 @@ async fn chat(
                     "This submission already completed and was not regenerated."
                 }
                 Outcome::Refunded => {
-                    "This submission failed and was refunded; use the new form to retry."
+                    "This submission failed and was refunded; start a New chat to retry."
                 }
             };
-            let token = match state.auth.issue_submission_for(
-                &session_id,
-                submission.conversation,
-                Some(&form.model),
-            ) {
-                Ok(value) => value,
-                Err(_) => return unavailable(),
-            };
-            return render::chat_page(
-                &catalog.models,
-                &session.csrf,
-                &token,
-                &history,
-                Some(&form.model),
-                Some(notice),
-                MAX_RENDERED_RESPONSE_BYTES,
-            )
-            .map_or_else(unavailable, |html| Html(html).into_response());
+            return Html(render::page(&format!(
+                "<p role=status>{notice}</p>{}",
+                render::chat_controls(&session.csrf, Some(&form.model))
+            )))
+            .into_response();
         }
     }
 
-    let reservation = ReservationGuard::new(state.accounting.clone(), submission_id);
-    let input_tokens = match state.inference.count_tokens(&form.model, &history).await {
-        Ok(value) => value,
-        Err(_) => {
-            let _ = state.accounting.refund(submission_id);
-            return unavailable();
-        }
-    };
-    let quote = match catalog.quote(&form.model, input_tokens) {
-        Ok(value) => value,
-        Err(_) => {
-            let _ = state.accounting.refund(submission_id);
-            return bad_request();
-        }
-    };
-    let generation = state.inference.generate(&quote.model, &history).await;
-    drop(permit);
-    let generation = match generation {
-        Ok(value) => value,
-        Err(_) => {
-            let _ = state.accounting.refund(submission_id);
-            return unavailable();
-        }
-    };
-    if generation.input_tokens != input_tokens
-        || actual_cost(&quote, generation.output_tokens).is_err()
-        || state
-            .accounting
-            .prepare_settlement(
-                submission_id,
-                generation.input_tokens,
-                generation.output_tokens,
-            )
-            .is_err()
-    {
-        let _ = state.accounting.refund(submission_id);
-        return unavailable();
-    }
-    history.push(Message {
-        role: "assistant".into(),
-        content: generation.content,
+    // Accounting acceptance: no await or prompt-bearing operation between the
+    // new reserve, constructing its sole guard, and detached preflight handoff.
+    let owner = ReservedGeneration::new(
+        state.accounting.clone(),
+        submission_id,
+        permit,
+        heavy.clone(),
+    );
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let work_heavy = heavy.clone();
+    tokio::spawn(ChargedPreflight {
+        work: Box::pin(async move {
+            // Field order plus the outer envelope keeps every captured/borrowed
+            // prompt and unclaimed result charged, including panic/pre-poll drop.
+            let mut job = PreflightInput {
+                form,
+                owner: Some(owner),
+            };
+            let result = tokio::time::timeout(PREFLIGHT_DEADLINE, async {
+                job.form.history.push(Message {
+                    role: "user".into(),
+                    content: std::mem::take(&mut job.form.prompt),
+                });
+                let tokens = state
+                    .inference
+                    .count_tokens(&job.form.model, &job.form.history)
+                    .await
+                    .map_err(|_| PreflightRejection::Unavailable)?;
+                job.form.prompt = job.form.history.pop().expect("preflight prompt").content;
+                catalog
+                    .quote(&job.form.model, tokens)
+                    .map_err(|_| PreflightRejection::Context)
+            })
+            .await;
+            let quote = match result {
+                Ok(Ok(quote)) => quote,
+                failure => {
+                    let rejection = match failure {
+                        Ok(Err(error)) => error,
+                        _ => PreflightRejection::Unavailable,
+                    };
+                    drop(job); // Refund exactly once before reporting failure.
+                    let _ = sender.send(Err(rejection));
+                    return;
+                }
+            };
+            #[cfg(test)]
+            state.preflight_hooks.before_compose().await;
+            let owner = job.owner.take().expect("sole reservation owner");
+            let input = AcceptedChat {
+                model: quote.model,
+                history: job.form.history,
+                prompt: job.form.prompt,
+                csrf: job.form.csrf,
+                session_id,
+                conversation: submission.conversation,
+            };
+            // This synchronous handoff is unconditional, even with no receiver.
+            let (body, observer) =
+                streaming_chat::compose(owner, work_heavy, input, state.auth, state.inference);
+            drop(observer);
+            #[cfg(test)]
+            state.preflight_hooks.after_compose().await;
+            let _ = sender.send(Ok(body)); // Failure discards delivery only.
+        }),
+        _heavy: heavy,
     });
-    // prepare_settlement has released accounting before acquiring auth locks.
-    // Compatibility remains delivery-owned: stale continuation still refunds
-    // through ReservationGuard; detached usage-owned settlement is packet 6.
-    let token = match state.auth.issue_submission_for(
-        &session_id,
-        submission.conversation,
-        Some(&form.model),
-    ) {
-        Ok(value) => value,
-        Err(_) => return unavailable(),
-    };
-    let Some(html) = render::chat_page(
-        &catalog.models,
-        &session.csrf,
-        &token,
-        &history,
-        Some(&form.model),
-        None,
-        MAX_RENDERED_RESPONSE_BYTES,
-    ) else {
-        return unavailable();
-    };
-    let (parts, body) = Html(html).into_response().into_parts();
-    Response::from_parts(parts, Body::new(ReservationBody::new(body, reservation)))
+    match receiver.await {
+        Ok(Ok(body)) => {
+            let mut response = Body::new(body).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            );
+            response
+        }
+        Ok(Err(PreflightRejection::Context)) => {
+            (StatusCode::BAD_REQUEST, "selected model context exceeded").into_response()
+        }
+        _ => unavailable(),
+    }
 }
 
-/// Additive decoder, deliberately not wired to production ChatForm yet.
+struct PreflightInput {
+    form: ContinuationForm,
+    owner: Option<ReservedGeneration>,
+}
+
+enum PreflightRejection {
+    Context,
+    Unavailable,
+}
+
+// Unlike async capture order, explicit field order guarantees that all work,
+// prompt-bearing inputs and queued results die before the last heavy lease.
+struct ChargedPreflight<F> {
+    work: Pin<Box<F>>,
+    _heavy: Arc<OwnedSemaphorePermit>,
+}
+
+impl<F: std::future::Future<Output = ()>> std::future::Future for ChargedPreflight<F> {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.get_mut().work.as_mut().poll(cx)
+    }
+}
+
+/// Owned, bounded decoded input for detached production preflight.
 /// No Debug implementation: this value contains prompts and authentication data.
 pub struct ContinuationForm {
     pub csrf: String,
@@ -883,6 +887,7 @@ fn decode_form_value(value: &str, limit: usize) -> Result<String, InvalidContinu
     String::from_utf8(bytes).map_err(|_| InvalidContinuation)
 }
 
+#[allow(dead_code)] // Buffered compatibility retirement is a separate packet.
 fn parse_history(encoded: &str) -> Option<Vec<Message>> {
     let history: Vec<Message> = serde_json::from_str(encoded).ok()?;
     if history.iter().any(|message| {
@@ -893,12 +898,14 @@ fn parse_history(encoded: &str) -> Option<Vec<Message>> {
     Some(history)
 }
 
+#[allow(dead_code)]
 struct ReservationGuard {
     accounting: Arc<Accounting>,
     submission_id: [u8; 32],
     armed: bool,
 }
 
+#[allow(dead_code)]
 impl ReservationGuard {
     fn new(accounting: Arc<Accounting>, submission_id: [u8; 32]) -> Self {
         Self {
@@ -923,11 +930,13 @@ impl Drop for ReservationGuard {
     }
 }
 
+#[allow(dead_code)]
 struct ReservationBody {
     inner: Body,
     reservation: Option<ReservationGuard>,
 }
 
+#[allow(dead_code)]
 impl ReservationBody {
     fn new(inner: Body, reservation: ReservationGuard) -> Self {
         Self {
@@ -1043,11 +1052,17 @@ mod tests {
             Ok(1)
         }
         async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-            Ok(Generation {
-                content: "answer".into(),
-                input_tokens: 1,
-                output_tokens: 1,
-            })
+            unreachable!("buffered route forbidden")
+        }
+        async fn generate_stream(
+            &self,
+            _: &Model,
+            _: &[Message],
+            on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        ) -> Result<crate::inference::stream::StreamUsage, InferenceError> {
+            let mut parser = crate::inference::stream::ProtocolParser::default();
+            parser.feed(concat!("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n", "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", "data: [DONE]\n\n").as_bytes(), on_delta).map_err(|_| InferenceError::InvalidResponse)?;
+            parser.eof().map_err(|_| InferenceError::InvalidResponse)
         }
         fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
             Ok(serde_json::json!({"verified":true}))
@@ -1213,7 +1228,7 @@ mod tests {
                 .header(header::COOKIE, session_cookie(&id))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
-                    "csrf={}&token={token}&model=m&history=%5B%5D&prompt=hello",
+                    "csrf={}&token={token}&model=m&h000000=W10&history_manifest=1.000001.00000002&prompt=hello",
                     session.csrf
                 )))
                 .unwrap()
@@ -1274,10 +1289,17 @@ mod tests {
         probe.release.notify_one();
         let response = task.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        drop(response); // Buffered compatibility refund; not a streaming worker.
+        drop(response); // Delivery loss does not cancel accepted generation.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.chat_memory.available_permits() != 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(state.generation_slots.available_permits(), 4);
         assert_eq!(state.chat_memory.available_permits(), 4);
         assert_eq!(state.chat_ingress.available_permits(), 4);
-        assert_eq!(state.accounting.available("a"), Some(100));
+        assert_eq!(state.accounting.available("a"), Some(97));
     }
 }

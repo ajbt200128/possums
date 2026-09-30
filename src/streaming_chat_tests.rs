@@ -4,7 +4,10 @@ use crate::{
     accounting::{Accounting, ReserveResult},
     auth::AuthError,
     catalog::Quote,
-    inference::{stream::StreamUsage, Generation, Inference},
+    inference::{
+        stream::{ProtocolParser, StreamUsage},
+        stream_support as wire, Generation, Inference,
+    },
 };
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -196,24 +199,28 @@ impl Inference for Mock {
         assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
         self.started.notify_one();
         self.delta_gate.acquire().await.unwrap().forget();
-        on_delta(DELTA);
+        let mut parser = ProtocolParser::default();
+        parser
+            .feed(
+                &wire::event(wire::choice(Some(DELTA), None)),
+                &mut *on_delta,
+            )
+            .map_err(|_| InferenceError::InvalidResponse)?;
         self.delta_sent.notify_one();
         self.finish_gate.acquire().await.unwrap().forget();
         self.consumed_terminal.store(true, Ordering::SeqCst);
+        let mut terminal = wire::event(wire::choice(None, Some("stop")));
         match self.result {
-            TerminalResult::Success => Ok(StreamUsage {
-                input_tokens: 5,
-                output_tokens: 4,
-                total_tokens: 9,
-            }),
-            TerminalResult::InvalidUsage => Ok(StreamUsage {
-                input_tokens: 5,
-                output_tokens: 4,
-                total_tokens: 10,
-            }),
-            TerminalResult::MissingUsage => Err(InferenceError::InvalidResponse),
-            TerminalResult::UpstreamError => Err(InferenceError::Unavailable),
+            TerminalResult::Success => terminal.extend(wire::event(wire::usage(5, 4))),
+            TerminalResult::InvalidUsage => terminal.extend(wire::event(serde_json::json!({"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":10}}))),
+            TerminalResult::MissingUsage => {},
+            TerminalResult::UpstreamError => terminal.extend(wire::event(serde_json::json!({"error":{"message":"fixture failure"}}))),
         }
+        terminal.extend(b"data: [DONE]\n\n");
+        parser
+            .feed(&terminal, on_delta)
+            .map_err(|_| InferenceError::InvalidResponse)?;
+        parser.eof().map_err(|_| InferenceError::InvalidResponse)
     }
 }
 

@@ -61,11 +61,16 @@ impl Inference for FixtureInference {
         Ok(1)
     }
 
-    async fn generate(
+    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
+        unreachable!("buffered route forbidden")
+    }
+
+    async fn generate_stream(
         &self,
         model: &Model,
         messages: &[Message],
-    ) -> Result<Generation, InferenceError> {
+        on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+    ) -> Result<stream::StreamUsage, InferenceError> {
         self.capture
             .lock()
             .unwrap()
@@ -76,11 +81,8 @@ impl Inference for FixtureInference {
                     .map(|m| (m.role.as_str(), m.content.as_str())),
             )
             .map_err(|_| InferenceError::InvalidResponse)?;
-        Ok(Generation {
-            content: FIXTURE_TEXT.into(),
-            input_tokens: 1,
-            output_tokens: 2,
-        })
+        fixture_support::terminal(FIXTURE_TEXT, 1, 2, on_delta)
+            .map_err(|_| InferenceError::InvalidResponse)
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {

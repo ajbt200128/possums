@@ -10,7 +10,7 @@ use tokio::time::Instant;
 pub mod stream;
 #[cfg(test)]
 #[path = "../tests/support/stream.rs"]
-mod stream_support;
+pub(crate) mod stream_support;
 
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 1024 * 1024;

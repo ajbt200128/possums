@@ -316,7 +316,7 @@ impl Auth {
     /// and have completed evidence/catalog/quote verification, before any prompt
     /// transmission. A new successful reserve is ACCOUNTING ACCEPTANCE, not
     /// successful context preflight, generation startup, or client receipt.
-    /// Streaming cutover contract (the buffered route has not migrated yet):
+    /// Production route handoff contract:
     /// after Reserved, construct ReservedGeneration and synchronously transfer
     /// it, owned decoded input, the middleware's exact heavy Arc and global
     /// generation permit into detached preflight, before ANY await/tokenization.

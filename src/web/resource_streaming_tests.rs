@@ -124,6 +124,27 @@ impl Pause {
     }
 }
 
+#[derive(Default)]
+pub(super) struct PreflightHooks {
+    before: std::sync::Mutex<Option<Pause>>,
+    after: std::sync::Mutex<Option<Pause>>,
+}
+
+impl PreflightHooks {
+    pub(super) async fn before_compose(&self) {
+        let pause = self.before.lock().unwrap().take();
+        if let Some(pause) = pause {
+            pause.wait().await;
+        }
+    }
+    pub(super) async fn after_compose(&self) {
+        let pause = self.after.lock().unwrap().take();
+        if let Some(pause) = pause {
+            pause.wait().await;
+        }
+    }
+}
+
 #[tokio::test]
 async fn proof_seams_use_real_serializers_and_consumer() {
     // Small seam smoke only; packet 3 must use borrowed *route* messages and

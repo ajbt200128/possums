@@ -47,10 +47,9 @@ try {
     if ((await page.locator("script, img, iframe").count()) !== 0) {
       throw new Error("hostile output rendered an active or remote element");
     }
-    await page.getByText("safe response").waitFor();
-    if (!(await page.locator("select").isDisabled())) {
-      throw new Error("model selector remained enabled after the first turn");
-    }
+    await page.getByText("safe response", { exact: false }).waitFor();
+    assert.equal(await page.locator('select[name="model"]').count(), 0);
+    await page.getByText(`Selected model: ${FIXTURE_MODELS[0]}`, { exact: true }).waitFor();
     if ((await page.locator('input[name="model"]').inputValue()) !== "fixture-model") {
       throw new Error("locked model was not preserved");
     }
@@ -67,19 +66,21 @@ try {
     assert.equal(await resetForm.locator('input[name="csrf"]').inputValue(),
       await page.locator('form[action="/chat"] input[name="csrf"]').inputValue());
     await resetForm.getByRole("button", { name: "New chat" }).click();
-    await page.waitForURL(`${origin}/`);
-    assert.equal(await page.locator("article").count(), 0);
-    assert.equal(await page.locator('form[action="/chat"] input[name="history"]').inputValue(), "[]");
+    await page.waitForURL(`${origin}/chat/new`);
+    assert.equal(await page.locator("pre").count(), 0);
+    assert.equal(await page.locator('form[action="/chat"] input[name="h000000"]').inputValue(), "W10");
+    assert.equal(await page.locator('form[action="/chat"] input[name="history_manifest"]').inputValue(), "1.000001.00000002");
     assert.equal(await page.locator('select[name="model"]').isEnabled(), true);
     assert.equal(await page.locator('form[action="/chat"] input[name="model"]').count(), 0);
     await page.locator('select[name="model"]').selectOption(FIXTURE_MODELS[1]);
     await page.locator('textarea[name="prompt"]').fill("after reset");
     await page.getByRole("button", { name: "Send" }).click();
     await page.getByText("after reset").waitFor();
-    assert.equal(await page.locator("article").count(), 2);
+    assert.equal(await page.locator("pre").count(), 2);
     assert.equal(await page.getByText("first turn").count(), 0);
     assert.equal(await page.getByText("second turn").count(), 0);
-    assert.equal(await page.locator("select").isDisabled(), true);
+    assert.equal(await page.locator('select[name="model"]').count(), 0);
+    await page.getByText(`Selected model: ${FIXTURE_MODELS[1]}`, { exact: true }).waitFor();
     assert.equal(await page.locator('input[name="model"]').inputValue(), FIXTURE_MODELS[1]);
 
     await page.getByRole("button", { name: "Log out" }).click();

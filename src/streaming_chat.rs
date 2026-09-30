@@ -1,7 +1,7 @@
-//! Internal composition only: `/chat` is still buffered. Call AFTER authenticated
+//! Production `/chat` composition. Call AFTER authenticated
 //! catalog verification, a new reservation, THEN detached context preflight;
 //! this module does no admission. Accounting acceptance is the successful reserve,
-//! not this synchronous generation handoff. The planned route preflight must pass
+//! not this synchronous generation handoff. Detached route preflight passes
 //! its original ReservedGeneration here even if its HTTP observer has disappeared.
 //! Synthetic tests are not authenticated provider/network or aggregate RSS proof.
 //! As with generation_owner, the service must suppress content in its panic hook.

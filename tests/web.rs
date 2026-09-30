@@ -4,12 +4,37 @@ use axum::{
     http::{header, Request, StatusCode},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use http_body_util::BodyExt;
+// Drain and release each frame like a transport. BodyExt::collect retains frame
+// owners until EOF, intentionally exhausting the eight-outstanding-frame budget.
+trait DrainBody {
+    async fn collect(self) -> Result<Drained, axum::Error>;
+    async fn frame(&mut self) -> Option<Result<http_body::Frame<axum::body::Bytes>, axum::Error>>;
+}
+struct Drained(axum::body::Bytes);
+impl Drained {
+    fn to_bytes(&self) -> axum::body::Bytes {
+        self.0.clone()
+    }
+}
+impl DrainBody for Body {
+    async fn collect(mut self) -> Result<Drained, axum::Error> {
+        let mut bytes = Vec::new();
+        while let Some(frame) = http_body_util::BodyExt::frame(&mut self).await {
+            if let Ok(data) = frame?.into_data() {
+                bytes.extend_from_slice(&data);
+            }
+        }
+        Ok(Drained(bytes.into()))
+    }
+    async fn frame(&mut self) -> Option<Result<http_body::Frame<axum::body::Bytes>, axum::Error>> {
+        http_body_util::BodyExt::frame(self).await
+    }
+}
 use possums::{
     attestation::{load_evidence, EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::{session_cookie, Auth},
     catalog::Model,
-    inference::{Generation, Inference, InferenceError, Message},
+    inference::{stream, Generation, Inference, InferenceError, Message},
     web::{router, serve, AppState},
 };
 use sha2::{Digest, Sha256};
@@ -27,6 +52,9 @@ use tokio::{
     time::{sleep, Duration},
 };
 use tower::ServiceExt;
+
+#[path = "support/stream.rs"]
+mod stream_support;
 
 // Count requested, live application allocation bytes on this test thread only.
 // This deliberately excludes allocator overhead, RSS, helper/SDK and transport
@@ -136,6 +164,14 @@ impl Inference for BlockingInference {
     async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
         unreachable!()
     }
+    async fn generate_stream(
+        &self,
+        _: &Model,
+        _: &[Message],
+        _: &mut (dyn for<'d> FnMut(&'d str) + Send),
+    ) -> Result<stream::StreamUsage, InferenceError> {
+        unreachable!("preflight must time out")
+    }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
         Ok(serde_json::json!({"verified": true}))
@@ -155,11 +191,35 @@ impl Inference for LargeResponseInference {
     }
 
     async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        Ok(Generation {
-            content: "x".repeat(200 * 1024),
-            input_tokens: 1,
-            output_tokens: 1,
-        })
+        unreachable!("buffered route forbidden")
+    }
+
+    async fn generate_stream(
+        &self,
+        _: &Model,
+        _: &[Message],
+        on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+    ) -> Result<stream::StreamUsage, InferenceError> {
+        let mut parser = stream::ProtocolParser::default();
+        for _ in 0..200 {
+            parser
+                .feed(
+                    &stream_support::event(stream_support::choice(Some(&"x".repeat(1024)), None)),
+                    &mut *on_delta,
+                )
+                .map_err(|_| InferenceError::InvalidResponse)?;
+            tokio::task::yield_now().await;
+        }
+        for event in [
+            stream_support::event(stream_support::choice(None, Some("stop"))),
+            stream_support::event(stream_support::usage(1, 1)),
+            b"data: [DONE]\n\n".to_vec(),
+        ] {
+            parser
+                .feed(&event, &mut *on_delta)
+                .map_err(|_| InferenceError::InvalidResponse)?;
+        }
+        parser.eof().map_err(|_| InferenceError::InvalidResponse)
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
@@ -178,9 +238,16 @@ impl Inference for OversizedVerificationInference {
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
         unreachable!()
     }
-
     async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
         unreachable!()
+    }
+    async fn generate_stream(
+        &self,
+        _: &Model,
+        _: &[Message],
+        _: &mut (dyn for<'d> FnMut(&'d str) + Send),
+    ) -> Result<stream::StreamUsage, InferenceError> {
+        unreachable!("verification must reject before generation")
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
@@ -202,6 +269,14 @@ impl Inference for PanicInference {
 
     async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
         unreachable!()
+    }
+    async fn generate_stream(
+        &self,
+        _: &Model,
+        _: &[Message],
+        _: &mut (dyn for<'d> FnMut(&'d str) + Send),
+    ) -> Result<stream::StreamUsage, InferenceError> {
+        unreachable!("preflight must panic")
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
@@ -283,12 +358,18 @@ impl Inference for FakeInference {
     }
 
     async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
+        unreachable!("buffered route forbidden")
+    }
+
+    async fn generate_stream(
+        &self,
+        _: &Model,
+        _: &[Message],
+        on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+    ) -> Result<stream::StreamUsage, InferenceError> {
         self.generations.fetch_add(1, Ordering::SeqCst);
-        Ok(Generation {
-            content: "**safe**".into(),
-            input_tokens: 1,
-            output_tokens: 1,
-        })
+        stream_support::terminal("**safe**", 1, 1, on_delta)
+            .map_err(|_| InferenceError::InvalidResponse)
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
@@ -370,7 +451,9 @@ async fn no_javascript_chat_sets_security_headers_and_settles() {
         EXPECTED_KEY,
     );
     let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
-    let body = format!("csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=hello");
+    let body = continuation_body(format!(
+        "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=hello"
+    ));
     let response = router(state.clone())
         .oneshot(
             Request::builder()
@@ -391,7 +474,8 @@ async fn no_javascript_chat_sets_security_headers_and_settles() {
         .contains("default-src 'none'"));
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("<strong>safe</strong>"));
+    assert!(html.contains("**safe**"));
+    assert!(!html.contains("<strong>"));
     assert!(!html.contains("Confirm response delivery"));
     assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
     assert_eq!(state.accounting.available("a"), Some(97));
@@ -400,8 +484,9 @@ async fn no_javascript_chat_sets_security_headers_and_settles() {
     let marker = "name=token value=\"";
     let start = html.find(marker).unwrap() + marker.len();
     let next_token = &html[start..html[start..].find('\"').unwrap() + start];
-    let next_body =
-        format!("csrf={csrf}&token={next_token}&model=m&history={carried_history}&prompt=again");
+    let next_body = continuation_body(format!(
+        "csrf={csrf}&token={next_token}&model=m&history={carried_history}&prompt=again"
+    ));
     let response = router(state.clone())
         .oneshot(
             Request::builder()
@@ -415,12 +500,13 @@ async fn no_javascript_chat_sets_security_headers_and_settles() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
     assert_eq!(inference.generations.load(Ordering::SeqCst), 2);
     std::fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]
-async fn dropping_unconsumed_response_refunds_reservation() {
+async fn dropping_unconsumed_response_settles_usage() {
     let path = std::env::temp_dir().join(format!(
         "possums-abandoned-response-evidence-{}",
         std::process::id()
@@ -440,9 +526,9 @@ async fn dropping_unconsumed_response_refunds_reservation() {
                 .uri("/chat")
                 .header(header::COOKIE, cookie.split(';').next().unwrap())
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(format!(
+                .body(Body::from(continuation_body(format!(
                     "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=hello"
-                )))
+                ))))
                 .unwrap(),
         )
         .await
@@ -450,7 +536,7 @@ async fn dropping_unconsumed_response_refunds_reservation() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(state.accounting.available("a"), Some(48));
     drop(response);
-    assert_eq!(state.accounting.available("a"), Some(100));
+    wait_balance(&state, "a", 97).await;
     assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
     std::fs::remove_file(path).unwrap();
 }
@@ -585,7 +671,7 @@ async fn concurrent_maximum_bodies_are_bounded_and_release_memory_on_drop() {
     drop(slice);
     assert_eq!(
         app.oneshot(request()).await.unwrap().status(),
-        StatusCode::UNPROCESSABLE_ENTITY
+        StatusCode::BAD_REQUEST
     );
 }
 
@@ -623,10 +709,10 @@ async fn replay_after_reauthentication_stops_before_prompt_calls() {
     let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
     let challenge = state.auth.issue_login_challenge().unwrap();
     let (new_session_id, new_session) = state.auth.authenticate(&credential, &challenge).unwrap();
-    let body = format!(
+    let body = continuation_body(format!(
         "csrf={}&token={token}&model=m&history=%5B%5D&prompt=canary",
         new_session.csrf
-    );
+    ));
     let response = router(state)
         .oneshot(
             Request::builder()
@@ -651,7 +737,9 @@ async fn replay_after_reauthentication_stops_before_prompt_calls() {
 #[tokio::test]
 async fn missing_gateway_evidence_stops_before_upstream_calls() {
     let (state, cookie, csrf, token, inference) = fixture("/missing/evidence");
-    let body = format!("csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary");
+    let body = continuation_body(format!(
+        "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary"
+    ));
     let response = router(state)
         .oneshot(
             Request::builder()
@@ -700,7 +788,9 @@ async fn unverified_gateway_evidence_stops_before_prompt_calls() {
         ));
         write_evidence(&path, quote, issued_at, release, key);
         let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
-        let body = format!("csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary");
+        let body = continuation_body(format!(
+            "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary"
+        ));
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -720,7 +810,50 @@ async fn unverified_gateway_evidence_stops_before_prompt_calls() {
     }
 }
 
+// Keep human-readable JSON in fixture recipes, but submit only the canonical
+// production continuation wire format. No compatibility decoder exists in /chat.
+fn continuation_body(body: String) -> String {
+    let mut fields: Vec<&str> = body.split('&').collect();
+    let Some(index) = fields
+        .iter()
+        .position(|field| field.starts_with("history="))
+    else {
+        return body;
+    };
+    let encoded = fields.remove(index).strip_prefix("history=").unwrap();
+    let mut json = Vec::new();
+    let mut bytes = encoded.bytes();
+    while let Some(byte) = bytes.next() {
+        json.push(match byte {
+            b'%' => {
+                (char::from(bytes.next().unwrap()).to_digit(16).unwrap() * 16
+                    + char::from(bytes.next().unwrap()).to_digit(16).unwrap()) as u8
+            }
+            b'+' => b' ',
+            byte => byte,
+        });
+    }
+    let mut wire = fields.join("&");
+    for (index, block) in json
+        .chunks(possums::render::HISTORY_BLOCK_BYTES)
+        .enumerate()
+    {
+        wire.push_str(&format!("&h{index:06}={}", URL_SAFE_NO_PAD.encode(block)));
+    }
+    wire.push_str(&format!(
+        "&history_manifest=1.{:06}.{:08}",
+        json.len().div_ceil(possums::render::HISTORY_BLOCK_BYTES),
+        json.len()
+    ));
+    wire
+}
+
 fn post_form(uri: &str, cookie: &str, body: String) -> Request<Body> {
+    let body = if uri.split('?').next() == Some("/chat") {
+        continuation_body(body)
+    } else {
+        body
+    };
     Request::builder()
         .method("POST")
         .uri(uri)
@@ -735,7 +868,7 @@ fn session_id(cookie: &str) -> &str {
 }
 
 #[tokio::test]
-async fn new_chat_requires_csrf_and_redirects_to_empty_history_in_same_session() {
+async fn new_chat_requires_csrf_and_renders_empty_selector_in_same_session() {
     let (state, cookie, csrf, _, inference) = fixture("/unused/evidence");
     let id = session_id(&cookie);
     let original = state.auth.session(id).unwrap();
@@ -757,28 +890,18 @@ async fn new_chat_requires_csrf_and_redirects_to_empty_history_in_same_session()
         .oneshot(post_form("/chat/new", &cookie, format!("csrf={csrf}")))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(response.headers()[header::LOCATION], "/");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(header::LOCATION));
     assert!(!response.headers().contains_key(header::SET_COOKIE));
     assert_ne!(
         state.auth.session(id).unwrap().conversation,
         original.conversation
     );
-    drop(response);
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .uri("/")
-                .header(header::COOKIE, cookie.split(';').next().unwrap())
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("name=history value=\"[]\""));
+    assert!(html.contains("name=h000000 value=\"W10\""));
+    assert!(html.contains("<select name=model>"));
+    assert!(html.contains("<option value=\"m\">m</option>"));
     assert_eq!(state.accounting.available("a"), Some(100));
     assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
     assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
@@ -827,7 +950,14 @@ async fn reset_and_logout_before_admission_prevent_all_prompt_transmission() {
             .oneshot(post_form(control, &cookie, format!("csrf={csrf}")))
             .await
             .unwrap();
-        assert_eq!(reset.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            reset.status(),
+            if control == "/chat/new" {
+                StatusCode::OK
+            } else {
+                StatusCode::SEE_OTHER
+            }
+        );
         drop(reset);
         gate.release.notify_one();
         assert_eq!(
@@ -866,7 +996,7 @@ async fn home_snapshot_cannot_issue_for_a_conversation_reset_during_catalog_fetc
             assert_eq!(reset.status(), StatusCode::SERVICE_UNAVAILABLE);
             state.auth.logout(session_id(&cookie), &csrf).unwrap();
         } else {
-            assert_eq!(reset.status(), StatusCode::SEE_OTHER);
+            assert_eq!(reset.status(), StatusCode::OK);
         }
         drop(reset);
         gate.release.notify_one();
@@ -891,19 +1021,25 @@ async fn accepted_work_continues_after_reset_or_logout_but_cannot_issue_stale_co
             .oneshot(post_form(control, &cookie, format!("csrf={csrf}")))
             .await
             .unwrap();
-        assert_eq!(reset.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            reset.status(),
+            if control == "/chat/new" {
+                StatusCode::OK
+            } else {
+                StatusCode::SEE_OTHER
+            }
+        );
         drop(reset);
         assert_eq!(state.accounting.available("a"), Some(48));
         gate.release.notify_one();
         let response = request.await.unwrap().unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert!(!String::from_utf8_lossy(&body).contains("name=token"));
         assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 1);
         assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
-        // Packet 3 intentionally preserves the buffered delivery policy: failed
-        // continuation delivery refunds. Packet 6 replaces this with usage settlement.
-        assert_eq!(state.accounting.available("a"), Some(100));
+        // Accepted usage settles even when reset/logout suppresses continuation.
+        assert_eq!(state.accounting.available("a"), Some(97));
         if control == "/chat/new" {
             assert_eq!(
                 state
@@ -928,15 +1064,21 @@ async fn reset_after_continuation_insertion_invalidates_token_without_cancelling
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(state.accounting.available("a"), Some(48));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(state.accounting.available("a"), Some(97));
         let reset = router(state.clone())
             .oneshot(post_form(control, &cookie, format!("csrf={csrf}")))
             .await
             .unwrap();
-        assert_eq!(reset.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            reset.status(),
+            if control == "/chat/new" {
+                StatusCode::OK
+            } else {
+                StatusCode::SEE_OTHER
+            }
+        );
         drop(reset);
-        assert_eq!(state.accounting.available("a"), Some(48));
-        let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(state.accounting.available("a"), Some(97));
         let html = String::from_utf8_lossy(&body);
         let continuation = html
@@ -974,12 +1116,15 @@ async fn changed_prompt_and_history_duplicates_never_regenerate_or_reserve_again
             tokio::spawn(router(state.clone()).oneshot(chat_request(&cookie, &csrf, &token)));
         gate.entered.notified().await;
         let changed_history =
-            "%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22changed-history%22%7D%5D";
+            "%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22changed-history%22%7D%2C%7B%22role%22%3A%22assistant%22%2C%22content%22%3A%22prior%22%7D%5D";
         for _ in 0..6 {
             let response = router(state.clone()).oneshot(post_form("/chat", &cookie, format!("csrf={csrf}&token={token}&model=m&history={changed_history}&prompt=different"))).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = response.into_body().collect().await.unwrap().to_bytes();
-            assert!(String::from_utf8_lossy(&body).contains("already in progress"));
+            let html = String::from_utf8_lossy(&body);
+            assert!(html.contains("already in progress"));
+            assert!(!html.contains("changed-history"));
+            assert!(!html.contains("name=token"));
             assert_eq!(state.accounting.available("a"), Some(48));
         }
         gate.release.notify_one();
@@ -989,7 +1134,8 @@ async fn changed_prompt_and_history_duplicates_never_regenerate_or_reserve_again
         } else {
             drop(response);
         }
-        let expected = if deliver { 97 } else { 100 };
+        let expected = 97;
+        wait_balance(&state, "a", expected).await;
         for _ in 0..6 {
             let response = router(state.clone()).oneshot(post_form("/chat", &cookie, format!("csrf={csrf}&token={token}&model=m&history={changed_history}&prompt=changed-again"))).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -1010,7 +1156,7 @@ async fn same_session_model_switch_needs_new_chat_and_old_tabs_stay_invalid() {
     for (body, expected) in [
         (
             format!("token={token}&model=m&history=%5B%5D&prompt=hello"),
-            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::BAD_REQUEST,
         ),
         (
             format!("csrf=forged&token={token}&model=m&history=%5B%5D&prompt=hello"),
@@ -1057,7 +1203,7 @@ async fn same_session_model_switch_needs_new_chat_and_old_tabs_stay_invalid() {
         .oneshot(post_form("/chat/new", &cookie, format!("csrf={csrf}")))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.status(), StatusCode::OK);
     drop(response);
     let response = router(state.clone())
         .oneshot(post_form("/chat", &cookie, switch))
@@ -1078,7 +1224,7 @@ async fn same_session_model_switch_needs_new_chat_and_old_tabs_stay_invalid() {
         .unwrap();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("name=history value=\"[]\""));
+    assert!(html.contains("name=h000000 value=\"W10\""));
     let fresh = html
         .split("name=token value=\"")
         .nth(1)
@@ -1128,7 +1274,7 @@ async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_
         .oneshot(post_form("/chat/new", &cookie, format!("csrf={csrf}")))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.status(), StatusCode::OK);
     drop(response);
     assert_eq!(state.accounting.available("a"), Some(844));
     let token = state.auth.issue_submission(session_id(&cookie)).unwrap();
@@ -1138,7 +1284,7 @@ async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_
             .oneshot(chat_request(&cookie, &csrf, &token))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             state
                 .auth
@@ -1153,9 +1299,9 @@ async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_
     let (gate, task) = pending.pop().unwrap();
     gate.release.notify_one();
     let response = task.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    drop(response);
-    assert_eq!(state.accounting.available("a"), Some(896));
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    assert_eq!(state.accounting.available("a"), Some(893));
     let response = router(state.clone())
         .oneshot(post_form(
             "/chat",
@@ -1168,12 +1314,11 @@ async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_
     response.into_body().collect().await.unwrap();
     for (gate, task) in pending {
         gate.release.notify_one();
-        assert_eq!(
-            task.await.unwrap().unwrap().status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
+        let response = task.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await.unwrap();
     }
-    assert_eq!(state.accounting.available("a"), Some(999));
+    assert_eq!(state.accounting.available("a"), Some(990));
     assert_eq!(
         state
             .auth
@@ -1187,6 +1332,16 @@ async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_
     std::fs::remove_file(path).unwrap();
 }
 
+async fn wait_balance(state: &AppState, account: &str, expected: u64) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.accounting.available(account) != Some(expected) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1194,8 +1349,8 @@ fn now() -> u64 {
         .as_secs()
 }
 
-#[tokio::test]
-async fn cancelled_request_refunds_reservation_and_releases_concurrency() {
+#[tokio::test(start_paused = true)]
+async fn cancelled_preflight_waiter_keeps_reservation_until_deadline() {
     let path = std::env::temp_dir().join(format!("possums-cancel-evidence-{}", std::process::id()));
     write_evidence(
         &path,
@@ -1223,10 +1378,10 @@ async fn cancelled_request_refunds_reservation_and_releases_concurrency() {
         Arc::<str>::from(path.to_str().unwrap()),
         Arc::new(TestEvidenceVerifier),
     );
-    let body = format!(
+    let body = continuation_body(format!(
         "csrf={}&token={token}&model=m&history=%5B%5D&prompt=hello",
         session.csrf
-    );
+    ));
     let request = Request::builder()
         .method("POST")
         .uri("/chat")
@@ -1242,12 +1397,14 @@ async fn cancelled_request_refunds_reservation_and_releases_concurrency() {
     assert_eq!(state.accounting.available("a"), Some(48));
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    assert_eq!(state.accounting.available("a"), Some(100));
+    assert_eq!(state.accounting.available("a"), Some(48));
+    tokio::time::advance(Duration::from_secs(31)).await;
+    wait_balance(&state, "a", 100).await;
     std::fs::remove_file(path).unwrap();
 }
 
-#[tokio::test]
-async fn socket_disconnect_during_inference_refunds_reservation() {
+#[tokio::test(start_paused = true)]
+async fn socket_disconnect_during_preflight_keeps_work_until_deadline() {
     let path = std::env::temp_dir().join(format!(
         "possums-disconnect-evidence-{}",
         std::process::id()
@@ -1280,10 +1437,10 @@ async fn socket_disconnect_during_inference_refunds_reservation() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(serve(listener, state.clone()));
-    let body = format!(
+    let body = continuation_body(format!(
         "csrf={}&token={token}&model=m&history=%5B%5D&prompt=hello",
         session.csrf
-    );
+    ));
     let request = format!(
         "POST /chat HTTP/1.1\r\nHost: local\r\nCookie: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}",
         session_cookie(&session_id).split(';').next().unwrap(),
@@ -1295,14 +1452,9 @@ async fn socket_disconnect_during_inference_refunds_reservation() {
     started.notified().await;
     assert_eq!(state.accounting.available("a"), Some(48));
     drop(client);
-
-    for _ in 0..100 {
-        if state.accounting.available("a") == Some(100) {
-            break;
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(state.accounting.available("a"), Some(100));
+    assert_eq!(state.accounting.available("a"), Some(48));
+    tokio::time::advance(Duration::from_secs(31)).await;
+    wait_balance(&state, "a", 100).await;
     server.abort();
     std::fs::remove_file(path).unwrap();
 }
@@ -1338,10 +1490,10 @@ async fn disconnect_near_transport_completion_reaches_one_terminal_balance() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(serve(listener, state.clone()));
-    let body = format!(
+    let body = continuation_body(format!(
         "csrf={}&token={token}&model=m&history=%5B%5D&prompt=hello",
         session.csrf
-    );
+    ));
     let request = format!(
         "POST /chat HTTP/1.1\r\nHost: local\r\nCookie: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}",
         session_cookie(&session_id).split(';').next().unwrap(),
@@ -1361,12 +1513,12 @@ async fn disconnect_near_transport_completion_reaches_one_terminal_balance() {
     drop(client);
 
     for _ in 0..100 {
-        if matches!(state.accounting.available("a"), Some(97 | 100)) {
+        if state.accounting.available("a") == Some(97) {
             break;
         }
         sleep(Duration::from_millis(10)).await;
     }
-    assert!(matches!(state.accounting.available("a"), Some(97 | 100)));
+    assert_eq!(state.accounting.available("a"), Some(97));
     server.abort();
     std::fs::remove_file(path).unwrap();
 }
@@ -1396,10 +1548,10 @@ async fn panic_after_reservation_refunds_before_error_response() {
         Arc::<str>::from(path.to_str().unwrap()),
         Arc::new(TestEvidenceVerifier),
     );
-    let body = format!(
+    let body = continuation_body(format!(
         "csrf={}&token={token}&model=m&history=%5B%5D&prompt=hello",
         session.csrf
-    );
+    ));
     let response = router(state.clone())
         .oneshot(
             Request::builder()
@@ -1415,7 +1567,7 @@ async fn panic_after_reservation_refunds_before_error_response() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(state.accounting.available("a"), Some(100));
     std::fs::remove_file(path).unwrap();
 }
@@ -1438,7 +1590,9 @@ async fn failed_reservation_stops_before_prompt_tokenization() {
     );
     // Old endpoint-only quote was 26; the full operational reservation is 52.
     let (state, cookie, csrf, token, inference) = fixture_with_budget(path.to_str().unwrap(), 51);
-    let body = format!("csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary");
+    let body = continuation_body(format!(
+        "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary"
+    ));
     let response = router(state.clone())
         .oneshot(
             Request::builder()
@@ -1552,9 +1706,9 @@ async fn invalid_catalog_and_unrepresentable_quote_stop_before_prompt_calls() {
                     .uri("/chat")
                     .header(header::COOKIE, cookie.split(';').next().unwrap())
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(format!(
+                    .body(Body::from(continuation_body(format!(
                         "csrf={csrf}&token={token}&model=m&history=%5B%5D&prompt=canary"
-                    )))
+                    ))))
                     .unwrap(),
             )
             .await
@@ -1592,6 +1746,7 @@ async fn invalid_catalog_and_unrepresentable_quote_stop_before_prompt_calls() {
 async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_account_limit() {
     let path = valid_evidence("partition");
     let (_, _, _, _, inference) = fixture(path.to_str().unwrap());
+    two_model_catalog(&inference);
     let credentials = [
         URL_SAFE_NO_PAD.encode([7_u8; 32]),
         URL_SAFE_NO_PAD.encode([8_u8; 32]),
@@ -1639,7 +1794,7 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
                 .oneshot(chat_request(&session_cookie(id), &session.csrf, &token))
                 .await
                 .unwrap();
-            assert_eq!(rejected.status(), StatusCode::PAYMENT_REQUIRED);
+            assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
             assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 3);
             drop(rejected);
         }
@@ -1698,7 +1853,7 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
         ))
         .await
         .unwrap();
-    assert_eq!(new_chat.status(), StatusCode::SEE_OTHER);
+    assert_eq!(new_chat.status(), StatusCode::OK);
     assert_ne!(state.auth.session(id).unwrap().conversation, original);
     // All six lanes are now occupied (four chats, New chat, ordinary controls).
     for route in ["/chat/new", "/logout"] {
@@ -1709,7 +1864,31 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
-    drop(new_chat);
+    let mut new_body = new_chat.into_body();
+    let new_frame = new_body
+        .frame()
+        .await
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&new_frame).contains("<option value=\"n\">n</option>"));
+    let retained_new = new_frame.slice(..1);
+    drop(new_frame);
+    drop(new_body);
+    assert_eq!(
+        app.clone()
+            .oneshot(post_form(
+                "/chat/new",
+                &cookie,
+                format!("csrf={}", session.csrf)
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop(retained_new);
     let new_chat = app
         .clone()
         .oneshot(post_form(
@@ -1719,8 +1898,13 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
         ))
         .await
         .unwrap();
-    assert_eq!(new_chat.status(), StatusCode::SEE_OTHER);
-    drop(new_chat);
+    assert_eq!(new_chat.status(), StatusCode::OK);
+    let selector = new_chat.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&selector);
+    assert!(html.contains("<select name=model>"));
+    assert!(html.contains("<option value=\"m\">m</option>"));
+    assert!(html.contains("<option value=\"n\">n</option>"));
+    assert!(html.contains("name=h000000 value=\"W10\""));
 
     // Ordinary controls also remain charged through dequeued/retained frames.
     let mut body = control.into_body();
@@ -1751,13 +1935,13 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
         gate.release.notify_one();
         let response = task.await.unwrap().unwrap();
         // Reset/logout invalidate continuation, but not already admitted work.
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::OK);
         drop(response);
     }
+    wait_balance(&state, "0", 991).await;
+    wait_balance(&state, "1", 997).await;
     assert_eq!(inference.generations.load(Ordering::SeqCst), 4);
-    assert_eq!(state.accounting.available("0"), Some(1000));
-    assert_eq!(state.accounting.available("1"), Some(1000));
-    // All heavy slots were returned after buffered failure/refund.
+    // All heavy slots return after accepted work, not after observer loss.
     let mut returned = Vec::new();
     for _ in 0..4 {
         let response = app
@@ -1765,7 +1949,7 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
             .oneshot(post_form("/chat", "", String::new()))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         returned.push(response);
     }
     std::fs::remove_file(path).unwrap();
@@ -1829,7 +2013,7 @@ async fn control_body_bounds_and_method_path_aliases_cannot_evade_lanes() {
             .await
             .unwrap()
             .status(),
-        StatusCode::SEE_OTHER
+        StatusCode::OK
     );
     let held_control = app
         .clone()
@@ -1867,14 +2051,14 @@ async fn control_body_bounds_and_method_path_aliases_cannot_evade_lanes() {
             .await
             .unwrap()
             .status(),
-        StatusCode::SEE_OTHER
+        StatusCode::OK
     );
     let chat = app
         .clone()
         .oneshot(post_form("/chat?native=1", &cookie, String::new()))
         .await
         .unwrap();
-    assert_eq!(chat.status(), StatusCode::UNPROCESSABLE_ENTITY); // Reached Form extraction.
+    assert_eq!(chat.status(), StatusCode::BAD_REQUEST); // Reached bounded continuation decoding.
     drop(chat);
     drop(held_control);
     assert_eq!(
@@ -1887,25 +2071,29 @@ async fn control_body_bounds_and_method_path_aliases_cannot_evade_lanes() {
 }
 
 fn maximum_chat_form(csrf: &str, token: &str, dense: bool) -> String {
-    use possums::web::BODY_LIMIT;
-    let mut payload = format!("csrf={csrf}&token={token}&model=m&prompt=x&history=");
-    if dense {
-        let message = r#"{"role":"user","content":"x"},"#;
-        let count = (BODY_LIMIT - payload.len() - 2) / message.len();
-        payload.push('[');
-        for _ in 0..count {
-            payload.push_str(message);
-        }
-        payload.pop();
-        payload.push(']');
+    use possums::{render::max_history_decoded_bytes, web::BODY_LIMIT};
+    let pair = r#"{"role":"user","content":"x"},{"role":"assistant","content":""},"#;
+    let json = if dense {
+        format!(
+            "[{}]",
+            pair.repeat((max_history_decoded_bytes() - 2) / pair.len())
+                .trim_end_matches(',')
+        )
     } else {
-        payload.push_str(r#"[{"role":"user","content":""#);
-        let closing = "\"}]";
-        payload.push_str(&"x".repeat(BODY_LIMIT - payload.len() - closing.len()));
-        payload.push_str(closing);
-    }
-    // JSON whitespace fills the dense case to the exact raw boundary.
-    payload.extend(std::iter::repeat_n(' ', BODY_LIMIT - payload.len()));
+        format!(
+            r#"[{{"role":"user","content":"{}"}},{{"role":"assistant","content":""}}]"#,
+            "x".repeat(max_history_decoded_bytes() - 80)
+        )
+    };
+    let mut payload = continuation_body(format!(
+        "csrf={csrf}&token={token}&model=m&history={json}&prompt=x"
+    ));
+    // Prompt padding reaches the exact raw boundary; no noncanonical fields.
+    payload = payload.replacen(
+        "prompt=x",
+        &format!("prompt=x{}", "x".repeat(BODY_LIMIT - payload.len())),
+        1,
+    );
     assert_eq!(payload.len(), BODY_LIMIT);
     payload
 }
@@ -1944,20 +2132,20 @@ async fn exact_eight_mib_and_dense_chat_inputs_stay_within_tested_heavy_envelope
         })
         .await;
         println!(
-            "buffered chat dense={dense}: raw={} application peak={peak}",
+            "streaming route preflight dense={dense}: raw={} thread-local peak={peak}",
             payload.len()
         );
         assert!(peak < 104 * 1024 * 1024, "application peak={peak}");
         // Fixture-only route/decoder measurement: inference is fake, so this is
         // not a universal 104-MiB envelope or SDK/TLS/inference measurement.
         // Both forms pass input parsing, trust, reservation and prompt calls.
-        // Existing buffered render ceiling still rejects these huge transcripts;
-        // this packet neither lowers it nor changes its delivery-owned refund.
+        // Generation/startup now run on detached workers: this old thread-local
+        // measurement covers only preflight, NOT the aggregate resource gate.
         assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 1);
-        assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::OK);
         drop(response);
-        assert_eq!(state.accounting.available("a"), Some(100));
+        wait_balance(&state, "a", 97).await;
+        assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
     }
     std::fs::remove_file(path).unwrap();
 }

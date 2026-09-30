@@ -135,7 +135,24 @@ fn streamed_success_exposes_new_chat_outside_the_continuation_form() {
     let (continuation, after_form) = after_chat.split_once("</form>").unwrap();
     assert!(continuation.contains("history_manifest"));
     assert!(!continuation.contains("New chat"));
-    assert!(after_form.starts_with("<button type=submit form=new-chat>New chat</button>"));
+    assert_eq!(after_form, "</main></body></html>");
+    assert!(chat.contains("<button type=submit>New chat</button></form>"));
+    assert!(chat.contains("<form method=post action=/logout>"));
+    assert!(chat.contains("<a href=/recovery>"));
+    assert!(chat.contains("Selected model:"));
+    assert_eq!(html.matches("New chat</button>").count(), 1);
+}
+
+#[test]
+fn selected_model_chrome_is_escaped_before_any_transcript() {
+    let mut html = String::new();
+    let model = "m<&\"'>";
+    let _renderer =
+        IncrementalRenderer::start(&[], "private", TOKEN, model, capture(&mut html)).unwrap();
+    assert!(html.contains("Selected model: m&lt;&amp;&quot;&#39;&gt;"));
+    assert!(!html.contains(model));
+    assert!(!html.contains("private"));
+    assert!(html.find("action=/logout").unwrap() < html.find("action=/chat>").unwrap());
 }
 
 #[test]
@@ -242,7 +259,7 @@ fn startup_sequence_cannot_be_skipped_or_replayed_into_continuation() {
         RenderOutcome::Ready
     );
     assert!(!html.contains("ignored"));
-    assert!(html.contains(&format!("<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{TOKEN}\"></form><form method=post action=/chat>")));
+    assert!(html.contains(&format!("<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{TOKEN}\"><button type=submit>New chat</button></form>")));
     let renderer = IncrementalRenderer::start(&history, "next", TOKEN, "m", |_| Ok(())).unwrap();
     assert_eq!(
         renderer.complete(Ok(usage()), || panic!("must not issue"), |_| Ok(())),
@@ -610,6 +627,16 @@ fn failures_and_budget_exhaustion_never_issue_a_continuation() {
         assert!(!html.contains("history_manifest"));
         assert!(!html.contains("name=token"));
         assert!(!html.contains(">Send</button>"));
+        let controls = html
+            .split("<form method=post action=/chat>")
+            .next()
+            .unwrap();
+        assert!(controls.contains("<button type=submit>New chat</button></form>"));
+        assert!(controls.contains("<button type=submit>Log out</button></form>"));
+        assert!(controls.contains("<a href=/recovery>"));
+        assert_eq!(controls.matches("name=csrf").count(), 2);
+        assert!(!controls.contains("name=h000000"));
+        assert!(!controls.contains("name=token"));
         assert!(decode_continuation(form(&fields(&html)).as_bytes()).is_err());
     }
 }

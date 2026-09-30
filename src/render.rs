@@ -61,6 +61,16 @@ pub fn login_page(login_challenge: &str, error: Option<&str>) -> String {
     ))
 }
 
+/// Independent controls precede the unfinished continuation form, so they stay
+/// usable even when upstream EOF is held or no continuation can be issued.
+pub fn chat_controls(csrf: &str, model: Option<&str>) -> String {
+    let selected = model
+        .map(|id| format!("<p>Selected model: {}</p>", escape(id)))
+        .unwrap_or_default();
+    let csrf = escape(csrf);
+    format!("{selected}<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{csrf}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{csrf}\"><button type=submit>Log out</button></form>")
+}
+
 pub fn chat_page(
     models: &[Model],
     csrf: &str,
@@ -128,12 +138,25 @@ pub fn chat_page(
             )
         })
         .collect::<String>();
-    let encoded_history = escape(&serde_json::to_string(history).unwrap_or_else(|_| "[]".into()));
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let json = serde_json::to_vec(history).ok()?;
+    let mut encoded_history = String::new();
+    for (index, block) in json.chunks(HISTORY_BLOCK_BYTES).enumerate() {
+        encoded_history.push_str(&format!(
+            "<input type=hidden name=h{index:06} value=\"{}\">",
+            URL_SAFE_NO_PAD.encode(block)
+        ));
+    }
+    encoded_history.push_str(&format!(
+        "<input type=hidden name=history_manifest value=\"1.{:06}.{:08}\">",
+        json.len().div_ceil(HISTORY_BLOCK_BYTES),
+        json.len()
+    ));
     let notice = notice
         .map(|value| format!("<p role=status>{}</p>", escape(value)))
         .unwrap_or_default();
     let rendered = page(&format!(
-        "<h1>Possums demo</h1>{notice}{transcript}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\"><input type=hidden name=history value=\"{}\"><label>Model {model_field}</label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><form method=post action=/chat/new><input type=hidden name=csrf value=\"{}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
+        "<h1>Possums demo</h1>{notice}{transcript}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\">{}<label>Model {model_field}</label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><form method=post action=/chat/new><input type=hidden name=csrf value=\"{}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
         escape(csrf),
         escape(submission_token),
         encoded_history,
@@ -297,8 +320,8 @@ impl<'a> IncrementalRenderer<'a> {
             state: RenderOutcome::Ready,
         };
         renderer.emit("<!doctype html><html lang=en><head><meta charset=utf-8><title>Possums</title></head><body><main>", &mut sink);
-        // New chat submits only CSRF, never the potentially exhausted history.
-        renderer.emit(&format!("<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{csrf}\"></form><form method=post action=/chat>"), &mut sink);
+        renderer.emit(&chat_controls(csrf, Some(model)), &mut sink);
+        renderer.emit("<form method=post action=/chat>", &mut sink);
         renderer.emit(&format!("<input type=hidden name=csrf value=\"{}\"><input type=hidden name=model value=\"{}\">", escape(csrf), escape(model)), &mut sink);
         renderer.history_bytes(b"[", &mut sink);
         Ok(renderer)
@@ -421,12 +444,15 @@ impl<'a> IncrementalRenderer<'a> {
             self.notice("Conversation changed; start a New chat.", &mut sink);
             return RenderOutcome::ContinuationUnavailable;
         };
-        self.emit(&format!("<input type=hidden name=token value=\"{token}\"><input type=hidden name=history_manifest value=\"1.{:06}.{:08}\"><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><button type=submit form=new-chat>New chat</button></main></body></html>", self.blocks, self.decoded), &mut sink);
+        self.emit(&format!("<input type=hidden name=token value=\"{token}\"><input type=hidden name=history_manifest value=\"1.{:06}.{:08}\"><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form></main></body></html>", self.blocks, self.decoded), &mut sink);
         self.state
     }
 
     fn notice(&mut self, message: &str, sink: &mut impl FnMut(&str) -> RenderSinkResult) {
-        self.emit(&format!("</form><p role=status>{message}</p><button type=submit form=new-chat>New chat</button></main></body></html>"), sink);
+        self.emit(
+            &format!("</form><p role=status>{message}</p></main></body></html>"),
+            sink,
+        );
     }
 
     fn emit(&mut self, html: &str, sink: &mut impl FnMut(&str) -> RenderSinkResult) {

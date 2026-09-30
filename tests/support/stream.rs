@@ -118,6 +118,25 @@ pub fn usage(input: u64, output: u64) -> Value {
     }})
 }
 
+/// Synthetic authenticated-channel fixture completion through the production
+/// parser, never a fabricated terminal usage. Caller controls the final counts.
+pub fn terminal(
+    content: &str,
+    input: u64,
+    output: u64,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> Result<StreamUsage, StreamError> {
+    let mut parser = ProtocolParser::default();
+    for bytes in [
+        event(choice(Some(content), Some("stop"))),
+        event(usage(input, output)),
+        b"data: [DONE]\n\n".to_vec(),
+    ] {
+        parser.feed(&bytes, &mut *on_delta)?;
+    }
+    parser.eof()
+}
+
 pub fn successful(content: &str) -> Vec<u8> {
     [
         event(choice(Some(content), Some("stop"))),

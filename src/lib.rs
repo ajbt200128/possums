@@ -5,16 +5,15 @@ mod bounded_json;
 pub mod catalog;
 #[cfg(test)]
 mod process_alloc_tests;
-// Staged ownership only; buffered /chat remains unchanged.
+// Reservation ownership is independent of HTTP delivery.
 #[allow(dead_code)]
 mod generation_owner;
 pub mod inference;
 pub mod render;
-// Staged internal primitive; route/worker integration is a separate packet.
+// Bounded delivery owners retain the shared heavy admission.
 #[allow(dead_code)]
 mod stream_owner;
-// Internal accepted-request composition; no production route cutover.
-#[allow(dead_code)]
+// Internal accepted-request composition.
 mod streaming_chat;
 pub mod telemetry;
 pub mod web;

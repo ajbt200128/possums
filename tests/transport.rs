@@ -192,6 +192,15 @@ impl Inference for UnusedInference {
         unreachable!()
     }
 
+    async fn generate_stream(
+        &self,
+        _: &Model,
+        _: &[Message],
+        _: &mut (dyn for<'d> FnMut(&'d str) + Send),
+    ) -> Result<possums::inference::stream::StreamUsage, InferenceError> {
+        unreachable!("transport rejection must precede generation")
+    }
+
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
         Err(InferenceError::Unavailable)
     }

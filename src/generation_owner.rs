@@ -1,4 +1,4 @@
-//! Staged, detached generation ownership; deliberately not wired to `/chat`.
+//! Detached ownership for accepted `/chat` reservations.
 //!
 //! Admission supplies the existing global-four generation permit and a separate
 //! heavy resource lease shared with delivery. Delivery owns no generation slot.
@@ -99,7 +99,7 @@ impl SettledReceipt {
 /// SAME guard and both leases belong to the worker. There is no disarm/ack gap in
 /// which cancellation can refund an already-running generation.
 ///
-/// Route cutover contract, not wired yet: the first spawn is DETACHED PREFLIGHT,
+/// The route's first spawn is DETACHED PREFLIGHT,
 /// before tokenization, not compose. Its explicit owner envelope drops owned
 /// prompt-bearing work BEFORE this guard/leases. Preflight failure/deadline drops
 /// this sole guard (no explicit refund plus guard); success moves this same value

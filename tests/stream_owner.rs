@@ -273,7 +273,7 @@ async fn accepted_over_16_mib_startup_really_drains_through_bounded_http_body() 
     })
     .unwrap();
     assert_eq!(reference.outcome(), RenderOutcome::Ready);
-    assert_eq!(expected_bytes, 22_412_733);
+    assert_eq!(expected_bytes, 22_413_030); // Includes independent startup controls.
 
     let (lane, lease) = lane();
     // Intentionally much smaller than 16 MiB. Outstanding HTTP frames, not just
