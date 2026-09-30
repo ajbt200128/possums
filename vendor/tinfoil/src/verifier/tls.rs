@@ -367,20 +367,26 @@ impl reqwest_middleware::Middleware for OriginBindingMiddleware {
     }
 }
 
+const MAX_SAME_ORIGIN_REDIRECTS: usize = 10;
+
+fn origin_bound_redirect_policy(expected_origin: String) -> reqwest::redirect::Policy {
+    let limit = reqwest::redirect::Policy::limited(MAX_SAME_ORIGIN_REDIRECTS);
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if request_origin_matches(&expected_origin, attempt.url()) {
+            limit.redirect(attempt)
+        } else {
+            attempt.error("redirect target is outside the verified enclave origin")
+        }
+    })
+}
+
 pub(crate) fn create_host_bound_pinned_client(
     pinned_fingerprint: &str,
     expected_origin: reqwest::Url,
 ) -> Result<HostBoundPinnedClient> {
     let expected_server_name = server_name_from_origin(&expected_origin)?;
     let expected_origin = expected_origin.origin().ascii_serialization();
-    let redirect_origin = expected_origin.clone();
-    let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
-        if request_origin_matches(&redirect_origin, attempt.url()) {
-            attempt.follow()
-        } else {
-            attempt.error("redirect target is outside the verified enclave origin")
-        }
-    });
+    let redirect_policy = origin_bound_redirect_policy(expected_origin.clone());
     let transport = build_pinned_client(
         pinned_fingerprint,
         Some(expected_server_name),
@@ -603,6 +609,66 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
                 &reqwest::Url::parse(different_port).unwrap()
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn test_origin_redirect_policy_bounds_long_loops_and_rejects_other_origins() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        crate::ensure_crypto_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let url = format!("{origin}/{}", "x".repeat(32 * 1024));
+        let destination = url.clone();
+        let peer = tokio::spawn(async move {
+            let mut count = 0;
+            while let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept()).await
+            {
+                let mut headers = Vec::new();
+                let mut block = [0; 4096];
+                while !headers.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let read = socket.read(&mut block).await.unwrap();
+                    assert!(read > 0, "empty request at redirect {count}");
+                    assert!(headers.len() + read <= 128 * 1024);
+                    headers.extend_from_slice(&block[..read]);
+                }
+                socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                count += 1;
+                assert!(count <= MAX_SAME_ORIGIN_REDIRECTS + 1);
+            }
+            count
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(origin_bound_redirect_policy(origin.clone()))
+            .build()
+            .unwrap();
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), client.get(url).send())
+            .await
+            .unwrap()
+            .is_err());
+        assert_eq!(peer.await.unwrap(), MAX_SAME_ORIGIN_REDIRECTS + 1);
+
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_url = format!("http://{}", other.local_addr().unwrap());
+        let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_url = format!("http://{}", first.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = first.accept().await.unwrap();
+            let mut block = [0; 2048];
+            assert!(socket.read(&mut block).await.unwrap() > 0);
+            socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {other_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(origin_bound_redirect_policy(first_url.clone()))
+            .build()
+            .unwrap();
+        assert!(client.get(first_url).send().await.is_err());
+        peer.await.unwrap();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), other.accept())
+            .await
+            .is_err());
     }
 
     #[tokio::test]

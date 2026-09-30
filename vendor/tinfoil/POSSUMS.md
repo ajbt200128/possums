@@ -22,3 +22,9 @@ background after a request returns, without retaining that request's resource
 lease. Zero idle capacity bypasses that path; it does not weaken certificate
 pinning or origin checks, but costs a fresh TLS handshake per request. This is
 source-level lifetime reasoning, not a whole-process RSS or live-provider proof.
+
+The same origin-bound client caps redirects at ten hops while rejecting every
+cross-origin target. Reqwest custom redirect policies do not inherit its default
+hop limit; unbounded same-origin redirect history otherwise grows before the
+gateway can validate a catalog response. Local HTTP/1 loopback tests exercise the
+policy; authenticated provider compatibility remains unverified.
