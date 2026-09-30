@@ -192,9 +192,28 @@ impl SecureClient {
         self.ground_truth.clone()
     }
 
+    /// Inspect the active verified evidence without first cloning it.
+    ///
+    /// Proxy mode holds the channel read lock for the entire callback, so a
+    /// caller can validate bounds and export the SAME snapshot. The callback
+    /// must be short and must not reenter this client or its proxy. Revoked or
+    /// unverified state returns None; no prior snapshot is cached or substituted.
+    pub fn with_verified_ground_truth<T>(
+        &self,
+        inspect: impl FnOnce(&GroundTruth) -> T,
+    ) -> Option<T> {
+        self.pinned_client.as_ref()?;
+        if let Some(proxy) = &self.ehbp {
+            return proxy.with_verified_ground_truth(inspect);
+        }
+        Some(inspect(self.ground_truth.as_ref()?))
+    }
+
     /// Get the ground truth as a JSON string
     pub fn ground_truth_json(&self) -> Result<String> {
-        let gt = self.ground_truth().ok_or(Error::Configuration("Client not verified - call verify() first".into()))?;
+        let gt = self.ground_truth().ok_or(Error::Configuration(
+            "Client not verified - call verify() first".into(),
+        ))?;
         serde_json::to_string(&gt).map_err(Error::Json)
     }
 
@@ -993,18 +1012,57 @@ mod tests {
             base_url_override: None,
         }
     }
-    
+
     #[test]
     fn test_client_creation() {
-        let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
+        let client = SecureClient::new(
+            "inference.tinfoil.sh",
+            "tinfoilsh/confidential-model-router",
+            "test-key",
+        );
         assert_eq!(client.host(), "inference.tinfoil.sh");
         assert!(!client.is_verified());
     }
-    
+
     #[test]
     fn test_not_verified_error() {
-        let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
+        let client = SecureClient::new(
+            "inference.tinfoil.sh",
+            "tinfoilsh/confidential-model-router",
+            "test-key",
+        );
         assert!(client.http_client().is_err());
+    }
+
+    #[test]
+    fn borrowed_evidence_export_uses_active_direct_state_without_clone() {
+        let mut client = verified_client(&"d".repeat(64), Some("v1"));
+        client
+            .ground_truth
+            .as_mut()
+            .unwrap()
+            .code_measurement
+            .registers
+            .push("x".repeat(16_777_217));
+        let original = client.ground_truth.as_ref().unwrap();
+        let rejected = client.with_verified_ground_truth(|borrowed| {
+            assert!(std::ptr::eq(original, borrowed));
+            assert_eq!(borrowed.code_measurement.registers[1].len(), 16_777_217);
+            false
+        });
+        assert_eq!(rejected, Some(false));
+        client.pinned_client = None;
+        assert!(client
+            .with_verified_ground_truth(|_| panic!("unverified callback"))
+            .is_none());
+        let client = verified_client(&"d".repeat(64), Some("v1"));
+        let document = client
+            .with_verified_ground_truth(|borrowed| {
+                VerificationDocument::from_ground_truth(borrowed.clone(), client.host().into())
+                    .unwrap()
+            })
+            .unwrap();
+        assert_eq!(document, client.verification_document().unwrap());
     }
 
     #[test]

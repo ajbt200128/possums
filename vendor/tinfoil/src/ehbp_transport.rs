@@ -171,6 +171,21 @@ impl EhbpProxy {
         state.ground_truth.clone()
     }
 
+    pub(crate) fn with_verified_ground_truth<T>(
+        &self,
+        inspect: impl FnOnce(&GroundTruth) -> T,
+    ) -> Option<T> {
+        let state = self.channel.read().ok()?;
+        state.client.as_ref()?;
+        let ground_truth = state.ground_truth.as_ref()?;
+        // Evidence and the active sealing key must describe the same snapshot.
+        // No clone occurs before the callback's caller-supplied bounds check.
+        if state.public_key.as_deref() != ground_truth.hpke_public_key.as_deref() {
+            return None;
+        }
+        Some(inspect(ground_truth))
+    }
+
     pub(crate) async fn lock_refresh(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.refresh_lock).lock_owned().await
     }
@@ -558,17 +573,25 @@ mod tests {
 
         proxy.refresh_after_mismatch(seen_generation).await.unwrap();
 
-        let channel = proxy
-            .channel
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
+        let channel = proxy.channel.read().unwrap_or_else(PoisonError::into_inner);
         let document = channel.ground_truth.as_ref().unwrap();
         assert_eq!(channel.public_key, document.hpke_public_key);
         assert_eq!(document.digest, "new-digest");
         assert_eq!(document.verified_at, "2026-08-04T12:30:00Z");
         drop(channel);
 
-        let verification_document = client.secure_client().verification_document().unwrap();
+        let secure = client.secure_client();
+        let verification_document = secure
+            .with_verified_ground_truth(|borrowed| {
+                // Publication cannot change the key/evidence between check and copy.
+                assert!(proxy.channel.try_write().is_err());
+                crate::VerificationDocument::from_ground_truth(
+                    borrowed.clone(),
+                    secure.host().into(),
+                )
+                .unwrap()
+            })
+            .unwrap();
         assert_eq!(verification_document.release_digest, "new-digest");
         assert_eq!(
             verification_document.hpke_public_key,
@@ -614,6 +637,9 @@ mod tests {
         refresh_started.notified().await;
         assert!(!proxy.is_active());
         assert!(proxy.verified_ground_truth().is_none());
+        assert!(proxy
+            .with_verified_ground_truth(|_| panic!("revoked callback"))
+            .is_none());
         refresh.abort();
         assert!(refresh.await.unwrap_err().is_cancelled());
 
@@ -682,9 +708,73 @@ mod tests {
         finish_refresh.notify_one();
         refresh.await.unwrap().unwrap();
 
-        let document = proxy.verified_ground_truth().unwrap();
+        let document = proxy
+            .with_verified_ground_truth(|borrowed| borrowed.clone())
+            .unwrap();
         assert_eq!(document.digest, "newest-digest");
         assert_eq!(document.verified_at, "2026-08-04T12:30:00Z");
+    }
+
+    #[tokio::test]
+    async fn borrowed_evidence_export_rechecks_refreshed_state_and_key_binding() {
+        let initial_key = TestEnclave::generate().public_key_hex();
+        let next_key = TestEnclave::generate().public_key_hex();
+        let client =
+            Client::test_client_with_ehbp("http://127.0.0.1:9", TEST_ENCLAVE_URL, &initial_key);
+        let secure = client.secure_client();
+        let proxy = secure.ehbp_proxy().unwrap();
+        proxy
+            .install_verified_state(
+                initial_key.clone(),
+                ground_truth(initial_key, "old", "time"),
+            )
+            .unwrap();
+        assert_eq!(
+            secure
+                .with_verified_ground_truth(|g| g.digest.clone())
+                .unwrap(),
+            "old"
+        );
+        let seen = proxy.generation();
+        proxy.set_refresher(move || {
+            let key = next_key.clone();
+            async move {
+                let mut evidence = ground_truth(key.clone(), "new", "time");
+                evidence
+                    .code_measurement
+                    .registers
+                    .push("x".repeat(16_777_217));
+                Ok(RefreshedState {
+                    hpke_public_key: key,
+                    ground_truth: Some(evidence),
+                })
+            }
+        });
+        proxy.refresh_after_mismatch(seen).await.unwrap();
+        assert_eq!(
+            secure.with_verified_ground_truth(|borrowed| {
+                let state = proxy.channel.read().unwrap();
+                assert!(std::ptr::eq(state.ground_truth.as_ref().unwrap(), borrowed));
+                assert!(proxy.channel.try_write().is_err());
+                assert_eq!(borrowed.digest, "new");
+                borrowed
+                    .code_measurement
+                    .registers
+                    .iter()
+                    .all(|r| r.len() <= 4096)
+            }),
+            Some(false)
+        );
+        // No fallback to the old, smaller document. Mismatched publication and
+        // revocation cannot expose evidence from a different active key.
+        proxy.channel.write().unwrap().public_key = Some("different".into());
+        assert!(secure
+            .with_verified_ground_truth(|_| panic!("mismatched callback"))
+            .is_none());
+        proxy.revoke();
+        assert!(secure
+            .with_verified_ground_truth(|_| panic!("revoked callback"))
+            .is_none());
     }
 
     #[tokio::test]

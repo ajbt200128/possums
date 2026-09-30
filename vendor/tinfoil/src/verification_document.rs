@@ -64,10 +64,10 @@ pub struct VerificationDocument {
 }
 
 impl VerificationDocument {
-    pub(crate) fn from_ground_truth(
-        ground_truth: GroundTruth,
-        enclave_host: String,
-    ) -> Option<Self> {
+    /// Project evidence into the public document schema; this does NOT verify it.
+    /// Callers exporting active client evidence should use
+    /// `SecureClient::with_verified_ground_truth` to validate before cloning.
+    pub fn from_ground_truth(ground_truth: GroundTruth, enclave_host: String) -> Option<Self> {
         let tls_public_key = ground_truth.tls_public_key.clone()?;
         let hpke_public_key = ground_truth.hpke_public_key.clone()?;
         let pinned = ground_truth.digest == crate::constants::PINNED_NO_DIGEST;
