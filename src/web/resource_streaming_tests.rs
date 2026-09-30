@@ -569,9 +569,10 @@ mod route {
             &self,
             model: &str,
             messages: &[Message],
+            heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         ) -> Result<u64, InferenceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let body = resource_fixtures::tokenizer_body(model, messages)?;
+            let (body, released) = resource_fixtures::tokenizer_body(model, messages, heavy)?;
             let pause = self.tokenizer.lock().unwrap().take();
             if let Some(pause) = pause {
                 pause.wait().await;
@@ -582,6 +583,7 @@ mod route {
                     .await
                     .map_err(|_| InferenceError::Unavailable)?,
             );
+            released.await;
             Ok(self.tokens)
         }
 
@@ -589,13 +591,18 @@ mod route {
             &self,
             model: &Model,
             messages: &[Message],
+            _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
             on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
         ) -> Result<stream::StreamUsage, InferenceError> {
             self.generations.fetch_add(1, Ordering::SeqCst);
             assert_eq!(model.id, "m");
             assert_eq!(model.max_output_tokens, 19); // Full context-legal allowance.
-            let body =
-                resource_fixtures::stream_body(&model.id, model.max_output_tokens, messages)?;
+            let body = resource_fixtures::stream_body(
+                &model.id,
+                model.max_output_tokens,
+                messages,
+                _heavy,
+            )?;
             drop(
                 body.collect()
                     .await
@@ -1128,13 +1135,17 @@ async fn proof_seams_use_real_serializers_and_consumer() {
         role: "user".into(),
         content: "borrowed \"<&>🐾\r\n".into(),
     }];
+    let lane = Arc::new(Semaphore::new(1));
+    let heavy = Arc::new(lane.clone().try_acquire_owned().unwrap());
     for (body, streaming) in [
         (
-            resource_fixtures::tokenizer_body("fixture", &messages).unwrap(),
+            resource_fixtures::tokenizer_body("fixture", &messages, heavy.clone())
+                .unwrap()
+                .0,
             false,
         ),
         (
-            resource_fixtures::stream_body("fixture", 99, &messages).unwrap(),
+            resource_fixtures::stream_body("fixture", 99, &messages, heavy.clone()).unwrap(),
             true,
         ),
     ] {

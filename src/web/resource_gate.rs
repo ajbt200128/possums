@@ -113,11 +113,17 @@ impl Inference for Probe {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
         Ok(catalog())
     }
-    async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        model: &str,
+        messages: &[Message],
+        heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         self.tokenizer.fetch_add(1, Ordering::SeqCst);
-        let body = resource_fixtures::tokenizer_body(model, messages)?;
+        let (body, released) = resource_fixtures::tokenizer_body(model, messages, heavy)?;
         self.hooks.at("tokenizer").await;
         let length = self.drain(body).await;
+        released.await;
         // Synthetic context estimate, AFTER the real borrowed serializer and
         // bounded transport; not a fabricated terminal usage result.
         let tokens = messages.iter().map(|m| m.content.len() as u64 + 1).sum();
@@ -132,6 +138,7 @@ impl Inference for Probe {
         &self,
         model: &Model,
         messages: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         self.generations.fetch_add(1, Ordering::SeqCst);
@@ -141,7 +148,8 @@ impl Inference for Probe {
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].content, "x");
         }
-        let body = resource_fixtures::stream_body(&model.id, model.max_output_tokens, messages)?;
+        let body =
+            resource_fixtures::stream_body(&model.id, model.max_output_tokens, messages, _heavy)?;
         self.hooks.at("generation").await;
         let length = self.drain(body).await;
         self.lengths

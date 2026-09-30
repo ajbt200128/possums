@@ -4,12 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tinfoil::Client;
-use tokio::time::Instant;
+use tokio::{sync::OwnedSemaphorePermit, time::Instant};
 
 pub mod stream;
 #[cfg(test)]
 #[path = "../tests/support/stream.rs"]
 pub(crate) mod stream_support;
+mod upload;
+#[cfg(test)]
+mod upload_tests;
 
 // Bounds apply to BORROWED SDK state, before any request-owned clone. The
 // schema has only fixed objects, two register vectors and these bounded strings.
@@ -36,10 +39,20 @@ pub enum InferenceError {
 #[async_trait]
 pub trait Inference: Send + Sync {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError>;
-    async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError>;
+    /// Success also certifies the serialized tokenizer upload has been released.
+    /// Pass the SAME admitted heavy lease through both prompt-bearing calls.
+    /// Implementations must attach it to serialized DATA, including transport
+    /// clones/slices, not only to the request future or outer body.
+    async fn count_tokens(
+        &self,
+        model: &str,
+        messages: &[Message],
+        heavy: Arc<OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError>;
     /// Stream only after trust/catalog/reservation and context preflight.
     /// `model` carries the full context-legal output allowance. Successful usage
     /// is terminal, withheld until validated finish, [DONE], and transport EOF.
+    /// Serialized upload DATA must retain `heavy` even beyond this call's return.
     ///
     /// The borrowed synchronous callback must not block, panic, or collect
     /// unbounded output. On delivery failure, detach delivery in the callback and
@@ -51,6 +64,7 @@ pub trait Inference: Send + Sync {
         &self,
         _model: &Model,
         _messages: &[Message],
+        _heavy: Arc<OwnedSemaphorePermit>,
         _on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         Err(InferenceError::Unavailable)
@@ -99,6 +113,7 @@ impl TinfoilInference {
         &self,
         model: &Model,
         messages: &[Message],
+        heavy: Arc<OwnedSemaphorePermit>,
         on_delta: impl FnMut(&str) + Send,
     ) -> Result<stream::StreamUsage, InferenceError> {
         let http = self.http()?;
@@ -112,6 +127,7 @@ impl TinfoilInference {
                 &model.id,
                 model.max_output_tokens,
                 messages,
+                Some(heavy),
             )?);
         // Use the origin-bound raw transport, not the SDK's retrying chat layer.
         let response = tokio::time::timeout_at(deadline, request.send())
@@ -136,7 +152,7 @@ impl TinfoilInference {
                 role: "user".into(),
                 content: "Reply with exactly: possums-live-canary".into(),
             }];
-            let input_tokens = self.count_tokens(model, &messages).await?;
+            let input_tokens = self.count_tokens_owned(model, &messages, None).await?;
             let request = self
                 .authenticate(
                     self.http()?
@@ -144,7 +160,7 @@ impl TinfoilInference {
                 )
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .header(reqwest::header::ACCEPT, "text/event-stream")
-                .body(stream::request_body(model, 64, &messages)?);
+                .body(stream::request_body(model, 64, &messages, None)?);
             let deadline = Instant::now() + Duration::from_secs(90);
             let mut probe = StreamProbe {
                 tokenizer_tokens: input_tokens,
@@ -158,6 +174,28 @@ impl TinfoilInference {
         })
         .await
         .map_err(|_| InferenceError::Unavailable)?
+    }
+
+    async fn count_tokens_owned(
+        &self,
+        model: &str,
+        messages: &[Message],
+        heavy: Option<Arc<OwnedSemaphorePermit>>,
+    ) -> Result<u64, InferenceError> {
+        let (body, released) = tokenizer_request_body(model, messages, heavy)?;
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let request = self
+            .authenticate(
+                self.http()?
+                    .post(format!("{}/v1/chat/completions/input_tokens", self.origin)),
+            )
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
+        let response = tokio::time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| InferenceError::Unavailable)?
+            .map_err(|_| InferenceError::Unavailable)?;
+        finish_tokenizer(response, released, deadline).await
     }
 
     async fn bounded_response(
@@ -657,6 +695,38 @@ fn tokenizer_request_bytes(model: &str, messages: &[Message]) -> Result<Vec<u8>,
     .map_err(|_| InferenceError::InvalidResponse)
 }
 
+// The private diagnostic alone may omit admission. Route APIs require a lease.
+fn tokenizer_request_body(
+    model: &str,
+    messages: &[Message],
+    heavy: Option<Arc<OwnedSemaphorePermit>>,
+) -> Result<(reqwest::Body, upload::UploadReleased), InferenceError> {
+    Ok(upload::body(
+        tokenizer_request_bytes(model, messages)?,
+        heavy,
+    ))
+}
+
+async fn finish_tokenizer(
+    response: reqwest::Response,
+    released: upload::UploadReleased,
+    deadline: Instant,
+) -> Result<u64, InferenceError> {
+    let bytes = collect_bounded_response(response, 64 * 1024, deadline).await?;
+    let count: TokenCount =
+        serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)?;
+    if count.input_tokens == 0 {
+        return Err(InferenceError::InvalidResponse);
+    }
+    // An early 200/EOF is NOT an upload-release receipt. Avoid overlap between
+    // the tokenizer allocation and generation serializer's growth peak. The
+    // route's existing 30-second preflight timeout also encloses this wait.
+    tokio::time::timeout_at(deadline, released.wait())
+        .await
+        .map_err(|_| InferenceError::Unavailable)?;
+    Ok(count.input_tokens)
+}
+
 // Synthetic transport access only: this neither bypasses nor proves production
 // provider authentication, endpoint binding or release provenance.
 #[cfg(test)]
@@ -675,17 +745,19 @@ pub(crate) mod resource_fixtures {
     pub(crate) fn tokenizer_body(
         model: &str,
         messages: &[Message],
-    ) -> Result<reqwest::Body, InferenceError> {
-        let bytes = tokenizer_request_bytes(model, messages)?;
-        Ok(reqwest::Body::wrap(reqwest::Body::from(bytes)))
+        heavy: Arc<OwnedSemaphorePermit>,
+    ) -> Result<(reqwest::Body, impl std::future::Future<Output = ()>), InferenceError> {
+        let (body, released) = tokenizer_request_body(model, messages, Some(heavy))?;
+        Ok((body, released.wait()))
     }
 
     pub(crate) fn stream_body(
         model: &str,
         max_output_tokens: u64,
         messages: &[Message],
+        heavy: Arc<OwnedSemaphorePermit>,
     ) -> Result<reqwest::Body, InferenceError> {
-        stream::request_body(model, max_output_tokens, messages)
+        stream::request_body(model, max_output_tokens, messages, Some(heavy))
     }
 
     pub(crate) async fn consume_response(
@@ -710,31 +782,23 @@ impl Inference for TinfoilInference {
         self.bounded_response(request, MAX_CATALOG_BYTES).await
     }
 
-    async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError> {
-        let bytes = tokenizer_request_bytes(model, messages)?;
-        let request = self
-            .authenticate(
-                self.http()?
-                    .post(format!("{}/v1/chat/completions/input_tokens", self.origin)),
-            )
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(reqwest::Body::wrap(reqwest::Body::from(bytes)));
-        let bytes = self.bounded_response(request, 64 * 1024).await?;
-        let count: TokenCount =
-            serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)?;
-        if count.input_tokens == 0 {
-            return Err(InferenceError::InvalidResponse);
-        }
-        Ok(count.input_tokens)
+    async fn count_tokens(
+        &self,
+        model: &str,
+        messages: &[Message],
+        heavy: Arc<OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
+        self.count_tokens_owned(model, messages, Some(heavy)).await
     }
 
     async fn generate_stream(
         &self,
         model: &Model,
         messages: &[Message],
+        heavy: Arc<OwnedSemaphorePermit>,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
-        TinfoilInference::generate_stream(self, model, messages, on_delta).await
+        TinfoilInference::generate_stream(self, model, messages, heavy, on_delta).await
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {

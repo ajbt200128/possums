@@ -661,7 +661,7 @@ async fn chat(
                     .input("preflight", &job.form);
                 let tokens = state
                     .inference
-                    .count_tokens(&job.form.model, &job.form.history)
+                    .count_tokens(&job.form.model, &job.form.history, work_heavy.clone())
                     .await
                     .map_err(|_| PreflightRejection::Unavailable)?;
                 job.form.prompt = job.form.history.pop().expect("preflight prompt").content;
@@ -1009,7 +1009,12 @@ mod tests {
         async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
             Ok(br#"{"object":"list","data":[{"id":"m","type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":1,"outputTokenPricePer1M":1,"requestPrice":0}}]}"#.to_vec())
         }
-        async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+        async fn count_tokens(
+            &self,
+            _: &str,
+            _: &[Message],
+            _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        ) -> Result<u64, InferenceError> {
             self.prompts.fetch_add(1, Ordering::SeqCst);
             self.entered.notify_one();
             self.release.notified().await;
@@ -1020,6 +1025,7 @@ mod tests {
             &self,
             _: &Model,
             _: &[Message],
+            _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
             on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
         ) -> Result<crate::inference::stream::StreamUsage, InferenceError> {
             let mut parser = crate::inference::stream::ProtocolParser::default();

@@ -13,7 +13,12 @@ impl Inference for NoStreaming {
         panic!("unexpected catalog call")
     }
 
-    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         panic!("unexpected tokenizer call")
     }
 
@@ -36,14 +41,20 @@ impl Inference for StreamingMock {
         NoStreaming.catalog().await
     }
 
-    async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError> {
-        NoStreaming.count_tokens(model, messages).await
+    async fn count_tokens(
+        &self,
+        model: &str,
+        messages: &[Message],
+        heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
+        NoStreaming.count_tokens(model, messages, heavy).await
     }
 
     async fn generate_stream(
         &self,
         model: &Model,
         messages: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<StreamUsage, InferenceError> {
         assert_eq!(model.id, "fixture");
@@ -87,7 +98,7 @@ async fn trait_object_dispatch_borrows_callback_and_returns_terminal_usage() {
     let (model, messages) = request();
     let mut deltas = Vec::new();
     let mut on_delta = |delta: &str| deltas.push(delta.to_owned());
-    let usage = assert_send(inference.generate_stream(&model, &messages, &mut on_delta))
+    let usage = assert_send(inference.generate_stream(&model, &messages, heavy(), &mut on_delta))
         .await
         .unwrap();
     assert_eq!(deltas, ["first", "second"]);
@@ -104,7 +115,7 @@ async fn detached_delivery_still_consumes_to_terminal_usage() {
     let mut callbacks = 0;
     let mut failed_deliveries = 0;
     let usage = inference
-        .generate_stream(&model, &messages, &mut |delta| {
+        .generate_stream(&model, &messages, heavy(), &mut |delta| {
             callbacks += 1;
             if let Some(sender) = &delivery {
                 if sender.try_send(delta.to_owned()).is_err() {
@@ -126,9 +137,17 @@ async fn default_streaming_fails_closed_without_callback() {
     let inference: SharedInference = Arc::new(NoStreaming);
     let (model, messages) = request();
     let result = inference
-        .generate_stream(&model, &messages, &mut |_| {
+        .generate_stream(&model, &messages, heavy(), &mut |_| {
             panic!("default streaming must not deliver deltas")
         })
         .await;
     assert!(matches!(result, Err(InferenceError::Unavailable)));
+}
+
+fn heavy() -> Arc<tokio::sync::OwnedSemaphorePermit> {
+    Arc::new(
+        Arc::new(tokio::sync::Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap(),
+    )
 }

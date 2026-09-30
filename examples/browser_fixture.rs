@@ -116,7 +116,12 @@ impl Inference for FixtureInference {
         })})).unwrap())
     }
 
-    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _heavy: Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         Ok(1)
     }
 
@@ -124,6 +129,7 @@ impl Inference for FixtureInference {
         &self,
         model: &Model,
         messages: &[Message],
+        _heavy: Arc<tokio::sync::OwnedSemaphorePermit>,
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         let call = {

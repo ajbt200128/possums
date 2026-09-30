@@ -184,7 +184,12 @@ impl Inference for UnusedInference {
         Err(InferenceError::Unavailable)
     }
 
-    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         unreachable!()
     }
 
@@ -192,6 +197,7 @@ impl Inference for UnusedInference {
         &self,
         _: &Model,
         _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         _: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<possums::inference::stream::StreamUsage, InferenceError> {
         unreachable!("transport rejection must precede generation")

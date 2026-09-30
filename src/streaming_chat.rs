@@ -102,7 +102,7 @@ fn compose_with_startup(
             content: std::mem::take(&mut input.prompt),
         });
         let result = inference
-            .generate_stream(&input.model, &input.history, &mut |delta| {
+            .generate_stream(&input.model, &input.history, _heavy.clone(), &mut |delta| {
                 renderer.delta(delta, |html| {
                     tx.try_send(html.as_bytes())
                         .map_err(|_| RenderOutcome::DeliveryFailed)

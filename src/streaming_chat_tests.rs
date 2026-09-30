@@ -177,7 +177,12 @@ impl Inference for Mock {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
         panic!("unexpected catalog call")
     }
-    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         panic!("unexpected preflight call")
     }
 
@@ -189,6 +194,7 @@ impl Inference for Mock {
         &self,
         model: &Model,
         messages: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<StreamUsage, InferenceError> {
         assert_eq!(model, &quote().model); // No output/model reduction.

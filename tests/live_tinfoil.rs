@@ -38,8 +38,15 @@ async fn production_client_authenticates_catalog_tokenization_and_streaming() {
         role: "user".into(),
         content: "Reply with exactly: possums-live-canary".into(),
     }];
+    // Synthetic admission for this ignored production-adapter canary only;
+    // the separate fixed-input diagnostic has no route lease.
+    let heavy = std::sync::Arc::new(
+        std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap(),
+    );
     let input_tokens = inference
-        .count_tokens(&model.id, &messages)
+        .count_tokens(&model.id, &messages, heavy.clone())
         .await
         .expect("authenticated live tokenization failed");
     let mut quote = catalog
@@ -51,7 +58,7 @@ async fn production_client_authenticates_catalog_tokenization_and_streaming() {
     // authority or proof of invoice coverage.
     let mut delta_count = 0_usize;
     let usage = inference
-        .generate_stream(&quote.model, &messages, |_| {
+        .generate_stream(&quote.model, &messages, heavy, |_| {
             delta_count = delta_count.saturating_add(1);
         })
         .await

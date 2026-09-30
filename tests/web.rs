@@ -156,7 +156,12 @@ impl Inference for BlockingInference {
         Ok(catalog_bytes())
     }
 
-    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         self.started.notify_one();
         std::future::pending().await
     }
@@ -165,6 +170,7 @@ impl Inference for BlockingInference {
         &self,
         _: &Model,
         _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         _: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         unreachable!("preflight must time out")
@@ -183,7 +189,12 @@ impl Inference for LargeResponseInference {
         Ok(catalog_bytes())
     }
 
-    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         Ok(1)
     }
 
@@ -191,6 +202,7 @@ impl Inference for LargeResponseInference {
         &self,
         _: &Model,
         _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         let mut parser = stream::ProtocolParser::default();
@@ -228,7 +240,12 @@ impl Inference for OversizedVerificationInference {
         unreachable!()
     }
 
-    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         unreachable!()
     }
 
@@ -236,6 +253,7 @@ impl Inference for OversizedVerificationInference {
         &self,
         _: &Model,
         _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         _: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         unreachable!("verification must reject before generation")
@@ -254,7 +272,12 @@ impl Inference for PanicInference {
         Ok(catalog_bytes())
     }
 
-    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         panic!("injected post-reservation panic")
     }
 
@@ -262,6 +285,7 @@ impl Inference for PanicInference {
         &self,
         _: &Model,
         _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         _: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         unreachable!("preflight must panic")
@@ -339,7 +363,12 @@ impl Inference for FakeInference {
             .unwrap_or_else(catalog_bytes))
     }
 
-    async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
         self.tokenizations.fetch_add(1, Ordering::SeqCst);
         self.pause_at(HoldPoint::Tokenization).await;
         Ok(1)
@@ -349,6 +378,7 @@ impl Inference for FakeInference {
         &self,
         _: &Model,
         _: &[Message],
+        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         self.generations.fetch_add(1, Ordering::SeqCst);

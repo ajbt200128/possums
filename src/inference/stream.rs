@@ -47,6 +47,7 @@ pub(super) fn request_body(
     model: &str,
     max_output_tokens: u64,
     messages: &[Message],
+    heavy: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
 ) -> Result<reqwest::Body, InferenceError> {
     let mut cache_scope = [0_u8; 32];
     rand::rng().fill_bytes(&mut cache_scope);
@@ -71,7 +72,7 @@ pub(super) fn request_body(
     .map_err(|_| InferenceError::InvalidResponse)?;
     // An ordinary JSON/bytes body is cloneable: reqwest could replay it on a
     // same-origin 307/308 or retry. Wrapping as a streaming body disables cloning.
-    Ok(reqwest::Body::wrap(reqwest::Body::from(bytes)))
+    Ok(super::upload::body(bytes, heavy).0)
 }
 
 // Private: arbitrary unauthenticated Responses must never become an inference
@@ -537,6 +538,14 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    fn heavy() -> Arc<tokio::sync::OwnedSemaphorePermit> {
+        Arc::new(
+            Arc::new(tokio::sync::Semaphore::new(1))
+                .try_acquire_owned()
+                .unwrap(),
+        )
+    }
+
     #[tokio::test]
     async fn streaming_request_has_full_allowance_usage_single_choice_and_fresh_cache_scope() {
         let messages = [Message {
@@ -545,7 +554,7 @@ mod tests {
         }];
         let mut scopes = Vec::new();
         for _ in 0..2 {
-            let body = request_body("fixture", 99, &messages)
+            let body = request_body("fixture", 99, &messages, Some(heavy()))
                 .unwrap()
                 .collect()
                 .await
@@ -570,7 +579,7 @@ mod tests {
             content: "x".repeat(MAX_REQUEST_BODY_BYTES),
         }];
         assert!(matches!(
-            request_body("fixture", 99, &messages),
+            request_body("fixture", 99, &messages, Some(heavy())),
             Err(InferenceError::InvalidResponse)
         ));
     }
@@ -612,7 +621,7 @@ mod tests {
                     socket.write_all(format!("HTTP/1.1 {status} Test\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
                 }
             });
-            let body = request_body("fixture", 99, &[]).unwrap();
+            let body = request_body("fixture", 99, &[], Some(heavy())).unwrap();
             let request = reqwest::Client::builder()
                 .no_proxy()
                 .build()
