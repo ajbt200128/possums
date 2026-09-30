@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
-import { fixtureOrigin, startBufferedFixture, FIXTURE_MODELS } from "./browser_support.mjs";
+import { fixtureOrigin, startStreamingFixture, FIXTURE_MODELS } from "./browser_support.mjs";
 
 // Direct helper boundary checks; no prompt/credential data in process diagnostics.
 assert.equal(fixtureOrigin(Buffer.from("http://127.0.0.1:1234\n")), "http://127.0.0.1:1234");
 for (const invalid of ["https://remote.invalid", "http://127.0.0.1:65536", "x".repeat(129)]) {
   assert.throws(() => fixtureOrigin(Buffer.from(invalid)));
 }
-const { origin, stop } = await startBufferedFixture();
+const { origin, stop } = await startStreamingFixture();
 try {
 
   const browser = await chromium.launch({ headless: true });

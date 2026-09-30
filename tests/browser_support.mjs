@@ -1,9 +1,9 @@
-// Test-only process helpers. This still launches the buffered production router;
-// the bounded Rust scenario channel is not wired to HTTP or /chat in packet 4.
+// Test-only IPC for the production streaming /chat router. No HTTP control route.
 import { spawn } from "node:child_process";
-import { once } from "node:events";
 
 export const FIXTURE_MODELS = ["fixture-model", "fixture-model-two"];
+export const FIXTURE_TEXT = "<script>fetch('https://browser-canary.invalid')</script> ![pixel](https://browser-canary.invalid/pixel) **safe response**";
+export const FIXTURE_PARTIAL = FIXTURE_TEXT.slice(0, -" **safe response**".length);
 const MAX_ORIGIN_BYTES = 128;
 
 export function fixtureOrigin(bytes) {
@@ -16,38 +16,100 @@ export function fixtureOrigin(bytes) {
   return origin;
 }
 
-export async function startBufferedFixture() {
+export async function startStreamingFixture({ progressive = false } = {}) {
+  // A process group ensures cargo AND the example die on failure, not just cargo.
   const server = spawn("cargo", ["run", "--quiet", "--example", "browser_fixture"], {
-    stdio: ["ignore", "pipe", "inherit"],
+    detached: true,
+    env: { ...process.env, POSSUMS_BROWSER_PROGRESSIVE: progressive ? "1" : "0" },
+    stdio: ["pipe", "pipe", "inherit"],
   });
-  const exit = once(server, "exit");
+  const phases = ["ready", "held", "released", "second-accepted", "reset-accepted"];
+  const waiters = new Set();
+  let phase = -1;
+  let origin;
+  let pending = Buffer.alloc(0);
+  let failure;
+  let stopping = false;
+  let releaseRequested = false;
+  let killTimer;
+  const killGroup = (signal) => {
+    if (!server.pid) return;
+    try { process.kill(-server.pid, signal); } catch (error) {
+      if (error.code !== "ESRCH") throw new Error("fixture cleanup failed");
+    }
+  };
+  const terminate = () => {
+    killGroup("SIGTERM");
+    killTimer ??= setTimeout(() => killGroup("SIGKILL"), 2_000);
+  };
+  const notify = () => { for (const waiter of waiters) waiter(); };
+  const fail = (message) => {
+    failure ??= new Error(message);
+    notify();
+    terminate();
+  };
+  const closed = new Promise((resolve) => {
+    server.once("error", () => fail("fixture failed"));
+    server.once("close", () => {
+      if (!stopping) fail("fixture exited");
+      clearTimeout(killTimer);
+      resolve();
+    });
+  });
+  server.stdin.on("error", () => fail("fixture control failed"));
+  server.stdout.on("data", (bytes) => {
+    if (failure || stopping) return;
+    if (pending.length + bytes.length > 1024) return fail("fixture output too large");
+    pending = Buffer.concat([pending, bytes]);
+    let newline;
+    while ((newline = pending.indexOf(10)) !== -1) {
+      const line = pending.subarray(0, newline);
+      pending = pending.subarray(newline + 1);
+      if (phase === -1) {
+        try { origin = fixtureOrigin(line); } catch { return fail("invalid fixture origin"); }
+      } else if (!progressive || line.toString() !== phases[phase + 1]
+        || (phase === 1 && !releaseRequested)) {
+        return fail("unexpected fixture phase");
+      }
+      phase += 1;
+      notify();
+    }
+    if (pending.length > MAX_ORIGIN_BYTES) fail("fixture output too large");
+  });
+  const waitFor = (expected, timeout = 10_000) => new Promise((resolve, reject) => {
+    const target = phases.indexOf(expected);
+    if (target === -1) return reject(new Error("invalid fixture phase"));
+    const timer = setTimeout(() => fail("fixture phase timed out"), timeout);
+    const check = () => {
+      if (!failure && phase < target) return;
+      clearTimeout(timer);
+      waiters.delete(check);
+      if (failure) reject(failure); else resolve();
+    };
+    waiters.add(check);
+    check();
+  });
+  const assertHeld = () => {
+    if (failure) throw failure;
+    if (phase !== 1 || releaseRequested) throw new Error("fixture terminal is not held");
+  };
   const stop = async () => {
-    if (server.exitCode === null && server.signalCode === null) server.kill("SIGTERM");
-    await exit;
+    stopping = true;
+    terminate();
+    await closed;
+    clearTimeout(killTimer);
   };
   try {
-    const origin = await new Promise((resolve, reject) => {
-      let startup = Buffer.alloc(0);
-      const timer = setTimeout(() => reject(new Error("fixture startup timed out")), 60_000);
-      const finish = (error, value) => {
-        clearTimeout(timer);
-        server.stdout.off("data", receive);
-        if (error) reject(error); else resolve(value);
-      };
-      const receive = (bytes) => {
-        if (startup.length + bytes.length > MAX_ORIGIN_BYTES) {
-          finish(new Error("fixture startup too large"));
-          return;
-        }
-        startup = Buffer.concat([startup, bytes]);
-        if (startup.includes(10)) {
-          try { finish(null, fixtureOrigin(startup)); } catch (error) { finish(error); }
-        }
-      };
-      server.stdout.on("data", receive);
-      exit.then(() => finish(new Error("fixture exited")), () => finish(new Error("fixture failed")));
-    });
-    return { origin, stop };
+    await waitFor("ready", 60_000);
+    return {
+      origin, stop, waitFor, assertHeld,
+      release: async () => {
+        assertHeld();
+        releaseRequested = true;
+        server.stdin.end("R");
+        await waitFor("released");
+      },
+    };
   } catch (error) {
     await stop();
     throw error;
