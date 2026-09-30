@@ -1,5 +1,8 @@
 //! Internal composition only: `/chat` is still buffered. Call AFTER authenticated
-//! catalog/context preflight and a new reservation; this module does no admission.
+//! catalog verification, a new reservation, THEN detached context preflight;
+//! this module does no admission. Accounting acceptance is the successful reserve,
+//! not this synchronous generation handoff. The planned route preflight must pass
+//! its original ReservedGeneration here even if its HTTP observer has disappeared.
 //! Synthetic tests are not authenticated provider/network or aggregate RSS proof.
 //! As with generation_owner, the service must suppress content in its panic hook.
 
@@ -109,6 +112,9 @@ fn compose_with_startup(
             || {
                 // complete calls this only while continuation remains usable.
                 // finish has already released the accounting lock before auth.
+                // If final enqueue fails after issuance, the unused token remains
+                // bounded by auth capacity and its 15-minute expiry. Do not tie
+                // settlement to delivery or add compensating token cleanup here.
                 settled
                     .then(|| {
                         auth.issue_submission_for(

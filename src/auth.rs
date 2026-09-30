@@ -314,7 +314,15 @@ impl Auth {
 
     /// Synchronous admission; caller must already hold required resource permits
     /// and have completed evidence/catalog/quote verification, before any prompt
-    /// transmission. Successful reserve is the acceptance linearization point.
+    /// transmission. A new successful reserve is ACCOUNTING ACCEPTANCE, not
+    /// successful context preflight, generation startup, or client receipt.
+    /// Streaming cutover contract (the buffered route has not migrated yet):
+    /// after Reserved, construct ReservedGeneration and synchronously transfer
+    /// it, owned decoded input, the middleware's exact heavy Arc and global
+    /// generation permit into detached preflight, before ANY await/tokenization.
+    /// Duplicate must never construct a second refund owner or launch work.
+    /// Lock order remains sessions -> submission_tokens -> accounting; reserve
+    /// snapshots this authenticated quote, with model/conversation binding.
     /// Failures commit neither token nor model binding. No content/hashes enter
     /// auth or accounting. Accounting never calls back into auth while locked.
     pub fn admit_submission(

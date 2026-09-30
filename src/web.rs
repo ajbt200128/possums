@@ -427,6 +427,11 @@ async fn logout(
     response
 }
 
+// Cutover contract: after CSRF validation/reset, render the COMPLETE bounded
+// empty continuation + authenticated model selector directly in this lane,
+// preserving every supported model and catalog fail-closed behavior. Redirecting
+// through GET / below is buffered compatibility, NOT independent availability.
+// No availability promise applies while the New chat lane itself is retained.
 async fn new_chat(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -517,6 +522,48 @@ struct ChatForm {
     prompt: String,
 }
 
+// PACKET-2 HANDOFF CONTRACT (not implemented by this buffered handler):
+// 1. Bounded raw decode, trust/catalog validation, CSRF/model/conversation checks,
+//    global-four permit and session->submission->accounting reserve (three/account).
+//    Insufficient credit/concurrency/duplicate paths send no prompt, even to the
+//    tokenizer. Keep the submitted authenticated quote in the ledger unchanged.
+// 2. New Reserved is accounting acceptance. With NO intervening await or prompt
+//    operation: construct ReservedGeneration and synchronously spawn detached
+//    preflight with owned decoded input + the SAME middleware heavy Arc + permit.
+//    Never create ReservationGuard as well, disarm/rearm, or automatically replay.
+// 3. Preflight owns tokenization and context checks under a finite overall
+//    deadline (30s, including tokenization). Move prompt into the message vector
+//    for borrowed serialization, then move it back for compose; do not clone it.
+//    Use the submitted catalog snapshot to compute the full context-legal output
+//    allowance; this must NOT replace/reprice the ledger's original reservation.
+//    On failure/deadline drop the sole owner to refund once before reporting a
+//    fixed rejection. On success synchronously call streaming_chat::compose with
+//    that SAME owner regardless of whether the result receiver is still open.
+// 4. Result is oneshot::Receiver<Result<DeliveryBody, PreflightRejection>>:
+//    one bounded body handle OR a content-free Context/Unavailable rejection.
+//    Attached clients await this BEFORE streaming headers. The detached task
+//    drops compose's settlement observer; it conveys no cancellation authority.
+//    A failed send drops delivery ONLY; it never vetoes compose or settlement.
+//    Receiver disappearance after acceptance must never abort the preflight task.
+// 5. Use explicit field order in the detached envelope: pinned work/input first,
+//    ReservedGeneration second, heavy Arc last. Work can take the owner only for
+//    the synchronous compose call. All prompt storage dies before the last heavy
+//    lease, including on pre-poll cancellation/unwind. A queued success is the
+//    DeliveryBody (already owns heavy); rejection holds no prompt. spawn_blocking
+//    inputs AND unclaimed results carry heavy last, as Startup/Started already do.
+//    Generation/account slots release at worker/terminal boundaries, independently
+//    of retained delivery. Body, queued chunks and Bytes clones/slices keep heavy
+//    until their last owner drops. Raw ingress keeps its SEPARATE lease through
+//    AdmittedBytes until its final owner drops; decoding does not release it early.
+// 6. Test-only one-shot reached/release barriers: inside tokenizer after actual
+//    serialization (body retained), after tokenization/context before compose,
+//    and immediately after synchronous compose before sending its body. Await
+//    barriers only under cfg(test); production has no await in either handoff.
+//    Tests cancel the HTTP waiter at each point, then release accepted work and
+//    assert one generation/settlement or zero generations/one preflight refund.
+//    Additional blocking-startup/parser gates belong to fixtures, not production.
+// The delivery contract remains 64 KiB / eight outstanding frame owners, including
+// dequeued clones/slices. This contract is not an aggregate resource proof.
 async fn chat(
     State(state): State<AppState>,
     headers: HeaderMap,

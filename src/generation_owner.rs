@@ -99,6 +99,13 @@ impl SettledReceipt {
 /// SAME guard and both leases belong to the worker. There is no disarm/ack gap in
 /// which cancellation can refund an already-running generation.
 ///
+/// Route cutover contract, not wired yet: the first spawn is DETACHED PREFLIGHT,
+/// before tokenization, not compose. Its explicit owner envelope drops owned
+/// prompt-bearing work BEFORE this guard/leases. Preflight failure/deadline drops
+/// this sole guard (no explicit refund plus guard); success moves this same value
+/// synchronously into streaming_chat::compose, even if observation was dropped.
+/// Neither a closed result channel nor reset/logout can veto accepted work.
+///
 /// Field order keeps the resource and generation leases until terminal cleanup.
 pub(crate) struct ReservedGeneration {
     terminal: Terminal,
