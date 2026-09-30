@@ -82,9 +82,13 @@
 //!   before validation, growing a 48-byte-element vector to 1,048,576 slots
 //!   (48 MiB), with an old 24-MiB vector potentially overlapping growth.
 //!   web::decode_continuation now validates each entry BEFORE pushing directly
-//!   into one Message vector. Accepted sequence histories and valid prefixes
-//!   still need a fresh capacity/growth derivation; object-only density is not
-//!   an upper bound. No history/model/output/concurrency policy was changed.
+//!   into one Message vector. A valid sequence-form pair needs at least 30 JSON
+//!   bytes (including its entry separators); decoded history is <=6 MiB, so
+//!   <=419,430 records can survive. On pinned 64-bit Rust a 48-byte Message Vec
+//!   grows to at most 524,288 slots (24 MiB), temporarily overlapping its old
+//!   262,144-slot allocation (12 MiB). This 36-MiB RECORD ceiling excludes
+//!   parsed strings, JSON, the prompt, and other phase allocations; it does
+//!   not establish the 104-MiB heavy envelope. No product cap was added.
 //! - BoundedWriter checks length BEFORE extending. Rust 1.88 RawVec grows to
 //!   max(2*capacity, required, minimum), not to logical length. A 16-MiB writer
 //!   therefore needs <32 MiB new plus <16 MiB old, including partial/failing
@@ -131,6 +135,18 @@ use crate::{
 use http_body_util::BodyExt;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{oneshot, Semaphore};
+
+#[test]
+fn accepted_sequence_history_record_growth_ceiling() {
+    // A valid user/assistant pair cannot be shorter: sequence-form struct
+    // entries are denser than object-form entries, and user content is nonempty.
+    assert_eq!(r#"[["user","x"],["assistant",""]]"#.len(), 31);
+    assert_eq!(std::mem::size_of::<crate::inference::Message>(), 48);
+    let decoded = crate::render::max_history_decoded_bytes();
+    assert!(decoded <= 6 * 1024 * 1024);
+    let max_records = 2 * ((decoded - 1) / 30);
+    assert!(max_records <= 524_288);
+}
 
 /// Public-schema counterexample: the SDK's legacy unbounded clone still fails.
 /// The gateway now uses the pre-clone export tested below, not this legacy path.
