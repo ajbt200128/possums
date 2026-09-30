@@ -13,7 +13,12 @@ pub mod stream;
 pub(crate) mod stream_support;
 
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 1024 * 1024;
+// Bounds apply to BORROWED SDK state, before any request-owned clone. The
+// schema has only fixed objects, two register vectors and these bounded strings.
+const MAX_EVIDENCE_FIELD_BYTES: usize = 4 * 1024;
+const MAX_EVIDENCE_STRING_BYTES: usize = 16 * 1024;
+const MAX_EVIDENCE_REGISTERS: usize = 32;
+const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 128 * 1024;
 const MAX_TOKENIZER_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -88,13 +93,12 @@ impl TinfoilInference {
         .await
         .map_err(|_| InferenceError::Unavailable)?
         .map_err(|_| InferenceError::Unavailable)?;
-        if client.secure_client().verification_document().is_none() {
-            return Err(InferenceError::Unavailable);
-        }
-        Ok(Self {
+        let inference = Self {
             origin: format!("https://{host}"),
             client,
-        })
+        };
+        inference.verification_document()?;
+        Ok(inference)
     }
 
     /// Verified streaming adapter; the buffered route is not migrated.
@@ -673,6 +677,15 @@ fn tokenizer_request_bytes(model: &str, messages: &[Message]) -> Result<Vec<u8>,
 pub(crate) mod resource_fixtures {
     use super::*;
 
+    // Same pre-clone export as the production adapter; synthetic data here is
+    // NOT evidence of live provider signatures or verification acceptance.
+    pub(crate) fn verification_value(
+        ground_truth: &tinfoil::GroundTruth,
+        host: &str,
+    ) -> Result<serde_json::Value, InferenceError> {
+        super::verification_value(ground_truth, host)
+    }
+
     pub(crate) fn tokenizer_body(
         model: &str,
         messages: &[Message],
@@ -816,15 +829,97 @@ impl Inference for TinfoilInference {
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
-        let document = self
-            .client
-            .secure_client()
-            .verification_document()
-            .ok_or(InferenceError::Unavailable)?;
-        let bytes = crate::bounded_json::to_vec(&document, MAX_VERIFICATION_DOCUMENT_BYTES)
-            .map_err(|_| InferenceError::InvalidResponse)?;
-        serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)
+        let secure = self.client.secure_client();
+        secure
+            .with_verified_ground_truth(|ground_truth| {
+                verification_value(ground_truth, secure.host())
+            })
+            .ok_or(InferenceError::Unavailable)?
     }
+}
+
+// Exhaustive destructuring intentionally makes SDK schema additions a compile
+// error here. Source capacities are irrelevant: String/Vec clone copies lengths.
+// Count duplicated document fields too, not only the source GroundTruth.
+fn evidence_fits(ground_truth: &tinfoil::GroundTruth, host: &str) -> bool {
+    let tinfoil::GroundTruth {
+        config_repo,
+        release_tag,
+        digest,
+        tls_public_key,
+        hpke_public_key,
+        code_measurement,
+        enclave_measurement,
+        code_fingerprint,
+        enclave_fingerprint,
+        verifier: tinfoil::SoftwareIdentity { name, version },
+        verified_at,
+    } = ground_truth;
+    let mut remaining = MAX_EVIDENCE_STRING_BYTES;
+    let mut accept = |field: &str| {
+        if field.len() > MAX_EVIDENCE_FIELD_BYTES || field.len() > remaining {
+            return false;
+        }
+        remaining -= field.len();
+        true
+    };
+    let (Some(tls), Some(hpke)) = (tls_public_key, hpke_public_key) else {
+        return false;
+    };
+    for field in [
+        config_repo.as_str(),
+        release_tag.as_deref().unwrap_or_default(),
+        digest,
+        tls,
+        tls,
+        hpke,
+        hpke,
+        code_fingerprint,
+        enclave_fingerprint,
+        name,
+        version,
+        verified_at,
+        host,
+        host,
+    ] {
+        if !accept(field) {
+            return false;
+        }
+    }
+    for tinfoil::Measurement {
+        type_: _,
+        registers,
+    } in [code_measurement, enclave_measurement]
+    {
+        if registers.len() > MAX_EVIDENCE_REGISTERS {
+            return false;
+        }
+        for register in registers {
+            if !accept(register) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn verification_value(
+    ground_truth: &tinfoil::GroundTruth,
+    host: &str,
+) -> Result<serde_json::Value, InferenceError> {
+    if !evidence_fits(ground_truth, host) {
+        return Err(InferenceError::InvalidResponse);
+    }
+    // The direct SDK borrow is immutable; proxy export keeps the channel read
+    // lock through this callback. No check/export race, unbounded SDK export,
+    // stale cache, or change to attestation/provenance/key authentication.
+    let document =
+        tinfoil::VerificationDocument::from_ground_truth(ground_truth.clone(), host.to_owned())
+            .ok_or(InferenceError::Unavailable)?;
+    let bytes = crate::bounded_json::to_vec(&document, MAX_VERIFICATION_DOCUMENT_BYTES)
+        .map_err(|_| InferenceError::InvalidResponse)?;
+    drop(document);
+    serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)
 }
 
 pub async fn authenticated_catalog(
