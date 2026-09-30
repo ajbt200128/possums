@@ -1,4 +1,4 @@
-use crate::{catalog::Model, inference::Message};
+use crate::{catalog::Quote, inference::Message};
 use pulldown_cmark::{html, Options, Parser};
 use std::collections::HashSet;
 
@@ -74,8 +74,33 @@ pub fn chat_controls(csrf: &str, model: Option<&str>) -> String {
     format!("{selected}{CHAT_DISCLOSURE}<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{csrf}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{csrf}\"><button type=submit>Log out</button></form>")
 }
 
+/// Authenticated admission quotes for every supported model, never affordability-filtered.
+pub struct CatalogSnapshot<'a> {
+    pub quotes: &'a [Quote],
+    pub available_microunits: u64,
+}
+
+/// Read after settlement; the reservation amount is from the original admission.
+#[derive(Clone, Copy)]
+pub struct CreditSnapshot {
+    pub reserved_microunits: u64,
+    pub available_microunits: u64,
+}
+
+fn usd(microunits: u64) -> String {
+    format!(
+        "USD {}.{:06}",
+        microunits / 1_000_000,
+        microunits % 1_000_000
+    )
+}
+
+fn available_credit(microunits: u64) -> String {
+    format!("<p>Available demo credit: {}</p>", usd(microunits))
+}
+
 pub fn chat_page(
-    models: &[Model],
+    catalog: CatalogSnapshot<'_>,
     csrf: &str,
     submission_token: &str,
     history: &[Message],
@@ -85,9 +110,12 @@ pub fn chat_page(
 ) -> Option<String> {
     // JSON and HTML escaping can expand hostile input substantially. Reject it
     // before constructing any rendering intermediates.
-    let input_bytes = models
+    let input_bytes = catalog
+        .quotes
         .iter()
-        .try_fold(0_usize, |total, model| total.checked_add(model.id.len()))?
+        .try_fold(0_usize, |total, quote| {
+            total.checked_add(quote.model.id.len())
+        })?
         .checked_add(csrf.len())?
         .checked_add(submission_token.len())?
         .checked_add(selected_model.map_or(0, str::len))?
@@ -100,21 +128,29 @@ pub fn chat_page(
     if input_bytes.checked_mul(128)?.checked_add(4096)? > limit {
         return None;
     }
-    if selected_model.is_some_and(|selected| !models.iter().any(|model| model.id == selected)) {
+    if selected_model.is_some_and(|selected| {
+        !catalog
+            .quotes
+            .iter()
+            .any(|quote| quote.model.id == selected)
+    }) {
         return None;
     }
-    let options = models
+    let options = catalog
+        .quotes
         .iter()
-        .map(|model| {
+        .map(|quote| {
+            let model = &quote.model;
             let selected = if selected_model == Some(model.id.as_str()) {
                 " selected"
             } else {
                 ""
             };
             format!(
-                "<option value=\"{}\"{selected}>{}</option>",
+                "<option value=\"{}\"{selected}>{} — indicative maximum reservation: {}</option>",
                 escape(&model.id),
-                escape(&model.id)
+                escape(&model.id),
+                usd(quote.reserved_microunits)
             )
         })
         .collect::<String>();
@@ -158,8 +194,9 @@ pub fn chat_page(
     let notice = notice
         .map(|value| format!("<p role=status>{}</p>", escape(value)))
         .unwrap_or_default();
+    let credit = available_credit(catalog.available_microunits);
     let rendered = page(&format!(
-        "<h1>Possums demo</h1>{notice}{transcript}{CHAT_DISCLOSURE}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\">{}<label>Model {model_field}</label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><form method=post action=/chat/new><input type=hidden name=csrf value=\"{}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
+        "<h1>Possums demo</h1>{notice}{transcript}{CHAT_DISCLOSURE}{credit}<p>Catalog prices and available credit are snapshots; revalidated when Send is submitted. Every supported model is listed, even if its maximum reservation exceeds available credit.</p><form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\">{}<label>Model {model_field}</label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><form method=post action=/chat/new><input type=hidden name=csrf value=\"{}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
         escape(csrf),
         escape(submission_token),
         encoded_history,
@@ -414,8 +451,21 @@ impl<'a> IncrementalRenderer<'a> {
     /// original accepted conversation/model; it is never called on failure.
     /// Settlement deliberately lives outside this API. UI failure cannot refund.
     pub fn complete(
+        self,
+        upstream: Result<crate::inference::stream::StreamUsage, crate::inference::InferenceError>,
+        issue_original_continuation: impl FnOnce() -> Option<String>,
+        sink: impl FnMut(&str) -> RenderSinkResult,
+    ) -> RenderOutcome {
+        self.complete_with_credit(upstream, None, issue_original_continuation, sink)
+    }
+
+    /// Production continuation uses a post-settlement ledger snapshot, not a
+    /// refreshed catalog or the smaller context-legal generation allowance.
+    /// None preserves the standalone renderer fixtures' behavior.
+    pub fn complete_with_credit(
         mut self,
         upstream: Result<crate::inference::stream::StreamUsage, crate::inference::InferenceError>,
+        credit: Option<CreditSnapshot>,
         issue_original_continuation: impl FnOnce() -> Option<String>,
         mut sink: impl FnMut(&str) -> RenderSinkResult,
     ) -> RenderOutcome {
@@ -447,7 +497,8 @@ impl<'a> IncrementalRenderer<'a> {
             self.notice("Conversation changed; start a New chat.", &mut sink);
             return RenderOutcome::ContinuationUnavailable;
         };
-        self.emit(&format!("<input type=hidden name=token value=\"{token}\"><input type=hidden name=history_manifest value=\"1.{:06}.{:08}\"><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form></main></body></html>", self.blocks, self.decoded), &mut sink);
+        let disclosure = credit.map(|credit| format!("{}<p>Selected model indicative maximum reservation: {} (original authenticated reservation snapshot, not a refreshed catalog price). Available credit is a post-settlement snapshot; price and credit are revalidated when Send is submitted.</p>", available_credit(credit.available_microunits), usd(credit.reserved_microunits))).unwrap_or_default();
+        self.emit(&format!("{disclosure}<input type=hidden name=token value=\"{token}\"><input type=hidden name=history_manifest value=\"1.{:06}.{:08}\"><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form></main></body></html>", self.blocks, self.decoded), &mut sink);
         self.state
     }
 

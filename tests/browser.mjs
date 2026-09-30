@@ -50,6 +50,24 @@ async function acceptance() {
             Boolean(node.compareDocumentPosition(document.querySelector('form[action="/chat"]')) & Node.DOCUMENT_POSITION_FOLLOWING)), true);
         }
       };
+      const credit = async (balance) => {
+        await page.getByText(`Available demo credit: USD ${balance}`, { exact: true }).waitFor();
+      };
+      const catalogCredit = async (balance) => {
+        await credit(balance);
+        assert.deepEqual(await page.locator('select[name="model"] option').allTextContents(), [
+          `${FIXTURE_MODELS[0]} — indicative maximum reservation: USD 0.000052`,
+          `${FIXTURE_MODELS[1]} — indicative maximum reservation: USD 0.000104`,
+        ]);
+        assert.equal(await page.locator('select[name="model"] option:disabled').count(), 0);
+        await page.getByText("Catalog prices and available credit are snapshots; revalidated when Send is submitted.", { exact: false }).waitFor();
+      };
+      const continuationCredit = async (balance, maximum) => {
+        // This local DOM assertion is not a guarantee of browser receipt when
+        // real delivery disconnects after server-side settlement.
+        await credit(balance);
+        await page.getByText(`Selected model indicative maximum reservation: USD ${maximum} (original authenticated reservation snapshot, not a refreshed catalog price). Available credit is a post-settlement snapshot; price and credit are revalidated when Send is submitted.`, { exact: true }).waitFor();
+      };
       stage = "authentication";
       await page.goto(origin);
       if ((await page.locator("script").count()) !== 0) throw new Error("script element rendered");
@@ -65,6 +83,7 @@ async function acceptance() {
       ), FIXTURE_MODELS);
       stage = "home pre-submit disclosure";
       await preSendDisclosure();
+      await catalogCredit("0.001000");
       await noActiveOutput();
       await page.locator('select[name="model"]').selectOption(FIXTURE_MODELS[0]);
 
@@ -78,6 +97,7 @@ async function acceptance() {
         throw new Error("unexpected recovery filename");
       }
       await page.getByRole("link", { name: "Return" }).click();
+      await catalogCredit("0.001000");
 
       stage = "progressive commit navigation";
       await page.locator('textarea[name="prompt"]').fill("first turn");
@@ -109,6 +129,7 @@ async function acceptance() {
       await fixture.release();
       await page.getByRole("button", { name: "Send", exact: true }).waitFor();
       await page.waitForLoadState("load");
+      await continuationCredit("0.000996", "0.000052");
       assert.equal(await assistant.textContent(), FIXTURE_TEXT);
       await noActiveOutput();
       assert.equal(await page.locator('select[name="model"]').count(), 0);
@@ -123,6 +144,7 @@ async function acceptance() {
       await fixture.waitFor("second-accepted");
       await page.getByText("second turn", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Send", exact: true }).waitFor();
+      await continuationCredit("0.000992", "0.000052");
       assert.equal(await assistant.textContent(), FIXTURE_TEXT);
       await noActiveOutput();
 
@@ -142,12 +164,15 @@ async function acceptance() {
       assert.equal(await page.locator('form[action="/chat"] input[name="history_manifest"]').inputValue(), "1.000001.00000002");
       assert.equal(await page.locator('select[name="model"]').isEnabled(), true);
       assert.equal(await page.locator('form[action="/chat"] input[name="model"]').count(), 0);
+      await catalogCredit("0.000992");
       await page.locator('select[name="model"]').selectOption(FIXTURE_MODELS[1]);
+      await catalogCredit("0.000992");
       await page.locator('textarea[name="prompt"]').fill("after reset");
       await page.getByRole("button", { name: "Send" }).click();
       await fixture.waitFor("reset-accepted");
       await page.getByText("after reset", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Send", exact: true }).waitFor();
+      await continuationCredit("0.000984", "0.000104");
       assert.equal(await assistant.textContent(), FIXTURE_TEXT);
       await noActiveOutput();
       assert.equal(await page.locator("pre").count(), 2);
@@ -167,6 +192,7 @@ async function acceptance() {
       assert.deepEqual(await page.locator('select[name="model"] option').evaluateAll(
         (options) => options.map((option) => option.value),
       ), FIXTURE_MODELS);
+      await catalogCredit("0.000984");
       await noActiveOutput();
       await context.close();
     } finally {

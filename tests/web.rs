@@ -915,7 +915,8 @@ async fn new_chat_requires_csrf_and_renders_empty_selector_in_same_session() {
     let html = String::from_utf8_lossy(&body);
     assert!(html.contains("name=h000000 value=\"W10\""));
     assert!(html.contains("<select name=model>"));
-    assert!(html.contains("<option value=\"m\">m</option>"));
+    assert!(html
+        .contains("<option value=\"m\">m — indicative maximum reservation: USD 0.000052</option>"));
     assert_eq!(state.accounting.available("a"), Some(100));
     assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
     assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
@@ -1886,7 +1887,8 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
         .unwrap()
         .into_data()
         .unwrap();
-    assert!(String::from_utf8_lossy(&new_frame).contains("<option value=\"n\">n</option>"));
+    assert!(String::from_utf8_lossy(&new_frame)
+        .contains("<option value=\"n\">n — indicative maximum reservation: USD 0.000006</option>"));
     let retained_new = new_frame.slice(..1);
     drop(new_frame);
     drop(new_body);
@@ -1916,8 +1918,10 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
     let selector = new_chat.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8_lossy(&selector);
     assert!(html.contains("<select name=model>"));
-    assert!(html.contains("<option value=\"m\">m</option>"));
-    assert!(html.contains("<option value=\"n\">n</option>"));
+    assert!(html
+        .contains("<option value=\"m\">m — indicative maximum reservation: USD 0.000052</option>"));
+    assert!(html
+        .contains("<option value=\"n\">n — indicative maximum reservation: USD 0.000006</option>"));
     assert!(html.contains("name=h000000 value=\"W10\""));
 
     // Ordinary controls also remain charged through dequeued/retained frames.
@@ -2201,4 +2205,188 @@ async fn full_supported_catalog_fits_tested_control_render_envelope() {
         html.len()
     );
     assert!(peak < 16 * 1024 * 1024);
+}
+
+fn home_request(cookie: &str) -> Request<Body> {
+    Request::builder()
+        .uri("/")
+        .header(header::COOKIE, cookie.split(';').next().unwrap())
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn assert_catalog_credit(html: &str, balance: &str, maximum: &str) {
+    assert!(html.contains(&format!("Available demo credit: USD {balance}")));
+    assert!(html.contains(&format!(
+        "<option value=\"m\">m — indicative maximum reservation: USD {maximum}</option>"
+    )));
+    assert!(html
+        .contains("<option value=\"n\">n — indicative maximum reservation: USD 0.000006</option>"));
+    assert_eq!(html.matches("<option ").count(), 2);
+    assert!(!html.contains("disabled"));
+    assert!(html.contains(
+        "Catalog prices and available credit are snapshots; revalidated when Send is submitted."
+    ));
+}
+
+#[tokio::test]
+async fn displayed_affordability_is_revalidated_before_any_prompt_calls() {
+    let path = valid_evidence("disclosure-revalidation");
+    for price_change in [true, false] {
+        let (state, cookie, csrf, _, inference) = fixture(path.to_str().unwrap());
+        two_model_catalog(&inference);
+        let response = router(state.clone())
+            .oneshot(home_request(&cookie))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&bytes);
+        assert_catalog_credit(&html, "0.000100", "0.000052");
+        let token = html
+            .split("name=token value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        if price_change {
+            // Stand-in authenticated provider snapshot changes after display.
+            let mut catalog: serde_json::Value = serde_json::from_slice(
+                inference.catalog_override.lock().unwrap().as_ref().unwrap(),
+            )
+            .unwrap();
+            catalog["data"][0]["pricing"]["inputTokenPricePer1M"] = serde_json::json!(2);
+            catalog["data"][0]["pricing"]["outputTokenPricePer1M"] = serde_json::json!(2);
+            *inference.catalog_override.lock().unwrap() =
+                Some(serde_json::to_vec(&catalog).unwrap());
+        } else {
+            let catalog =
+                possums::catalog::Catalog::parse_authenticated(&catalog_bytes(), now()).unwrap();
+            state
+                .accounting
+                .reserve(
+                    "a",
+                    [91; 32],
+                    [92; 32],
+                    catalog.reservation_quote("m").unwrap(),
+                    std::time::Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap();
+        }
+        // Rejected submissions leave the selected model visible and enabled on
+        // a fresh home, even when the displayed balance cannot cover its quote.
+        for _ in 0..2 {
+            let response = router(state.clone())
+                .oneshot(chat_request(&cookie, &csrf, token))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+            drop(response);
+            assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
+            assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+        }
+        let response = router(state.clone())
+            .oneshot(home_request(&cookie))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_catalog_credit(
+            &String::from_utf8_lossy(&bytes),
+            if price_change { "0.000100" } else { "0.000048" },
+            if price_change { "0.000104" } else { "0.000052" },
+        );
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn one_unrepresentable_quote_fails_the_entire_home_catalog_closed() {
+    let (state, cookie, csrf, _, inference) = fixture("/unused/evidence");
+    two_model_catalog(&inference);
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(inference.catalog_override.lock().unwrap().as_ref().unwrap())
+            .unwrap();
+    catalog["data"][1]["context_window"] = serde_json::json!(u64::MAX);
+    catalog["data"][1]["pricing"]["inputTokenPricePer1M"] = serde_json::json!(1);
+    catalog["data"][1]["pricing"]["outputTokenPricePer1M"] = serde_json::json!(1);
+    *inference.catalog_override.lock().unwrap() = Some(serde_json::to_vec(&catalog).unwrap());
+    for request in [
+        home_request(&cookie),
+        post_form("/chat/new", &cookie, format!("csrf={csrf}")),
+    ] {
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(!html.contains("<option"));
+        assert!(!html.contains("Send"));
+    }
+    assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 0);
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn continuation_discloses_original_quote_and_post_settlement_available_credit() {
+    let path = valid_evidence("continuation-credit");
+    let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
+    two_model_catalog(&inference);
+    let gate = inference.hold(HoldPoint::Tokenization);
+    let app = router(state.clone());
+    let request = chat_request(&cookie, &csrf, &token);
+    let pending = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+    gate.entered.notified().await; // Original maximum 52 is already reserved.
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(inference.catalog_override.lock().unwrap().as_ref().unwrap())
+            .unwrap();
+    let original = possums::catalog::Catalog::parse_authenticated(
+        &serde_json::to_vec(&catalog).unwrap(),
+        now(),
+    )
+    .unwrap();
+    state
+        .accounting
+        .reserve(
+            "a",
+            [93; 32],
+            [94; 32],
+            original.reservation_quote("n").unwrap(),
+            std::time::Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+    catalog["data"][0]["pricing"]["inputTokenPricePer1M"] = serde_json::json!(10);
+    catalog["data"][0]["pricing"]["outputTokenPricePer1M"] = serde_json::json!(10);
+    *inference.catalog_override.lock().unwrap() = Some(serde_json::to_vec(&catalog).unwrap());
+    // No post-stream catalog request: a refresh would fail, not invent a price.
+    inference.catalog_failures.store(1, Ordering::SeqCst);
+    gate.release.notify_one();
+    let response = pending.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&bytes);
+    let (before_send, _) = html.split_once("<button type=submit>Send").unwrap();
+    assert!(before_send.contains("Selected model indicative maximum reservation: USD 0.000052 (original authenticated reservation snapshot, not a refreshed catalog price)"));
+    assert!(before_send.contains("Available demo credit: USD 0.000091")); // 100 - 6 concurrent - 3 settled
+    assert!(before_send.contains(
+        "post-settlement snapshot; price and credit are revalidated when Send is submitted"
+    ));
+    assert_eq!(state.accounting.available("a"), Some(91));
+    assert_eq!(inference.catalog_failures.load(Ordering::SeqCst), 1);
+    inference.catalog_failures.store(0, Ordering::SeqCst);
+    let next_token = html
+        .split("name=token value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let response = router(state.clone())
+        .oneshot(chat_request(&cookie, &csrf, next_token))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 1);
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 1);
+    std::fs::remove_file(path).unwrap();
 }

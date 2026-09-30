@@ -112,7 +112,19 @@ fn assert_pre_send_disclosure(html: &str) {
 
 #[test]
 fn empty_history_home_discloses_before_send() {
-    let html = render::chat_page(&[], "csrf", TOKEN, &[], None, None, 100_000).unwrap();
+    let html = render::chat_page(
+        render::CatalogSnapshot {
+            quotes: &[],
+            available_microunits: 0,
+        },
+        "csrf",
+        TOKEN,
+        &[],
+        None,
+        None,
+        100_000,
+    )
+    .unwrap();
     assert_pre_send_disclosure(&html);
     assert_eq!(html.matches("<form method=post action=/chat>").count(), 1);
 }
@@ -131,7 +143,10 @@ fn streaming_controls_disclose_before_assistant_output() {
 fn buffered_chat_reset_form_is_separate_and_carries_only_escaped_csrf() {
     let csrf = "token&\"<";
     let html = render::chat_page(
-        &[],
+        render::CatalogSnapshot {
+            quotes: &[],
+            available_microunits: 0,
+        },
         csrf,
         TOKEN,
         &[message("user", "previous prompt")],
@@ -966,4 +981,66 @@ fn long_stream_parser_and_renderer_retained_capacity_is_constant() {
         ),
         RenderOutcome::TransportLimit
     );
+}
+
+#[test]
+fn catalog_displays_exact_six_decimal_usd_without_float_rounding_or_filtering() {
+    use possums::catalog::{Model, Quote};
+    let quotes: Vec<_> = [1, 1_000_000, u64::MAX]
+        .into_iter()
+        .map(|reserved_microunits| Quote {
+            model: Model {
+                id: format!("m{reserved_microunits}"),
+                context_tokens: 20,
+                max_output_tokens: 20,
+                input_microunits_per_million_tokens: 1,
+                output_microunits_per_million_tokens: 1,
+            },
+            input_tokens: 20,
+            reserved_microunits,
+        })
+        .collect();
+    let html = render::chat_page(
+        render::CatalogSnapshot {
+            quotes: &quotes,
+            available_microunits: 999_999,
+        },
+        TOKEN,
+        TOKEN,
+        &[],
+        None,
+        None,
+        100_000,
+    )
+    .unwrap();
+    for amount in ["USD 0.000001", "USD 1.000000", "USD 18446744073709.551615"] {
+        assert!(html.contains(&format!(
+            "indicative maximum reservation: {amount}</option>"
+        )));
+    }
+    assert!(html.contains("Available demo credit: USD 0.999999"));
+    assert_eq!(html.matches("<option ").count(), 3);
+    assert!(!html.contains("disabled"));
+}
+
+#[test]
+fn failed_stream_never_discloses_success_credit_or_issues_continuation() {
+    let mut html = String::new();
+    let renderer =
+        IncrementalRenderer::open(&[], "prompt", TOKEN, "m", capture(&mut html)).unwrap();
+    assert_eq!(
+        renderer.complete_with_credit(
+            Err(InferenceError::InvalidResponse),
+            Some(render::CreditSnapshot {
+                reserved_microunits: 52,
+                available_microunits: 97
+            }),
+            || panic!("failed generation must not issue continuation"),
+            capture(&mut html),
+        ),
+        RenderOutcome::UpstreamFailed
+    );
+    assert!(!html.contains("Available demo credit"));
+    assert!(!html.contains("original authenticated reservation snapshot"));
+    assert!(!html.contains("<button type=submit>Send"));
 }

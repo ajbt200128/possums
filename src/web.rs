@@ -358,28 +358,46 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some((session_id, session)) = session_from_headers(&state, &headers) else {
         return login_page_response(&state, None);
     };
-    match current_catalog(&state).await {
-        Ok(catalog) => match state.auth.issue_submission_for(
-            &session_id,
-            session.conversation,
+    let catalog = match current_catalog(&state).await {
+        Ok(catalog) => catalog,
+        Err(response) => return response,
+    };
+    // Quote the complete authenticated catalog with admission's exact formula.
+    // One unusable quote fails the whole display, never hides a supported model.
+    let quotes = match catalog
+        .models
+        .iter()
+        .map(|model| catalog.reservation_quote(&model.id))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(quotes) => quotes,
+        Err(_) => return unavailable(),
+    };
+    let Some(available_microunits) = state.accounting.available(&session.account_id) else {
+        return unavailable();
+    };
+    match state.auth.issue_submission_for(
+        &session_id,
+        session.conversation,
+        session.selected_model.as_deref(),
+    ) {
+        Ok(token) => render::chat_page(
+            render::CatalogSnapshot {
+                quotes: &quotes,
+                available_microunits,
+            },
+            &session.csrf,
+            &token,
+            &[],
             session.selected_model.as_deref(),
-        ) {
-            Ok(token) => render::chat_page(
-                &catalog.models,
-                &session.csrf,
-                &token,
-                &[],
-                session.selected_model.as_deref(),
-                None,
-                // Validated catalog: <=256 IDs of <=128 safe ASCII bytes;
-                // empty history. The renderer preflight bounds intermediates
-                // before allocation without excluding any supported model.
-                MAX_CONTROL_RENDERED_RESPONSE_BYTES,
-            )
-            .map_or_else(unavailable, |html| Html(html).into_response()),
-            Err(_) => unavailable(),
-        },
-        Err(response) => response,
+            None,
+            // Validated catalog: <=256 IDs of <=128 safe ASCII bytes;
+            // empty history. The renderer preflight bounds intermediates
+            // before allocation without excluding any supported model.
+            MAX_CONTROL_RENDERED_RESPONSE_BYTES,
+        )
+        .map_or_else(unavailable, |html| Html(html).into_response()),
+        Err(_) => unavailable(),
     }
 }
 
@@ -583,6 +601,9 @@ async fn chat(
         Ok(value) => value,
         Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response(),
     };
+    // Keep only the original admission maximum for later UI disclosure, not the
+    // context-legal quote computed after tokenization or a future catalog price.
+    let reserved_microunits = reservation_quote.reserved_microunits;
     let admission = match state.auth.admit_submission(
         &state.accounting,
         &session_id,
@@ -696,8 +717,18 @@ async fn chat(
                 resource_hooks: Some(state.preflight_hooks.resources.clone()),
             };
             // This synchronous handoff is unconditional, even with no receiver.
-            let (body, observer) =
-                streaming_chat::compose(owner, work_heavy, input, state.auth, state.inference);
+            let (body, observer) = streaming_chat::compose_with_credit(
+                owner,
+                work_heavy,
+                input,
+                state.auth,
+                state.inference,
+                streaming_chat::ContinuationCredit {
+                    accounting: state.accounting,
+                    account_id: session.account_id,
+                    reserved_microunits,
+                },
+            );
             drop(observer);
             #[cfg(test)]
             state.preflight_hooks.after_compose().await;

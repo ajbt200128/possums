@@ -7,12 +7,12 @@
 //! As with generation_owner, the service must suppress content in its panic hook.
 
 use crate::{
-    accounting::Outcome,
+    accounting::{Accounting, Outcome},
     auth::{Auth, ConversationId},
     catalog::Model,
     generation_owner::{OwnerError, ReservedGeneration},
     inference::{InferenceError, Message, SharedInference},
-    render::{IncrementalRenderer, RenderOutcome},
+    render::{CreditSnapshot, IncrementalRenderer, RenderOutcome},
     stream_owner::{delivery, DeliveryBody, DeliveryTx, Limits, StartupTx},
 };
 use std::{sync::Arc, time::Duration};
@@ -39,10 +39,37 @@ pub(crate) struct AcceptedChat {
     pub resource_hooks: Option<Arc<crate::web::resource_streaming_tests::ResourceHooks>>,
 }
 
+/// Prompt-free disclosure context, never used to settle or reprice the reservation.
+pub(crate) struct ContinuationCredit {
+    pub accounting: Arc<Accounting>,
+    pub account_id: String,
+    pub reserved_microunits: u64,
+}
+
 /// `heavy` MUST be the same Arc supplied to `owner`, not a second acquisition.
 /// Synchronous handoff: neither startup nor inference runs in the request future.
 /// The optional observer has no cancellation authority over accepted work.
-pub(crate) fn compose(
+pub(crate) fn compose_with_credit(
+    owner: ReservedGeneration,
+    heavy: Arc<OwnedSemaphorePermit>,
+    input: AcceptedChat,
+    auth: Arc<Auth>,
+    inference: SharedInference,
+    credit: ContinuationCredit,
+) -> (DeliveryBody, Observer) {
+    compose_inner(
+        owner,
+        heavy,
+        input,
+        auth,
+        inference,
+        STARTUP_TIMEOUT,
+        (start, Some(credit)),
+    )
+}
+
+#[cfg(test)]
+fn compose(
     owner: ReservedGeneration,
     heavy: Arc<OwnedSemaphorePermit>,
     input: AcceptedChat,
@@ -52,7 +79,8 @@ pub(crate) fn compose(
     compose_with_startup(owner, heavy, input, auth, inference, STARTUP_TIMEOUT, start)
 }
 
-// Keep the blocking boundary injectable privately for panic/shutdown tests.
+// Preserve standalone owner/resource fixtures without a disclosure ledger.
+#[cfg(test)]
 fn compose_with_startup(
     owner: ReservedGeneration,
     heavy: Arc<OwnedSemaphorePermit>,
@@ -61,6 +89,30 @@ fn compose_with_startup(
     inference: SharedInference,
     timeout: Duration,
     startup: impl FnOnce(Startup) -> Started + Send + 'static,
+) -> (DeliveryBody, Observer) {
+    compose_inner(
+        owner,
+        heavy,
+        input,
+        auth,
+        inference,
+        timeout,
+        (startup, None),
+    )
+}
+
+// Keep the blocking boundary injectable privately for panic/shutdown tests.
+fn compose_inner(
+    owner: ReservedGeneration,
+    heavy: Arc<OwnedSemaphorePermit>,
+    input: AcceptedChat,
+    auth: Arc<Auth>,
+    inference: SharedInference,
+    timeout: Duration,
+    (startup, credit): (
+        impl FnOnce(Startup) -> Started + Send + 'static,
+        Option<ContinuationCredit>,
+    ),
 ) -> (DeliveryBody, Observer) {
     let (tx, body) = delivery(heavy.clone(), LIMITS, timeout);
     #[cfg(test)]
@@ -120,15 +172,32 @@ fn compose_with_startup(
         } else {
             Err(InferenceError::InvalidResponse)
         };
-        renderer.complete(
+        // finish released the ledger lock. Read available credit afresh AFTER
+        // settlement, including any concurrent reservations; never refresh price.
+        // A failed balance read must not produce a next-turn Send without credit.
+        let snapshot = settled
+            .then_some(credit.as_ref())
+            .flatten()
+            .and_then(|credit| {
+                credit
+                    .accounting
+                    .available(&credit.account_id)
+                    .map(|available_microunits| CreditSnapshot {
+                        reserved_microunits: credit.reserved_microunits,
+                        available_microunits,
+                    })
+            });
+        let can_continue = settled && (credit.is_none() || snapshot.is_some());
+        renderer.complete_with_credit(
             display_result,
+            snapshot,
             || {
                 // complete calls this only while continuation remains usable.
                 // finish has already released the accounting lock before auth.
                 // If final enqueue fails after issuance, the unused token remains
                 // bounded by auth capacity and its 15-minute expiry. Do not tie
                 // settlement to delivery or add compensating token cleanup here.
-                settled
+                can_continue
                     .then(|| {
                         auth.issue_submission_for(
                             &input.session_id,

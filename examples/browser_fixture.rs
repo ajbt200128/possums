@@ -112,7 +112,8 @@ impl ProgressiveScenario {
 impl Inference for FixtureInference {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
         Ok(serde_json::to_vec(&serde_json::json!({"object":"list", "data": FIXTURE_MODELS.map(|id| {
-            serde_json::json!({"id": id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":1,"outputTokenPricePer1M":1,"requestPrice":0}})
+            let price = if id == FIXTURE_MODELS[0] { 1 } else { 2 };
+            serde_json::json!({"id": id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"requestPrice":0}})
         })})).unwrap())
     }
 
