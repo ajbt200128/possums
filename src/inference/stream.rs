@@ -515,6 +515,10 @@ impl<'de> Visitor<'de> for JsonGuard<'_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         let mut keys = BTreeSet::new();
         while let Some(key) = map.next_key::<String>()? {
+            // serde_json's RawValue key reparses a string without this guard.
+            if key == "$serde_json::private::RawValue" {
+                return Err(de::Error::custom("reserved JSON key"));
+            }
             if !keys.insert(key) {
                 return Err(de::Error::custom("duplicate JSON key"));
             }
@@ -827,5 +831,36 @@ mod tests {
             );
         }
         assert!(validate_json(br#"{"optional":1.5}"#).is_ok());
+    }
+
+    #[test]
+    fn raw_value_private_keys_cannot_expand_past_guarded_node_limit() {
+        let nested = format!("[{}]", vec![r#"{"":0}"#; 7_000].join(","));
+        let encoded = serde_json::to_string(&nested).unwrap();
+        let mut wire = String::from("data: {\"choices\":[],\n");
+        for (index, name) in ["x", "y", "z"].into_iter().enumerate() {
+            let separator = if index == 2 { "" } else { "," };
+            wire.push_str(&format!(
+                "data: \"{name}\":{{\"$serde_json::private::RawValue\":{encoded}}}{separator}\n"
+            ));
+        }
+        wire.push_str("data: }\n\n");
+        assert!(wire.lines().all(|line| line.len() <= MAX_LINE_BYTES));
+        let payload = wire
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(payload.len() <= MAX_FRAME_BYTES);
+        assert!(validate_json(payload.as_bytes()).is_err());
+        let mut parser = ProtocolParser::default();
+        assert_eq!(
+            parser.feed(wire.as_bytes(), |_| panic!("must not emit")),
+            Err(StreamError::Protocol)
+        );
+
+        // Guard decoded keys, not only their literal wire spelling.
+        assert!(validate_json(br#"{"$serde_json::private::Ra\u0077Value":"[]"}"#).is_err());
+        assert!(validate_json(br#"{"optional":{"RawValue":"[]"}}"#).is_ok());
     }
 }

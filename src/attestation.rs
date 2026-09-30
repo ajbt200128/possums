@@ -169,6 +169,7 @@ fn check_json_structure(bytes: &[u8]) -> Result<(), EvidenceError> {
             }
             b'"' => {
                 nodes += 1;
+                let start = index;
                 index += 1;
                 while index < bytes.len() {
                     match bytes[index] {
@@ -178,6 +179,19 @@ fn check_json_structure(bytes: &[u8]) -> Result<(), EvidenceError> {
                             break;
                         }
                         _ => index += 1,
+                    }
+                }
+                // raw_value can reparse a quoted JSON string into an unguarded
+                // Value tree. Check decoded keys, including escaped spellings.
+                if bytes[index..]
+                    .iter()
+                    .find(|byte| !byte.is_ascii_whitespace())
+                    == Some(&b':')
+                {
+                    let key: String = serde_json::from_slice(&bytes[start..index])
+                        .map_err(|_| EvidenceError::Invalid)?;
+                    if key == "$serde_json::private::RawValue" {
+                        return Err(EvidenceError::Invalid);
                     }
                 }
             }

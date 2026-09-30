@@ -79,6 +79,27 @@ fn file_evidence_accepts_normal_and_near_limit_quotes() {
     assert!(load_evidence(&large.0).is_ok());
 }
 
+#[test]
+fn evidence_rejects_raw_value_reparse_before_building_quote_tree() {
+    let nested = format!("[{}]", vec![r#"{"":0}"#; 35_000].join(","));
+    let encoded = serde_json::to_string(&nested).unwrap();
+    for key in [
+        "$serde_json::private::RawValue",
+        r"$serde_json::private::Ra\u0077Value",
+    ] {
+        let quote = format!(r#"{{"{key}":{encoded}}}"#);
+        let document = envelope(&quote);
+        assert!(document.len() < 1024 * 1024);
+        let file = TempFile::new(document.as_bytes());
+        assert!(matches!(
+            load_evidence(&file.0),
+            Err(EvidenceError::Invalid)
+        ));
+    }
+    let normal = TempFile::new(envelope(r#"{"RawValue":"[]"}"#).as_bytes());
+    assert!(load_evidence(&normal.0).is_ok());
+}
+
 #[cfg(unix)]
 mod helper {
     use super::*;
