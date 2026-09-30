@@ -61,6 +61,9 @@ pub fn login_page(login_challenge: &str, error: Option<&str>) -> String {
     ))
 }
 
+// Static plain HTML, shown before Send on both buffered and streaming pages.
+const CHAT_DISCLOSURE: &str = "<p>Before Send: An accepted generation keeps running after your browser disconnects. A successful authenticated completion may charge you even if you do not receive the answer. Submitting again may charge twice.</p><p>The live authenticated Tinfoil model catalog contents are outside the gateway's attested measurement.</p>";
+
 /// Independent controls precede the unfinished continuation form, so they stay
 /// usable even when upstream EOF is held or no continuation can be issued.
 pub fn chat_controls(csrf: &str, model: Option<&str>) -> String {
@@ -68,7 +71,7 @@ pub fn chat_controls(csrf: &str, model: Option<&str>) -> String {
         .map(|id| format!("<p>Selected model: {}</p>", escape(id)))
         .unwrap_or_default();
     let csrf = escape(csrf);
-    format!("{selected}<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{csrf}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{csrf}\"><button type=submit>Log out</button></form>")
+    format!("{selected}{CHAT_DISCLOSURE}<form id=new-chat method=post action=/chat/new><input type=hidden name=csrf value=\"{csrf}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{csrf}\"><button type=submit>Log out</button></form>")
 }
 
 pub fn chat_page(
@@ -156,7 +159,7 @@ pub fn chat_page(
         .map(|value| format!("<p role=status>{}</p>", escape(value)))
         .unwrap_or_default();
     let rendered = page(&format!(
-        "<h1>Possums demo</h1>{notice}{transcript}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\">{}<label>Model {model_field}</label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><form method=post action=/chat/new><input type=hidden name=csrf value=\"{}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
+        "<h1>Possums demo</h1>{notice}{transcript}{CHAT_DISCLOSURE}<form method=post action=/chat><input type=hidden name=csrf value=\"{}\"><input type=hidden name=token value=\"{}\">{}<label>Model {model_field}</label><label>Message <textarea name=prompt required></textarea></label><button type=submit>Send</button></form><form method=post action=/chat/new><input type=hidden name=csrf value=\"{}\"><button type=submit>New chat</button></form><nav><a href=/recovery>Recovery credential</a> <a href=/claims>Claims</a></nav><form method=post action=/logout><input type=hidden name=csrf value=\"{}\"><button type=submit>Log out</button></form>",
         escape(csrf),
         escape(submission_token),
         encoded_history,

@@ -38,6 +38,18 @@ async function acceptance() {
         assert.equal(await page.locator("script, img, iframe, object, embed, audio, video, source, svg, math").count(), 0);
         assert.equal(remoteRequested, false);
       };
+      const preSendDisclosure = async () => {
+        for (const text of [
+          "Before Send: An accepted generation keeps running after your browser disconnects. A successful authenticated completion may charge you even if you do not receive the answer. Submitting again may charge twice.",
+          "The live authenticated Tinfoil model catalog contents are outside the gateway's attested measurement.",
+        ]) {
+          const notice = page.locator("main > p", { hasText: text });
+          assert.equal(await notice.count(), 1);
+          assert.equal(await notice.textContent(), text);
+          assert.equal(await notice.evaluate((node) =>
+            Boolean(node.compareDocumentPosition(document.querySelector('form[action="/chat"]')) & Node.DOCUMENT_POSITION_FOLLOWING)), true);
+        }
+      };
       stage = "authentication";
       await page.goto(origin);
       if ((await page.locator("script").count()) !== 0) throw new Error("script element rendered");
@@ -51,6 +63,9 @@ async function acceptance() {
       assert.deepEqual(await page.locator('select[name="model"] option').evaluateAll(
         (options) => options.map((option) => option.value),
       ), FIXTURE_MODELS);
+      stage = "home pre-submit disclosure";
+      await preSendDisclosure();
+      await noActiveOutput();
       await page.locator('select[name="model"]').selectOption(FIXTURE_MODELS[0]);
 
       stage = "manual recovery";
@@ -73,6 +88,7 @@ async function acceptance() {
       ]);
       stage = "held partial DOM";
       fixture.assertHeld();
+      await preSendDisclosure();
       const assistant = page.locator('pre[aria-label="Assistant"]');
       await assistant.filter({ hasText: FIXTURE_PARTIAL }).waitFor({ state: "visible" });
       // Driver-side inspection only: no page script or DOM mutation. This must be

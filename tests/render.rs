@@ -96,6 +96,37 @@ fn staged_answer(
     (html, outcome)
 }
 
+fn assert_pre_send_disclosure(html: &str) {
+    let (before_send, _) = html.split_once("<form method=post action=/chat>").unwrap();
+    for text in [
+        "Before Send: An accepted generation keeps running after your browser disconnects.",
+        "A successful authenticated completion may charge you even if you do not receive the answer.",
+        "Submitting again may charge twice.",
+        "The live authenticated Tinfoil model catalog contents are outside the gateway's attested measurement.",
+    ] {
+        assert_eq!(html.matches(text).count(), 1);
+        assert!(before_send.contains(text));
+    }
+    assert!(!before_send.contains("<script"));
+}
+
+#[test]
+fn empty_history_home_discloses_before_send() {
+    let html = render::chat_page(&[], "csrf", TOKEN, &[], None, None, 100_000).unwrap();
+    assert_pre_send_disclosure(&html);
+    assert_eq!(html.matches("<form method=post action=/chat>").count(), 1);
+}
+
+#[test]
+fn streaming_controls_disclose_before_assistant_output() {
+    let mut html = String::new();
+    let _renderer =
+        IncrementalRenderer::start(&[], "prompt", TOKEN, "m", capture(&mut html)).unwrap();
+    assert_pre_send_disclosure(&html);
+    assert!(!html.contains("prompt"));
+    assert_eq!(html.matches("<form id=new-chat").count(), 1);
+}
+
 #[test]
 fn buffered_chat_reset_form_is_separate_and_carries_only_escaped_csrf() {
     let csrf = "token&\"<";
