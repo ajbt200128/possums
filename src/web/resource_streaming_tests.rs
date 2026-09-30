@@ -62,7 +62,11 @@
 //!   fixture queues and evidence/catalog data separately. Never subtract an
 //!   unexplained residual; report absolute totals alongside scoped attribution.
 //!
-//! Scoped capacity derivation (pinned 64-bit Rust/serde, NOT an RSS bound):
+//! REJECTED capacity worksheet (independent audit of HEAD 7da10c8).
+//! The following is the unchanged admission TARGET, not an established bound.
+//! See docs/verification.md, "Packet 3 analytical capacity refutation", for the
+//! source-linked phase/ownership audit and the precise decision required.
+//! Scoped capacity target (pinned 64-bit Rust/serde, NOT an RSS bound):
 //! | Owner / maximum simultaneous lanes | MiB each | MiB total |
 //! | heavy (owned input + exclusive transients + bounded work) x4 | 104 | 416 |
 //! | raw ingress (collection plus one incoming frame) x4         |  16 |  64 |
@@ -70,47 +74,39 @@
 //! | ordinary controls lane x1                                   |  16 |  16 |
 //! | scoped admission TOTAL                                     |     | 512 |
 //!
-//! Heavy = 32 owned input + 48 exclusive transient + 8 renderer/parser/delivery
-//! + 8 catalog/evidence + 8 task/channel/result allowance = 104 MiB:
-//! - History JSON <=6 MiB. Even before valid_history, the two required String
-//!   fields require >=25 wire bytes/element including separator. <=251659
-//!   elements, hence a doubling Vec capacity <=262144 * 48 = 12 MiB. Legal
-//!   histories are smaller still. Strings own at most twice their JSON spans
-//!   (12 MiB conservatively); prompt capacity <=8 MiB. Total <=32 MiB. Empty
-//!   Strings allocate nothing. Appending the prompt can grow the message vector;
-//!   any old/new overlap fits the transient allowance, not a second input copy.
-//! - Decode: JSON <=6 MiB, serde escaped-string scratch <=12 MiB, old message
-//!   vector during growth <=6 MiB, and even a non-reusing conversion <=12 MiB:
-//!   <=36 MiB transient. All die BEFORE borrowed serialization. Serializer
-//!   logical limit 16 MiB gives Vec capacity <32 MiB; conservatively charge
-//!   an additional old <16-MiB allocation during growth: <=48 MiB. Tokenizer
-//!   body dies before pre-compose; generation body is constructed only AFTER
-//!   startup. These are mutually exclusive, witnessed by the phase barriers.
-//! - Renderer owns a 4096-byte block, borrows input, and emits <=6144-byte visible
-//!   / <5600-byte hidden chunks. Escape replacement old/new temporaries stay
-//!   below 32 KiB. Delivery is <=65536 payload bytes and eight owner records;
-//!   dequeued clones/slices retain those SAME owners, not additional payloads.
-//!   Parser buffers are 64+256 KiB, transport fragment <=256 KiB, at most 8192
-//!   JSON nodes/depth 16 and 16-KiB optional strings: conservative <8 MiB with
-//!   JSON map/vector growth. There is never a complete collected answer.
-//! - Catalog input <=256 KiB. The densest stored unvalidated field is an array
-//!   of empty endpoint strings (>=3 bytes/24-byte String): doubling storage
-//!   <=3 MiB plus <=1.5 MiB old capacity. Other model fields, input and scratch
-//!   fit the remaining 3.5 MiB. Validated output is <=256 models/128-byte IDs.
-//!   Gateway evidence is <=1 MiB and <=4096 nodes; its temporary parse/growth
-//!   fits 8 MiB and ends before catalog parsing. SDK/helper internals excluded.
-//! - Eight MiB task allowance is deliberately loose: bounded one-shot/channel
-//!   records, Arc owners, model/token/session strings and the two blocking
-//!   input/result envelopes are <1 MiB per lane; the history moves, never copies.
-//!   Queued input AND unclaimed result own the original heavy lease. Generation
-//!   slots release at accounting, heavy/ingress only at their final owners.
-//! - Ingress uses one fixed 8-MiB Vec plus at most one 8-MiB incoming frame;
-//!   no vector of fragments. New chat/ordinary selectors use <=8-MiB catalog
-//!   work, then <=256 safe 128-byte IDs (<80 KiB options, conservative <2 MiB
-//!   rendered intermediates); 4-KiB input and bounded chrome fit 16 MiB.
-//!   Attestation controls borrow two bounded documents and serialize <=2 MiB
-//!   (capacity <4 MiB plus old <2 MiB); gateway <=4096 nodes and the pinned
-//!   SDK document schema are assumptions, NOT arbitrary unbounded Value inputs.
+//! Proposed heavy split was 32 owned input + 48 exclusive transient + 8 renderer/
+//! parser/delivery + 8 catalog/evidence + 8 task/channel/result = 104 MiB.
+//! It is NOT accepted by this audit:
+//! - serde_json 1.0.151 deserialize_struct accepts sequences, even with
+//!   deny_unknown_fields. A pre-validation history element ["",""] plus comma
+//!   costs EIGHT bytes, not 25. A <6-MiB history can grow its 48-byte-element
+//!   vector to 1,048,576 slots (48 MiB); an old 24-MiB vector can overlap growth.
+//!   Validation occurs AFTER conversion in web::decode_continuation. Accepted
+//!   sequence histories also need a fresh derivation; object-only density is not
+//!   an upper bound. No history/model/output/concurrency policy was changed.
+//! - BoundedWriter checks length BEFORE extending. Rust 1.88 RawVec grows to
+//!   max(2*capacity, required, minimum), not to logical length. A 16-MiB writer
+//!   therefore needs <32 MiB new plus <16 MiB old, including partial/failing
+//!   serialization. Borrowed tokenizer/generation serializers do not copy input.
+//! - Decoder scratch dies before tokenization; startup precedes generation
+//!   serialization. Four chats may independently occupy any of these phases.
+//!   Heavy ownership survives detached/queued work and retained delivery frames;
+//!   generation slots do not authorize replacement of a surviving heavy owner.
+//! - The decisive blocker is the ordinary /attestation lane: production obtains
+//!   an OWNED SDK verification document BEFORE bounded serialization. Normal SDK
+//!   provenance constructs three code registers, but does not cap their strings.
+//!   For SNP, measurement comparison checks register[0], not TDX register[2].
+//!   A 16-MiB+1 register[2] survives the SDK-style clone, then the 1-MiB writer
+//!   rejects it. That ONE application-owned string exceeds the 16-MiB lane.
+//!   sdk_evidence_clone_bound_counterexample reproduces the pinned schema,
+//!   comparison, clone and failing writer; it is not a live attestation test.
+//!   Excluding SDK internals/shared state cannot exclude this returned document.
+//! - A check after verification_document() or before parsing Value is too late
+//!   for that clone. A bounded export/pre-publication SDK contract is required;
+//!   no speculative SDK/API redesign or production correction lands here.
+//! - Renderer/parser, catalog/gateway evidence, controls and finite task records
+//!   are inventoried in the evidence table, NOT certified by blanket slack. The
+//!   passing workload remains corroboration of its exercised shapes only.
 //!
 //! Baseline runtime/auth/ledger/shared provider state is separate from admission.
 //! Fixture construction retains ONE 8-MiB wire plus <=6-MiB source JSON, releasing
@@ -122,7 +118,7 @@
 //! INCLUDED in absolute/live/delta observations, never silently subtracted.
 //! The 512-MiB assertion includes fixture deltas and is stricter than subtracting
 //! them. It cannot establish SDK/TLS/helper or allocator/RSS universal bounds.
-//! Independent review must validate this derivation as well as measurements.
+//! Independent audit REFUTED the derivation; passing measurements do not close it.
 //! SDK/TLS/helper universal bounds, allocator overhead and whole-process RSS remain
 //! unproven even if local requested allocation fits. Synthetic transport proves
 //! neither live Tinfoil authentication nor invoice/billable-cost bounds.
@@ -134,6 +130,67 @@ use crate::{
 use http_body_util::BodyExt;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{oneshot, Semaphore};
+
+/// A passing test CONFIRMS the unresolved control-lane counterexample, not a fix.
+/// This is a schema/clone reproduction, not fabricated live SDK authentication.
+#[test]
+fn sdk_evidence_clone_bound_counterexample() {
+    use tinfoil::verifier::{Measurement, PredicateType};
+    const CONTROL_BYTES: usize = 16 * 1024 * 1024;
+    let enclave = Measurement {
+        type_: PredicateType::SevGuestV2,
+        registers: vec!["0".repeat(96)],
+    };
+    // The normal Sigstore extractor constructs exactly these THREE registers.
+    // The SNP branch checks only the first; authenticated does not mean bounded.
+    let code = Measurement {
+        type_: PredicateType::SnpTdxMultiPlatformV1,
+        registers: vec![
+            enclave.registers[0].clone(),
+            "0".repeat(96),
+            "x".repeat(CONTROL_BYTES + 1),
+        ],
+    };
+    code.equals(&enclave).unwrap();
+    let mut document: tinfoil::VerificationDocument = serde_json::from_value(serde_json::json!({
+        "schemaVersion": 1,
+        "configRepo": "fixture/repo", "enclaveHost": "fixture.invalid",
+        "releaseDigest": "0".repeat(64),
+        "codeMeasurement": {
+            "type": "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1",
+            "registers": []
+        },
+        "enclaveMeasurement": {
+            "measurement": enclave,
+            "tlsPublicKeyFingerprint": "0".repeat(64),
+            "hpkePublicKey": "0".repeat(64)
+        },
+        "tlsPublicKey": "0".repeat(64), "hpkePublicKey": "0".repeat(64),
+        "codeFingerprint": "0".repeat(64), "enclaveFingerprint": "0".repeat(64),
+        "selectedRouterEndpoint": "fixture.invalid", "securityVerified": true,
+        "verifier": {"name": "tinfoil", "version": "fixture"},
+        "verifiedAt": "2026-09-30T00:00:00Z",
+        "steps": {
+            "fetchDigest": {"status": "success"}, "verifyCode": {"status": "success"},
+            "verifyEnclave": {"status": "success"},
+            "compareMeasurements": {"status": "success"},
+            "verifyCertificate": {"status": "success"}
+        }
+    }))
+    .unwrap();
+    document.code_measurement = code;
+    // SecureClient::ground_truth clones owned strings, then from_ground_truth
+    // moves code_measurement into the application-returned VerificationDocument.
+    // Cloning this public document reproduces the same load-bearing String clone.
+    let owned = document.clone();
+    drop(document); // Do not count the shared-state/fixture source copy.
+    let retained = owned.code_measurement.registers[2].capacity();
+    assert!(crate::bounded_json::to_vec(&owned, 1024 * 1024).is_err());
+    assert!(retained > CONTROL_BYTES);
+    println!(
+        "capacity blocker: cloned_rtmr2_bytes={retained} control_lane_bytes={CONTROL_BYTES} registers=3 serializer_rejected=true"
+    );
+}
 
 // One-use test-only rendezvous. No Notify wakeup race, blocking runtime thread,
 // global registry, or production instrumentation API. Dropping the controller
