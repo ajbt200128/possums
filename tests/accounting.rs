@@ -35,9 +35,10 @@ fn reserves_settles_and_refunds_remainder_once() {
         ReserveResult::Reserved
     );
     assert_eq!(ledger.available("a"), Some(48));
-    assert_eq!(ledger.prepare_settlement([1; 32], 5, 4).unwrap(), 29);
-    assert_eq!(ledger.available("a"), Some(48));
-    assert_eq!(ledger.settle([1; 32]).unwrap(), 29);
+    assert_eq!(
+        ledger.finish([1; 32], usage(5, 4)).unwrap(),
+        Outcome::Settled { charged: 29 }
+    );
     assert_eq!(ledger.available("a"), Some(71));
     assert_eq!(
         ledger
@@ -45,10 +46,13 @@ fn reserves_settles_and_refunds_remainder_once() {
             .unwrap(),
         ReserveResult::Duplicate(Outcome::Settled { charged: 29 })
     );
-    assert_eq!(
-        ledger.refund([1; 32]),
-        Err(AccountingError::InvalidTransition)
-    );
+    for terminal in [usage(5, 4), None] {
+        assert_eq!(
+            ledger.finish([1; 32], terminal).unwrap(),
+            Outcome::Settled { charged: 29 }
+        );
+        assert_eq!(ledger.available("a"), Some(71));
+    }
 }
 
 #[test]
@@ -63,8 +67,8 @@ fn altered_duplicate_never_reserves_again() {
             .unwrap_err(),
         AccountingError::AlteredDuplicate
     );
-    ledger.refund([1; 32]).unwrap();
-    ledger.refund([1; 32]).unwrap();
+    assert_eq!(ledger.finish([1; 32], None).unwrap(), Outcome::Refunded);
+    assert_eq!(ledger.finish([1; 32], None).unwrap(), Outcome::Refunded);
     assert_eq!(ledger.available("a"), Some(100));
 }
 
@@ -75,7 +79,7 @@ fn terminal_state_is_reclaimed_only_after_token_expiry() {
     ledger
         .reserve("a", [1; 32], [2; 32], quote(), expires)
         .unwrap();
-    ledger.refund([1; 32]).unwrap();
+    assert_eq!(ledger.finish([1; 32], None).unwrap(), Outcome::Refunded);
     assert_eq!(
         ledger
             .reserve("a", [1; 32], [2; 32], quote(), token_expiry())
@@ -92,22 +96,40 @@ fn terminal_state_is_reclaimed_only_after_token_expiry() {
 }
 
 #[test]
-fn delivery_completion_and_abandonment_race_has_one_terminal_balance() {
+fn conflicting_stream_completions_race_has_one_absorbing_terminal_balance() {
     let ledger = Arc::new(Accounting::new([("a".into(), 100)]));
     ledger
         .reserve("a", [1; 32], [2; 32], quote(), token_expiry())
         .unwrap();
-    ledger.prepare_settlement([1; 32], 5, 4).unwrap();
-
+    let barrier = Arc::new(std::sync::Barrier::new(2));
     let settle_ledger = Arc::clone(&ledger);
-    let settle = std::thread::spawn(move || settle_ledger.settle([1; 32]));
+    let ready = Arc::clone(&barrier);
+    let settle = std::thread::spawn(move || {
+        ready.wait();
+        settle_ledger.finish([1; 32], usage(5, 4)).unwrap()
+    });
     let refund_ledger = Arc::clone(&ledger);
-    let refund = std::thread::spawn(move || refund_ledger.refund([1; 32]));
-    let settle = settle.join().unwrap();
-    let refund = refund.join().unwrap();
-
-    assert_ne!(settle.is_ok(), refund.is_ok());
-    assert!(matches!(ledger.available("a"), Some(71 | 100)));
+    let refund = std::thread::spawn(move || {
+        barrier.wait();
+        refund_ledger.finish([1; 32], None).unwrap()
+    });
+    let outcome = settle.join().unwrap();
+    assert_eq!(refund.join().unwrap(), outcome);
+    let balance = match outcome {
+        Outcome::Settled { charged: 29 } => 71,
+        Outcome::Refunded => 100,
+        _ => panic!("unexpected outcome"),
+    };
+    for terminal in [None, usage(5, 4)] {
+        assert_eq!(ledger.finish([1; 32], terminal).unwrap(), outcome);
+        assert_eq!(ledger.available("a"), Some(balance));
+    }
+    assert_eq!(
+        ledger
+            .reserve("a", [1; 32], [2; 32], quote(), token_expiry())
+            .unwrap(),
+        ReserveResult::Duplicate(outcome)
+    );
 }
 
 #[test]
@@ -168,11 +190,6 @@ fn usage_above_operational_bounds_is_capped_not_refunded_and_never_reversed() {
             assert_eq!(ledger.finish([1; 32], terminal).unwrap(), settled);
             assert_eq!(ledger.available("a"), Some(350));
         }
-        assert_eq!(
-            ledger.refund([1; 32]),
-            Err(AccountingError::InvalidTransition)
-        );
-        assert_eq!(ledger.settle([1; 32]).unwrap(), 650);
         assert_eq!(
             ledger
                 .reserve("a", [1; 32], [2; 32], operational_quote(), token_expiry())
@@ -257,11 +274,8 @@ fn malformed_totals_and_charge_overflow_refund_once_even_if_later_usage_is_valid
             assert_eq!(ledger.finish([1; 32], terminal).unwrap(), Outcome::Refunded);
             assert_eq!(ledger.available("a"), Some(budget));
         }
-        ledger.refund([1; 32]).unwrap();
-        assert_eq!(
-            ledger.settle([1; 32]),
-            Err(AccountingError::InvalidTransition)
-        );
+        assert_eq!(ledger.finish([1; 32], None).unwrap(), Outcome::Refunded);
+        assert_eq!(ledger.available("a"), Some(budget));
     }
 }
 
@@ -353,7 +367,7 @@ fn reserve_racing_terminal_transition_preserves_three_account_slots() {
 }
 
 #[test]
-fn terminal_cannot_create_a_reservation_and_legacy_pending_charge_cannot_override_it() {
+fn terminal_cannot_create_a_reservation_and_later_usage_cannot_override_it() {
     let ledger = Accounting::new([("a".into(), 1000)]);
     assert_eq!(
         ledger.finish([1; 32], usage(5, 4)),
@@ -363,11 +377,13 @@ fn terminal_cannot_create_a_reservation_and_legacy_pending_charge_cannot_overrid
     ledger
         .reserve("a", [1; 32], [2; 32], operational_quote(), token_expiry())
         .unwrap();
-    ledger.prepare_settlement([1; 32], 5, 4).unwrap();
     assert_eq!(
         ledger.finish([1; 32], usage(100, 101)).unwrap(),
         Outcome::Settled { charged: 650 }
     );
-    assert_eq!(ledger.settle([1; 32]).unwrap(), 650);
+    assert_eq!(
+        ledger.finish([1; 32], usage(5, 4)).unwrap(),
+        Outcome::Settled { charged: 650 }
+    );
     assert_eq!(ledger.available("a"), Some(350));
 }

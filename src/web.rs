@@ -615,9 +615,7 @@ async fn chat(
         ReserveResult::Duplicate(outcome) => {
             drop(permit);
             let notice = match outcome {
-                Outcome::InFlight | Outcome::AwaitingDelivery => {
-                    "This submission is already in progress."
-                }
+                Outcome::InFlight => "This submission is already in progress.",
                 Outcome::Settled { .. } => {
                     "This submission already completed and was not regenerated."
                 }

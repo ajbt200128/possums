@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use possums::{
-    accounting::{Accounting, AccountingError, Outcome, ReserveResult},
+    accounting::{Accounting, AccountingError, FinalUsage, Outcome, ReserveResult},
     auth::{AdmissionError, Auth},
     catalog::{Model, Quote},
 };
@@ -28,6 +28,14 @@ fn quote() -> Quote {
         },
         input_tokens: 10,
         reserved_microunits: 26,
+    }
+}
+
+fn usage() -> FinalUsage {
+    FinalUsage {
+        input_tokens: 1,
+        output_tokens: 1,
+        total_tokens: 2,
     }
 }
 
@@ -105,10 +113,12 @@ fn three_slots_survive_reset_and_logout_until_old_work_finishes_once() {
         assert_eq!(auth.session(&id).unwrap().selected_model, None);
         // An old accepted reservation may settle after reset/logout. Auth state
         // is not needed for either terminal outcome and cannot gain extra slots.
-        ledger.prepare_settlement(accepted[0].id, 1, 1).unwrap();
-        assert_eq!(ledger.settle(accepted[0].id).unwrap(), 3);
-        assert_eq!(ledger.settle(accepted[0].id).unwrap(), 3);
-        assert!(ledger.refund(accepted[0].id).is_err());
+        for terminal in [Some(usage()), Some(usage()), None] {
+            assert_eq!(
+                ledger.finish(accepted[0].id, terminal).unwrap(),
+                Outcome::Settled { charged: 3 }
+            );
+        }
         assert_eq!(ledger.available("a"), Some(45));
         // The previously rejected token/model was not half-bound: another model
         // can now use it, without needing a reset to clear failed admission.
@@ -118,13 +128,16 @@ fn three_slots_survive_reset_and_logout_until_old_work_finishes_once() {
             .unwrap();
         assert_eq!(new.result, ReserveResult::Reserved);
         for old in &accepted[1..] {
-            ledger.refund(old.id).unwrap();
-            ledger.refund(old.id).unwrap();
+            assert_eq!(ledger.finish(old.id, None).unwrap(), Outcome::Refunded);
+            assert_eq!(ledger.finish(old.id, None).unwrap(), Outcome::Refunded);
             assert!(auth
                 .issue_submission_for(&id, old.conversation, Some("m"))
                 .is_err());
         }
-        ledger.refund(new.submission.id).unwrap();
+        assert_eq!(
+            ledger.finish(new.submission.id, None).unwrap(),
+            Outcome::Refunded
+        );
         assert_eq!(ledger.available("a"), Some(97));
         let current = auth.session(&id).unwrap();
         assert_eq!(current.conversation, session.conversation);
@@ -154,8 +167,10 @@ fn concurrent_completions_issue_only_original_conversation_continuations() {
             .iter()
             .map(|submission| {
                 scope.spawn(|| {
-                    ledger.prepare_settlement(submission.id, 1, 1).unwrap();
-                    ledger.settle(submission.id).unwrap();
+                    assert_eq!(
+                        ledger.finish(submission.id, Some(usage())).unwrap(),
+                        Outcome::Settled { charged: 3 }
+                    );
                     start.wait();
                     auth.issue_submission_for(&id, submission.conversation, Some("m"))
                         .unwrap()
@@ -187,7 +202,7 @@ fn concurrent_completions_issue_only_original_conversation_continuations() {
 }
 
 #[test]
-fn abandoned_delivery_refund_is_terminal_and_idempotent() {
+fn failed_stream_refund_is_terminal_and_idempotent() {
     let ledger = Accounting::new([("a".into(), 100)]);
     ledger
         .reserve(
@@ -198,8 +213,9 @@ fn abandoned_delivery_refund_is_terminal_and_idempotent() {
             Instant::now() + Duration::from_secs(60),
         )
         .unwrap();
-    ledger.refund([1; 32]).unwrap();
-    ledger.refund([1; 32]).unwrap();
+    for terminal in [None, None, Some(usage())] {
+        assert_eq!(ledger.finish([1; 32], terminal).unwrap(), Outcome::Refunded);
+    }
     assert_eq!(ledger.available("a"), Some(100));
     assert_eq!(
         ledger

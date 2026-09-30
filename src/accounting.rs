@@ -1,4 +1,4 @@
-use crate::catalog::{actual_cost, marked_up_cost, CatalogError, Quote};
+use crate::catalog::{marked_up_cost, Quote};
 use std::{collections::HashMap, sync::Mutex, time::Instant};
 use thiserror::Error;
 
@@ -8,7 +8,6 @@ const MAX_ACCOUNT_IN_FLIGHT: u32 = 3;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     InFlight,
-    AwaitingDelivery,
     Settled { charged: u64 },
     Refunded,
 }
@@ -28,7 +27,6 @@ struct Submission {
     request_digest: [u8; 32],
     quote: Quote,
     outcome: Outcome,
-    pending_charge: Option<u64>,
     token_expires_at: Instant,
 }
 
@@ -97,7 +95,7 @@ impl Accounting {
     /// Auth admission calls this while holding sessions then submission tokens.
     /// This is the innermost lock: no callback into auth or async work is allowed.
     /// `request_digest` is a model binding, never a prompt/history content hash.
-    /// Terminal methods release this lock before callers issue continuations.
+    /// `finish` releases this lock before callers issue continuations.
     pub fn reserve(
         &self,
         account_id: &str,
@@ -144,14 +142,13 @@ impl Accounting {
                 request_digest,
                 quote,
                 outcome: Outcome::InFlight,
-                pending_charge: None,
                 token_expires_at,
             },
         );
         Ok(ReserveResult::Reserved)
     }
 
-    /// Atomically finish a future streaming reservation, independently of receipt.
+    /// The sole terminal operation: finish a streaming reservation independently of receipt.
     /// Pass None for any protocol/upstream failure or missing/invalid usage.
     /// Invalid totals or unrepresentable charges also refund. Terminal outcomes
     /// are absorbing: repeated or conflicting calls return the original outcome.
@@ -210,118 +207,7 @@ impl Accounting {
         account.available = available;
         account.in_flight = in_flight;
         submission.outcome = outcome.clone();
-        submission.pending_charge = None;
         Ok(outcome)
-    }
-
-    // Temporary buffered-route compatibility. Streaming uses finish instead.
-    pub fn prepare_settlement(
-        &self,
-        submission_id: [u8; 32],
-        input_tokens: u64,
-        output_tokens: u64,
-    ) -> Result<u64, AccountingError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| AccountingError::InvalidTransition)?;
-        let submission = state
-            .submissions
-            .get(&submission_id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        if submission.outcome != Outcome::InFlight || input_tokens > submission.quote.input_tokens {
-            return Err(AccountingError::InvalidTransition);
-        }
-        let mut actual_quote = submission.quote.clone();
-        actual_quote.input_tokens = input_tokens;
-        let charged = actual_cost(&actual_quote, output_tokens).map_err(map_cost)?;
-        if charged > submission.quote.reserved_microunits {
-            return Err(AccountingError::InvalidTransition);
-        }
-        let submission = state
-            .submissions
-            .get_mut(&submission_id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        submission.outcome = Outcome::AwaitingDelivery;
-        submission.pending_charge = Some(charged);
-        Ok(charged)
-    }
-
-    pub fn settle(&self, submission_id: [u8; 32]) -> Result<u64, AccountingError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| AccountingError::InvalidTransition)?;
-        let submission = state
-            .submissions
-            .get(&submission_id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        if let Outcome::Settled { charged } = submission.outcome {
-            return Ok(charged);
-        }
-        if submission.outcome != Outcome::AwaitingDelivery {
-            return Err(AccountingError::InvalidTransition);
-        }
-        let charged = submission
-            .pending_charge
-            .ok_or(AccountingError::InvalidTransition)?;
-        let account_id = submission.account_id.clone();
-        let refund = submission.quote.reserved_microunits - charged;
-        let account = state
-            .accounts
-            .get_mut(&account_id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        account.available = account
-            .available
-            .checked_add(refund)
-            .ok_or(AccountingError::Cost)?;
-        account.in_flight = account
-            .in_flight
-            .checked_sub(1)
-            .ok_or(AccountingError::InvalidTransition)?;
-        let submission = state
-            .submissions
-            .get_mut(&submission_id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        submission.outcome = Outcome::Settled { charged };
-        submission.pending_charge = None;
-        Ok(charged)
-    }
-
-    pub fn refund(&self, submission_id: [u8; 32]) -> Result<(), AccountingError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| AccountingError::InvalidTransition)?;
-        let submission = state
-            .submissions
-            .get(&submission_id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        match submission.outcome {
-            Outcome::Refunded => return Ok(()),
-            Outcome::Settled { .. } => return Err(AccountingError::InvalidTransition),
-            Outcome::InFlight | Outcome::AwaitingDelivery => {}
-        }
-        let account_id = submission.account_id.clone();
-        let reserved = submission.quote.reserved_microunits;
-        let account = state
-            .accounts
-            .get_mut(&account_id)
-            .ok_or(AccountingError::InvalidTransition)?;
-        account.available = account
-            .available
-            .checked_add(reserved)
-            .ok_or(AccountingError::Cost)?;
-        account.in_flight = account
-            .in_flight
-            .checked_sub(1)
-            .ok_or(AccountingError::InvalidTransition)?;
-        state
-            .submissions
-            .get_mut(&submission_id)
-            .ok_or(AccountingError::InvalidTransition)?
-            .outcome = Outcome::Refunded;
-        Ok(())
     }
 
     #[cfg(test)]
@@ -341,10 +227,6 @@ impl Accounting {
 
 fn is_terminal(outcome: &Outcome) -> bool {
     matches!(outcome, Outcome::Settled { .. } | Outcome::Refunded)
-}
-
-fn map_cost(_: CatalogError) -> AccountingError {
-    AccountingError::Cost
 }
 
 #[cfg(test)]
@@ -395,14 +277,12 @@ mod tests {
                 request_digest,
                 quote,
                 outcome,
-                pending_charge,
                 token_expires_at,
             } = &state.submissions[&[1; 32]];
             assert_eq!(account_id, "a");
             assert_eq!(*request_digest, binding);
             assert_eq!(*quote, original);
             assert_eq!(*outcome, Outcome::Settled { charged: 3 });
-            assert_eq!(*pending_charge, None);
             assert_eq!(*token_expires_at, expiry);
             assert_eq!(state.accounts["a"].in_flight, 0);
         }
@@ -473,7 +353,6 @@ mod tests {
                         request_digest: [1; 32],
                         quote: quote.clone(),
                         outcome: Outcome::Refunded,
-                        pending_charge: None,
                         token_expires_at: future,
                     },
                 )

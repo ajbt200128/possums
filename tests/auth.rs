@@ -90,8 +90,14 @@ fn reset_rotates_conversation_without_reauthentication_or_old_continuations() {
     assert!(auth
         .admit_submission(&ledger, &id, &current.csrf, &next, quote("b"))
         .is_ok());
-    ledger.refund(old.submission.id).unwrap();
-    ledger.refund(old.submission.id).unwrap();
+    assert_eq!(
+        ledger.finish(old.submission.id, None).unwrap(),
+        Outcome::Refunded
+    );
+    assert_eq!(
+        ledger.finish(old.submission.id, None).unwrap(),
+        Outcome::Refunded
+    );
     assert_eq!(
         auth.session(&id).unwrap().selected_model.as_deref(),
         Some("b")
