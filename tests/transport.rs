@@ -258,6 +258,44 @@ async fn incomplete_headers_are_closed_at_the_total_header_deadline() {
 }
 
 #[tokio::test]
+async fn pipelined_http1_rejects_oversized_declared_body_without_reading_its_length() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve_with_header_deadline(
+        listener,
+        state(),
+        Duration::from_secs(5),
+    ));
+    let mut client = TcpStream::connect(address).await.unwrap();
+    let request = format!(
+        "GET /claims HTTP/1.1\r\nHost: local\r\nX-Fill: {}\r\n\r\nPOST /login HTTP/1.1\r\nHost: local\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        "h".repeat(10 * 1024),
+        8 * 1024,
+        "x".repeat(4 * 1024 + 1),
+    );
+    client.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    let mut block = [0; 4096];
+    while !response
+        .windows(b"HTTP/1.1 413".len())
+        .any(|part| part == b"HTTP/1.1 413")
+    {
+        let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut block))
+            .await
+            .expect("pipelined response timed out")
+            .unwrap();
+        assert!(
+            read > 0,
+            "server closed before rejecting the oversized body"
+        );
+        response.extend_from_slice(&block[..read]);
+        assert!(response.len() <= 64 * 1024);
+    }
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn oversized_headers_are_rejected_before_routing() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
