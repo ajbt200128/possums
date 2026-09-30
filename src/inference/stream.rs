@@ -19,8 +19,9 @@ pub const MAX_JSON_DEPTH: usize = 16;
 pub const MAX_JSON_NODES: usize = 8192;
 pub const MAX_OPTIONAL_BYTES: usize = 16 * 1024;
 pub const MAX_TRAILER_BYTES: usize = 64 * 1024;
-/// Maximum accepted transport chunk, checked before retaining/copying into parser
-/// state. Reqwest/TLS internals have separate buffers, not measured by this limit.
+/// Maximum borrowed parser feed slice. Reqwest may yield a larger HTTP/1 DATA
+/// backing; retain the whole chunk while feeding bounded slices, not a full answer.
+/// Producer/TLS allocations are separate from this parser limit.
 pub const MAX_TRANSPORT_BUFFER_BYTES: usize = 256 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub const STREAM_DEADLINE: Duration = Duration::from_secs(300);
@@ -109,12 +110,11 @@ pub(super) async fn consume_response(
         }
         match chunk {
             Some(bytes) => {
-                if bytes.len() > MAX_TRANSPORT_BUFFER_BYTES {
-                    return Err(InferenceError::InvalidResponse);
+                for fragment in bytes.chunks(MAX_TRANSPORT_BUFFER_BYTES) {
+                    parser
+                        .feed(fragment, &mut on_delta)
+                        .map_err(|_| InferenceError::InvalidResponse)?;
                 }
-                parser
-                    .feed(&bytes, &mut on_delta)
-                    .map_err(|_| InferenceError::InvalidResponse)?;
             }
             None => return parser.eof().map_err(|_| InferenceError::InvalidResponse),
         }
@@ -714,7 +714,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_headers_and_transport_buffer_limits_fail_without_error_body_collection() {
+    async fn response_headers_fail_without_error_body_collection_and_chunks_are_fragment_independent(
+    ) {
         use futures_util::stream;
         for (status, mime) in [(500, "text/event-stream"), (200, "application/json")] {
             let body = reqwest::Body::wrap_stream(stream::poll_fn(
@@ -738,7 +739,11 @@ mod tests {
             .await
             .is_err());
         }
-        for size in [MAX_TRANSPORT_BUFFER_BYTES, MAX_TRANSPORT_BUFFER_BYTES + 1] {
+        for size in [
+            MAX_TRANSPORT_BUFFER_BYTES,
+            MAX_TRANSPORT_BUFFER_BYTES + 1,
+            512 * 1024,
+        ] {
             let mut bytes = successful("");
             // Blank lines before DONE do not impose a cumulative answer limit.
             bytes.splice(0..0, vec![b'\n'; size - bytes.len()]);
@@ -756,7 +761,10 @@ mod tests {
                 |_| {},
             )
             .await;
-            assert_eq!(result.is_ok(), size == MAX_TRANSPORT_BUFFER_BYTES);
+            assert!(
+                result.is_ok(),
+                "a valid stream must not depend on DATA fragmentation"
+            );
         }
         // An already expired total deadline rejects even an immediately ready EOF.
         let response = reqwest::Response::from(
