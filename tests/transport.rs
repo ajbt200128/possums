@@ -9,7 +9,7 @@ use possums::{
     attestation::UnavailableEvidenceVerifier,
     auth::Auth,
     catalog::Model,
-    inference::{Generation, Inference, InferenceError, Message},
+    inference::{Inference, InferenceError, Message},
     web::{router_with_body_deadline, serve_with_header_deadline, AppState},
 };
 use sha2::{Digest, Sha256};
@@ -185,10 +185,6 @@ impl Inference for UnusedInference {
     }
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
-        unreachable!()
-    }
-
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
         unreachable!()
     }
 

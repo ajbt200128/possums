@@ -962,7 +962,7 @@ mod tests {
     use crate::{
         attestation::{EvidenceError, GatewayEvidence},
         catalog::Model,
-        inference::{Generation, Inference, InferenceError},
+        inference::{Inference, InferenceError},
     };
     use async_trait::async_trait;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -989,9 +989,7 @@ mod tests {
             self.release.notified().await;
             Ok(1)
         }
-        async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-            unreachable!("buffered route forbidden")
-        }
+
         async fn generate_stream(
             &self,
             _: &Model,

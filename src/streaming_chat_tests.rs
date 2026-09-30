@@ -6,7 +6,7 @@ use crate::{
     catalog::Quote,
     inference::{
         stream::{ProtocolParser, StreamUsage},
-        stream_support as wire, Generation, Inference,
+        stream_support as wire, Inference,
     },
 };
 use async_trait::async_trait;
@@ -180,9 +180,7 @@ impl Inference for Mock {
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
         panic!("unexpected preflight call")
     }
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        panic!("buffered fallback forbidden")
-    }
+
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
         Err(InferenceError::Unavailable)
     }

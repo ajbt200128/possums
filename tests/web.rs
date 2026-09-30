@@ -34,7 +34,7 @@ use possums::{
     attestation::{load_evidence, EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::{session_cookie, Auth},
     catalog::Model,
-    inference::{stream, Generation, Inference, InferenceError, Message},
+    inference::{stream, Inference, InferenceError, Message},
     web::{router, serve, AppState},
 };
 use sha2::{Digest, Sha256};
@@ -161,9 +161,6 @@ impl Inference for BlockingInference {
         std::future::pending().await
     }
 
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        unreachable!()
-    }
     async fn generate_stream(
         &self,
         _: &Model,
@@ -188,10 +185,6 @@ impl Inference for LargeResponseInference {
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
         Ok(1)
-    }
-
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        unreachable!("buffered route forbidden")
     }
 
     async fn generate_stream(
@@ -238,9 +231,7 @@ impl Inference for OversizedVerificationInference {
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
         unreachable!()
     }
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        unreachable!()
-    }
+
     async fn generate_stream(
         &self,
         _: &Model,
@@ -267,9 +258,6 @@ impl Inference for PanicInference {
         panic!("injected post-reservation panic")
     }
 
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        unreachable!()
-    }
     async fn generate_stream(
         &self,
         _: &Model,
@@ -355,10 +343,6 @@ impl Inference for FakeInference {
         self.tokenizations.fetch_add(1, Ordering::SeqCst);
         self.pause_at(HoldPoint::Tokenization).await;
         Ok(1)
-    }
-
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        unreachable!("buffered route forbidden")
     }
 
     async fn generate_stream(

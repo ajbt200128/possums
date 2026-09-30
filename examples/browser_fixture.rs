@@ -4,7 +4,7 @@ use possums::{
     attestation::{load_evidence, EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::Auth,
     catalog::Model,
-    inference::{stream, Generation, Inference, InferenceError, Message},
+    inference::{stream, Inference, InferenceError, Message},
     web::{serve, AppState},
 };
 use sha2::{Digest, Sha256};
@@ -118,10 +118,6 @@ impl Inference for FixtureInference {
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
         Ok(1)
-    }
-
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        unreachable!("buffered route forbidden")
     }
 
     async fn generate_stream(

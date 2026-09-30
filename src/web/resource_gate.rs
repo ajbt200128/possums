@@ -6,7 +6,7 @@ use crate::{
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::{session_cookie, Auth},
     catalog::{Model, MAX_CATALOG_BYTES, MAX_MODELS},
-    inference::{stream, Generation, Inference, InferenceError, Message},
+    inference::{stream, Inference, InferenceError, Message},
     process_alloc_tests::{Snapshot, ALLOCATOR},
     web::{router, AppState, BODY_LIMIT},
 };
@@ -127,9 +127,7 @@ impl Inference for Probe {
             .push(("tokenizer", messages.len(), length));
         Ok(tokens)
     }
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        panic!("buffered inference forbidden")
-    }
+
     async fn generate_stream(
         &self,
         model: &Model,

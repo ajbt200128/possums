@@ -8,8 +8,8 @@ const REPOSITORY: &str = "tinfoilsh/confidential-model-router";
 const CANARY_MAX_OUTPUT_TOKENS: u64 = 64;
 
 #[tokio::test]
-#[ignore = "requires a funded TINFOIL_API_KEY and makes a live canary request"]
-async fn production_client_authenticates_catalog_tokenization_and_generation() {
+#[ignore = "requires a funded TINFOIL_API_KEY and makes one live streaming canary request"]
+async fn production_client_authenticates_catalog_tokenization_and_streaming() {
     let api_key = load_api_key();
     let inference = TinfoilInference::connect(HOST, REPOSITORY, api_key)
         .await
@@ -46,15 +46,27 @@ async fn production_client_authenticates_catalog_tokenization_and_generation() {
         .quote(&model.id, input_tokens)
         .expect("live canary exceeded the selected model context");
     quote.model.max_output_tokens = quote.model.max_output_tokens.min(CANARY_MAX_OUTPUT_TOKENS);
-    // Historical buffered smoke test only. Tokenizer equality and operational
-    // output bounds are not settlement authority or proof of invoice coverage.
-    let _generation = inference
-        .generate(&quote.model, &messages)
+    // Count deltas in constant space; never retain or log content or credentials.
+    // Tokenizer equality and operational output bounds are not settlement
+    // authority or proof of invoice coverage.
+    let mut delta_count = 0_usize;
+    let usage = inference
+        .generate_stream(&quote.model, &messages, |_| {
+            delta_count = delta_count.saturating_add(1);
+        })
         .await
-        .expect("authenticated live generation failed");
+        .expect("authenticated live streaming failed");
+    assert!(delta_count > 0, "live stream delivered no deltas");
+    // Success is terminal: the adapter has validated finish, DONE and EOF.
+    assert!(usage.total_tokens > 0, "live stream returned empty usage");
+    assert_eq!(
+        usage.input_tokens.checked_add(usage.output_tokens),
+        Some(usage.total_tokens),
+        "live stream returned inconsistent terminal usage"
+    );
 }
 
-/// Diagnostic only. The buffered canary above is historical coverage, not stream evidence.
+/// Diagnostic only; separate from the production streaming adapter canary above.
 #[tokio::test]
 #[ignore = "funded opt-in: up to eight fixed-input streaming requests, 64 output tokens each"]
 async fn streaming_contract_probe_all_catalog_models() {

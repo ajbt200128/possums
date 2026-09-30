@@ -1,26 +1,20 @@
 use async_trait::async_trait;
 use possums::{
     catalog::Model,
-    inference::{
-        stream::StreamUsage, Generation, Inference, InferenceError, Message, SharedInference,
-    },
+    inference::{stream::StreamUsage, Inference, InferenceError, Message, SharedInference},
 };
 use std::sync::Arc;
 
-struct LegacyOnly;
+struct NoStreaming;
 
 #[async_trait]
-impl Inference for LegacyOnly {
+impl Inference for NoStreaming {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
         panic!("unexpected catalog call")
     }
 
     async fn count_tokens(&self, _: &str, _: &[Message]) -> Result<u64, InferenceError> {
         panic!("unexpected tokenizer call")
-    }
-
-    async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-        panic!("streaming must not fall back to buffered generation")
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
@@ -39,19 +33,11 @@ const USAGE: StreamUsage = StreamUsage {
 #[async_trait]
 impl Inference for StreamingMock {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
-        LegacyOnly.catalog().await
+        NoStreaming.catalog().await
     }
 
     async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError> {
-        LegacyOnly.count_tokens(model, messages).await
-    }
-
-    async fn generate(
-        &self,
-        model: &Model,
-        messages: &[Message],
-    ) -> Result<Generation, InferenceError> {
-        LegacyOnly.generate(model, messages).await
+        NoStreaming.count_tokens(model, messages).await
     }
 
     async fn generate_stream(
@@ -71,7 +57,7 @@ impl Inference for StreamingMock {
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
-        LegacyOnly.verification_document()
+        NoStreaming.verification_document()
     }
 }
 
@@ -136,8 +122,8 @@ async fn detached_delivery_still_consumes_to_terminal_usage() {
 }
 
 #[tokio::test]
-async fn default_streaming_fails_closed_without_callback_or_buffered_fallback() {
-    let inference: SharedInference = Arc::new(LegacyOnly);
+async fn default_streaming_fails_closed_without_callback() {
+    let inference: SharedInference = Arc::new(NoStreaming);
     let (model, messages) = request();
     let result = inference
         .generate_stream(&model, &messages, &mut |_| {

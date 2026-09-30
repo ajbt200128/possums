@@ -508,7 +508,7 @@ mod route {
         attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
         auth::{session_cookie, Auth},
         catalog::Model,
-        inference::{stream, Generation, Inference, InferenceError, Message},
+        inference::{stream, Inference, InferenceError, Message},
         web::{router, AppState},
     };
     use async_trait::async_trait;
@@ -567,9 +567,7 @@ mod route {
             );
             Ok(self.tokens)
         }
-        async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
-            unreachable!("buffered route forbidden")
-        }
+
         async fn generate_stream(
             &self,
             model: &Model,

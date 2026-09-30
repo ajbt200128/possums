@@ -1,6 +1,5 @@
 use crate::catalog::{Catalog, Model, MAX_CATALOG_BYTES};
 use async_trait::async_trait;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
@@ -12,7 +11,6 @@ pub mod stream;
 #[path = "../tests/support/stream.rs"]
 pub(crate) mod stream_support;
 
-const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 // Bounds apply to BORROWED SDK state, before any request-owned clone. The
 // schema has only fixed objects, two register vectors and these bounded strings.
 const MAX_EVIDENCE_FIELD_BYTES: usize = 4 * 1024;
@@ -27,13 +25,6 @@ pub struct Message {
     pub content: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Generation {
-    pub content: String,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-}
-
 #[derive(Debug, Error)]
 pub enum InferenceError {
     #[error("verified inference unavailable")]
@@ -46,11 +37,6 @@ pub enum InferenceError {
 pub trait Inference: Send + Sync {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError>;
     async fn count_tokens(&self, model: &str, messages: &[Message]) -> Result<u64, InferenceError>;
-    async fn generate(
-        &self,
-        model: &Model,
-        messages: &[Message],
-    ) -> Result<Generation, InferenceError>;
     /// Stream only after trust/catalog/reservation and context preflight.
     /// `model` carries the full context-legal output allowance. Successful usage
     /// is terminal, withheld until validated finish, [DONE], and transport EOF.
@@ -60,7 +46,7 @@ pub trait Inference: Send + Sync {
     /// keep polling this future to completion; never cancel upstream or retry an
     /// uncertain generation. Callback return values cannot cancel consumption.
     /// Implementations must not expose prompt text or raw upstream diagnostics.
-    /// The default fails closed without falling back to buffered generation.
+    /// The default fails closed for implementations without streaming support.
     async fn generate_stream(
         &self,
         _model: &Model,
@@ -101,7 +87,7 @@ impl TinfoilInference {
         Ok(inference)
     }
 
-    /// Verified streaming adapter; the buffered route is not migrated.
+    /// Verified streaming adapter.
     ///
     /// Call only after trust/catalog/reservation and context preflight. `model`
     /// carries the full context-legal output allowance, not a credit-reduced cap.
@@ -712,40 +698,9 @@ pub(crate) mod resource_fixtures {
     }
 }
 
-#[derive(Serialize)]
-struct BufferedRequest<'a> {
-    model: &'a str,
-    messages: &'a [Message],
-    max_tokens: u64,
-    stream: bool,
-    user_cache_secret: &'a str,
-}
-
 #[derive(Deserialize)]
 struct TokenCount {
     input_tokens: u64,
-}
-
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-    usage: Usage,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: AssistantMessage,
-}
-
-#[derive(Deserialize)]
-struct AssistantMessage {
-    content: String,
-}
-
-#[derive(Deserialize)]
-struct Usage {
-    prompt_tokens: u64,
-    completion_tokens: u64,
 }
 
 #[async_trait]
@@ -771,52 +726,6 @@ impl Inference for TinfoilInference {
             return Err(InferenceError::InvalidResponse);
         }
         Ok(count.input_tokens)
-    }
-
-    async fn generate(
-        &self,
-        model: &Model,
-        messages: &[Message],
-    ) -> Result<Generation, InferenceError> {
-        let mut cache_scope = [0_u8; 32];
-        rand::rng().fill_bytes(&mut cache_scope);
-        let cache_secret = base64::Engine::encode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            cache_scope,
-        );
-        let request = self
-            .authenticate(
-                self.http()?
-                    .post(format!("{}/v1/chat/completions", self.origin)),
-            )
-            .json(&BufferedRequest {
-                model: &model.id,
-                messages,
-                max_tokens: model.max_output_tokens,
-                stream: false,
-                user_cache_secret: &cache_secret,
-            });
-        let bytes = self
-            .bounded_response(request, MAX_UPSTREAM_RESPONSE_BYTES)
-            .await?;
-        let response: ChatResponse =
-            serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)?;
-        if response.choices.len() != 1
-            || response.usage.prompt_tokens == 0
-            || response.usage.completion_tokens > model.max_output_tokens
-        {
-            return Err(InferenceError::InvalidResponse);
-        }
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or(InferenceError::InvalidResponse)?;
-        Ok(Generation {
-            content: choice.message.content,
-            input_tokens: response.usage.prompt_tokens,
-            output_tokens: response.usage.completion_tokens,
-        })
     }
 
     async fn generate_stream(
