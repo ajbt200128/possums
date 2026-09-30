@@ -904,83 +904,6 @@ fn decode_form_value(value: &str, limit: usize) -> Result<String, InvalidContinu
     String::from_utf8(bytes).map_err(|_| InvalidContinuation)
 }
 
-#[allow(dead_code)] // Buffered compatibility retirement is a separate packet.
-fn parse_history(encoded: &str) -> Option<Vec<Message>> {
-    let history: Vec<Message> = serde_json::from_str(encoded).ok()?;
-    if history.iter().any(|message| {
-        !matches!(message.role.as_str(), "user" | "assistant") || message.content.is_empty()
-    }) {
-        return None;
-    }
-    Some(history)
-}
-
-#[allow(dead_code)]
-struct ReservationGuard {
-    accounting: Arc<Accounting>,
-    submission_id: [u8; 32],
-    armed: bool,
-}
-
-#[allow(dead_code)]
-impl ReservationGuard {
-    fn new(accounting: Arc<Accounting>, submission_id: [u8; 32]) -> Self {
-        Self {
-            accounting,
-            submission_id,
-            armed: true,
-        }
-    }
-
-    fn settle(&mut self) {
-        if self.accounting.settle(self.submission_id).is_ok() {
-            self.armed = false;
-        }
-    }
-}
-
-impl Drop for ReservationGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self.accounting.refund(self.submission_id);
-        }
-    }
-}
-
-#[allow(dead_code)]
-struct ReservationBody {
-    inner: Body,
-    reservation: Option<ReservationGuard>,
-}
-
-#[allow(dead_code)]
-impl ReservationBody {
-    fn new(inner: Body, reservation: ReservationGuard) -> Self {
-        Self {
-            inner,
-            reservation: Some(reservation),
-        }
-    }
-}
-
-impl HttpBody for ReservationBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        let result = Pin::new(&mut self.inner).poll_frame(context);
-        if matches!(result, Poll::Ready(None)) {
-            if let Some(mut reservation) = self.reservation.take() {
-                reservation.settle();
-            }
-        }
-        result
-    }
-}
-
 async fn verified_gateway_evidence(
     state: &AppState,
 ) -> Result<crate::attestation::GatewayEvidence, crate::attestation::EvidenceError> {
@@ -1111,7 +1034,7 @@ mod tests {
         let probe = Arc::new(PermitProbe::default());
         let state = AppState::new(auth, probe.clone(), "unused", probe);
         // Test-only handler observes staged plumbing through raw-body collection;
-        // production /chat remains buffered and does not consume the extension.
+        // The production handler consumes the same lease when handing off work.
         let app = Router::new()
             .fallback(|request: Request<Body>| async move {
                 let lease = request.extensions().get::<Arc<OwnedSemaphorePermit>>();
