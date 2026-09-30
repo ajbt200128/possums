@@ -78,11 +78,12 @@
 //! parser/delivery + 8 catalog/evidence + 8 task/channel/result = 104 MiB.
 //! It is NOT accepted by this audit:
 //! - serde_json 1.0.151 deserialize_struct accepts sequences, even with
-//!   deny_unknown_fields. A pre-validation history element ["",""] plus comma
-//!   costs EIGHT bytes, not 25. A <6-MiB history can grow its 48-byte-element
-//!   vector to 1,048,576 slots (48 MiB); an old 24-MiB vector can overlap growth.
-//!   Validation occurs AFTER conversion in web::decode_continuation. Accepted
-//!   sequence histories also need a fresh derivation; object-only density is not
+//!   deny_unknown_fields. The old decoder collected eight-byte ["",""] entries
+//!   before validation, growing a 48-byte-element vector to 1,048,576 slots
+//!   (48 MiB), with an old 24-MiB vector potentially overlapping growth.
+//!   web::decode_continuation now validates each entry BEFORE pushing directly
+//!   into one Message vector. Accepted sequence histories and valid prefixes
+//!   still need a fresh capacity/growth derivation; object-only density is not
 //!   an upper bound. No history/model/output/concurrency policy was changed.
 //! - BoundedWriter checks length BEFORE extending. Rust 1.88 RawVec grows to
 //!   max(2*capacity, required, minimum), not to logical length. A 16-MiB writer

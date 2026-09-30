@@ -1,4 +1,4 @@
-//! Accepted-input counterexamples, not allocation measurements or a memory proof.
+//! Input regressions and scoped decoder allocation checks, not a memory/RSS proof.
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use possums::{
     inference::{stream::StreamUsage, Message},
@@ -7,6 +7,63 @@ use possums::{
 };
 
 const TOKEN: &str = "ccccccccccccccccccccccccccccccccccccccccccc";
+
+// Count cumulative requested bytes only during synchronous decoding on this
+// thread. Parallel tests and fixture construction cannot affect the counter.
+mod allocation_probe {
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+    };
+
+    thread_local! {
+        static BYTES: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    pub struct Allocator;
+
+    fn record(size: usize) {
+        let _ = BYTES.try_with(|bytes| {
+            if let Some(total) = bytes.get() {
+                bytes.set(Some(total.saturating_add(size)));
+            }
+        });
+    }
+
+    // SAFETY: forwards unchanged pointers/layouts to System; accounting neither
+    // allocates nor dereferences pointers. Realloc counts the full new request.
+    unsafe impl GlobalAlloc for Allocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                record(layout.size());
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) };
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            let pointer = unsafe { System.realloc(pointer, layout, size) };
+            if !pointer.is_null() {
+                record(size);
+            }
+            pointer
+        }
+    }
+
+    pub fn measure<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        BYTES.with(|bytes| bytes.set(Some(0)));
+        let result = operation();
+        let allocated = BYTES.with(|bytes| bytes.replace(None).unwrap());
+        (result, allocated)
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: allocation_probe::Allocator = allocation_probe::Allocator;
 
 fn pair_history(pairs: usize) -> String {
     let pair = r#"{"role":"user","content":"x"},{"role":"assistant","content":""}"#;
@@ -41,6 +98,87 @@ fn many_tiny_messages_fit_body_limit() {
             && pair[1].content.is_empty()
     }));
     assert_eq!(form.prompt, "x");
+}
+
+#[test]
+fn dense_invalid_sequence_history_rejects_before_vector_growth() {
+    // About 6 MiB decoded / 8 MiB wire. The old collect-then-validate decoder
+    // grew hundreds of thousands of 48-byte entries before rejecting these.
+    for prefix in [
+        r#"["",""]"#,
+        r#"["user",""]"#,
+        r#"["user","x"],["user","x"]"#,
+    ] {
+        let json = format!(
+            "[{prefix},{}]",
+            r#"["",""],"#.repeat(749_999).trim_end_matches(',')
+        );
+        let body = history_form(&json, "x");
+        assert!(body.len() < BODY_LIMIT);
+        let (result, allocated) = allocation_probe::measure(|| decode_continuation(&body));
+        assert!(result.is_err());
+        // Allows decoded JSON, per-block canonical re-encoding and small parser
+        // overhead, but not a vector for the invalid tail. Not a product cap or
+        // a peak/RSS bound; fixtures are deliberately outside the measurement.
+        assert!(
+            allocated < 3 * json.len(),
+            "decoder allocated {allocated} bytes"
+        );
+    }
+}
+
+#[test]
+fn sequence_history_preserves_exact_multi_turn_messages() {
+    let expected = vec![
+        Message {
+            role: "user".into(),
+            content: " first\n<&>🦝\u{0}".into(),
+        },
+        Message {
+            role: "assistant".into(),
+            content: String::new(),
+        },
+        Message {
+            role: "user".into(),
+            content: " \t ".into(),
+        },
+        Message {
+            role: "assistant".into(),
+            content: "answer \"\\\r\n".into(),
+        },
+    ];
+    let entries: Vec<_> = expected
+        .iter()
+        .map(|message| [&message.role, &message.content])
+        .collect();
+    let json = serde_json::to_string(&entries).unwrap();
+    let form = decode_continuation(&history_form(&json, "next"))
+        .unwrap_or_else(|_| panic!("valid sequence history rejected"));
+    assert_eq!(form.history, expected);
+    assert_eq!(form.prompt, "next");
+    // Struct entries can also mix sequence and object representations.
+    let mixed = r#"[["user","x"],{"role":"assistant","content":""}]"#;
+    assert!(decode_continuation(&history_form(mixed, "x")).is_ok());
+}
+
+#[test]
+fn sequence_history_keeps_strict_schema_and_turn_validation() {
+    for json in [
+        r#"[["user","x"]]"#, // Odd trailing count.
+        r#"[["user","x"],["system",""]]"#,
+        r#"[["assistant","x"],["user","x"]]"#,
+        r#"[["user"]]"#,
+        r#"[["user","x","extra"],["assistant",""]]"#,
+        r#"[["user",null],["assistant",""]]"#,
+        r#"[{"role":"user","role":"user","content":"x"},["assistant",""]]"#,
+        r#"[{"role":"user","content":"x","content":"x"},["assistant",""]]"#,
+        r#"[{"role":"user","content":"x","extra":"x"},["assistant",""]]"#,
+        r#"[["user","x"],["assistant",""]] []"#,
+        r#"{}"#,
+    ] {
+        assert!(decode_continuation(&history_form(json, "x")).is_err());
+    }
+    assert!(decode_continuation(&history_form("[]", "x")).is_ok());
 }
 
 #[test]

@@ -764,6 +764,7 @@ pub struct InvalidContinuation;
 pub fn decode_continuation(body: &[u8]) -> Result<ContinuationForm, InvalidContinuation> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use render::{HISTORY_BLOCK_BYTES, MAX_HISTORY_FIELDS};
+    use serde::de::{self, Deserializer, SeqAccess, Visitor};
     if body.len() > BODY_LIMIT {
         return Err(InvalidContinuation);
     }
@@ -843,21 +844,46 @@ pub fn decode_continuation(body: &[u8]) -> Result<ContinuationForm, InvalidConti
         role: String,
         content: String,
     }
-    // Serde's depth limit also bounds hostile nested JSON; schema denies unknown
-    // and duplicate fields. The decoded input and message allocation are bounded
-    // separately from the renderer; later admission must budget both.
-    let parsed: Vec<HistoryMessage> =
-        serde_json::from_slice(&json).map_err(|_| InvalidContinuation)?;
-    let history: Vec<Message> = parsed
-        .into_iter()
-        .map(|m| Message {
-            role: m.role,
-            content: m.content,
-        })
-        .collect();
-    if !render::valid_history(&history) {
-        return Err(InvalidContinuation);
+    struct HistoryVisitor;
+    impl<'de> Visitor<'de> for HistoryVisitor {
+        type Value = Vec<Message>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("alternating user/assistant history")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+            // Do not reserve from an untrusted count or collect an intermediate
+            // vector. Validate each strict object/sequence entry BEFORE pushing.
+            let mut history = Vec::new();
+            while let Some(message) = sequence.next_element::<HistoryMessage>()? {
+                let valid = if history.len().is_multiple_of(2) {
+                    message.role == "user" && !message.content.is_empty()
+                } else {
+                    message.role == "assistant"
+                };
+                if !valid {
+                    return Err(de::Error::custom("invalid history"));
+                }
+                history.push(Message {
+                    role: message.role,
+                    content: message.content,
+                });
+            }
+            if !history.len().is_multiple_of(2) {
+                return Err(de::Error::custom("invalid history"));
+            }
+            Ok(history)
+        }
     }
+    // Retain serde's depth limit and strict fields, including sequence-form
+    // compatibility. Valid prefixes still allocate; admission must budget JSON,
+    // strings and vector capacity/growth, not just the final logical length.
+    let mut deserializer = serde_json::Deserializer::from_slice(&json);
+    let history = deserializer
+        .deserialize_seq(HistoryVisitor)
+        .map_err(|_| InvalidContinuation)?;
+    deserializer.end().map_err(|_| InvalidContinuation)?;
     let form = ContinuationForm {
         csrf: csrf.ok_or(InvalidContinuation)?,
         token: token.ok_or(InvalidContinuation)?,
