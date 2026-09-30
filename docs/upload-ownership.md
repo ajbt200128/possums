@@ -74,6 +74,10 @@ Local macOS/aarch64 verification:
 - `git diff --check`: passed. The existing vendored SDK dead-code warning remains;
   no vendor source changes were made.
 
+Two independent read-only reviews found no concrete upload-lifetime or fixture
+wiring defect. One could not execute Rust tests in its own environment; the
+full local suite and one-test fixture above were run separately in this checkout.
+
 The synthetic peak is neither a universal bound nor RSS. The unchanged 104-MiB
 per-heavy/512-MiB scoped target still requires the complete analytic phase bound,
 including writer growth, accepted input, parsing/rendering/delivery overlap and
