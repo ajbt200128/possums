@@ -87,7 +87,10 @@
 //! unproven even if local requested allocation fits. Synthetic transport proves
 //! neither live Tinfoil authentication nor invoice/billable-cost bounds.
 
-use crate::{inference::resource_fixtures, stream_owner};
+use crate::{
+    inference::{resource_fixtures, stream_support as support},
+    stream_owner,
+};
 use http_body_util::BodyExt;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{oneshot, Semaphore};
@@ -141,6 +144,566 @@ impl PreflightHooks {
         let pause = self.after.lock().unwrap().take();
         if let Some(pause) = pause {
             pause.wait().await;
+        }
+    }
+}
+
+// These are production-route lifecycle proofs, NOT the aggregate resource gate.
+mod route {
+    use super::*;
+    use crate::{
+        attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
+        auth::{session_cookie, Auth},
+        catalog::Model,
+        inference::{stream, Generation, Inference, InferenceError, Message},
+        web::{router, AppState},
+    };
+    use async_trait::async_trait;
+    use axum::{
+        body::{Body, Bytes},
+        http::{header, Request, StatusCode},
+    };
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use sha2::{Digest, Sha256};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Mutex,
+    };
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    struct Probe {
+        tokenizer: Mutex<Option<Pause>>,
+        tokens: u64,
+        calls: AtomicUsize,
+        generations: AtomicUsize,
+        repriced: AtomicBool,
+        overall_timeout: AtomicBool,
+        response: Mutex<Option<reqwest::Response>>,
+        entered: Notify,
+        delta: Notify,
+    }
+
+    #[async_trait]
+    impl Inference for Probe {
+        async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
+            let price = if self.repriced.load(Ordering::SeqCst) {
+                9
+            } else {
+                1
+            };
+            Ok(serde_json::to_vec(&serde_json::json!({"object":"list", "data":[{"id":"m","type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"requestPrice":0}}]})).unwrap())
+        }
+        async fn count_tokens(
+            &self,
+            model: &str,
+            messages: &[Message],
+        ) -> Result<u64, InferenceError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let body = resource_fixtures::tokenizer_body(model, messages)?;
+            let pause = self.tokenizer.lock().unwrap().take();
+            if let Some(pause) = pause {
+                pause.wait().await;
+            }
+            // Actual borrowed production serialization, retained across the gate.
+            drop(
+                body.collect()
+                    .await
+                    .map_err(|_| InferenceError::Unavailable)?,
+            );
+            Ok(self.tokens)
+        }
+        async fn generate(&self, _: &Model, _: &[Message]) -> Result<Generation, InferenceError> {
+            unreachable!("buffered route forbidden")
+        }
+        async fn generate_stream(
+            &self,
+            model: &Model,
+            messages: &[Message],
+            on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        ) -> Result<stream::StreamUsage, InferenceError> {
+            self.generations.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(model.id, "m");
+            assert_eq!(model.max_output_tokens, 19); // Full context-legal allowance.
+            let body =
+                resource_fixtures::stream_body(&model.id, model.max_output_tokens, messages)?;
+            drop(
+                body.collect()
+                    .await
+                    .map_err(|_| InferenceError::Unavailable)?,
+            );
+            let response = self.response.lock().unwrap().take().unwrap();
+            self.entered.notify_one();
+            resource_fixtures::consume_response(
+                response,
+                tokio::time::Instant::now() + Duration::from_secs(3),
+                if self.overall_timeout.load(Ordering::SeqCst) {
+                    Duration::from_secs(10)
+                } else {
+                    Duration::from_secs(1)
+                },
+                |delta| {
+                    on_delta(delta);
+                    self.delta.notify_one();
+                },
+            )
+            .await
+        }
+        fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
+            Ok(serde_json::json!({"fixture":true}))
+        }
+    }
+    #[async_trait]
+    impl EvidenceVerifier for Probe {
+        async fn verify(&self, _: &str, now: u64) -> Result<GatewayEvidence, EvidenceError> {
+            Ok(GatewayEvidence {
+                quote: serde_json::json!({"fixture":true}),
+                issued_at_unix: now,
+                release_digest: "fixture".into(),
+                endpoint_key_sha256: "fixture".into(),
+                freshness_expires_at_unix: now + 60,
+            })
+        }
+    }
+    struct Fixture {
+        state: AppState,
+        probe: Arc<Probe>,
+        session: String,
+        csrf: String,
+        token: String,
+    }
+    impl Fixture {
+        async fn new(tokens: u64) -> (Self, support::RawPeer) {
+            let credential = URL_SAFE_NO_PAD.encode([21; 32]);
+            let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
+            let auth = Auth::from_json(&format!(
+                r#"[{{"id":"a","credential_sha256":"{hash}","demo_microunits":100}}]"#
+            ))
+            .unwrap();
+            let (id, session) = auth
+                .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+                .unwrap();
+            let token = auth.issue_submission(&id).unwrap();
+            let (response, peer) = support::raw_response().await;
+            let probe = Arc::new(Probe {
+                tokenizer: Mutex::new(None),
+                tokens,
+                calls: AtomicUsize::new(0),
+                generations: AtomicUsize::new(0),
+                repriced: AtomicBool::new(false),
+                overall_timeout: AtomicBool::new(false),
+                response: Mutex::new(Some(response)),
+                entered: Notify::new(),
+                delta: Notify::new(),
+            });
+            let state = AppState::new(auth, probe.clone(), "unused", probe.clone());
+            (
+                Self {
+                    state,
+                    probe,
+                    session: id,
+                    csrf: session.csrf,
+                    token,
+                },
+                peer,
+            )
+        }
+        fn request(&self) -> Request<Body> {
+            Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header(header::COOKIE, session_cookie(&self.session))
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded; charset=UTF-8",
+                )
+                .body(Body::from(self.wire()))
+                .unwrap()
+        }
+        fn wire(&self) -> String {
+            format!("csrf={}&token={}&model=m&h000000=W10&history_manifest=1.000001.00000002&prompt=hello", self.csrf, self.token)
+        }
+        async fn terminal(&self, expected: u64) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.state.generation_slots.available_permits() != 4 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(self.state.accounting.available("a"), Some(expected));
+        }
+        async fn duplicate(&self, expected: &str) {
+            let response = router(self.state.clone())
+                .oneshot(self.request())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let html = drain(response.into_body()).await;
+            assert!(html.contains(expected));
+            assert!(!html.contains("name=token"));
+            assert!(!html.contains("hello"));
+            assert_eq!(self.probe.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+    async fn drain(mut body: Body) -> String {
+        let mut bytes = Vec::new();
+        while let Some(frame) = body.frame().await {
+            if let Ok(data) = frame.unwrap().into_data() {
+                bytes.extend_from_slice(&data);
+            }
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+    async fn complete(peer: &support::RawPeer, input: u64, output: u64) {
+        peer.send(&support::event(support::choice(None, Some("stop"))), 1024)
+            .await;
+        peer.send(&support::event(support::usage(input, output)), 1024)
+            .await;
+        peer.send(b"data: [DONE]\n\n", 1024).await;
+        peer.eof().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observer_abort_at_each_handoff_keeps_one_generation_and_settlement() {
+        for phase in 0..3 {
+            let (fixture, peer) = Fixture::new(1).await;
+            let (pause, gate) = checkpoint();
+            match phase {
+                0 => *fixture.probe.tokenizer.lock().unwrap() = Some(pause),
+                1 => *fixture.state.preflight_hooks.before.lock().unwrap() = Some(pause),
+                _ => *fixture.state.preflight_hooks.after.lock().unwrap() = Some(pause),
+            }
+            let waiter = tokio::spawn(router(fixture.state.clone()).oneshot(fixture.request()));
+            tokio::time::timeout(Duration::from_secs(5), gate.reached)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(fixture.state.accounting.available("a"), Some(48));
+            assert_eq!(fixture.state.generation_slots.available_permits(), 3);
+            assert_eq!(fixture.state.chat_memory.available_permits(), 3);
+            waiter.abort();
+            assert!(waiter.await.unwrap_err().is_cancelled());
+            assert_eq!(fixture.state.accounting.available("a"), Some(48));
+            gate.release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), fixture.probe.entered.notified())
+                .await
+                .unwrap();
+            complete(&peer, 2, 3).await;
+            fixture.terminal(93).await;
+            assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 1);
+            fixture.duplicate("already completed").await;
+            assert_eq!(fixture.state.chat_memory.available_permits(), 4);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_detached_context_preflight_refunds_without_generation_or_replay() {
+        for disconnect in [false, true] {
+            let (fixture, _peer) = Fixture::new(21).await;
+            let (pause, gate) = checkpoint();
+            *fixture.probe.tokenizer.lock().unwrap() = Some(pause);
+            let waiter = tokio::spawn(router(fixture.state.clone()).oneshot(fixture.request()));
+            gate.reached.await.unwrap();
+            assert_eq!(fixture.state.accounting.available("a"), Some(48));
+            if disconnect {
+                waiter.abort();
+            }
+            gate.release.send(()).unwrap();
+            if disconnect {
+                assert!(waiter.await.unwrap_err().is_cancelled());
+            } else {
+                assert_eq!(
+                    waiter.await.unwrap().unwrap().status(),
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            fixture.terminal(100).await;
+            assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 0);
+            fixture.duplicate("refunded").await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn last_usage_only_after_finish_done_eof_and_retained_frames_pin_only_heavy() {
+        for (last_input, last_output, balance) in [(2, 3, 93), (200, 300, 48)] {
+            let (fixture, peer) = Fixture::new(1).await;
+            let response = router(fixture.state.clone())
+                .oneshot(fixture.request())
+                .await
+                .unwrap();
+            let (frame_tx, frame_rx) = oneshot::channel();
+            let has_token = Arc::new(AtomicBool::new(false));
+            let seen = has_token.clone();
+            let reader = tokio::spawn(async move {
+                let mut body = response.into_body();
+                let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+                // Keep a one-byte slice after worker completion, not the full body.
+                frame_tx.send(frame.slice(..1)).unwrap();
+                drop(frame);
+                let mut html = String::new();
+                while let Some(frame) = body.frame().await {
+                    if let Ok(data) = frame.unwrap().into_data() {
+                        html.push_str(std::str::from_utf8(&data).unwrap());
+                        seen.store(html.contains("name=token"), Ordering::SeqCst);
+                    }
+                }
+                html
+            });
+            let retained: Bytes = frame_rx.await.unwrap();
+            fixture.probe.entered.notified().await;
+            peer.send(&support::event(support::choice(Some("visible"), None)), 3)
+                .await;
+            fixture.probe.delta.notified().await;
+            peer.send(&support::event(support::usage(8, 9)), 1024).await;
+            peer.send(&support::event(support::choice(None, Some("stop"))), 1024)
+                .await;
+            peer.send(
+                &support::event(support::usage(last_input, last_output)),
+                1024,
+            )
+            .await;
+            assert_eq!(fixture.state.accounting.available("a"), Some(48));
+            assert!(!reader.is_finished());
+            peer.send(b"data: [DONE]\n\n", 1024).await;
+            fixture.probe.repriced.store(true, Ordering::SeqCst);
+            assert_eq!(fixture.state.accounting.available("a"), Some(48));
+            assert!(!reader.is_finished());
+            assert!(!has_token.load(Ordering::SeqCst));
+            peer.eof().await;
+            let html = reader.await.unwrap();
+            assert!(html.contains("visible"));
+            assert!(html.contains("name=token"));
+            fixture.terminal(balance).await;
+            assert_eq!(fixture.state.chat_memory.available_permits(), 3);
+            assert_eq!(fixture.state.chat_ingress.available_permits(), 4);
+            assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 1);
+            drop(retained);
+            assert_eq!(fixture.state.chat_memory.available_permits(), 4);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_socket_close_before_output_after_delta_and_while_eof_held_keeps_settlement() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::{TcpListener, TcpStream},
+        };
+        for phase in 0..3 {
+            let (fixture, peer) = Fixture::new(1).await;
+            let (pause, gate) = checkpoint();
+            *fixture.probe.tokenizer.lock().unwrap() = Some(pause);
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(crate::web::serve(listener, fixture.state.clone()));
+            let mut socket = TcpStream::connect(address).await.unwrap();
+            let wire = fixture.wire();
+            socket.write_all(format!("POST /chat HTTP/1.1\r\nHost: local\r\nCookie: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}", session_cookie(&fixture.session).split(';').next().unwrap(), wire.len(), wire).as_bytes()).await.unwrap();
+            gate.reached.await.unwrap();
+            let mut socket = Some(socket);
+            if phase == 0 {
+                drop(socket.take());
+            }
+            assert_eq!(fixture.state.accounting.available("a"), Some(48));
+            gate.release.send(()).unwrap();
+            fixture.probe.entered.notified().await;
+            if phase != 0 {
+                peer.send(
+                    &support::event(support::choice(Some("visible"), None)),
+                    1024,
+                )
+                .await;
+                fixture.probe.delta.notified().await;
+                let mut visible = Vec::new();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !visible.windows(7).any(|s| s == b"visible") {
+                        let mut bytes = [0; 1024];
+                        let size = socket.as_mut().unwrap().read(&mut bytes).await.unwrap();
+                        assert!(size > 0 && visible.len() + size < 16 * 1024);
+                        visible.extend_from_slice(&bytes[..size]);
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(!String::from_utf8_lossy(&visible).contains("name=token"));
+                assert!(String::from_utf8_lossy(&visible).contains("action=/logout"));
+                if phase == 1 {
+                    drop(socket.take());
+                }
+            }
+            peer.send(&support::event(support::choice(None, Some("stop"))), 1024)
+                .await;
+            peer.send(&support::event(support::usage(2, 3)), 1024).await;
+            peer.send(b"data: [DONE]\n\n", 1024).await;
+            assert_eq!(fixture.state.accounting.available("a"), Some(48));
+            drop(socket);
+            peer.eof().await;
+            fixture.terminal(93).await;
+            fixture.duplicate("already completed").await;
+            assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 1);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn racing_duplicate_has_one_reservation_and_restart_never_replays() {
+        let (fixture, peer) = Fixture::new(1).await;
+        let (pause, gate) = checkpoint();
+        *fixture.probe.tokenizer.lock().unwrap() = Some(pause);
+        let mut first = tokio::spawn(router(fixture.state.clone()).oneshot(fixture.request()));
+        let mut second = tokio::spawn(router(fixture.state.clone()).oneshot(fixture.request()));
+        gate.reached.await.unwrap();
+        let (duplicate, accepted) = tokio::select! {
+            response = &mut first => (response.unwrap().unwrap(), second),
+            response = &mut second => (response.unwrap().unwrap(), first),
+        };
+        let html = drain(duplicate.into_body()).await;
+        assert!(html.contains("already in progress"));
+        assert!(!html.contains("name=token"));
+        assert_eq!(fixture.state.accounting.available("a"), Some(48));
+        gate.release.send(()).unwrap();
+        drop(accepted.await.unwrap().unwrap());
+        fixture.probe.entered.notified().await;
+        complete(&peer, 1, 1).await;
+        fixture.terminal(97).await;
+        assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 1);
+        let (restarted, _peer) = Fixture::new(1).await;
+        let response = router(restarted.state.clone())
+            .oneshot(fixture.request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(restarted.probe.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(restarted.probe.generations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn racing_reservations_reject_insufficient_credit_before_second_tokenization() {
+        let (fixture, peer) = Fixture::new(1).await;
+        let (pause, gate) = checkpoint();
+        *fixture.probe.tokenizer.lock().unwrap() = Some(pause);
+        let other_token = fixture
+            .state
+            .auth
+            .issue_submission(&fixture.session)
+            .unwrap();
+        let mut other_request = fixture.request();
+        *other_request.body_mut() =
+            Body::from(fixture.wire().replace(&fixture.token, &other_token));
+        let mut first = tokio::spawn(router(fixture.state.clone()).oneshot(fixture.request()));
+        let mut second = tokio::spawn(router(fixture.state.clone()).oneshot(other_request));
+        gate.reached.await.unwrap();
+        let (rejected, accepted) = tokio::select! {
+            response = &mut first => (response.unwrap().unwrap(), second),
+            response = &mut second => (response.unwrap().unwrap(), first),
+        };
+        assert_eq!(rejected.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(drain(rejected.into_body())
+            .await
+            .contains("insufficient demo credit"));
+        assert_eq!(fixture.state.accounting.available("a"), Some(48));
+        assert_eq!(fixture.probe.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 0);
+        gate.release.send(()).unwrap();
+        drop(accepted.await.unwrap().unwrap());
+        fixture.probe.entered.notified().await;
+        complete(&peer, 1, 1).await;
+        fixture.terminal(97).await;
+        assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn content_type_and_noncanonical_continuations_fail_before_reservation() {
+        let (fixture, _peer) = Fixture::new(1).await;
+        for content_type in [
+            None,
+            Some("application/json"),
+            Some("application/x-www-form-urlencoded-extra"),
+        ] {
+            let mut request = fixture.request();
+            request.headers_mut().remove(header::CONTENT_TYPE);
+            if let Some(value) = content_type {
+                request
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, value.parse().unwrap());
+            }
+            let response = router(fixture.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        }
+        for replacement in [
+            "history=%5B%5D",
+            "h000000=W10",
+            "h000000=W10&history_manifest=1.000001.00000002&h000000=W10",
+        ] {
+            let mut request = fixture.request();
+            *request.body_mut() = Body::from(fixture.wire().replace(
+                "h000000=W10&history_manifest=1.000001.00000002",
+                replacement,
+            ));
+            let response = router(fixture.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(fixture.state.accounting.available("a"), Some(100));
+        assert_eq!(fixture.probe.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_faults_refund_once_recover_capacity_and_never_replay() {
+        for fault in 0..10 {
+            let (fixture, peer) = Fixture::new(1).await;
+            fixture
+                .probe
+                .overall_timeout
+                .store(fault == 9, Ordering::SeqCst);
+            let response = router(fixture.state.clone())
+                .oneshot(fixture.request())
+                .await
+                .unwrap();
+            drop(response);
+            fixture.probe.entered.notified().await;
+            peer.send(
+                &support::event(support::choice(
+                    Some("partial"),
+                    if fault == 8 { None } else { Some("stop") },
+                )),
+                1024,
+            )
+            .await;
+            if fault != 0 {
+                let usage = if fault == 1 {
+                    serde_json::json!({"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":99}})
+                } else {
+                    support::usage(1, 2)
+                };
+                peer.send(&support::event(usage), 1024).await;
+            }
+            match fault {
+                2 => {
+                    peer.send(b"data: {\"error\":{\"message\":\"hostile\"}}\n\n", 1024)
+                        .await
+                }
+                3 => peer.send(b"data: [DONE]\n\ndata: {}\n\n", 1024).await,
+                4 => peer.send(b"data: [DONE]\n\ntrailing", 1024).await,
+                5 => {} // EOF without DONE
+                _ => peer.send(b"data: [DONE]\n\n", 1024).await,
+            }
+            if fault == 6 {
+                peer.fault().await;
+            } else if fault != 7 && fault != 9 {
+                peer.eof().await;
+            } // DONE with stalled transport EOF: idle (7) or overall (9) deadline.
+            fixture.terminal(100).await;
+            fixture.duplicate("refunded").await;
+            assert_eq!(fixture.state.chat_memory.available_permits(), 4);
+            assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 1);
         }
     }
 }
