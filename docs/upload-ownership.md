@@ -67,6 +67,10 @@ Local macOS/aarch64 verification:
   exactly one test passed, 82 filtered; peak requested live allocation
   **119,000,481 bytes** for these synthetic phases. Nix used an expired cached
   dependency ref after a DNS lookup failed; the test itself completed normally.
+- The same exact one-test command with `--release` passed again after the
+  disclosure merge (`2a3c73c`), with **118,997,451 bytes** peak requested live
+  allocation (82 filtered). Optimization and this synthetic sample are not
+  worst-case, allocator-overhead, or RSS evidence.
 - `git diff --check`: passed. The existing vendored SDK dead-code warning remains;
   no vendor source changes were made.
 
