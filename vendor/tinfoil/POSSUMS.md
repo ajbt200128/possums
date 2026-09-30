@@ -14,3 +14,11 @@ across validation and export. Existing attestation verification, release
 provenance, TLS binding, refresh publication and revocation remain unchanged.
 The original unbounded SDK APIs remain for upstream compatibility but must not
 be used by the gateway's request-owned evidence path.
+
+The shared pinned-client builder (including origin-bound requests) also disables
+the HTTP/1 idle pool.
+Hyper's pooled checkout can otherwise finish speculative connections in the
+background after a request returns, without retaining that request's resource
+lease. Zero idle capacity bypasses that path; it does not weaken certificate
+pinning or origin checks, but costs a fresh TLS handshake per request. This is
+source-level lifetime reasoning, not a whole-process RSS or live-provider proof.

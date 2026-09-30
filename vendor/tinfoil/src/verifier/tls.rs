@@ -437,7 +437,9 @@ fn build_pinned_client(
     // Build reqwest client with this config
     let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls(config)
-        .https_only(true);
+        .https_only(true)
+        // Avoid Hyper's speculative/idle connections outliving request admission.
+        .pool_max_idle_per_host(0);
     if let Some(policy) = redirect_policy {
         builder = builder.redirect(policy);
     }
