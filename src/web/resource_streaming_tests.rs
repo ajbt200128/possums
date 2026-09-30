@@ -131,8 +131,9 @@ use http_body_util::BodyExt;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{oneshot, Semaphore};
 
-/// A passing test CONFIRMS the unresolved control-lane counterexample, not a fix.
-/// This is a schema/clone reproduction, not fabricated live SDK authentication.
+/// Public-schema counterexample: the SDK's legacy unbounded clone still fails.
+/// The gateway now uses the pre-clone export tested below, not this legacy path.
+/// This is NOT fabricated live SDK authentication.
 #[test]
 fn sdk_evidence_clone_bound_counterexample() {
     use tinfoil::verifier::{Measurement, PredicateType};
@@ -190,6 +191,149 @@ fn sdk_evidence_clone_bound_counterexample() {
     println!(
         "capacity blocker: cloned_rtmr2_bytes={retained} control_lane_bytes={CONTROL_BYTES} registers=3 serializer_rejected=true"
     );
+}
+
+fn synthetic_ground_truth() -> tinfoil::GroundTruth {
+    use tinfoil::{GroundTruth, Measurement, PredicateType, SoftwareIdentity};
+    let measurement = Measurement {
+        type_: PredicateType::SevGuestV2,
+        registers: vec!["0".repeat(96)],
+    };
+    GroundTruth {
+        config_repo: "fixture/repo".into(),
+        release_tag: Some("v1".into()),
+        digest: "0".repeat(64),
+        tls_public_key: Some("0".repeat(64)),
+        hpke_public_key: Some("1".repeat(64)),
+        code_measurement: measurement.clone(),
+        enclave_measurement: measurement,
+        code_fingerprint: "0".repeat(64),
+        enclave_fingerprint: "0".repeat(64),
+        verifier: SoftwareIdentity {
+            name: "fixture".into(),
+            version: "1".into(),
+        },
+        verified_at: "2026-09-30T00:00:00Z".into(),
+    }
+}
+
+#[test]
+fn sdk_evidence_export_boundary() {
+    // Isolate the process-wide counter even when the complete suite runs with
+    // parallel tests. Fixture construction precedes each measurement; rejected
+    // exports must allocate ZERO bytes, not allocate and immediately free a clone.
+    const CHILD: &str = "POSSUMS_EVIDENCE_ALLOCATION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "web::resource_streaming_tests::sdk_evidence_export_boundary",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated evidence allocation test failed"
+        );
+        print!("{}", String::from_utf8(output.stdout).unwrap());
+        return;
+    }
+    let allocator = &crate::process_alloc_tests::ALLOCATOR;
+    let reject = |evidence: &tinfoil::GroundTruth, host: &str| {
+        let before = allocator.begin_phase();
+        let result = resource_fixtures::verification_value(evidence, host);
+        let after = allocator.snapshot();
+        assert!(result.is_err());
+        assert_eq!(
+            after.phase_peak, before.live,
+            "rejection allocated before returning"
+        );
+        assert_eq!(after.live, before.live);
+    };
+    let mut evidence = synthetic_ground_truth();
+    evidence.code_measurement.type_ = tinfoil::PredicateType::SnpTdxMultiPlatformV1;
+    evidence
+        .code_measurement
+        .registers
+        .extend(["0".repeat(96), "x".repeat(16_777_217)]);
+    evidence
+        .code_measurement
+        .equals(&evidence.enclave_measurement)
+        .unwrap();
+    reject(&evidence, "fixture.invalid");
+    drop(evidence);
+
+    // Every variable string, including nested identity, optional fields, both
+    // measurement vectors, and the configuration-derived host. No field names
+    // or contents are emitted by the sanitized production error.
+    type Field = fn(&mut tinfoil::GroundTruth) -> &mut String;
+    let fields: [Field; 12] = [
+        |g| &mut g.config_repo,
+        |g| g.release_tag.as_mut().unwrap(),
+        |g| &mut g.digest,
+        |g| g.tls_public_key.as_mut().unwrap(),
+        |g| g.hpke_public_key.as_mut().unwrap(),
+        |g| &mut g.code_fingerprint,
+        |g| &mut g.enclave_fingerprint,
+        |g| &mut g.verifier.name,
+        |g| &mut g.verifier.version,
+        |g| &mut g.verified_at,
+        |g| &mut g.code_measurement.registers[0],
+        |g| &mut g.enclave_measurement.registers[0],
+    ];
+    for field in fields {
+        let mut evidence = synthetic_ground_truth();
+        *field(&mut evidence) = "x".repeat(4097);
+        reject(&evidence, "fixture.invalid");
+    }
+    reject(&synthetic_ground_truth(), &"x".repeat(4097));
+    for code in [true, false] {
+        let mut evidence = synthetic_ground_truth();
+        let measurement = if code {
+            &mut evidence.code_measurement
+        } else {
+            &mut evidence.enclave_measurement
+        };
+        measurement.registers = vec![String::new(); 33];
+        reject(&evidence, "fixture.invalid");
+    }
+    let mut aggregate = synthetic_ground_truth();
+    aggregate.code_measurement.registers = vec!["x".repeat(4096); 4];
+    reject(&aggregate, "fixture.invalid"); // Each field fits; aggregate does not.
+    aggregate.code_measurement.registers.clear();
+    aggregate.tls_public_key = Some("x".repeat(4096));
+    aggregate.hpke_public_key = Some("x".repeat(4096));
+    reject(&aggregate, "fixture.invalid"); // Output duplicates keys: >16 KiB.
+    for tls in [true, false] {
+        let mut missing = synthetic_ground_truth();
+        if tls {
+            missing.tls_public_key = None;
+        } else {
+            missing.hpke_public_key = None;
+        }
+        reject(&missing, "fixture.invalid");
+    }
+
+    let mut valid = synthetic_ground_truth();
+    valid.code_measurement.registers = vec!["\0".repeat(200); 32];
+    valid.enclave_measurement.registers = vec!["\0".repeat(200); 32];
+    valid.release_tag = Some("\0".repeat(2048));
+    // Compare to the unchanged SDK projection outside the measured export.
+    let expected = serde_json::to_value(
+        tinfoil::VerificationDocument::from_ground_truth(valid.clone(), "fixture.invalid".into())
+            .unwrap(),
+    )
+    .unwrap();
+    let before = allocator.begin_phase();
+    let value = resource_fixtures::verification_value(&valid, "fixture.invalid").unwrap();
+    let after = allocator.snapshot();
+    assert_eq!(value, expected);
+    let export_peak = after.phase_peak - before.live;
+    assert!(export_peak < 1024 * 1024);
+    println!("bounded evidence: unused_register_bytes=16777217 rejected_export_peak_delta=0 other_fields=12 host=1 vector_limits=2 aggregate_cases=2 missing_keys=2 valid_export_peak_delta={export_peak}");
 }
 
 // One-use test-only rendezvous. No Notify wakeup race, blocking runtime thread,
@@ -389,6 +533,7 @@ mod route {
         repriced: AtomicBool,
         overall_timeout: AtomicBool,
         response: Mutex<Option<reqwest::Response>>,
+        evidence: Mutex<tinfoil::GroundTruth>,
         entered: Notify,
         delta: Notify,
     }
@@ -459,7 +604,7 @@ mod route {
             .await
         }
         fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
-            Ok(serde_json::json!({"fixture":true}))
+            resource_fixtures::verification_value(&self.evidence.lock().unwrap(), "fixture.invalid")
         }
     }
     #[async_trait]
@@ -502,6 +647,7 @@ mod route {
                 repriced: AtomicBool::new(false),
                 overall_timeout: AtomicBool::new(false),
                 response: Mutex::new(Some(response)),
+                evidence: Mutex::new(synthetic_ground_truth()),
                 entered: Notify::new(),
                 delta: Notify::new(),
             });
@@ -564,6 +710,48 @@ mod route {
         }
         String::from_utf8(bytes).unwrap()
     }
+    #[tokio::test]
+    async fn attestation_uses_bounded_adapter_export() {
+        // Real router and production export helper, with explicitly SYNTHETIC
+        // ground truth. SDK snapshot selection/refresh has separate SDK tests.
+        let (fixture, _peer) = Fixture::new(1).await;
+        let request = || {
+            Request::builder()
+                .uri("/attestation")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = router(fixture.state.clone())
+            .oneshot(request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let document: serde_json::Value =
+            serde_json::from_str(&drain(response.into_body()).await).unwrap();
+        let expected =
+            resource_fixtures::verification_value(&synthetic_ground_truth(), "fixture.invalid")
+                .unwrap();
+        assert_eq!(document["upstream"], expected);
+        fixture
+            .probe
+            .evidence
+            .lock()
+            .unwrap()
+            .code_measurement
+            .registers
+            .push("x".repeat(16_777_217));
+        let response = router(fixture.state.clone())
+            .oneshot(request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = drain(response.into_body()).await;
+        assert!(!body.contains("fixture.invalid"));
+        assert!(!body.contains("16777217"));
+        assert_eq!(fixture.probe.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 0);
+    }
+
     async fn complete(peer: &support::RawPeer, input: u64, output: u64) {
         peer.send(&support::event(support::choice(None, Some("stop"))), 1024)
             .await;
