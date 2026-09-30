@@ -3,7 +3,7 @@
 Source: https://github.com/tinfoilsh/tinfoil-rs at
 `34157e497a747c191852d52af39cfbdb8dbd9eb7` (Apache-2.0).
 `src/`, `assets/`, `tests/`, Cargo.toml, Cargo.lock, LICENSE and README.md
-are imported byte-for-byte before the local bounded-evidence patch. Git records
+are imported byte-for-byte before the local patches described below. Git records
 the pristine import separately for review. Cargo.lock in this directory pins
 the SDK's standalone test dependencies; the repository root Cargo.lock pins
 production dependencies. No dependency-cache edits are required.
