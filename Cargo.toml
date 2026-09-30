@@ -22,7 +22,8 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"
 subtle = "2.6"
 thiserror = "2"
-tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", rev = "34157e497a747c191852d52af39cfbdb8dbd9eb7" }
+# Exact upstream revision and local patch provenance: vendor/tinfoil/POSSUMS.md.
+tinfoil = { path = "vendor/tinfoil" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["catch-panic", "limit", "set-header", "timeout"] }
