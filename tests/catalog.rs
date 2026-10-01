@@ -235,9 +235,43 @@ fn unusable_catalog_fields_fail_closed() {
         value["data"][0]["pricing"][field] = serde_json::json!(-1);
         assert!(Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0).is_err());
     }
-    for extra in ["cachedInputTokenPricePer1M", "imagePrice", "unknownFee"] {
+    for extra in ["imagePrice", "unknownFee"] {
         let mut value = base.clone();
         value["data"][0]["pricing"][extra] = serde_json::json!(0);
+        assert_eq!(
+            Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0),
+            Err(CatalogError::Invalid)
+        );
+    }
+}
+
+#[test]
+fn cached_input_discount_never_lowers_the_reservation() {
+    let mut value = serde_json::json!({"object":"list","data":[{
+        "id":"m", "type":"chat", "context_window":100,
+        "endpoints":["/v1/chat/completions"],
+        "pricing":{"inputTokenPricePer1M":2,"outputTokenPricePer1M":3,"requestPrice":0}
+    }]});
+    let quote = Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0)
+        .unwrap()
+        .reservation_quote("m")
+        .unwrap();
+    for discount in [
+        serde_json::json!(0),
+        serde_json::json!(0.5),
+        serde_json::json!(2),
+    ] {
+        value["data"][0]["pricing"]["cachedInputTokenPricePer1M"] = discount;
+        let catalog =
+            Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0).unwrap();
+        assert_eq!(catalog.reservation_quote("m"), Ok(quote.clone()));
+    }
+    for invalid in [
+        serde_json::json!(2.000001),
+        serde_json::json!(-1),
+        serde_json::json!("0.5"),
+    ] {
+        value["data"][0]["pricing"]["cachedInputTokenPricePer1M"] = invalid;
         assert_eq!(
             Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0),
             Err(CatalogError::Invalid)

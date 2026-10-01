@@ -65,6 +65,8 @@ struct TinfoilPricing {
     input: Option<Number>,
     #[serde(rename = "outputTokenPricePer1M")]
     output: Option<Number>,
+    #[serde(rename = "cachedInputTokenPricePer1M")]
+    cached_input: Option<Number>,
     #[serde(rename = "requestPrice")]
     request: Option<Number>,
 }
@@ -101,13 +103,20 @@ impl Catalog {
             if scaled_amount(&request_price)? != 0 {
                 return Err(CatalogError::Invalid);
             }
+            let input_price = scaled_price(&input_price)?;
+            if let Some(cached) = upstream_model.pricing.cached_input {
+                // Charge and reserve at the standard rate, never an unverified discount.
+                if scaled_amount(&cached)? > input_price {
+                    return Err(CatalogError::Invalid);
+                }
+            }
             let model = Model {
                 id: upstream_model.id,
                 context_tokens,
                 // No separate output bound is advertised by this catalog schema.
                 // M=C is an operational assumption, not a proven billing bound.
                 max_output_tokens: context_tokens,
-                input_microunits_per_million_tokens: scaled_price(&input_price)?,
+                input_microunits_per_million_tokens: input_price,
                 output_microunits_per_million_tokens: scaled_price(&output_price)?,
             };
             if !valid_model(&model) || !ids.insert(model.id.clone()) {
