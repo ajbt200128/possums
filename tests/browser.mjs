@@ -11,12 +11,14 @@ async function acceptance() {
   for (const invalid of ["https://remote.invalid", "http://127.0.0.1:65536", "x".repeat(129)]) {
     assert.throws(() => fixtureOrigin(Buffer.from(invalid)));
   }
+  stage = "fixture launch";
   const fixture = await startStreamingFixture({ progressive: true });
   const { origin, stop } = fixture;
   try {
-
+    stage = "browser launch";
     const browser = await chromium.launch({ headless: true });
     try {
+      stage = "browser context";
       const context = await browser.newContext({ javaScriptEnabled: false });
       context.setDefaultTimeout(10_000);
       context.setDefaultNavigationTimeout(10_000);
@@ -205,9 +207,12 @@ async function acceptance() {
 
 try {
   await acceptance();
-} catch {
+} catch (error) {
   // Playwright errors can include page URLs, selector text and input values.
   // Report only a fixed phase, never the original error/cause or page content.
   console.error(`browser acceptance failed: ${stage}`);
+  if (stage === "fixture launch" && ["fixture exited", "fixture failed", "invalid fixture origin", "fixture phase timed out", "fixture output too large"].includes(error.message)) {
+    console.error(`fixture failure class: ${error.message}`);
+  }
   process.exitCode = 1;
 }
