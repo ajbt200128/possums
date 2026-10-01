@@ -78,9 +78,10 @@ Two independent read-only reviews found no concrete upload-lifetime or fixture
 wiring defect. One could not execute Rust tests in its own environment; the
 full local suite and one-test fixture above were run separately in this checkout.
 
-The synthetic peak is neither a universal bound nor RSS. The unchanged 104-MiB
-per-heavy/512-MiB scoped target still requires the complete analytic phase bound,
-including writer growth, accepted input, parsing/rendering/delivery overlap and
-shared/control/ingress allowances. This repair closes queued-upload ownership and
-successive-serializer overlap gaps; it does not establish the remaining bound,
-SDK/TLS/helper RSS, authenticated live-provider behavior, or release readiness.
+The synthetic peak is neither a universal bound nor RSS. The 104-MiB
+per-heavy/512-MiB scoped target remains unproved; the user has explicitly
+accepted that availability risk for Phase 0 rather than requiring its analytic
+proof as a release gate. This repair still closes queued-upload ownership and
+successive-serializer overlap gaps. It does not establish a whole-process memory
+bound, SDK/TLS/helper RSS, authenticated live-provider behavior, or release
+readiness.
