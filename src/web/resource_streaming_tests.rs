@@ -1130,7 +1130,15 @@ mod route {
             } // DONE with stalled transport EOF: idle (7) or overall (9) deadline.
             fixture.terminal(100).await;
             fixture.duplicate("refunded").await;
-            assert_eq!(fixture.state.chat_memory.available_permits(), 4);
+            // Settlement and the generation slot can finish before the last
+            // admitted upload/delivery owner releases its heavy lease.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while fixture.state.chat_memory.available_permits() != 4 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("heavy lease retained after fault {fault}"));
             assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 1);
         }
     }
