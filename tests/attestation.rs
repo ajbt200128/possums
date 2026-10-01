@@ -4,11 +4,14 @@ use std::io::Write;
 const NOW: u64 = 1_000;
 
 fn envelope(quote: &str) -> String {
+    envelope_at(quote, NOW, NOW + 1)
+}
+
+fn envelope_at(quote: &str, issued: u64, expires: u64) -> String {
     format!(
-        r#"{{"quote":{quote},"issued_at_unix":{NOW},"release_digest":"{}","endpoint_key_sha256":"{}","freshness_expires_at_unix":{}}}"#,
+        r#"{{"quote":{quote},"issued_at_unix":{issued},"release_digest":"{}","endpoint_key_sha256":"{}","freshness_expires_at_unix":{expires}}}"#,
         "a".repeat(64),
         "b".repeat(64),
-        NOW + 1
     )
 }
 
@@ -123,9 +126,31 @@ mod helper {
     }
 
     #[tokio::test]
-    async fn helper_accepts_normal_fixture() {
-        let file = script(&format!("printf '%s' '{}'", envelope(r#"{"format":"v3"}"#)));
+    async fn helper_accepts_evidence_issued_after_request_started() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let file = script(&format!(
+            "sleep 1; printf '%s' '{}'",
+            envelope_at(r#"{"format":"v3"}"#, now + 1, now + 301)
+        ));
+        // The supplied request-start sample predates issuance; only a
+        // validation-time sample after the helper exits can accept it.
         assert!(verify(&file).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn helper_still_rejects_genuinely_future_issuance() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let file = script(&format!(
+            "printf '%s' '{}'",
+            envelope_at(r#"{"format":"v3"}"#, now + 60, now + 360)
+        ));
+        assert!(matches!(verify(&file).await, Err(EvidenceError::Invalid)));
     }
 
     #[tokio::test]

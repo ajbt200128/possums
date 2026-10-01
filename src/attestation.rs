@@ -1,6 +1,12 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Read, path::Path, process::Stdio, time::Duration};
+use std::{
+    fs,
+    io::Read,
+    path::Path,
+    process::Stdio,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
@@ -21,6 +27,8 @@ pub struct GatewayEvidence {
 
 #[async_trait]
 pub trait EvidenceVerifier: Send + Sync {
+    // Fixture verifiers can use the supplied time. The production helper must
+    // sample its clock after awaiting newly issued evidence instead.
     async fn verify(
         &self,
         evidence_path: &str,
@@ -47,7 +55,7 @@ impl EvidenceVerifier for TinfoilEvidenceVerifier {
     async fn verify(
         &self,
         evidence_path: &str,
-        now_unix: u64,
+        _now_unix: u64,
     ) -> Result<GatewayEvidence, EvidenceError> {
         let mut command = Command::new(&self.helper_path);
         command
@@ -75,7 +83,13 @@ impl EvidenceVerifier for TinfoilEvidenceVerifier {
             if !status.success() {
                 return Err(EvidenceError::Invalid);
             }
-            parse_and_validate(&bytes, now_unix)
+            // The helper issues fresh evidence after this request begins; sampling
+            // before awaiting it can reject a valid quote across a second boundary.
+            let validated_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| EvidenceError::Unavailable)?
+                .as_secs();
+            parse_and_validate(&bytes, validated_at)
         })
         .await
         .map_err(|_| EvidenceError::Unavailable)?
