@@ -331,10 +331,17 @@ impl ProtocolParser {
             [] if usage.is_some() => {}
             [choice] if self.state == State::Receiving => {
                 let choice = choice.as_object().ok_or(StreamError::Protocol)?;
-                if choice
-                    .keys()
-                    .any(|k| !["index", "delta", "finish_reason", "logprobs"].contains(&k.as_str()))
-                    || choice.get("index").and_then(Value::as_u64) != Some(0)
+                if choice.keys().any(|k| {
+                    ![
+                        "index",
+                        "delta",
+                        "finish_reason",
+                        "logprobs",
+                        "token_ids",
+                        "stop_reason",
+                    ]
+                    .contains(&k.as_str())
+                }) || choice.get("index").and_then(Value::as_u64) != Some(0)
                 {
                     return Err(StreamError::Protocol);
                 }
@@ -362,6 +369,7 @@ impl ProtocolParser {
                         "role" if value.as_str() == Some("assistant") => {}
                         "reasoning" | "reasoning_content"
                             if value.is_null() || value.is_string() => {}
+                        "p" => {} // Authenticated backend metadata; bounded and never rendered.
                         _ => return Err(StreamError::Protocol),
                     }
                 }
@@ -724,6 +732,57 @@ mod tests {
             assert!(result.is_err());
             assert!(!format!("{result:?}").contains("secret"));
         }
+    }
+
+    #[test]
+    fn authenticated_backend_metadata_is_bounded_but_never_rendered() {
+        let mut parser = ProtocolParser::default();
+        let mut deltas = Vec::new();
+        let first = serde_json::json!({"choices":[{"index":0,"delta":{
+            "content":"safe", "p":{"ignored":"<img src=remote>"}
+        },"finish_reason":null,"token_ids":[1,2]}],"usage":{
+            "prompt_tokens":2,"completion_tokens":1,"total_tokens":3,
+            "completion_tokens_details":{"reasoning_tokens":1}
+        }});
+        parser
+            .feed(&event(first), |delta| deltas.push(delta.to_owned()))
+            .unwrap();
+        parser
+            .feed(
+                &event(serde_json::json!({"choices":[{
+                    "index":0,"delta":{},"finish_reason":"stop",
+                    "token_ids":[],"stop_reason":null
+                }]})),
+                |_| panic!("metadata must not render"),
+            )
+            .unwrap();
+        parser
+            .feed(&event(usage(2, 1)), |_| panic!("usage must not render"))
+            .unwrap();
+        parser
+            .feed(b"data: [DONE]\n\n", |_| panic!("DONE must not render"))
+            .unwrap();
+        assert_eq!(deltas, ["safe"]);
+        assert_eq!(parser.eof().unwrap().total_tokens, 3);
+
+        for (location, field) in [("delta", "unrecognized"), ("choice", "unknownFee")] {
+            let mut choice = choice(Some("safe"), None);
+            let target = if location == "delta" {
+                &mut choice["choices"][0]["delta"]
+            } else {
+                &mut choice["choices"][0]
+            };
+            target[field] = serde_json::json!(0);
+            assert_eq!(
+                ProtocolParser::default().feed(&event(choice), |_| panic!()),
+                Err(StreamError::Protocol)
+            );
+        }
+        let oversized = serde_json::json!({"choices":[{"index":0,"delta":{"content":"safe","p":"x".repeat(MAX_OPTIONAL_BYTES)},"finish_reason":null}]});
+        assert_eq!(
+            ProtocolParser::default().feed(&event(oversized), |_| panic!()),
+            Err(StreamError::Limit)
+        );
     }
 
     #[tokio::test]
