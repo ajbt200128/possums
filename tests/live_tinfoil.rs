@@ -53,17 +53,13 @@ async fn production_client_authenticates_catalog_tokenization_and_streaming() {
         .quote(&model.id, input_tokens)
         .expect("live canary exceeded the selected model context");
     quote.model.max_output_tokens = quote.model.max_output_tokens.min(CANARY_MAX_OUTPUT_TOKENS);
-    // Count deltas in constant space; never retain or log content or credentials.
-    // Tokenizer equality and operational output bounds are not settlement
-    // authority or proof of invoice coverage.
-    let mut delta_count = 0_usize;
+    // A 64-token canary may spend every output token on reasoning and emit no
+    // visible content. Terminal authenticated usage, not delta count, decides
+    // success; this does not establish provider invoice semantics.
     let usage = inference
-        .generate_stream(&quote.model, &messages, heavy, |_| {
-            delta_count = delta_count.saturating_add(1);
-        })
+        .generate_stream(&quote.model, &messages, heavy, |_| {})
         .await
         .expect("authenticated live streaming failed");
-    assert!(delta_count > 0, "live stream delivered no deltas");
     // Success is terminal: the adapter has validated finish, DONE and EOF.
     assert!(usage.total_tokens > 0, "live stream returned empty usage");
     assert_eq!(
@@ -71,6 +67,60 @@ async fn production_client_authenticates_catalog_tokenization_and_streaming() {
         Some(usage.total_tokens),
         "live stream returned inconsistent terminal usage"
     );
+}
+
+/// Check every current model with the production adapter, not only the tolerant
+/// diagnostic probe. A failure stops before any next model; no generation retries.
+#[tokio::test]
+#[ignore = "funded opt-in: up to eight independent 64-output-token live generations"]
+async fn production_adapter_streams_all_catalog_models() {
+    assert_eq!(
+        env::var("TINFOIL_ALL_MODELS_FUNDED").as_deref(),
+        Ok("yes"),
+        "set TINFOIL_ALL_MODELS_FUNDED=yes to authorize the funded canaries"
+    );
+    let inference = TinfoilInference::connect(HOST, REPOSITORY, load_api_key())
+        .await
+        .expect("live attested Tinfoil connection failed");
+    let now = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs();
+    let catalog = authenticated_catalog(&inference, now)
+        .await
+        .expect("live Tinfoil catalog authentication or validation failed");
+    assert!(
+        catalog.models.len() <= 8,
+        "catalog exceeds funded request budget"
+    );
+    for model in &catalog.models {
+        let messages = [Message {
+            role: "user".into(),
+            content: "Reply with exactly: possums-production-adapter-canary".into(),
+        }];
+        let heavy = std::sync::Arc::new(
+            std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+                .try_acquire_owned()
+                .unwrap(),
+        );
+        let input_tokens = inference
+            .count_tokens(&model.id, &messages, heavy.clone())
+            .await
+            .expect("authenticated tokenization failed");
+        let mut quote = catalog
+            .quote(&model.id, input_tokens)
+            .expect("canary exceeded model context");
+        quote.model.max_output_tokens = quote.model.max_output_tokens.min(CANARY_MAX_OUTPUT_TOKENS);
+        let usage = inference
+            .generate_stream(&quote.model, &messages, heavy, |_| {})
+            .await
+            .expect("authenticated live streaming failed; do not replay");
+        assert!(usage.total_tokens > 0);
+        assert_eq!(
+            usage.input_tokens.checked_add(usage.output_tokens),
+            Some(usage.total_tokens),
+            "live stream returned inconsistent terminal usage"
+        );
+        // Public model IDs only; never retain or log content, keys or raw usage.
+        println!("validated model={}", model.id);
+    }
 }
 
 /// Diagnostic only; separate from the production streaming adapter canary above.
