@@ -300,6 +300,7 @@ impl Inference for PanicInference {
 enum HoldPoint {
     Catalog,
     Tokenization,
+    Generation,
 }
 
 #[derive(Default)]
@@ -382,6 +383,7 @@ impl Inference for FakeInference {
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         self.generations.fetch_add(1, Ordering::SeqCst);
+        self.pause_at(HoldPoint::Generation).await;
         stream_support::terminal("**safe**", 1, 1, on_delta)
             .map_err(|_| InferenceError::InvalidResponse)
     }
@@ -1074,13 +1076,31 @@ async fn reset_after_continuation_insertion_invalidates_token_without_cancelling
     let path = valid_evidence("reset-delivery");
     for control in ["/chat/new", "/logout"] {
         let (state, cookie, csrf, token, inference) = fixture(path.to_str().unwrap());
+        let gate = inference.hold(HoldPoint::Generation);
         let response = router(state.clone())
             .oneshot(chat_request(&cookie, &csrf, &token))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let mut body = response.into_body();
+        let mut html = String::new();
+        while !html.contains("<pre aria-label=\"Assistant\">") {
+            let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            html.push_str(std::str::from_utf8(&frame).unwrap());
+        }
+        gate.entered.notified().await;
+        gate.release.notify_one();
+        while let Some(frame) = body.frame().await {
+            html.push_str(std::str::from_utf8(&frame.unwrap().into_data().unwrap()).unwrap());
+        }
         assert_eq!(state.accounting.available("a"), Some(97));
+        let continuation = html
+            .split("name=token value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
         let reset = router(state.clone())
             .oneshot(post_form(control, &cookie, format!("csrf={csrf}")))
             .await
@@ -1095,14 +1115,6 @@ async fn reset_after_continuation_insertion_invalidates_token_without_cancelling
         );
         drop(reset);
         assert_eq!(state.accounting.available("a"), Some(97));
-        let html = String::from_utf8_lossy(&body);
-        let continuation = html
-            .split("name=token value=\"")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap();
         let stale = router(state.clone())
             .oneshot(chat_request(&cookie, &csrf, continuation))
             .await

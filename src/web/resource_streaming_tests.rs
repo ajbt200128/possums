@@ -852,9 +852,11 @@ mod route {
                 .await
                 .unwrap();
             let (frame_tx, frame_rx) = oneshot::channel();
+            let (startup_tx, startup_rx) = oneshot::channel();
             let has_token = Arc::new(AtomicBool::new(false));
             let seen = has_token.clone();
             let reader = tokio::spawn(async move {
+                let mut startup_tx = Some(startup_tx);
                 let mut body = response.into_body();
                 let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
                 // Keep a one-byte slice after worker completion, not the full body.
@@ -864,6 +866,11 @@ mod route {
                 while let Some(frame) = body.frame().await {
                     if let Ok(data) = frame.unwrap().into_data() {
                         html.push_str(std::str::from_utf8(&data).unwrap());
+                        if html.contains("<pre aria-label=\"Assistant\">") {
+                            if let Some(tx) = startup_tx.take() {
+                                tx.send(()).unwrap();
+                            }
+                        }
                         seen.store(html.contains("name=token"), Ordering::SeqCst);
                     }
                 }
@@ -871,6 +878,7 @@ mod route {
             });
             let retained: Bytes = frame_rx.await.unwrap();
             fixture.probe.entered.notified().await;
+            startup_rx.await.unwrap();
             peer.send(&support::event(support::choice(Some("visible"), None)), 3)
                 .await;
             fixture.probe.delta.notified().await;
