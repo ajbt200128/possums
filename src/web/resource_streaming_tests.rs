@@ -1094,6 +1094,7 @@ mod route {
                 .oneshot(fixture.request())
                 .await
                 .unwrap();
+            peer.allow_disconnect();
             drop(response);
             fixture.probe.entered.notified().await;
             peer.send(

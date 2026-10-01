@@ -6,6 +6,10 @@ use super::stream::{
     ProtocolParser, StreamError, StreamUsage, MAX_FRAME_BYTES, MAX_TRANSPORT_BUFFER_BYTES,
 };
 use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::mpsc,
@@ -16,6 +20,7 @@ use tokio::{
 pub struct RawPeer {
     sender: mpsc::Sender<Step>,
     task: tokio::task::JoinHandle<()>,
+    allow_disconnect: Arc<AtomicBool>,
 }
 
 enum Step {
@@ -31,26 +36,61 @@ impl Drop for RawPeer {
 }
 
 impl RawPeer {
+    pub fn allow_disconnect(&self) {
+        self.allow_disconnect.store(true, Ordering::SeqCst);
+    }
+
     pub async fn send(&self, bytes: &[u8], fragment: usize) {
         assert!(fragment > 0 && fragment <= MAX_TRANSPORT_BUFFER_BYTES);
         for part in bytes.chunks(fragment) {
-            self.sender
+            if self
+                .sender
                 .send(Step::Fragment(part.to_vec()))
                 .await
-                .unwrap();
+                .is_err()
+            {
+                assert!(self.allow_disconnect.load(Ordering::SeqCst));
+                break;
+            }
         }
     }
 
     pub async fn eof(&self) {
-        self.sender.send(Step::Eof).await.unwrap();
+        if self.sender.send(Step::Eof).await.is_err() {
+            assert!(self.allow_disconnect.load(Ordering::SeqCst));
+        }
     }
 
     pub async fn fault(&self) {
-        self.sender.send(Step::Fault).await.unwrap();
+        if self.sender.send(Step::Fault).await.is_err() {
+            assert!(self.allow_disconnect.load(Ordering::SeqCst));
+        }
     }
 
     pub async fn finished(mut self) {
         (&mut self.task).await.unwrap();
+    }
+}
+
+async fn write_fragment(
+    socket: &mut tokio::net::TcpStream,
+    bytes: &[u8],
+    allow_disconnect: &AtomicBool,
+) -> bool {
+    match socket.write_all(bytes).await {
+        Ok(()) => true,
+        Err(error)
+            if allow_disconnect.load(Ordering::SeqCst)
+                && matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ) =>
+        {
+            false
+        }
+        Err(error) => panic!("fixture write failed: {error}"),
     }
 }
 
@@ -59,6 +99,8 @@ pub async fn raw_response() -> (reqwest::Response, RawPeer) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (sender, mut receiver) = mpsc::channel(2);
+    let allow_disconnect = Arc::new(AtomicBool::new(false));
+    let peer_disconnect = allow_disconnect.clone();
     let task = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = [0; 1024];
@@ -76,15 +118,20 @@ pub async fn raw_response() -> (reqwest::Response, RawPeer) {
         while let Some(step) = receiver.recv().await {
             match step {
                 Step::Fragment(bytes) => {
-                    socket
-                        .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
-                        .await
-                        .unwrap();
-                    socket.write_all(&bytes).await.unwrap();
-                    socket.write_all(b"\r\n").await.unwrap();
+                    if !write_fragment(
+                        &mut socket,
+                        format!("{:x}\r\n", bytes.len()).as_bytes(),
+                        &peer_disconnect,
+                    )
+                    .await
+                        || !write_fragment(&mut socket, &bytes, &peer_disconnect).await
+                        || !write_fragment(&mut socket, b"\r\n", &peer_disconnect).await
+                    {
+                        break;
+                    }
                 }
                 Step::Eof => {
-                    socket.write_all(b"0\r\n\r\n").await.unwrap();
+                    write_fragment(&mut socket, b"0\r\n\r\n", &peer_disconnect).await;
                     break;
                 }
                 Step::Fault => break, // Missing HTTP chunk terminator is a transport fault.
@@ -99,7 +146,14 @@ pub async fn raw_response() -> (reqwest::Response, RawPeer) {
         .send()
         .await
         .unwrap();
-    (response, RawPeer { sender, task })
+    (
+        response,
+        RawPeer {
+            sender,
+            task,
+            allow_disconnect,
+        },
+    )
 }
 
 pub fn event(value: Value) -> Vec<u8> {
