@@ -23,8 +23,16 @@
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
-            let base = baseNameOf path; in
-            craneLib.filterCargoSources path type &&
+            let
+              base = baseNameOf path;
+              sdkAssets = map toString [
+                ./vendor/tinfoil/assets
+                ./vendor/tinfoil/assets/genoa_cert_chain.pem
+                ./vendor/tinfoil/assets/trusted_root.json
+                ./vendor/tinfoil/assets/rekor_test_bundle.json
+              ];
+            in
+            (craneLib.filterCargoSources path type || builtins.elem (toString path) sdkAssets) &&
             base != ".pi" && base != ".env";
         };
         common = {
