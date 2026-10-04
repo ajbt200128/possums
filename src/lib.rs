@@ -1,10 +1,14 @@
 pub mod accounting;
+mod api;
+mod api_stream;
 pub mod attestation;
 pub mod auth;
 mod bounded_json;
 pub mod catalog;
 #[cfg(test)]
 mod process_alloc_tests;
+// Shared admission and detached preflight, before renderer handoff.
+mod generation;
 // Reservation ownership is independent of HTTP delivery.
 #[allow(dead_code)]
 mod generation_owner;

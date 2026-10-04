@@ -10,6 +10,7 @@ use crate::{
     accounting::{Accounting, Outcome},
     auth::{Auth, ConversationId},
     catalog::Model,
+    generation::PreparedGeneration,
     generation_owner::{OwnerError, ReservedGeneration},
     inference::{InferenceError, Message, SharedInference},
     render::{CreditSnapshot, IncrementalRenderer, RenderOutcome},
@@ -37,6 +38,29 @@ pub(crate) struct AcceptedChat {
     pub conversation: ConversationId,
     #[cfg(test)]
     pub resource_hooks: Option<Arc<crate::web::resource_streaming_tests::ResourceHooks>>,
+}
+
+impl AcceptedChat {
+    /// Add only web continuation state to the shared preflight result.
+    pub(crate) fn new(
+        prepared: PreparedGeneration,
+        session_id: String,
+        csrf: String,
+        #[cfg(test)] resource_hooks: Option<
+            Arc<crate::web::resource_streaming_tests::ResourceHooks>,
+        >,
+    ) -> Self {
+        Self {
+            model: prepared.model,
+            history: prepared.history,
+            prompt: prepared.prompt,
+            conversation: prepared.conversation,
+            session_id,
+            csrf,
+            #[cfg(test)]
+            resource_hooks,
+        }
+    }
 }
 
 /// Prompt-free disclosure context, never used to settle or reprice the reservation.

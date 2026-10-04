@@ -1,10 +1,10 @@
 use crate::{
-    accounting::{Accounting, AccountingError, Outcome, ReserveResult},
+    accounting::{Accounting, AccountingError, Outcome},
     attestation::{EvidenceVerifier, GatewayEvidence},
     auth::{
         clear_session_cookie, login_challenge_cookie, session_cookie, AdmissionError, Auth, Session,
     },
-    generation_owner::ReservedGeneration,
+    generation::{now_unix, Generation, GenerationInput, Rejection, Submission},
     inference::{authenticated_catalog, Message, SharedInference},
     render,
     streaming_chat::{self, AcceptedChat},
@@ -29,7 +29,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::{
     net::TcpListener,
@@ -58,7 +58,6 @@ const CHAT_LANES: usize = 4;
 // conversation history. Apply this ceiling to fallbacks/wrong methods as well.
 const CONTROL_BODY_LIMIT: usize = 4 * 1024;
 const MAX_CONTROL_RENDERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const PREFLIGHT_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_ATTESTATION_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -78,6 +77,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn generation(&self) -> Generation<'_> {
+        Generation {
+            auth: &self.auth,
+            accounting: &self.accounting,
+            inference: &self.inference,
+            evidence_path: &self.gateway_evidence_path,
+            evidence_verifier: &self.gateway_evidence_verifier,
+            slots: &self.generation_slots,
+            #[cfg(test)]
+            hooks: &self.preflight_hooks,
+        }
+    }
+
     pub fn new(
         auth: Auth,
         inference: SharedInference,
@@ -109,6 +121,7 @@ pub fn router(state: AppState) -> Router {
 #[doc(hidden)]
 pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Router {
     Router::new()
+        .merge(crate::api::routes())
         .route("/", get(home))
         .route("/login", post(login))
         .route("/logout", post(logout))
@@ -175,19 +188,43 @@ async fn request_admission(
     // affect routing. Wrong methods, trailing slashes and encoded aliases stay
     // in the bounded control lane and cannot reach a heavy handler.
     let lane = match (request.method(), request.uri().path()) {
-        (&Method::POST, "/chat") => &state.chat_memory,
+        (&Method::POST, "/chat" | "/v1/chat/completions") => &state.chat_memory,
         (&Method::POST, "/chat/new") => &state.new_chat_memory,
         _ => &state.control_memory,
     };
+    let api = crate::api::is_api(request.uri().path());
     let Ok(permit) = lane.clone().try_acquire_owned() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response();
+        return if api {
+            crate::api::error(StatusCode::SERVICE_UNAVAILABLE)
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response()
+        };
     };
     let lease = Arc::new(permit);
-    if request.method() == Method::POST && request.uri().path() == "/chat" {
+    if request.method() == Method::POST
+        && matches!(request.uri().path(), "/chat" | "/v1/chat/completions")
+    {
         // Detached preflight, generation and delivery share THIS heavy admission.
         request.extensions_mut().insert(lease.clone());
     }
-    let response = next.run(request).await;
+    let response = if api && (request.uri().query().is_some() || request.method() == Method::HEAD) {
+        crate::api::error(StatusCode::BAD_REQUEST)
+    } else {
+        next.run(request).await
+    };
+    // Normalize even framework, panic, header and body-limit failures, while
+    // retaining the SAME admission lease through the replacement response.
+    let response = if api
+        && !response.status().is_success()
+        && response
+            .extensions()
+            .get::<crate::api::SafeError>()
+            .is_none()
+    {
+        crate::api::error(response.status())
+    } else {
+        response
+    };
     let (parts, body) = response.into_parts();
     Response::from_parts(parts, Body::new(AdmissionBody { inner: body, lease }))
 }
@@ -248,7 +285,8 @@ async fn total_body_deadline(
     next: Next,
     deadline: Duration,
 ) -> Response {
-    let chat = request.method() == Method::POST && request.uri().path() == "/chat";
+    let chat = request.method() == Method::POST
+        && matches!(request.uri().path(), "/chat" | "/v1/chat/completions");
     // The outer heavy permit is already owned. Failure here rolls it back
     // through the bounded error response, with no waiter or body polling.
     let ingress = if chat {
@@ -310,7 +348,7 @@ async fn header_size_limit(request: Request<Body>, next: Next) -> Response {
                 .saturating_add(name.as_str().len())
                 .saturating_add(value.as_bytes().len())
         });
-    if header_bytes > MAX_HEADER_BYTES {
+    if header_bytes > MAX_HEADER_BYTES || request.headers().len() > MAX_HEADERS {
         return (
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "request headers too large",
@@ -572,7 +610,10 @@ async fn chat(
     };
     #[cfg(test)]
     {
-        state.preflight_hooks.resources.input("decoded", &form);
+        state
+            .preflight_hooks
+            .resources
+            .input("decoded", &form.history, &form.prompt);
         state.preflight_hooks.resources.at("decoded").await;
     }
     drop(body); // Decoded storage is heavy-owned; the raw ingress owner ends here.
@@ -582,59 +623,85 @@ async fn chat(
     if !Auth::verify_csrf(&session, &form.csrf) || form.prompt.is_empty() {
         return bad_request();
     }
-    // Gateway provenance and serving-key evidence is a mandatory pre-prompt gate.
-    if verified_gateway_evidence(&state).await.is_err() {
-        return unavailable();
-    }
-    let catalog = match current_catalog(&state).await {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    let reservation_quote = match catalog.reservation_quote(&form.model) {
-        Ok(value) => value,
-        Err(_) => return bad_request(),
-    };
-    // The heavy permit is already owned by middleware. Obtain the
-    // existing global generation permit nonblockingly before admission and any
-    // prompt-bearing tokenizer call. Failed/duplicate admission releases it.
-    let permit = match state.generation_slots.clone().try_acquire_owned() {
-        Ok(value) => value,
-        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response(),
-    };
-    // Keep only the original admission maximum for later UI disclosure, not the
-    // context-legal quote computed after tokenization or a future catalog price.
-    let reserved_microunits = reservation_quote.reserved_microunits;
-    let admission = match state.auth.admit_submission(
-        &state.accounting,
-        &session_id,
-        &form.csrf,
-        &form.token,
-        reservation_quote,
-    ) {
-        Ok(value) => value,
-        Err(AdmissionError::Auth(_)) => return bad_request(),
-        Err(AdmissionError::Accounting(AccountingError::InsufficientCredit)) => {
-            return (
-                StatusCode::PAYMENT_REQUIRED,
-                "insufficient demo credit for selected model maximum reservation",
-            )
-                .into_response()
+    // Only small renderer/admission metadata is copied; history/prompt move once.
+    let model = form.model.clone();
+    let render_session_id = session_id.clone();
+    let csrf = form.csrf.clone();
+    let auth = state.auth.clone();
+    let inference = state.inference.clone();
+    let accounting = state.accounting.clone();
+    let render_heavy = heavy.clone();
+    #[cfg(test)]
+    let resource_hooks = Some(state.preflight_hooks.resources.clone());
+    let result = state
+        .generation()
+        .submit(
+            Submission {
+                session_id: &session_id,
+                csrf: &form.csrf,
+                token: &form.token,
+            },
+            GenerationInput {
+                model: form.model,
+                history: form.history,
+                prompt: form.prompt,
+            },
+            heavy,
+            move |owner, prepared| {
+                let reserved_microunits = prepared.reserved_microunits;
+                let input = AcceptedChat::new(
+                    prepared,
+                    render_session_id,
+                    csrf,
+                    #[cfg(test)]
+                    resource_hooks,
+                );
+                let (body, observer) = streaming_chat::compose_with_credit(
+                    owner,
+                    render_heavy,
+                    input,
+                    auth,
+                    inference,
+                    streaming_chat::ContinuationCredit {
+                        accounting,
+                        account_id: session.account_id,
+                        reserved_microunits,
+                    },
+                );
+                drop(observer);
+                body
+            },
+        )
+        .await;
+    match result {
+        Ok(body) => {
+            let mut response = Body::new(body).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            );
+            response
         }
-        Err(AdmissionError::Accounting(AccountingError::Concurrency)) => {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                "account concurrency limit reached",
-            )
-                .into_response()
+        Err(Rejection::Context) => {
+            (StatusCode::BAD_REQUEST, "selected model context exceeded").into_response()
         }
-        Err(AdmissionError::Accounting(_)) => return unavailable(),
-    };
-    let submission = admission.submission;
-    let submission_id = submission.id;
-    match admission.result {
-        ReserveResult::Reserved => {}
-        ReserveResult::Duplicate(outcome) => {
-            drop(permit);
+        Err(Rejection::InvalidModel | Rejection::Admission(AdmissionError::Auth(_))) => {
+            bad_request()
+        }
+        Err(Rejection::Busy) => (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response(),
+        Err(Rejection::Admission(AdmissionError::Accounting(
+            AccountingError::InsufficientCredit,
+        ))) => (
+            StatusCode::PAYMENT_REQUIRED,
+            "insufficient demo credit for selected model maximum reservation",
+        )
+            .into_response(),
+        Err(Rejection::Admission(AdmissionError::Accounting(AccountingError::Concurrency))) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "account concurrency limit reached",
+        )
+            .into_response(),
+        Err(Rejection::Duplicate(outcome)) => {
             let notice = match outcome {
                 Outcome::InFlight => "This submission is already in progress.",
                 Outcome::Settled { .. } => {
@@ -644,135 +711,15 @@ async fn chat(
                     "This submission failed and was refunded; start a New chat to retry."
                 }
             };
-            return Html(render::page(&format!(
+            Html(render::page(&format!(
                 "<p role=status>{notice}</p>{}",
-                render::chat_controls(&session.csrf, Some(&form.model))
+                render::chat_controls(&session.csrf, Some(&model))
             )))
-            .into_response();
+            .into_response()
         }
-    }
-
-    // Accounting acceptance: no await or prompt-bearing operation between the
-    // new reserve, constructing its sole guard, and detached preflight handoff.
-    let owner = ReservedGeneration::new(
-        state.accounting.clone(),
-        submission_id,
-        permit,
-        heavy.clone(),
-    );
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    let work_heavy = heavy.clone();
-    tokio::spawn(ChargedPreflight {
-        work: Box::pin(async move {
-            // Field order plus the outer envelope keeps every captured/borrowed
-            // prompt and unclaimed result charged, including panic/pre-poll drop.
-            let mut job = PreflightInput {
-                form,
-                owner: Some(owner),
-            };
-            let result = tokio::time::timeout(PREFLIGHT_DEADLINE, async {
-                job.form.history.push(Message {
-                    role: "user".into(),
-                    content: std::mem::take(&mut job.form.prompt),
-                });
-                #[cfg(test)]
-                state
-                    .preflight_hooks
-                    .resources
-                    .input("preflight", &job.form);
-                let tokens = state
-                    .inference
-                    .count_tokens(&job.form.model, &job.form.history, work_heavy.clone())
-                    .await
-                    .map_err(|_| PreflightRejection::Unavailable)?;
-                job.form.prompt = job.form.history.pop().expect("preflight prompt").content;
-                catalog
-                    .quote(&job.form.model, tokens)
-                    .map_err(|_| PreflightRejection::Context)
-            })
-            .await;
-            let quote = match result {
-                Ok(Ok(quote)) => quote,
-                failure => {
-                    let rejection = match failure {
-                        Ok(Err(error)) => error,
-                        _ => PreflightRejection::Unavailable,
-                    };
-                    drop(job); // Refund exactly once before reporting failure.
-                    let _ = sender.send(Err(rejection));
-                    return;
-                }
-            };
-            #[cfg(test)]
-            state.preflight_hooks.before_compose().await;
-            let owner = job.owner.take().expect("sole reservation owner");
-            let input = AcceptedChat {
-                model: quote.model,
-                history: job.form.history,
-                prompt: job.form.prompt,
-                csrf: job.form.csrf,
-                session_id,
-                conversation: submission.conversation,
-                #[cfg(test)]
-                resource_hooks: Some(state.preflight_hooks.resources.clone()),
-            };
-            // This synchronous handoff is unconditional, even with no receiver.
-            let (body, observer) = streaming_chat::compose_with_credit(
-                owner,
-                work_heavy,
-                input,
-                state.auth,
-                state.inference,
-                streaming_chat::ContinuationCredit {
-                    accounting: state.accounting,
-                    account_id: session.account_id,
-                    reserved_microunits,
-                },
-            );
-            drop(observer);
-            #[cfg(test)]
-            state.preflight_hooks.after_compose().await;
-            let _ = sender.send(Ok(body)); // Failure discards delivery only.
-        }),
-        _heavy: heavy,
-    });
-    match receiver.await {
-        Ok(Ok(body)) => {
-            let mut response = Body::new(body).into_response();
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/html; charset=utf-8"),
-            );
-            response
+        Err(Rejection::Unavailable | Rejection::Admission(AdmissionError::Accounting(_))) => {
+            unavailable()
         }
-        Ok(Err(PreflightRejection::Context)) => {
-            (StatusCode::BAD_REQUEST, "selected model context exceeded").into_response()
-        }
-        _ => unavailable(),
-    }
-}
-
-struct PreflightInput {
-    form: ContinuationForm,
-    owner: Option<ReservedGeneration>,
-}
-
-enum PreflightRejection {
-    Context,
-    Unavailable,
-}
-
-// Unlike async capture order, explicit field order guarantees that all work,
-// prompt-bearing inputs and queued results die before the last heavy lease.
-struct ChargedPreflight<F> {
-    work: Pin<Box<F>>,
-    _heavy: Arc<OwnedSemaphorePermit>,
-}
-
-impl<F: std::future::Future<Output = ()>> std::future::Future for ChargedPreflight<F> {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.get_mut().work.as_mut().poll(cx)
     }
 }
 
@@ -962,23 +909,13 @@ fn decode_form_value(value: &str, limit: usize) -> Result<String, InvalidContinu
 async fn verified_gateway_evidence(
     state: &AppState,
 ) -> Result<crate::attestation::GatewayEvidence, crate::attestation::EvidenceError> {
-    state
-        .gateway_evidence_verifier
-        .verify(state.gateway_evidence_path.as_ref(), now_unix())
-        .await
+    state.generation().evidence().await
 }
 
 async fn current_catalog(state: &AppState) -> Result<crate::catalog::Catalog, Response> {
     authenticated_catalog(state.inference.as_ref(), now_unix())
         .await
         .map_err(|_| unavailable())
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 fn login_page_response(state: &AppState, error: Option<&str>) -> Response {

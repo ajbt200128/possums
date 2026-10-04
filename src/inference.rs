@@ -70,6 +70,18 @@ pub trait Inference: Send + Sync {
         Err(InferenceError::Unavailable)
     }
 
+    /// API adapter preserves authenticated finish metadata as well as final usage.
+    /// Implementations without a qualified completion protocol fail closed.
+    async fn generate_completion_stream(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _heavy: Arc<OwnedSemaphorePermit>,
+        _on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+    ) -> Result<stream::StreamCompletion, InferenceError> {
+        Err(InferenceError::Unavailable)
+    }
+
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError>;
 }
 
@@ -116,6 +128,18 @@ impl TinfoilInference {
         heavy: Arc<OwnedSemaphorePermit>,
         on_delta: impl FnMut(&str) + Send,
     ) -> Result<stream::StreamUsage, InferenceError> {
+        self.generate_completion_stream(model, messages, heavy, on_delta)
+            .await
+            .map(|completion| completion.usage)
+    }
+
+    async fn generate_completion_stream(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        heavy: Arc<OwnedSemaphorePermit>,
+        on_delta: impl FnMut(&str) + Send,
+    ) -> Result<stream::StreamCompletion, InferenceError> {
         let http = self.http()?;
         let url = format!("{}/v1/chat/completions", self.origin);
         let deadline = Instant::now() + stream::STREAM_DEADLINE;
@@ -137,7 +161,13 @@ impl TinfoilInference {
         if response.url().as_str() != url {
             return Err(InferenceError::InvalidResponse);
         }
-        stream::consume_response(response, deadline, stream::STREAM_IDLE_TIMEOUT, on_delta).await
+        stream::consume_completion_response(
+            response,
+            deadline,
+            stream::STREAM_IDLE_TIMEOUT,
+            on_delta,
+        )
+        .await
     }
 
     /// Funded diagnostic only: fixed non-user input, no gateway accounting or route.
@@ -799,6 +829,16 @@ impl Inference for TinfoilInference {
         on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         TinfoilInference::generate_stream(self, model, messages, heavy, on_delta).await
+    }
+
+    async fn generate_completion_stream(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        heavy: Arc<OwnedSemaphorePermit>,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+    ) -> Result<stream::StreamCompletion, InferenceError> {
+        TinfoilInference::generate_completion_stream(self, model, messages, heavy, on_delta).await
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {

@@ -202,6 +202,77 @@ fn concurrent_completions_issue_only_original_conversation_continuations() {
 }
 
 #[test]
+fn api_restart_and_reauthentication_never_revive_old_tokens() {
+    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+    let auth = Auth::from_json(&auth_config()).unwrap();
+    let (id, session) = auth
+        .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
+        .unwrap();
+    let token = auth.issue_api_submission(&id, "m", false).unwrap();
+    auth.logout_api(&id).unwrap();
+    for current in [&auth, &Auth::from_json(&auth_config()).unwrap()] {
+        let ledger = Accounting::new(current.account_budgets());
+        assert!(current.api_session(&id).is_none());
+        let (next_id, next_session) = current
+            .authenticate_api(&credential, &current.issue_api_challenge().unwrap())
+            .unwrap();
+        assert!(current
+            .admit_submission(&ledger, &id, &session.csrf, &token, quote())
+            .is_err());
+        assert!(current
+            .admit_submission(&ledger, &next_id, &next_session.csrf, &token, quote())
+            .is_err());
+        assert_eq!(ledger.available("a"), Some(100));
+    }
+}
+
+#[test]
+fn api_accepted_slots_survive_reset_logout_and_absorbing_terminal_outcomes() {
+    for logout in [false, true] {
+        let auth = Auth::from_json(&auth_config()).unwrap();
+        let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        let (mut id, mut session) = auth
+            .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
+            .unwrap();
+        let ledger = Accounting::new(auth.account_budgets());
+        let mut accepted = Vec::new();
+        for _ in 0..3 {
+            let token = auth.issue_api_submission(&id, "m", true).unwrap();
+            accepted.push(
+                auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                    .unwrap()
+                    .submission,
+            );
+            if logout {
+                auth.logout_api(&id).unwrap();
+                (id, session) = auth
+                    .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
+                    .unwrap();
+            }
+        }
+        let token = auth.issue_api_submission(&id, "m", true).unwrap();
+        assert_eq!(
+            auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                .unwrap_err(),
+            AdmissionError::Accounting(AccountingError::Concurrency)
+        );
+        for (index, submission) in accepted.into_iter().enumerate() {
+            let terminal = if index == 0 { Some(usage()) } else { None };
+            let outcome = ledger.finish(submission.id, terminal).unwrap();
+            assert_eq!(
+                ledger.finish(submission.id, Some(usage())).unwrap(),
+                outcome
+            );
+            assert_eq!(ledger.finish(submission.id, None).unwrap(), outcome);
+            assert!(auth
+                .issue_submission_for(&id, submission.conversation, Some("m"))
+                .is_err());
+        }
+        assert_eq!(ledger.available("a"), Some(97));
+    }
+}
+
+#[test]
 fn failed_stream_refund_is_terminal_and_idempotent() {
     let ledger = Accounting::new([("a".into(), 100)]);
     ledger

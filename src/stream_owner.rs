@@ -227,6 +227,10 @@ impl DeliveryTx {
         self.detach_on_error(result)
     }
 
+    pub(crate) fn detach(&mut self) {
+        let _ = self.detach_on_error(Err(DeliveryError::Closed));
+    }
+
     pub(crate) fn failure(&self) -> Option<DeliveryError> {
         self.failure
     }

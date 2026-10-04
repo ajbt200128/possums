@@ -78,12 +78,24 @@ pub(super) fn request_body(
 // Private: arbitrary unauthenticated Responses must never become an inference
 // entry point. Unit tests alone may inject raw HTTP here; ProtocolParser itself
 // remains reusable but makes no authentication claim.
+#[cfg(test)]
 pub(super) async fn consume_response(
+    response: reqwest::Response,
+    deadline: Instant,
+    idle_timeout: Duration,
+    on_delta: impl FnMut(&str),
+) -> Result<StreamUsage, InferenceError> {
+    consume_completion_response(response, deadline, idle_timeout, on_delta)
+        .await
+        .map(|completion| completion.usage)
+}
+
+pub(super) async fn consume_completion_response(
     mut response: reqwest::Response,
     deadline: Instant,
     idle_timeout: Duration,
     mut on_delta: impl FnMut(&str),
-) -> Result<StreamUsage, InferenceError> {
+) -> Result<StreamCompletion, InferenceError> {
     if !response.status().is_success() {
         return Err(InferenceError::Unavailable); // Do not read error bodies.
     }
@@ -117,7 +129,11 @@ pub(super) async fn consume_response(
                         .map_err(|_| InferenceError::InvalidResponse)?;
                 }
             }
-            None => return parser.eof().map_err(|_| InferenceError::InvalidResponse),
+            None => {
+                return parser
+                    .eof_completion()
+                    .map_err(|_| InferenceError::InvalidResponse)
+            }
         }
     }
 }
@@ -127,6 +143,19 @@ pub struct StreamUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    Stop,
+    Length,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamCompletion {
+    pub usage: StreamUsage,
+    pub finish_reason: FinishReason,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -149,6 +178,7 @@ enum State {
 pub struct ProtocolParser {
     state: State,
     usage: Option<StreamUsage>,
+    finish_reason: Option<FinishReason>,
     line: Vec<u8>,
     payload: Vec<u8>,
     has_data: bool,
@@ -170,6 +200,7 @@ impl Default for ProtocolParser {
         Self {
             state: State::Receiving,
             usage: None,
+            finish_reason: None,
             // Fixed capacities: no geometric growth, independently of answer length.
             line: Vec::with_capacity(MAX_LINE_BYTES),
             payload: Vec::with_capacity(MAX_FRAME_BYTES),
@@ -201,12 +232,19 @@ impl ProtocolParser {
 
     /// Consuming the parser makes exactly one successful terminal return possible.
     /// The caller must invoke this only on transport EOF, never on `[DONE]`.
-    pub fn eof(mut self) -> Result<StreamUsage, StreamError> {
+    pub fn eof(self) -> Result<StreamUsage, StreamError> {
+        self.eof_completion().map(|completion| completion.usage)
+    }
+
+    pub fn eof_completion(mut self) -> Result<StreamCompletion, StreamError> {
         if self.state != State::Done || !self.line.is_empty() {
             return Err(StreamError::Protocol);
         }
         self.state = State::SuccessfulEOF;
-        self.usage.ok_or(StreamError::Protocol)
+        Ok(StreamCompletion {
+            usage: self.usage.ok_or(StreamError::Protocol)?,
+            finish_reason: self.finish_reason.ok_or(StreamError::Protocol)?,
+        })
     }
 
     /// Parser byte-buffer capacity only; excludes the bounded temporary JSON tree
@@ -326,7 +364,7 @@ impl ProtocolParser {
             .and_then(Value::as_array)
             .ok_or(StreamError::Protocol)?;
         let mut content = None;
-        let mut finished = false;
+        let mut finish_reason = None;
         match choices.as_slice() {
             [] if usage.is_some() => {}
             [choice] if self.state == State::Receiving => {
@@ -350,9 +388,10 @@ impl ProtocolParser {
                     &["index", "delta", "finish_reason"],
                     &mut optional_bytes,
                 )?;
-                finished = match choice.get("finish_reason") {
-                    Some(Value::Null) => false,
-                    Some(Value::String(reason)) if reason == "stop" || reason == "length" => true,
+                finish_reason = match choice.get("finish_reason") {
+                    Some(Value::Null) => None,
+                    Some(Value::String(reason)) if reason == "stop" => Some(FinishReason::Stop),
+                    Some(Value::String(reason)) if reason == "length" => Some(FinishReason::Length),
                     _ => return Err(StreamError::Protocol),
                 };
                 let fields = choice
@@ -381,7 +420,8 @@ impl ProtocolParser {
         if let Some(usage) = usage {
             self.usage = Some(usage);
         }
-        if finished {
+        if let Some(reason) = finish_reason {
+            self.finish_reason = Some(reason);
             self.state = State::Finished;
         }
         if let Some(content) = content.filter(|s| !s.is_empty()) {

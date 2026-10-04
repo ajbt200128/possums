@@ -386,7 +386,7 @@ impl Pause {
 }
 
 #[derive(Default)]
-pub(super) struct PreflightHooks {
+pub(crate) struct PreflightHooks {
     before: std::sync::Mutex<Option<Pause>>,
     after: std::sync::Mutex<Option<Pause>>,
     pub(crate) resources: Arc<ResourceHooks>,
@@ -451,19 +451,22 @@ impl ResourceHooks {
         }
     }
 
-    pub(crate) fn input(&self, phase: &'static str, form: &super::ContinuationForm) {
+    pub(crate) fn input(
+        &self,
+        phase: &'static str,
+        history: &Vec<crate::inference::Message>,
+        prompt: &String,
+    ) {
         if self.capture.load(std::sync::atomic::Ordering::SeqCst) {
             self.capacities.lock().unwrap().push(InputCapacity {
                 phase,
-                messages: form.history.len(),
-                vector_bytes: form.history.capacity()
-                    * std::mem::size_of::<crate::inference::Message>(),
-                strings: form
-                    .history
+                messages: history.len(),
+                vector_bytes: history.capacity() * std::mem::size_of::<crate::inference::Message>(),
+                strings: history
                     .iter()
                     .map(|m| m.role.capacity() + m.content.capacity())
                     .sum(),
-                prompt: form.prompt.capacity(),
+                prompt: prompt.capacity(),
             });
         }
     }
@@ -482,14 +485,14 @@ impl ResourceHooks {
 }
 
 impl PreflightHooks {
-    pub(super) async fn before_compose(&self) {
+    pub(crate) async fn before_compose(&self) {
         self.resources.at("pre-compose").await;
         let pause = self.before.lock().unwrap().take();
         if let Some(pause) = pause {
             pause.wait().await;
         }
     }
-    pub(super) async fn after_compose(&self) {
+    pub(crate) async fn after_compose(&self) {
         let pause = self.after.lock().unwrap().take();
         if let Some(pause) = pause {
             pause.wait().await;
@@ -781,6 +784,205 @@ mod route {
             .await;
         peer.send(b"data: [DONE]\n\n", 1024).await;
         peer.eof().await;
+    }
+
+    #[test]
+    fn shared_preflight_pre_poll_drop_refunds_after_destroying_handoff_inputs() {
+        use crate::generation::{GenerationInput, Submission};
+        use std::task::Poll;
+
+        struct DropProbe {
+            heavy: Arc<Semaphore>,
+            slots: Arc<Semaphore>,
+            dropped_while_charged: Arc<AtomicBool>,
+        }
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.dropped_while_charged.store(
+                    self.heavy.available_permits() == 3 && self.slots.available_permits() == 3,
+                    Ordering::SeqCst,
+                );
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (fixture, peer) = runtime.block_on(Fixture::new(1));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let probe = DropProbe {
+            heavy: fixture.state.chat_memory.clone(),
+            slots: fixture.state.generation_slots.clone(),
+            dropped_while_charged: dropped.clone(),
+        };
+        runtime.block_on(async {
+            let submission = fixture.state.generation().submit(
+                Submission {
+                    session_id: &fixture.session,
+                    csrf: &fixture.csrf,
+                    token: &fixture.token,
+                },
+                GenerationInput {
+                    model: "m".into(),
+                    history: Vec::new(),
+                    prompt: "hello".into(),
+                },
+                Arc::new(
+                    fixture
+                        .state
+                        .chat_memory
+                        .clone()
+                        .try_acquire_owned()
+                        .unwrap(),
+                ),
+                move |owner, _| {
+                    drop(probe);
+                    drop(owner);
+                    panic!("pre-poll handoff must not run");
+                },
+            );
+            tokio::pin!(submission);
+            // Immediate fixture evidence/catalog allow admission in this poll.
+            // Do not yield to the detached task before shutting down the runtime.
+            assert!(matches!(
+                futures_util::poll!(&mut submission),
+                Poll::Pending
+            ));
+            assert_eq!(fixture.state.accounting.available("a"), Some(48));
+            assert_eq!(fixture.probe.calls.load(Ordering::SeqCst), 0);
+        });
+        assert!(!dropped.load(Ordering::SeqCst)); // Dropping observer did not cancel.
+        drop(runtime);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(fixture.state.accounting.available("a"), Some(100));
+        assert_eq!(fixture.state.generation_slots.available_permits(), 4);
+        assert_eq!(fixture.state.chat_memory.available_permits(), 4);
+        assert_eq!(fixture.probe.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 0);
+        drop(peer);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_preflight_moves_input_to_non_html_handoff_at_original_price() {
+        use crate::generation::{GenerationInput, Rejection, Submission};
+
+        let (fixture, peer) = Fixture::new(1).await;
+        let (pause, gate) = checkpoint();
+        *fixture.probe.tokenizer.lock().unwrap() = Some(pause);
+        let state = fixture.state.clone();
+        let id = fixture.session.clone();
+        let csrf = fixture.csrf.clone();
+        let token = fixture.token.clone();
+        // Spare capacity permits the tokenizer's temporary prompt push without
+        // reallocating: assert the core transfers these allocations, not copies.
+        let mut history = Vec::with_capacity(4);
+        history.push(Message {
+            role: "user".into(),
+            content: "prior".into(),
+        });
+        history.push(Message {
+            role: "assistant".into(),
+            content: "reply".into(),
+        });
+        let prompt = "hello".to_owned();
+        let history_ptr = history.as_ptr() as usize;
+        let prompt_ptr = prompt.as_ptr() as usize;
+        let waiter = tokio::spawn(async move {
+            let inference = state.inference.clone();
+            let heavy = Arc::new(state.chat_memory.clone().try_acquire_owned().unwrap());
+            let work_heavy = heavy.clone();
+            state
+                .generation()
+                .submit(
+                    Submission {
+                        session_id: &id,
+                        csrf: &csrf,
+                        token: &token,
+                    },
+                    GenerationInput {
+                        model: "m".into(),
+                        history,
+                        prompt,
+                    },
+                    heavy,
+                    move |owner, mut prepared| {
+                        assert_eq!(prepared.history.as_ptr() as usize, history_ptr);
+                        assert_eq!(prepared.prompt.as_ptr() as usize, prompt_ptr);
+                        assert_eq!(prepared.history.len(), 2);
+                        assert_eq!(prepared.reserved_microunits, 52);
+                        assert_eq!(prepared.model.max_output_tokens, 19);
+                        assert_eq!(
+                            prepared.model.input_microunits_per_million_tokens,
+                            1_000_000
+                        );
+                        assert_eq!(
+                            prepared.model.output_microunits_per_million_tokens,
+                            1_000_000
+                        );
+                        // No HTML composer, body, renderer or answer buffer. The same
+                        // owner remains terminal authority for this synthetic sink.
+                        drop(owner.spawn_settling((), move |(), settlement| async move {
+                            prepared.history.push(Message {
+                                role: "user".into(),
+                                content: prepared.prompt,
+                            });
+                            let result = inference
+                                .generate_stream(
+                                    &prepared.model,
+                                    &prepared.history,
+                                    work_heavy,
+                                    &mut |_| {},
+                                )
+                                .await;
+                            settlement.finish(&result)
+                        }));
+                    },
+                )
+                .await
+        });
+        gate.reached.await.unwrap();
+        fixture.probe.repriced.store(true, Ordering::SeqCst);
+        // Duplicate admission must neither construct a guard nor invoke handoff.
+        let duplicate = fixture
+            .state
+            .generation()
+            .submit(
+                Submission {
+                    session_id: &fixture.session,
+                    csrf: &fixture.csrf,
+                    token: &fixture.token,
+                },
+                GenerationInput {
+                    model: "m".into(),
+                    history: Vec::new(),
+                    prompt: "changed".into(),
+                },
+                Arc::new(
+                    fixture
+                        .state
+                        .chat_memory
+                        .clone()
+                        .try_acquire_owned()
+                        .unwrap(),
+                ),
+                |_, _| panic!("duplicate handoff must not run"),
+            )
+            .await;
+        assert_eq!(
+            duplicate,
+            Err(Rejection::Duplicate(crate::accounting::Outcome::InFlight))
+        );
+        assert_eq!(fixture.state.accounting.available("a"), Some(48));
+        assert_eq!(fixture.probe.calls.load(Ordering::SeqCst), 1);
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        gate.release.send(()).unwrap();
+        fixture.probe.entered.notified().await;
+        complete(&peer, 2, 3).await;
+        fixture.terminal(93).await;
+        assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.state.chat_memory.available_permits(), 4);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

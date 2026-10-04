@@ -144,6 +144,80 @@ fn failed_admission_does_not_bind_token_or_model_and_duplicates_do_not_reserve()
 }
 
 #[test]
+fn api_and_web_kinds_are_separate_and_debug_is_redacted() {
+    let (auth, credential) = fixture();
+    let web_challenge = auth.issue_login_challenge().unwrap();
+    assert!(auth.authenticate_api(&credential, &web_challenge).is_err());
+    assert!(auth.authenticate(&credential, &web_challenge).is_err());
+    let api_challenge = auth.issue_api_challenge().unwrap();
+    assert!(auth.authenticate(&credential, &api_challenge).is_err());
+    assert!(auth.authenticate_api(&credential, &api_challenge).is_err());
+    let (web_id, web) = auth
+        .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+        .unwrap();
+    let (api_id, api) = auth
+        .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
+        .unwrap();
+    assert!(auth.api_session(&web_id).is_none());
+    assert!(auth.session(&api_id).is_none());
+    assert!(auth.logout_api(&web_id).is_err());
+    assert!(auth.logout(&api_id, &api.csrf).is_err());
+    assert!(auth.new_chat(&api_id, &api.csrf).is_err());
+    assert!(auth.issue_api_submission(&web_id, "m", true).is_err());
+    assert!(auth.issue_submission(&api_id).is_err());
+    assert!(auth
+        .issue_submission_for(&api_id, api.conversation, None)
+        .is_err());
+    assert!(api.recovery_credential.is_empty());
+    for session in [web, api] {
+        assert_eq!(format!("{session:?}"), "Session { [redacted] }");
+    }
+}
+
+#[test]
+fn api_tokens_bind_model_session_and_account_before_first_admission() {
+    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+    let other = URL_SAFE_NO_PAD.encode([8_u8; 32]);
+    let config = serde_json::json!([credential.clone(), other.clone()].iter().enumerate().map(|(i, c)| serde_json::json!({
+        "id": i.to_string(), "credential_sha256": URL_SAFE_NO_PAD.encode(Sha256::digest(c.as_bytes())), "demo_microunits": 1000
+    })).collect::<Vec<_>>()).to_string();
+    let auth = Auth::from_json(&config).unwrap();
+    let ledger = Accounting::new(auth.account_budgets());
+    let (id, session) = auth
+        .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
+        .unwrap();
+    let token = auth.issue_api_submission(&id, "m", false).unwrap();
+    assert!(auth
+        .admit_submission(&ledger, &id, &session.csrf, &token, quote("other"))
+        .is_err());
+    for credential in [credential, other] {
+        let (other_id, other_session) = auth
+            .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
+            .unwrap();
+        assert!(auth
+            .admit_submission(&ledger, &other_id, &other_session.csrf, &token, quote("m"))
+            .is_err());
+    }
+    let accepted = auth
+        .admit_submission(&ledger, &id, &session.csrf, &token, quote("m"))
+        .unwrap();
+    assert_eq!(accepted.result, ReserveResult::Reserved);
+    assert_eq!(
+        auth.admit_submission(&ledger, &id, &session.csrf, &token, quote("m"))
+            .unwrap()
+            .result,
+        ReserveResult::Duplicate(Outcome::InFlight)
+    );
+    ledger.finish(accepted.submission.id, None).unwrap();
+    assert_eq!(
+        auth.admit_submission(&ledger, &id, &session.csrf, &token, quote("m"))
+            .unwrap()
+            .result,
+        ReserveResult::Duplicate(Outcome::Refunded)
+    );
+}
+
+#[test]
 fn rejects_short_oversized_or_wrong_credentials() {
     let (auth, _) = fixture();
     let challenge = auth.issue_login_challenge().unwrap();
