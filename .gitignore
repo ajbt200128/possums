@@ -5,3 +5,4 @@
 .env.*
 !.env.example
 .pi/
+/examples/phase01/node_modules/

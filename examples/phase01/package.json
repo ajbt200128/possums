@@ -1,0 +1,17 @@
+{
+  "name": "possums-phase01-channel",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node build.mjs", "check": "tsc --noEmit" },
+  "dependencies": {
+    "@tinfoilsh/verifier": "1.2.1",
+    "@freedomofpress/sigstore-browser": "0.1.15",
+    "ehbp": "0.3.2"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "esbuild": "0.25.10",
+    "playwright": "1.61.1"
+  }
+}
