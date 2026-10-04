@@ -597,6 +597,10 @@ Release workspace evidence: `candidate-verification.json`,
 bundle hash reports. Fresh transport artifacts are
 `/var/folders/5v/1zw417197236y_k11j994g8r0000gn/T/possums-phase01-channel-6zimy67o/run-AH3Ffc/`;
 fresh combined API/client artifacts are `/tmp/possums-phase01-api-MN4JcD/`.
+Final Linux CI `37172373997` at client/approval commit
+`7a43c0a66a4b22ea3e4fa6a4515e6b4d33420242` passed all four jobs: flake, browser,
+image and image-startup. A final public-origin pinned verification also passed
+with zero credential/content sends; GitHub latest is `v0.0.9`.
 
 ### Acceptance scope and remaining unknowns
 
