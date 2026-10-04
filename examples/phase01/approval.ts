@@ -18,7 +18,19 @@ export const WEB_APPROVAL = Object.freeze({
 });
 export type Approval = { origin: string; repository: string; tag: string; manifest: string;
   image: string; commit: string; config: string; workflow: string; invocation: string; expires: number };
-export const API_APPROVALS: readonly Approval[] = Object.freeze([]);
+// Independently checked release provenance, held candidate and promoted endpoint.
+// Administrative expiry is NOT v2 quote freshness or Phase 0.2 acceptance.
+export const API_APPROVALS: readonly Approval[] = Object.freeze([Object.freeze({
+  origin: 'https://possum-phase0.possums.containers.tinfoil.dev',
+  repository: 'ajbt200128/possums', tag: 'v0.0.9',
+  manifest: '8c819d1b26f857d45e9aa9ccb7915cebc4448c3111d94707c094af232a17e28f',
+  image: 'sha256:45395fad53d7df0390da1cbed2a2cf46202a5a566fbc45694ba434dbcc41a22b',
+  commit: 'd9ccbf0de0a9b4de73d2d465dfd6e14424253990',
+  config: '36fc7ff23870d3a08428246f903f42f7fea242b7b6c723420e03b4d722f266b4',
+  workflow: 'https://github.com/ajbt200128/possums/.github/workflows/tinfoil-release-publish.yml@refs/tags/v0.0.9',
+  invocation: 'https://github.com/ajbt200128/possums/actions/runs/37167124305/attempts/1',
+  expires: Date.parse('2026-10-11T00:00:00Z'),
+})]);
 // Locally distributed denylist; no claim of AMD CRL/OCSP coverage.
 const REVOKED_MANIFESTS: ReadonlySet<string> = new Set();
 const REVOKED_KEYS: ReadonlySet<string> = new Set();
