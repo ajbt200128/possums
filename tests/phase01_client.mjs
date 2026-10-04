@@ -42,6 +42,15 @@ export async function clientCases(moduleURL) {
     const receipt = await m.consumeCompletion(stream(valid, size), 'org/model:v1', value => { text += value; });
     check(text === 'synthetic🐾<script>' && receipt.finish === 'length' && receipt.totalTokens === 5 && receipt.chargedMicrounits === '7');
   }
+  const setTimer = globalThis.setTimeout;
+  const deadlines = [];
+  globalThis.setTimeout = (callback, ms, ...args) => {
+    deadlines.push(ms);
+    return setTimer(callback, ms, ...args);
+  };
+  try { await m.consumeCompletion(stream(valid, 4096), 'org/model:v1', () => {}); }
+  finally { globalThis.setTimeout = setTimer; }
+  check(deadlines.includes(m.LIMITS.streamMs) && !deadlines.includes(m.LIMITS.idleMs));
   for (const bad of [
     delta + finish + usage + done, role + usage + done, role + delta, role + delta + finish + done,
     role + finish + usage, role + finish + usage + done + done, role + finish + usage + done + delta,

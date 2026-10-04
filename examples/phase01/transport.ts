@@ -27,7 +27,7 @@ function request(url: string, op: Operation, method = 'GET', body?: Uint8Array<A
     credentials: 'omit', redirect: 'error', cache: 'no-store', referrerPolicy: 'no-referrer' });
 }
 async function send(req: Request, op: Operation): Promise<Response> {
-  const response = await op.wait(fetch(req));
+  const response = await op.wait(fetch(req), LIMITS.operationMs);
   if (response.redirected || (response.status >= 300 && response.status < 400) ||
       (response.headers.has('content-encoding') && !['identity', 'gzip', 'deflate', 'br'].includes(response.headers.get('content-encoding')!))) {
     op.close();
@@ -112,7 +112,7 @@ function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation): Reada
   return new ReadableStream({
     async pull(controller) {
       try {
-        const { done, value } = await op.wait(reader.read());
+        const { done, value } = await op.wait(reader.read(), LIMITS.streamMs);
         if (done) { requireThat(prefix === 0 && remaining === 0 && frames > 0); controller.close(); return; }
         total += value.length;
         requireThat(value.length <= LIMITS.chunk && total <= LIMITS.stream);
@@ -138,7 +138,7 @@ function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean
   return new ReadableStream({
     async pull(controller) {
       try {
-        const { done, value } = await op.wait(reader.read());
+        const { done, value } = await op.wait(reader.read(), sse ? LIMITS.streamMs : LIMITS.idleMs);
         if (done) { if (sse) decoder.decode(); op.close(); controller.close(); return; }
         total += value.length;
         requireThat(value.length <= LIMITS.frame && total <= LIMITS.stream);

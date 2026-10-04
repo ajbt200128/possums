@@ -97,7 +97,8 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
   function atEOF(): boolean { return state === 'eof'; }
   try {
     for (;;) {
-      const next = await op.wait(reader.read());
+      // Reasoning can pause visible output; the absolute stream deadline stays bounded.
+      const next = await op.wait(reader.read(), LIMITS.streamMs);
       if (next.done) {
         requireThat(decoder.decode() === '');
         if (controlError) gatewayError(parseJSON(new TextEncoder().encode(pending), LIMITS.error));
