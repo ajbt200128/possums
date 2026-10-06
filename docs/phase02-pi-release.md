@@ -39,5 +39,40 @@ before the changed client sends credentials or prompts. The old v0.0.9 approval
 is not authority for changed code. No fake evidence, fixture capability or
 measurement-only provenance bypass is allowed.
 
-Evidence will be recorded after publication and deployment; neither this file
-nor local tests assert a completed rollout or full Phase 0.2 acceptance.
+## 2026-10-06 production rollout
+
+- Feature PR #9 merged; independent image publication run `37493659098` built
+  source `26f3c06aec9f61f595b097547326746af060425b` twice and preserved the matching
+  registry digest `sha256:a3f603d7188dfc0ee42ecf4fb8591481ce547a746b4ae26496089edaf3d4b7aa`.
+- Digest-only PR #10 merged. Release tag **v0.0.10** identifies source/config
+  `142f5d22823750f34c45d565b5c1f9788fb5de46`; measurement/publication invocation
+  is `37495820434/attempts/1`.
+- Manifest SHA-256: `3efd59e19458dd71cafd5c9593b8a9906e8fcd5f2c84a563bb38eca9951fd336`.
+  Decoded measured config SHA-256:
+  `3d1a527f8f3e49d493f4be22d2c6531d7e9803e53a7bf4de5053cf9099f1e5ee`.
+  Config bytes match the tag, exact signed predicate matches the manifest, and
+  Sigstore verification checked the expected signer workflow/source digest.
+- Direct production update used the existing container with `hold:false`.
+  The read-only plan selected blue/green with no required downtime. The serving
+  container reports `current_tag:v0.0.10`, running, with no pending update;
+  GitHub's latest release is v0.0.10.
+- The installed native verifier accepted the serving production v3 hardware,
+  provenance and endorsed keys with exact tag/manifest pins. Separately, the
+  actual rebuilt Pi extension accepted its legacy-v2 public bootstrap through
+  the pinned JS verifier and reached the secret prompt; it deliberately stopped
+  there with **zero submitted credentials and zero inference requests**.
+  Accepted external-v2 freshness/revocation limitations remain unchanged.
+- Local release checks: **285 Rust tests**, three ignored live tests, strict
+  format/Clippy, **436 reference checks and 17 pinned-Pi checks**, strict TS/build.
+  Linux flake/browser/image/startup checks passed. The first image test job had
+  one attestation-helper assertion failure; the failed job passed on rerun.
+  Its transient cause was not established and no runtime gate was weakened.
+- Client approval changed to these exact v0.0.10 pins without extending the
+  administrative expiry (**2026-10-11**). WEB v0.0.8 approval is untouched.
+
+The private real-Pi runner's loader smoke passed with fetch blocked and zero
+sends. **Funded Pi multiple-call execution/continuation and balance reconciliation
+remain unverified.** No new generation or usage quote was added by this rollout;
+historical quoted use/holds remain 11 attempts / 7,792,060 microunits under the
+10,000,000 quoted ceiling. This is not a provider-invoice or full Phase 0.2
+acceptance claim.
