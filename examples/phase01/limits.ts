@@ -4,6 +4,7 @@ export const LIMITS = Object.freeze({
   bundle: 1024 * 1024, provenance: 512 * 1024, certificate: 16 * 1024,
   key: 41, report: 1184, catalog: 256 * 1024, error: 4096,
   depth: 16, nodes: 32768, messages: 4096, models: 256,
+  tools: 64, toolArguments: 64 * 1024, totalToolArguments: 256 * 1024,
   chunk: 64 * 1024, frame: 256 * 1024, frames: 65536,
   stream: 64 * 1024 * 1024, sseEvent: 64 * 1024, sseEvents: 65536,
   operationMs: 30000, streamMs: 300000, idleMs: 15000, cleanupMs: 100,
@@ -90,7 +91,7 @@ function stringSize(text: string, cap: number): number {
 export function mapData(value: unknown, max: number, map: (key: string, value: unknown) => unknown): any {
   requireThat(typeof value === 'object' && value !== null);
   const array = Array.isArray(value);
-  requireThat(array || Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+  requireThat(Object.getPrototypeOf(value) === (array ? Array.prototype : Object.prototype) || Object.getPrototypeOf(value) === null);
   const length = array ? Object.getOwnPropertyDescriptor(value, 'length')!.value : 0;
   requireThat(!array || length <= max);
   let count = 0;
@@ -106,6 +107,10 @@ export function mapData(value: unknown, max: number, map: (key: string, value: u
       requireThat(typeof key === 'string' && ++count <= max);
       if (array) requireThat(key === String(count - 1));
       const desc = Object.getOwnPropertyDescriptor(target, key);
+      // Pi's pinned TypeBox schemas carry an inert, non-JSON kind marker.
+      // Ignore only this non-enumerable data value; never invoke an accessor.
+      if (!array && key === '~kind' && desc && 'value' in desc && !desc.enumerable &&
+        typeof desc.value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(desc.value)) return desc;
       requireThat(desc && 'value' in desc && desc.enumerable);
       return desc;
     },
@@ -118,7 +123,7 @@ export function mapData(value: unknown, max: number, map: (key: string, value: u
   requireThat(!array || count === length);
   return snapshot;
 }
-type AdmittedJSON = string | boolean | null | AdmittedJSON[] | { [key: string]: AdmittedJSON };
+type AdmittedJSON = string | number | boolean | null | AdmittedJSON[] | { [key: string]: AdmittedJSON };
 export function serialize(value: unknown, cap: number): Uint8Array<ArrayBuffer> {
   let nodes = 0, bytesUsed = 0;
   function add(bytes: number): void { bytesUsed += bytes; requireThat(bytesUsed <= cap); }
@@ -126,6 +131,7 @@ export function serialize(value: unknown, cap: number): Uint8Array<ArrayBuffer> 
     requireThat(depth <= LIMITS.depth && ++nodes <= LIMITS.nodes);
     if (typeof v === 'string') { add(stringSize(v, cap - bytesUsed)); return v; }
     if (typeof v === 'boolean') { add(v ? 4 : 5); return v; }
+    if (typeof v === 'number') { requireThat(Number.isFinite(v)); add(String(v).length); return v; }
     if (v === null) { add(4); return v; }
     const array = Array.isArray(v);
     add(2);
@@ -151,21 +157,28 @@ export async function cleanup(action: Promise<unknown>): Promise<void> {
 export class Operation {
   readonly controller = new AbortController();
   private timer: ReturnType<typeof setTimeout>;
-  constructor(ms: number = LIMITS.operationMs) {
-    this.timer = setTimeout(() => this.controller.abort(), ms);
+  private readonly abort = () => this.controller.abort();
+  constructor(ms: number = LIMITS.operationMs, private readonly parent?: AbortSignal) {
+    requireThat(parent === undefined || parent instanceof AbortSignal);
+    this.timer = setTimeout(this.abort, ms);
+    parent?.addEventListener('abort', this.abort, { once: true });
+    if (parent?.aborted) this.abort();
   }
-  close(): void { clearTimeout(this.timer); this.controller.abort(); }
+  check(): void { requireThat(!this.controller.signal.aborted); }
+  close(): void { clearTimeout(this.timer); this.parent?.removeEventListener('abort', this.abort); this.controller.abort(); }
   async wait<T>(promise: Promise<T>, idle: number = LIMITS.idleMs): Promise<T> {
     const signal = this.controller.signal;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let abort: () => void = () => {};
     try {
-      requireThat(!signal.aborted);
-      return await Promise.race([promise, new Promise<never>((_, reject) => {
+      if (signal.aborted) { void promise.catch(() => {}); throw new ChannelError(); }
+      const result = await Promise.race([promise, new Promise<never>((_, reject) => {
         abort = () => reject(new ChannelError());
         signal.addEventListener('abort', abort, { once: true });
         timer = setTimeout(() => { this.controller.abort(); }, idle);
       })]);
+      this.check();
+      return result;
     } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
   }
 }
@@ -176,6 +189,7 @@ export async function collect(body: ReadableStream<Uint8Array> | null, cap: numb
   let length = 0;
   try {
     for (;;) {
+      op.check();
       const { done, value } = await op.wait(reader.read());
       if (done) break;
       length += value.length;

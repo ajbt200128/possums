@@ -128,7 +128,7 @@ async fn discover(state: &AppState, bearer: Option<&str>, expected: StatusCode) 
     assert!(bytes.len() <= MAX_CATALOG_BYTES);
     let result = serde_json::from_slice(&bytes).unwrap();
     if !expected.is_success() {
-        assert!(bytes.len() < 100);
+        assert!(bytes.len() < 512); // Fixed detail/message/billing, never provider text.
     }
     result
 }
@@ -227,7 +227,7 @@ async fn authentication_gateway_and_catalog_fail_closed_without_stale_fallback()
     provider.unavailable.store(true, Ordering::SeqCst);
     assert_eq!(
         discover(&state, Some(&bearer), StatusCode::SERVICE_UNAVAILABLE).await,
-        json!({"error":{"code":"unavailable"}})
+        json!({"error":{"code":"unavailable","detail":"inference_unavailable","message":"Verified inference is unavailable.","billing":"unknown"}})
     );
     provider.unavailable.store(false, Ordering::SeqCst);
     for invalid in [
@@ -241,7 +241,7 @@ async fn authentication_gateway_and_catalog_fail_closed_without_stale_fallback()
         *provider.catalog.lock().unwrap() = invalid;
         assert_eq!(
             discover(&state, Some(&bearer), StatusCode::SERVICE_UNAVAILABLE).await,
-            json!({"error":{"code":"unavailable"}})
+            json!({"error":{"code":"unavailable","detail":"catalog_failed","message":"The authenticated model catalog is unavailable or invalid.","billing":"unknown"}})
         );
     }
     *provider.catalog.lock().unwrap() = raw;

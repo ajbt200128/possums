@@ -717,6 +717,9 @@ async fn chat(
             )))
             .into_response()
         }
+        Err(Rejection::Upstream(failure)) => {
+            (StatusCode::SERVICE_UNAVAILABLE, failure.to_string()).into_response()
+        }
         Err(Rejection::Unavailable | Rejection::Admission(AdmissionError::Accounting(_))) => {
             unavailable()
         }

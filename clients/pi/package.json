@@ -1,0 +1,21 @@
+{
+  "name": "possums-pi",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": {
+    "@tinfoilsh/verifier": "1.2.1",
+    "@freedomofpress/sigstore-browser": "0.1.15",
+    "ehbp": "0.3.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "esbuild": "0.25.10",
+    "@types/node": "22.19.19"
+  }
+}

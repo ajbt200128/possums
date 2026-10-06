@@ -5,14 +5,16 @@ use axum::{
     response::Response,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use possums::{
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::Auth,
     catalog::Model,
     inference::{
-        stream::{ProtocolParser, StreamCompletion},
-        Inference, InferenceError, Message,
+        stream::{ProtocolParser, SdkToolValidator, StreamCompletion},
+        tools::{CompletionDelta, ToolInvocation, ToolProfile},
+        Inference, InferenceError, InferenceFailure, Message,
     },
     web::{router, AppState, BODY_LIMIT},
 };
@@ -21,7 +23,7 @@ use sha2::{Digest, Sha256};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -29,6 +31,10 @@ use tokio::sync::{Notify, OwnedSemaphorePermit};
 use tower::ServiceExt;
 
 struct Provider {
+    qualified: AtomicBool,
+    revoke_qualification: AtomicBool,
+    qualification_checks: AtomicUsize,
+    invocation: Mutex<Option<Value>>,
     tokens: AtomicU64,
     tokenizer_calls: AtomicUsize,
     generation_calls: AtomicUsize,
@@ -38,8 +44,11 @@ struct Provider {
     valid_evidence: AtomicBool,
     upstream_error: AtomicBool,
     invalid_usage: AtomicBool,
+    missing_final_usage: AtomicBool,
     overflow_delivery: AtomicBool,
     hold_tokenizer: AtomicBool,
+    tokenizer_error: AtomicBool,
+    invalid_receipt: AtomicBool,
     tokenizer_started: Notify,
     tokenizer_release: Notify,
     started: Notify,
@@ -81,6 +90,9 @@ impl Inference for Provider {
         if self.hold_tokenizer.load(Ordering::SeqCst) {
             self.tokenizer_release.notified().await;
         }
+        if self.tokenizer_error.load(Ordering::SeqCst) {
+            return Err(InferenceFailure::TokenizerResponseInvalid.into());
+        }
         Ok(self.tokens.load(Ordering::SeqCst))
     }
     async fn generate_completion_stream(
@@ -111,8 +123,17 @@ impl Inference for Provider {
         }
         self.started.notify_one();
         self.finish.notified().await;
-        let result = if self.upstream_error.load(Ordering::SeqCst) {
-            Err(InferenceError::Unavailable)
+        let result = if self.invalid_receipt.load(Ordering::SeqCst) {
+            Ok(StreamCompletion {
+                usage: possums::inference::stream::StreamUsage {
+                    input_tokens: 2,
+                    output_tokens: 3,
+                    total_tokens: 999,
+                },
+                finish_reason: possums::inference::stream::FinishReason::Stop,
+            })
+        } else if self.upstream_error.load(Ordering::SeqCst) {
+            Err(InferenceFailure::StreamTransportFailed.into())
         } else if self.invalid_usage.load(Ordering::SeqCst) {
             Err(InferenceError::InvalidResponse)
         } else {
@@ -121,6 +142,120 @@ impl Inference for Provider {
                 .eof_completion()
                 .map_err(|_| InferenceError::InvalidResponse)
         };
+        self.completed.notify_one();
+        result
+    }
+    fn tool_profile(&self, model: &str) -> Option<ToolProfile> {
+        let check = self.qualification_checks.fetch_add(1, Ordering::SeqCst);
+        (model == "m"
+            && self.qualified.load(Ordering::SeqCst)
+            && !(check > 0 && self.revoke_qualification.load(Ordering::SeqCst)))
+        .then_some(ToolProfile::OpenAiFunctionsV1)
+    }
+    async fn count_invocation_tokens(
+        &self,
+        model: &str,
+        invocation: &ToolInvocation,
+        heavy: Arc<OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
+        *self.invocation.lock().unwrap() = Some(serde_json::to_value(invocation).unwrap());
+        self.count_tokens(model, &[], heavy).await
+    }
+    async fn generate_invocation_stream(
+        &self,
+        model: &Model,
+        invocation: &ToolInvocation,
+        _: Arc<OwnedSemaphorePermit>,
+        on_delta: &mut (dyn for<'d> FnMut(CompletionDelta<'d>) + Send),
+    ) -> Result<StreamCompletion, InferenceError> {
+        assert_eq!(
+            self.invocation.lock().unwrap().as_ref(),
+            Some(&serde_json::to_value(invocation).unwrap())
+        );
+        self.generation_calls.fetch_add(1, Ordering::SeqCst);
+        self.output_allowance
+            .store(model.max_output_tokens, Ordering::SeqCst);
+        let mut validator = SdkToolValidator::default();
+        // Controllable HTTP-byte fixture through the production SDK decoder.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>, std::io::Error>>();
+        let bytes = futures_util::stream::unfold(rx, |mut rx| async {
+            rx.recv().await.map(|b| (b.map(Into::into), rx))
+        });
+        let mut events = tinfoil::sse::parse_event_stream(bytes);
+        let arguments = json!({"q":"🐾\n".repeat(260)}).to_string();
+        let event = format!(
+            "data: {}\n\n",
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"generated_0","type":"function","function":{"name":"lookup","arguments":arguments}}]},"finish_reason":null}],
+                "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}})
+        );
+        tx.send(Ok(event.into_bytes())).unwrap();
+        validator
+            .accept(
+                events
+                    .next()
+                    .await
+                    .unwrap()
+                    .map_err(|_| InferenceError::InvalidResponse)?,
+                &mut *on_delta,
+            )
+            .map_err(|_| InferenceError::InvalidResponse)?;
+        if self.overflow_delivery.load(Ordering::SeqCst) {
+            let event = format!(
+                "data: {}\n\n",
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":" ".repeat(256)}}]},"finish_reason":null}]})
+            );
+            for _ in 0..100 {
+                tx.send(Ok(event.as_bytes().to_vec())).unwrap();
+                validator
+                    .accept(
+                        events
+                            .next()
+                            .await
+                            .unwrap()
+                            .map_err(|_| InferenceError::InvalidResponse)?,
+                        &mut *on_delta,
+                    )
+                    .map_err(|_| InferenceError::InvalidResponse)?;
+            }
+        }
+        self.started.notify_one();
+        self.finish.notified().await;
+        if self.upstream_error.load(Ordering::SeqCst) {
+            tx.send(Err(std::io::Error::other("fixture transport failure")))
+                .unwrap();
+        } else {
+            tx.send(Ok(format!(
+                "data: {}\n\n",
+                json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}})
+            )
+            .into_bytes()))
+                .unwrap();
+            if !self.missing_final_usage.load(Ordering::SeqCst) {
+                let total = if self.invalid_usage.load(Ordering::SeqCst) {
+                    6
+                } else {
+                    5
+                };
+                tx.send(Ok(format!("data: {}\n\n", json!({"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":total}})).into_bytes())).unwrap();
+            }
+            tx.send(Ok(b"data: [DONE]\n\n".to_vec())).unwrap();
+        }
+        drop(tx);
+        let result = async {
+            while let Some(event) = events.next().await {
+                validator
+                    .accept(
+                        event.map_err(|_| InferenceError::InvalidResponse)?,
+                        &mut *on_delta,
+                    )
+                    .map_err(|_| InferenceError::InvalidResponse)?;
+            }
+            validator
+                .eof_completion()
+                .map_err(|_| InferenceError::InvalidResponse)
+        }
+        .await;
         self.completed.notify_one();
         result
     }
@@ -136,6 +271,10 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         .unwrap();
     let submission = auth.issue_api_submission(&bearer, "m", false).unwrap();
     let provider = Arc::new(Provider {
+        qualified: false.into(),
+        revoke_qualification: false.into(),
+        qualification_checks: 0.into(),
+        invocation: Mutex::new(None),
         tokens: 2.into(),
         tokenizer_calls: 0.into(),
         generation_calls: 0.into(),
@@ -145,8 +284,11 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         valid_evidence: true.into(),
         upstream_error: false.into(),
         invalid_usage: false.into(),
+        missing_final_usage: false.into(),
         overflow_delivery: false.into(),
         hold_tokenizer: false.into(),
+        tokenizer_error: false.into(),
+        invalid_receipt: false.into(),
         tokenizer_started: Notify::new(),
         tokenizer_release: Notify::new(),
         started: Notify::new(),
@@ -231,6 +373,8 @@ async fn progressive_stream_preserves_finish_and_settles_before_success_markers_
     assert!(text.contains("\"finish_reason\":\"length\""));
     assert!(text.contains("\"total_tokens\":5"));
     assert!(text.contains("\"charged_microunits\":\"7\""));
+    assert!(text.contains("\"quoted_input_microunits_per_million_tokens\":\"1000000\""));
+    assert!(text.contains("\"quoted_output_microunits_per_million_tokens\":\"1000000\""));
     assert!(text.ends_with("data: [DONE]\n\n"));
     duplicate(&state, &bearer, &submission, "settled").await;
     assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 1);
@@ -391,4 +535,292 @@ async fn reject_buffered_mode_tools_malformed_history_oversize_and_old_restart_a
         send(&restarted, &bearer, &submission).await.status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+fn structured_input(submission: &str) -> Value {
+    json!({"model":"m","stream":true,"submission":submission,
+        "tools":[{"type":"function","function":{"name":"lookup","description":"fixture","parameters":{"type":"object"}}}],
+        "tool_choice":"auto",
+        "messages":[{"role":"user","content":"fixture"},
+            {"role":"assistant","content":null,"tool_calls":[{"id":"prior_0","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"prior_0","content":"fixture result"}]})
+}
+
+#[tokio::test]
+async fn tools_require_independent_qualification_rechecked_before_reservation() {
+    for revoked in [false, true] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        provider.qualified.store(revoked, Ordering::SeqCst);
+        provider
+            .revoke_qualification
+            .store(revoked, Ordering::SeqCst);
+        let response = router(state.clone())
+            .oneshot(json_request(&bearer, structured_input(&submission)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            provider.qualification_checks.load(Ordering::SeqCst),
+            if revoked { 2 } else { 1 }
+        );
+        assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.accounting.available("demo"), Some(5_000_000));
+    }
+}
+
+#[tokio::test]
+async fn structured_history_exact_preflight_bounded_sse_and_original_price_receipt() {
+    for choice in [
+        json!("none"),
+        json!("required"),
+        json!({"type":"function","function":{"name":"named"}}),
+    ] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        provider.qualified.store(true, Ordering::SeqCst);
+        let mut input = structured_input(&submission);
+        // Neither historical nor returned calls need belong to today's declarations.
+        // Policy is enforced only at the caller's execution boundary.
+        input["tools"][0]["function"]["name"] = json!("current");
+        input["tool_choice"] = choice;
+        let expected_messages = input["messages"].clone();
+        let response = router(state.clone())
+            .oneshot(json_request(&bearer, input))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        wait(&provider.started).await;
+        assert_eq!(
+            provider.invocation.lock().unwrap().as_ref().unwrap()["messages"],
+            expected_messages
+        );
+        assert_eq!(provider.output_allowance.load(Ordering::SeqCst), 18);
+        assert_eq!(state.accounting.available("demo"), Some(5_000_000 - 52));
+        provider.price.store(100, Ordering::SeqCst);
+        provider.finish.notify_one();
+        let mut body = response.into_body();
+        let mut arguments = String::new();
+        let mut fragments = 0;
+        let mut finished = false;
+        let mut receipt = false;
+        let mut done = false;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.unwrap().into_data().unwrap();
+            assert!(frame.len() <= 8192);
+            let text = std::str::from_utf8(&frame).unwrap();
+            if text == "data: [DONE]\n\n" {
+                assert!(finished && receipt);
+                done = true;
+                continue;
+            }
+            let value: Value =
+                serde_json::from_str(text.strip_prefix("data: ").unwrap().trim()).unwrap();
+            if let Some(delta) =
+                value["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str()
+            {
+                assert!(!finished);
+                fragments += 1;
+                arguments.push_str(delta);
+            }
+            if let Some(reason) = value["choices"][0]["finish_reason"].as_str() {
+                assert_eq!(reason, "stop"); // Never normalize stop-with-calls to tool_calls.
+                finished = true;
+            }
+            if value.get("possums").is_some() {
+                assert!(finished);
+                assert_eq!(state.accounting.available("demo"), Some(5_000_000 - 7));
+                assert_eq!(value["possums"]["charged_microunits"], "7");
+                assert_eq!(value["possums"]["refunded_microunits"], "45");
+                assert_eq!(
+                    value["possums"]["quoted_input_microunits_per_million_tokens"],
+                    "1000000"
+                );
+                assert_eq!(
+                    value["possums"]["quoted_output_microunits_per_million_tokens"],
+                    "1000000"
+                );
+                receipt = true;
+            }
+        }
+        assert!(done && fragments > 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&arguments).unwrap(),
+            json!({"q":"🐾\n".repeat(260)})
+        );
+        duplicate(&state, &bearer, &submission, "settled").await;
+    }
+}
+
+#[tokio::test]
+async fn structured_disconnect_overflow_and_failure_keep_sole_settling_owner() {
+    for mode in [
+        "disconnect",
+        "overflow",
+        "failure",
+        "invalid_usage",
+        "missing_final_usage",
+    ] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        provider.qualified.store(true, Ordering::SeqCst);
+        provider
+            .overflow_delivery
+            .store(mode == "overflow", Ordering::SeqCst);
+        provider
+            .upstream_error
+            .store(mode == "failure", Ordering::SeqCst);
+        provider
+            .invalid_usage
+            .store(mode == "invalid_usage", Ordering::SeqCst);
+        provider
+            .missing_final_usage
+            .store(mode == "missing_final_usage", Ordering::SeqCst);
+        let failed = matches!(mode, "failure" | "invalid_usage" | "missing_final_usage");
+        let response = router(state.clone())
+            .oneshot(json_request(&bearer, structured_input(&submission)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        wait(&provider.started).await;
+        if mode == "overflow" {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(body.len() <= 64 * 1024);
+            assert!(!std::str::from_utf8(&body).unwrap().contains("[DONE]"));
+        } else {
+            drop(response);
+        }
+        provider.finish.notify_one();
+        terminal(&state, 5_000_000 - if failed { 0 } else { 7 }).await;
+        duplicate(
+            &state,
+            &bearer,
+            &submission,
+            if failed { "refunded" } else { "settled" },
+        )
+        .await;
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn structured_preflight_survives_request_cancellation_and_context_rejection() {
+    for context_failure in [false, true] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        provider.qualified.store(true, Ordering::SeqCst);
+        provider.hold_tokenizer.store(true, Ordering::SeqCst);
+        if context_failure {
+            provider.tokens.store(20, Ordering::SeqCst);
+        }
+        let request = json_request(&bearer, structured_input(&submission));
+        let task = tokio::spawn(router(state.clone()).oneshot(request));
+        wait(&provider.tokenizer_started).await;
+        task.abort();
+        let _ = task.await;
+        provider.tokenizer_release.notify_one();
+        if context_failure {
+            terminal(&state, 5_000_000).await;
+            assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
+            duplicate(&state, &bearer, &submission, "refunded").await;
+        } else {
+            wait(&provider.started).await;
+            provider.finish.notify_one();
+            terminal(&state, 5_000_000 - 7).await;
+            duplicate(&state, &bearer, &submission, "settled").await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn catalog_advertises_only_explicit_fixture_profile() {
+    let (state, provider, bearer, _) = fixture(5_000_000);
+    for qualified in [false, true] {
+        provider.qualified.store(qualified, Ordering::SeqCst);
+        let response = router(state.clone())
+            .oneshot(
+                Request::get("/v1/models")
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["data"][0].get("tool_protocol"),
+            qualified.then_some(&json!("openai-functions-v1"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn safe_details_survive_middleware_and_only_actual_refunds_are_reported() {
+    for preflight in ["tokenizer", "evidence", "catalog"] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        let detail = match preflight {
+            "tokenizer" => {
+                provider.tokenizer_error.store(true, Ordering::SeqCst);
+                "tokenizer_response_invalid"
+            }
+            "evidence" => {
+                provider.valid_evidence.store(false, Ordering::SeqCst);
+                "verification_failed"
+            }
+            _ => {
+                provider.valid_catalog.store(false, Ordering::SeqCst);
+                "inference_unavailable"
+            }
+        };
+        let response = send(&state, &bearer, &submission).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["code"], "unavailable");
+        assert_eq!(value["error"]["detail"], detail);
+        assert_eq!(value["error"]["billing"], "unknown"); // Drop is not a receipt.
+        assert!(value["error"]["message"].is_string());
+        assert!(!std::str::from_utf8(&bytes).unwrap().contains("synthetic"));
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.accounting.available("demo"), Some(5_000_000));
+    }
+    for invalid_receipt in [false, true] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        provider
+            .upstream_error
+            .store(!invalid_receipt, Ordering::SeqCst);
+        provider
+            .invalid_receipt
+            .store(invalid_receipt, Ordering::SeqCst);
+        let response = send(&state, &bearer, &submission).await;
+        wait(&provider.started).await;
+        provider.finish.notify_one();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let error = text
+            .lines()
+            .find(|line| line.starts_with("data: {\"error\":{\"code\":\"generation_failed\""))
+            .unwrap();
+        let value: Value = serde_json::from_str(error.strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(
+            value["error"]["detail"],
+            if invalid_receipt {
+                "settlement_failed"
+            } else {
+                "stream_transport_failed"
+            }
+        );
+        assert_eq!(
+            value["error"]["billing"],
+            if invalid_receipt {
+                "unknown"
+            } else {
+                "refunded"
+            }
+        );
+        assert!(!error.contains("synthetic"));
+        assert!(!text.contains("[DONE]"));
+        terminal(&state, 5_000_000).await;
+        duplicate(&state, &bearer, &submission, "refunded").await;
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+    }
 }

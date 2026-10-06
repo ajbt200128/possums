@@ -4,8 +4,12 @@ use crate::{
     auth::{AdmissionError, AuthError, Session},
     bounded_json,
     catalog::{Catalog, MAX_CATALOG_BYTES},
-    generation::{now_unix, GenerationInput, Rejection, Submission},
-    inference::{authenticated_catalog, Message},
+    generation::{now_unix, GenerationInput, Rejection, StructuredGenerationInput, Submission},
+    inference::{
+        authenticated_catalog,
+        tools::{Tool, ToolChoice, ToolInvocation, ToolMessage},
+        InferenceFailure,
+    },
     web::AppState,
 };
 use axum::{
@@ -60,6 +64,19 @@ pub(crate) fn error(status: StatusCode) -> Response {
     let mut response = (
         status,
         axum::Json(serde_json::json!({"error": {"code": code}})),
+    )
+        .into_response();
+    response.extensions_mut().insert(SafeError);
+    response
+}
+
+fn inference_error(failure: InferenceFailure) -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({"error": {
+            "code": "unavailable", "detail": failure,
+            "message": failure.to_string(), "billing": "unknown"
+        }})),
     )
         .into_response();
     response.extensions_mut().insert(SafeError);
@@ -134,8 +151,10 @@ fn parse<T: DeserializeOwned>(headers: &HeaderMap, bytes: &Bytes) -> Result<T, S
     if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
         return Err(StatusCode::BAD_REQUEST);
     }
-    // Middleware has already bounded collection to 4 KiB under its deadline and
-    // retained control lease. Typed structs reject duplicates/unknown fields.
+    // Middleware has already bounded collection under its deadline and retained
+    // request lease. Typed structs reject unknown fields; the guard also rejects
+    // duplicate keys inside opaque tool schemas before Value can discard them.
+    crate::inference::stream::validate_request_json(bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     serde_json::from_slice(bytes).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
@@ -189,16 +208,19 @@ struct SubmissionRequest {
     new_conversation: bool,
 }
 
-async fn live_catalog(state: &AppState) -> Result<Catalog, StatusCode> {
+async fn live_catalog(state: &AppState) -> Result<Catalog, InferenceFailure> {
     tokio::time::timeout(Duration::from_secs(30), async {
-        state.generation().evidence().await.map_err(|_| ())?;
+        state
+            .generation()
+            .evidence()
+            .await
+            .map_err(|_| InferenceFailure::VerificationFailed)?;
         authenticated_catalog(state.inference.as_ref(), now_unix())
             .await
-            .map_err(|_| ())
+            .map_err(|error| error.failure())
     })
     .await
-    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-    .map_err(|()| StatusCode::SERVICE_UNAVAILABLE)
+    .map_err(|_| InferenceFailure::InferenceUnavailable)?
 }
 
 async fn submission(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes) -> Response {
@@ -215,7 +237,7 @@ async fn submission(State(state): State<AppState>, headers: HeaderMap, bytes: By
     }
     let catalog = match live_catalog(&state).await {
         Ok(catalog) => catalog,
-        Err(status) => return error(status),
+        Err(failure) => return inference_error(failure),
     };
     if catalog.reservation_quote(&input.model).is_err() {
         return error(StatusCode::BAD_REQUEST);
@@ -261,6 +283,8 @@ struct ModelEntry {
     input_microunits_per_million_tokens: String,
     output_microunits_per_million_tokens: String,
     maximum_reservation_microunits: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_protocol: Option<&'static str>,
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes) -> Response {
@@ -273,16 +297,20 @@ async fn models(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes)
     }
     let catalog = match live_catalog(&state).await {
         Ok(catalog) => catalog,
-        Err(status) => return error(status),
+        Err(failure) => return inference_error(failure),
     };
     let mut data = Vec::with_capacity(catalog.models.len());
     for model in &catalog.models {
         let quote = match catalog.reservation_quote(&model.id) {
             Ok(quote) => quote,
-            Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE),
+            Err(_) => return inference_error(InferenceFailure::CatalogFailed),
         };
         data.push(ModelEntry {
             object: "model",
+            tool_protocol: state
+                .inference
+                .tool_profile(&model.id)
+                .map(|p| p.protocol()),
             id: model.id.clone(),
             context_tokens: model.context_tokens.to_string(),
             max_output_tokens: model.max_output_tokens.to_string(),
@@ -321,7 +349,11 @@ struct ChatRequest {
     stream_options: Option<StreamOptions>,
     n: Option<u8>,
     #[serde(deserialize_with = "chat_messages")]
-    messages: Vec<ChatMessage>,
+    messages: Vec<ToolMessage>,
+    #[serde(default, deserialize_with = "crate::inference::tools::bounded_list")]
+    tools: Option<Vec<Tool>>,
+    #[serde(default, deserialize_with = "present")]
+    tool_choice: Option<ToolChoice>,
 }
 
 #[derive(Deserialize)]
@@ -330,19 +362,19 @@ struct StreamOptions {
     include_usage: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChatMessage {
-    role: String,
-    content: String,
+// Presence is significant: explicit null is not absence/capability bypass.
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    decoder: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(decoder).map(Some)
 }
 
 fn chat_messages<'de, D: serde::Deserializer<'de>>(
     decoder: D,
-) -> Result<Vec<ChatMessage>, D::Error> {
+) -> Result<Vec<ToolMessage>, D::Error> {
     struct Messages;
     impl<'de> Visitor<'de> for Messages {
-        type Value = Vec<ChatMessage>;
+        type Value = Vec<ToolMessage>;
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("bounded text messages")
         }
@@ -384,52 +416,76 @@ async fn chat(
         || input.model.is_empty()
         || input.model.len() > 128
         || input.messages.is_empty()
-        || input
-            .messages
-            .iter()
-            .any(|m| !matches!(m.role.as_str(), "system" | "user" | "assistant"))
-        || input
-            .messages
-            .last()
-            .is_none_or(|m| m.role != "user" || m.content.is_empty())
     {
         return error(StatusCode::BAD_REQUEST);
     }
-    let prompt = input
-        .messages
-        .pop()
-        .expect("validated final user message")
-        .content;
-    let history = input
-        .messages
-        .into_iter()
-        .map(|m| Message {
-            role: m.role,
-            content: m.content,
-        })
-        .collect();
     let inference = state.inference.clone();
     let delivery_heavy = heavy.clone();
-    match state
-        .generation()
-        .submit(
-            Submission {
-                session_id: &session_id,
-                csrf: &session.csrf,
-                token: &input.submission,
-            },
-            GenerationInput {
-                model: input.model,
-                history,
-                prompt,
-            },
-            heavy,
-            move |owner, prepared| {
-                crate::api_stream::compose(owner, delivery_heavy, prepared, inference)
-            },
-        )
-        .await
-    {
+    let submission = Submission {
+        session_id: &session_id,
+        csrf: &session.csrf,
+        token: &input.submission,
+    };
+    let structured = input.tools.is_some()
+        || input.tool_choice.is_some()
+        || input.messages.iter().any(ToolMessage::is_structured);
+    let result = if structured {
+        let invocation = match ToolInvocation::new(input.messages, input.tools, input.tool_choice) {
+            Ok(invocation) => invocation,
+            Err(_) => return error(StatusCode::BAD_REQUEST),
+        };
+        state
+            .generation()
+            .submit_structured(
+                submission,
+                StructuredGenerationInput {
+                    model: input.model,
+                    invocation,
+                },
+                heavy,
+                move |owner, prepared| {
+                    crate::api_stream::compose_structured(
+                        owner,
+                        delivery_heavy,
+                        prepared,
+                        inference,
+                    )
+                },
+            )
+            .await
+    } else {
+        let Some(ToolMessage::User { content: prompt }) = input.messages.pop() else {
+            return error(StatusCode::BAD_REQUEST);
+        };
+        if prompt.is_empty() {
+            return error(StatusCode::BAD_REQUEST);
+        }
+        let history = match input
+            .messages
+            .into_iter()
+            .map(ToolMessage::into_text)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(history) => history,
+            Err(_) => return error(StatusCode::BAD_REQUEST),
+        };
+        state
+            .generation()
+            .submit(
+                submission,
+                GenerationInput {
+                    model: input.model,
+                    history,
+                    prompt,
+                },
+                heavy,
+                move |owner, prepared| {
+                    crate::api_stream::compose(owner, delivery_heavy, prepared, inference)
+                },
+            )
+            .await
+    };
+    match result {
         Ok(body) => {
             let mut response = axum::body::Body::new(body).into_response();
             response
@@ -456,6 +512,8 @@ async fn chat(
             response.extensions_mut().insert(SafeError);
             response
         }
+        Err(Rejection::Upstream(failure)) => inference_error(failure),
+        Err(Rejection::Unavailable) => inference_error(InferenceFailure::InferenceUnavailable),
         Err(rejection) => error(match rejection {
             Rejection::InvalidModel
             | Rejection::Context

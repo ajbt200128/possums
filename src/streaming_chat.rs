@@ -12,7 +12,7 @@ use crate::{
     catalog::Model,
     generation::PreparedGeneration,
     generation_owner::{OwnerError, ReservedGeneration},
-    inference::{InferenceError, Message, SharedInference},
+    inference::{InferenceError, InferenceFailure, Message, SharedInference},
     render::{CreditSnapshot, IncrementalRenderer, RenderOutcome},
     stream_owner::{delivery, DeliveryBody, DeliveryTx, Limits, StartupTx},
 };
@@ -188,13 +188,14 @@ fn compose_inner(
         // Only the adapter's terminal result reaches accounting, once. A failed
         // delivery never cancels/replays upstream or changes its billing result.
         let receipt = settlement.finish(&result);
-        let settled = matches!(receipt.outcome(), Ok(Outcome::Settled { .. }));
+        let settled = matches!(receipt.outcome(), Ok(Outcome::Settled { .. })) && result.is_ok();
         // A valid upstream EOF can still refund on invalid usage arithmetic.
         // Render that as a failed generation, not a changed conversation.
-        let display_result = if settled {
+        let refunded = matches!(receipt.outcome(), Ok(Outcome::Refunded)) && result.is_err();
+        let display_result = if settled || refunded {
             result
         } else {
-            Err(InferenceError::InvalidResponse)
+            Err(InferenceFailure::SettlementFailed.into())
         };
         // finish released the ledger lock. Read available credit afresh AFTER
         // settlement, including any concurrent reservations; never refresh price.
@@ -212,9 +213,10 @@ fn compose_inner(
                     })
             });
         let can_continue = settled && (credit.is_none() || snapshot.is_some());
-        renderer.complete_with_credit(
+        renderer.complete_with_settlement(
             display_result,
             snapshot,
+            refunded,
             || {
                 // complete calls this only while continuation remains usable.
                 // finish has already released the accounting lock before auth.

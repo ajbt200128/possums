@@ -151,3 +151,33 @@ fn heavy() -> Arc<tokio::sync::OwnedSemaphorePermit> {
             .unwrap(),
     )
 }
+
+#[tokio::test]
+async fn default_structured_methods_fail_closed_without_text_fallback() {
+    use possums::inference::tools::{ToolInvocation, ToolMessage};
+    let inference: SharedInference = Arc::new(NoStreaming);
+    let (model, _) = request();
+    let input = ToolInvocation::new(
+        vec![ToolMessage::User {
+            content: "fixture".into(),
+        }],
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(inference.tool_profile(&model.id).is_none());
+    assert!(matches!(
+        inference
+            .count_invocation_tokens(&model.id, &input, heavy())
+            .await,
+        Err(InferenceError::Unavailable)
+    ));
+    assert!(matches!(
+        inference
+            .generate_invocation_stream(&model, &input, heavy(), &mut |_| panic!(
+                "default must not emit"
+            ))
+            .await,
+        Err(InferenceError::Unavailable)
+    ));
+}
