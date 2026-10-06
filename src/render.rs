@@ -463,9 +463,20 @@ impl<'a> IncrementalRenderer<'a> {
     /// refreshed catalog or the smaller context-legal generation allowance.
     /// None preserves the standalone renderer fixtures' behavior.
     pub fn complete_with_credit(
+        self,
+        upstream: Result<crate::inference::stream::StreamUsage, crate::inference::InferenceError>,
+        credit: Option<CreditSnapshot>,
+        issue_original_continuation: impl FnOnce() -> Option<String>,
+        sink: impl FnMut(&str) -> RenderSinkResult,
+    ) -> RenderOutcome {
+        self.complete_with_settlement(upstream, credit, false, issue_original_continuation, sink)
+    }
+
+    pub(crate) fn complete_with_settlement(
         mut self,
         upstream: Result<crate::inference::stream::StreamUsage, crate::inference::InferenceError>,
         credit: Option<CreditSnapshot>,
+        refunded: bool,
         issue_original_continuation: impl FnOnce() -> Option<String>,
         mut sink: impl FnMut(&str) -> RenderSinkResult,
     ) -> RenderOutcome {
@@ -473,9 +484,17 @@ impl<'a> IncrementalRenderer<'a> {
             return RenderOutcome::InvalidInput;
         }
         self.emit("</pre>", &mut sink);
-        if upstream.is_err() {
+        if let Err(error) = upstream {
+            let billing = if refunded {
+                "Reservation refunded."
+            } else {
+                "Billing status unknown."
+            };
             self.notice(
-                "Generation failed; no continuation is available.",
+                &format!(
+                    "Generation failed; no continuation is available. {} {billing}",
+                    escape(&error.failure().to_string())
+                ),
                 &mut sink,
             );
             return RenderOutcome::UpstreamFailed;

@@ -6,7 +6,11 @@ use thiserror::Error;
 use tinfoil::Client;
 use tokio::{sync::OwnedSemaphorePermit, time::Instant};
 
+mod errors;
+pub use errors::InferenceFailure;
 pub mod stream;
+pub mod tools;
+use tools::{CompletionDelta, InvocationRequest, ToolInvocation, ToolProfile};
 #[cfg(test)]
 #[path = "../tests/support/stream.rs"]
 pub(crate) mod stream_support;
@@ -34,6 +38,18 @@ pub enum InferenceError {
     Unavailable,
     #[error("authenticated upstream response is invalid")]
     InvalidResponse,
+    #[error(transparent)]
+    Detailed(#[from] InferenceFailure),
+}
+
+impl InferenceError {
+    pub fn failure(&self) -> InferenceFailure {
+        match self {
+            Self::Unavailable => InferenceFailure::InferenceUnavailable,
+            Self::InvalidResponse => InferenceFailure::UpstreamResponseInvalid,
+            Self::Detailed(failure) => *failure,
+        }
+    }
 }
 
 #[async_trait]
@@ -82,6 +98,32 @@ pub trait Inference: Send + Sync {
         Err(InferenceError::Unavailable)
     }
 
+    /// Explicit qualification only; catalog presence never grants this capability.
+    fn tool_profile(&self, _model: &str) -> Option<ToolProfile> {
+        None
+    }
+
+    async fn count_invocation_tokens(
+        &self,
+        _model: &str,
+        _invocation: &ToolInvocation,
+        _heavy: Arc<OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
+        Err(InferenceError::Unavailable)
+    }
+
+    /// The callback borrows bounded fragments; never collect complete arguments.
+    /// Delivery failure must detach only, not cancel this settling operation.
+    async fn generate_invocation_stream(
+        &self,
+        _model: &Model,
+        _invocation: &ToolInvocation,
+        _heavy: Arc<OwnedSemaphorePermit>,
+        _on_delta: &mut (dyn for<'delta> FnMut(CompletionDelta<'delta>) + Send),
+    ) -> Result<stream::StreamCompletion, InferenceError> {
+        Err(InferenceError::Unavailable)
+    }
+
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError>;
 }
 
@@ -103,8 +145,8 @@ impl TinfoilInference {
             Client::new(host, repository, api_key),
         )
         .await
-        .map_err(|_| InferenceError::Unavailable)?
-        .map_err(|_| InferenceError::Unavailable)?;
+        .map_err(|_| InferenceError::Detailed(InferenceFailure::VerificationFailed))?
+        .map_err(|_| InferenceError::Detailed(InferenceFailure::VerificationFailed))?;
         let inference = Self {
             origin: format!("https://{host}"),
             client,
@@ -156,10 +198,12 @@ impl TinfoilInference {
         // Use the origin-bound raw transport, not the SDK's retrying chat layer.
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
-            .map_err(|_| InferenceError::Unavailable)?
-            .map_err(|_| InferenceError::Unavailable)?;
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?;
         if response.url().as_str() != url {
-            return Err(InferenceError::InvalidResponse);
+            return Err(InferenceError::Detailed(
+                InferenceFailure::EndpointBindingFailed,
+            ));
         }
         stream::consume_completion_response(
             response,
@@ -214,17 +258,18 @@ impl TinfoilInference {
     ) -> Result<u64, InferenceError> {
         let (body, released) = tokenizer_request_body(model, messages, heavy)?;
         let deadline = Instant::now() + Duration::from_secs(300);
+        let url = format!("{}/v1/chat/completions/input_tokens", self.origin);
         let request = self
-            .authenticate(
-                self.http()?
-                    .post(format!("{}/v1/chat/completions/input_tokens", self.origin)),
-            )
+            .authenticate(self.http()?.post(&url))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
-            .map_err(|_| InferenceError::Unavailable)?
-            .map_err(|_| InferenceError::Unavailable)?;
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendFailed))?
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendFailed))?;
+        if response.url().as_str() != url {
+            return Err(InferenceFailure::EndpointBindingFailed.into());
+        }
         finish_tokenizer(response, released, deadline).await
     }
 
@@ -236,15 +281,15 @@ impl TinfoilInference {
         let deadline = Instant::now() + Duration::from_secs(300);
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
-            .map_err(|_| InferenceError::Unavailable)?
-            .map_err(|_| InferenceError::Unavailable)?;
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::CatalogFailed))?
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::CatalogFailed))?;
         collect_bounded_response(response, limit, deadline).await
     }
 
     fn http(&self) -> Result<&tinfoil::verifier::tls::OriginBoundClient, InferenceError> {
         self.client
             .http_client()
-            .map_err(|_| InferenceError::Unavailable)
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::VerificationFailed))
     }
 
     fn authenticate(
@@ -699,6 +744,49 @@ mod stream_probe_tests {
         );
     }
 
+    #[tokio::test]
+    async fn tokenizer_failures_preserve_only_stage_and_release_constraint() {
+        use InferenceFailure::*;
+        for (status, payload, hold_upload, expected) in [
+            (503, "private-provider-marker", false, TokenizerHttpFailed),
+            (
+                200,
+                "private-provider-marker",
+                false,
+                TokenizerResponseInvalid,
+            ),
+            (
+                200,
+                "{\"input_tokens\":\"private-provider-marker\"}",
+                false,
+                TokenizerResponseInvalid,
+            ),
+            (200, "{\"input_tokens\":0}", false, TokenizerResponseInvalid),
+            (200, "{\"input_tokens\":2}", true, TokenizerUploadIncomplete),
+        ] {
+            let (body, released) = tokenizer_request_body("fixture", &[], None).unwrap();
+            let mut body = Some(body);
+            if !hold_upload {
+                drop(body.take());
+            }
+            let response = http::Response::builder()
+                .status(status)
+                .body(payload)
+                .unwrap()
+                .into();
+            let error = finish_tokenizer(
+                response,
+                released,
+                Instant::now() + Duration::from_millis(20),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.failure(), expected);
+            assert!(!format!("{error:?} {error}").contains("private-provider-marker"));
+            drop(body);
+        }
+    }
+
     #[test]
     fn tokenizer_request_is_bounded_before_transport() {
         let messages = [Message {
@@ -709,20 +797,51 @@ mod stream_probe_tests {
     }
 }
 
-#[derive(Serialize)]
-struct TokenCountRequest<'a> {
-    model: &'a str,
-    messages: &'a [Message],
+fn text_request(
+    model: &str,
+    messages: &[Message],
+) -> Result<tinfoil::relaxed::RelaxedChatRequestBuilder, InferenceError> {
+    let messages = messages
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| InferenceError::Detailed(InferenceFailure::RequestEncodingFailed))?;
+    Ok(tinfoil::relaxed::RelaxedChatRequestBuilder::new()
+        .model(model)
+        .messages(messages))
 }
 
-// Both production and in-crate resource fixtures borrow the route's messages;
-// never clone a transcript merely to serialize a tokenizer request.
+fn invocation_request(
+    model: &str,
+    invocation: &ToolInvocation,
+) -> Result<tinfoil::relaxed::RelaxedChatRequestBuilder, InferenceError> {
+    // This serializer maps admitted gateway input, not a provider wire request.
+    let mut input = serde_json::to_value(InvocationRequest { model, invocation })
+        .map_err(|_| InferenceError::Detailed(InferenceFailure::RequestEncodingFailed))?;
+    let messages = input["messages"]
+        .take()
+        .as_array_mut()
+        .map(std::mem::take)
+        .ok_or(InferenceError::Detailed(
+            InferenceFailure::RequestEncodingFailed,
+        ))?;
+    let mut builder = tinfoil::relaxed::RelaxedChatRequestBuilder::new()
+        .model(model)
+        .messages(messages);
+    for field in ["tools", "tool_choice"] {
+        if let Some(value) = input.get_mut(field) {
+            builder = builder.set(field, value.take());
+        }
+    }
+    Ok(builder)
+}
+
 fn tokenizer_request_bytes(model: &str, messages: &[Message]) -> Result<Vec<u8>, InferenceError> {
     crate::bounded_json::to_vec(
-        &TokenCountRequest { model, messages },
+        &text_request(model, messages)?.build(),
         MAX_TOKENIZER_REQUEST_BYTES,
     )
-    .map_err(|_| InferenceError::InvalidResponse)
+    .map_err(|_| InferenceError::Detailed(InferenceFailure::RequestEncodingFailed))
 }
 
 // The private diagnostic alone may omit admission. Route APIs require a lease.
@@ -737,23 +856,43 @@ fn tokenizer_request_body(
     ))
 }
 
+fn invocation_tokenizer_body(
+    model: &str,
+    invocation: &ToolInvocation,
+    heavy: Arc<OwnedSemaphorePermit>,
+) -> Result<(reqwest::Body, upload::UploadReleased), InferenceError> {
+    let bytes = crate::bounded_json::to_vec(
+        &invocation_request(model, invocation)?.build(),
+        MAX_TOKENIZER_REQUEST_BYTES,
+    )
+    .map_err(|_| InferenceError::Detailed(InferenceFailure::RequestEncodingFailed))?;
+    Ok(upload::body(bytes, Some(heavy)))
+}
+
 async fn finish_tokenizer(
     response: reqwest::Response,
     released: upload::UploadReleased,
     deadline: Instant,
 ) -> Result<u64, InferenceError> {
-    let bytes = collect_bounded_response(response, 64 * 1024, deadline).await?;
-    let count: TokenCount =
-        serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)?;
+    if !response.status().is_success() {
+        return Err(InferenceFailure::TokenizerHttpFailed.into());
+    }
+    let bytes = collect_bounded_response(response, 64 * 1024, deadline)
+        .await
+        .map_err(|_| InferenceFailure::TokenizerResponseInvalid)?;
+    let count: TokenCount = serde_json::from_slice(&bytes)
+        .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerResponseInvalid))?;
     if count.input_tokens == 0 {
-        return Err(InferenceError::InvalidResponse);
+        return Err(InferenceError::Detailed(
+            InferenceFailure::TokenizerResponseInvalid,
+        ));
     }
     // An early 200/EOF is NOT an upload-release receipt. Avoid overlap between
     // the tokenizer allocation and generation serializer's growth peak. The
     // route's existing 30-second preflight timeout also encloses this wait.
     tokio::time::timeout_at(deadline, released.wait())
         .await
-        .map_err(|_| InferenceError::Unavailable)?;
+        .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerUploadIncomplete))?;
     Ok(count.input_tokens)
 }
 
@@ -809,7 +948,9 @@ struct TokenCount {
 impl Inference for TinfoilInference {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
         let request = self.authenticate(self.http()?.get(format!("{}/v1/models", self.origin)));
-        self.bounded_response(request, MAX_CATALOG_BYTES).await
+        self.bounded_response(request, MAX_CATALOG_BYTES)
+            .await
+            .map_err(|_| InferenceFailure::CatalogFailed.into())
     }
 
     async fn count_tokens(
@@ -841,13 +982,86 @@ impl Inference for TinfoilInference {
         TinfoilInference::generate_completion_stream(self, model, messages, heavy, on_delta).await
     }
 
+    fn tool_profile(&self, model: &str) -> Option<ToolProfile> {
+        tools::production_profile(model)
+    }
+
+    async fn count_invocation_tokens(
+        &self,
+        model: &str,
+        invocation: &ToolInvocation,
+        heavy: Arc<OwnedSemaphorePermit>,
+    ) -> Result<u64, InferenceError> {
+        self.tool_profile(model)
+            .ok_or(InferenceFailure::ToolProfileUnqualified)?;
+        let (body, released) = invocation_tokenizer_body(model, invocation, heavy)?;
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let url = format!("{}/v1/chat/completions/input_tokens", self.origin);
+        let request = self
+            .authenticate(self.http()?.post(&url))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
+        let response = tokio::time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendFailed))?
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendFailed))?;
+        if response.url().as_str() != url {
+            return Err(InferenceError::Detailed(
+                InferenceFailure::EndpointBindingFailed,
+            ));
+        }
+        finish_tokenizer(response, released, deadline).await
+    }
+
+    async fn generate_invocation_stream(
+        &self,
+        model: &Model,
+        invocation: &ToolInvocation,
+        heavy: Arc<OwnedSemaphorePermit>,
+        on_delta: &mut (dyn for<'delta> FnMut(CompletionDelta<'delta>) + Send),
+    ) -> Result<stream::StreamCompletion, InferenceError> {
+        let profile = self
+            .tool_profile(&model.id)
+            .ok_or(InferenceFailure::ToolProfileUnqualified)?;
+        let url = format!("{}/v1/chat/completions", self.origin);
+        let deadline = Instant::now() + stream::STREAM_DEADLINE;
+        let request = self
+            .authenticate(self.http()?.post(&url))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .body(stream::invocation_body(
+                &model.id,
+                model.max_output_tokens,
+                invocation,
+                heavy,
+            )?);
+        let response = tokio::time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?;
+        if response.url().as_str() != url {
+            return Err(InferenceError::Detailed(
+                InferenceFailure::EndpointBindingFailed,
+            ));
+        }
+        stream::consume_invocation_response(
+            response,
+            deadline,
+            stream::STREAM_IDLE_TIMEOUT,
+            profile,
+            invocation,
+            on_delta,
+        )
+        .await
+    }
+
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
         let secure = self.client.secure_client();
         secure
             .with_verified_ground_truth(|ground_truth| {
                 verification_value(ground_truth, secure.host())
             })
-            .ok_or(InferenceError::Unavailable)?
+            .ok_or(InferenceFailure::VerificationFailed)?
     }
 }
 
@@ -921,18 +1135,23 @@ fn verification_value(
     host: &str,
 ) -> Result<serde_json::Value, InferenceError> {
     if !evidence_fits(ground_truth, host) {
-        return Err(InferenceError::InvalidResponse);
+        return Err(InferenceError::Detailed(
+            InferenceFailure::VerificationFailed,
+        ));
     }
     // The direct SDK borrow is immutable; proxy export keeps the channel read
     // lock through this callback. No check/export race, unbounded SDK export,
     // stale cache, or change to attestation/provenance/key authentication.
     let document =
         tinfoil::VerificationDocument::from_ground_truth(ground_truth.clone(), host.to_owned())
-            .ok_or(InferenceError::Unavailable)?;
+            .ok_or(InferenceError::Detailed(
+                InferenceFailure::VerificationFailed,
+            ))?;
     let bytes = crate::bounded_json::to_vec(&document, MAX_VERIFICATION_DOCUMENT_BYTES)
-        .map_err(|_| InferenceError::InvalidResponse)?;
+        .map_err(|_| InferenceError::Detailed(InferenceFailure::VerificationFailed))?;
     drop(document);
-    serde_json::from_slice(&bytes).map_err(|_| InferenceError::InvalidResponse)
+    serde_json::from_slice(&bytes)
+        .map_err(|_| InferenceError::Detailed(InferenceFailure::VerificationFailed))
 }
 
 pub async fn authenticated_catalog(
@@ -940,5 +1159,6 @@ pub async fn authenticated_catalog(
     now_unix: u64,
 ) -> Result<Catalog, InferenceError> {
     let bytes = inference.catalog().await?;
-    Catalog::parse_authenticated(&bytes, now_unix).map_err(|_| InferenceError::InvalidResponse)
+    Catalog::parse_authenticated(&bytes, now_unix)
+        .map_err(|_| InferenceFailure::CatalogFailed.into())
 }

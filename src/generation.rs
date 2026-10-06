@@ -8,7 +8,11 @@ use crate::{
     auth::{AdmissionError, Auth, ConversationId},
     catalog::Model,
     generation_owner::ReservedGeneration,
-    inference::{authenticated_catalog, Message, SharedInference},
+    inference::{
+        authenticated_catalog,
+        tools::{ToolInvocation, ToolProfile},
+        InferenceFailure, Message, SharedInference,
+    },
 };
 use std::{
     future::Future,
@@ -57,10 +61,52 @@ pub(crate) struct PreparedGeneration {
     pub reserved_microunits: u64,
 }
 
+pub(crate) struct StructuredGenerationInput {
+    pub model: String,
+    pub invocation: ToolInvocation,
+}
+
+pub(crate) struct PreparedStructuredGeneration {
+    pub model: Model,
+    pub invocation: ToolInvocation,
+    pub reserved_microunits: u64,
+}
+
+enum RequestInput {
+    Text(GenerationInput),
+    Structured(StructuredGenerationInput),
+}
+impl RequestInput {
+    fn model(&self) -> &str {
+        match self {
+            Self::Text(input) => &input.model,
+            Self::Structured(input) => &input.model,
+        }
+    }
+    fn profile(&self, inference: &SharedInference) -> Result<Option<ToolProfile>, Rejection> {
+        match self {
+            Self::Text(_) => Ok(None),
+            Self::Structured(input) => {
+                inference
+                    .tool_profile(&input.model)
+                    .map(Some)
+                    .ok_or(Rejection::Upstream(
+                        InferenceFailure::ToolProfileUnqualified,
+                    ))
+            }
+        }
+    }
+}
+enum Prepared {
+    Text(PreparedGeneration),
+    Structured(PreparedStructuredGeneration),
+}
+
 /// Fixed, content-free failures; adapters own their protocol/status mappings.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Rejection {
     Unavailable,
+    Upstream(InferenceFailure),
     InvalidModel,
     Busy,
     Admission(AdmissionError),
@@ -90,12 +136,65 @@ impl Generation<'_> {
         T: Send + 'static,
         F: FnOnce(ReservedGeneration, PreparedGeneration) -> T + Send + 'static,
     {
-        self.evidence().await.map_err(|_| Rejection::Unavailable)?;
+        self.submit_core(
+            submission,
+            RequestInput::Text(input),
+            heavy,
+            move |owner, prepared| {
+                let Prepared::Text(prepared) = prepared else {
+                    unreachable!("text handoff")
+                };
+                handoff(owner, prepared)
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn submit_structured<T, F>(
+        self,
+        submission: Submission<'_>,
+        input: StructuredGenerationInput,
+        heavy: Arc<OwnedSemaphorePermit>,
+        handoff: F,
+    ) -> Result<T, Rejection>
+    where
+        T: Send + 'static,
+        F: FnOnce(ReservedGeneration, PreparedStructuredGeneration) -> T + Send + 'static,
+    {
+        self.submit_core(
+            submission,
+            RequestInput::Structured(input),
+            heavy,
+            move |owner, prepared| {
+                let Prepared::Structured(prepared) = prepared else {
+                    unreachable!("structured handoff")
+                };
+                handoff(owner, prepared)
+            },
+        )
+        .await
+    }
+
+    async fn submit_core<T, F>(
+        self,
+        submission: Submission<'_>,
+        input: RequestInput,
+        heavy: Arc<OwnedSemaphorePermit>,
+        handoff: F,
+    ) -> Result<T, Rejection>
+    where
+        T: Send + 'static,
+        F: FnOnce(ReservedGeneration, Prepared) -> T + Send + 'static,
+    {
+        let profile = input.profile(self.inference)?;
+        self.evidence()
+            .await
+            .map_err(|_| Rejection::Upstream(InferenceFailure::VerificationFailed))?;
         let catalog = authenticated_catalog(self.inference.as_ref(), now_unix())
             .await
-            .map_err(|_| Rejection::Unavailable)?;
+            .map_err(|error| Rejection::Upstream(error.failure()))?;
         let quote = catalog
-            .reservation_quote(&input.model)
+            .reservation_quote(input.model())
             .map_err(|_| Rejection::InvalidModel)?;
         let permit = self
             .slots
@@ -103,6 +202,13 @@ impl Generation<'_> {
             .try_acquire_owned()
             .map_err(|_| Rejection::Busy)?;
         let reserved_microunits = quote.reserved_microunits;
+        // Qualification is independent of catalog data and must still match before
+        // reservation. There are no prompt-bearing calls before this point.
+        if input.profile(self.inference)? != profile {
+            return Err(Rejection::Upstream(
+                InferenceFailure::ToolProfileUnqualified,
+            ));
+        }
         // Session -> submission -> accounting locks remain inside Auth. No await
         // or prompt-bearing operation may separate a new reserve from its guard.
         let admission = self
@@ -140,21 +246,34 @@ impl Generation<'_> {
         tokio::spawn(ChargedPreflight {
             work: Box::pin(async move {
                 let result = tokio::time::timeout(PREFLIGHT_DEADLINE, async {
-                    job.input.history.push(Message {
-                        role: "user".into(),
-                        content: std::mem::take(&mut job.input.prompt),
-                    });
-                    #[cfg(test)]
-                    hooks
-                        .resources
-                        .input("preflight", &job.input.history, &job.input.prompt);
-                    let tokens = inference
-                        .count_tokens(&job.input.model, &job.input.history, work_heavy.clone())
-                        .await
-                        .map_err(|_| Rejection::Unavailable)?;
-                    job.input.prompt = job.input.history.pop().expect("preflight prompt").content;
+                    let tokens = match &mut job.input {
+                        RequestInput::Text(input) => {
+                            input.history.push(Message {
+                                role: "user".into(),
+                                content: std::mem::take(&mut input.prompt),
+                            });
+                            #[cfg(test)]
+                            hooks
+                                .resources
+                                .input("preflight", &input.history, &input.prompt);
+                            let tokens = inference
+                                .count_tokens(&input.model, &input.history, work_heavy.clone())
+                                .await
+                                .map_err(|error| Rejection::Upstream(error.failure()))?;
+                            input.prompt = input.history.pop().expect("preflight prompt").content;
+                            tokens
+                        }
+                        RequestInput::Structured(input) => inference
+                            .count_invocation_tokens(
+                                &input.model,
+                                &input.invocation,
+                                work_heavy.clone(),
+                            )
+                            .await
+                            .map_err(|error| Rejection::Upstream(error.failure()))?,
+                    };
                     catalog
-                        .quote(&job.input.model, tokens)
+                        .quote(job.input.model(), tokens)
                         .map_err(|_| Rejection::Context)
                 })
                 .await;
@@ -174,12 +293,21 @@ impl Generation<'_> {
                 #[cfg(test)]
                 hooks.before_compose().await;
                 let owner = job.owner.take().expect("sole reservation owner");
-                let prepared = PreparedGeneration {
-                    model: quote.model,
-                    history: job.input.history,
-                    prompt: job.input.prompt,
-                    conversation: admission.submission.conversation,
-                    reserved_microunits,
+                let prepared = match job.input {
+                    RequestInput::Text(input) => Prepared::Text(PreparedGeneration {
+                        model: quote.model,
+                        history: input.history,
+                        prompt: input.prompt,
+                        conversation: admission.submission.conversation,
+                        reserved_microunits,
+                    }),
+                    RequestInput::Structured(input) => {
+                        Prepared::Structured(PreparedStructuredGeneration {
+                            model: quote.model,
+                            invocation: input.invocation,
+                            reserved_microunits,
+                        })
+                    }
                 };
                 // Unconditional synchronous transfer, never gated by sender state.
                 let output = (job.handoff)(owner, prepared);
@@ -202,7 +330,7 @@ impl Generation<'_> {
 // Close observation AFTER refund on panic/pre-poll drop, not in unspecified
 // async capture order where another worker could observe failure before cleanup.
 struct PreflightInput<F, T> {
-    input: GenerationInput,
+    input: RequestInput,
     handoff: F,
     owner: Option<ReservedGeneration>,
     sender: Option<oneshot::Sender<Result<T, Rejection>>>,
