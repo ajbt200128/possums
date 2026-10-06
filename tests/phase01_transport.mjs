@@ -55,7 +55,7 @@ const NativeDate = Date;
 globalThis.Date = class extends NativeDate { constructor(...args) { super(...(args.length ? args : ['2100-01-01T00:00:00Z'])); } };
 try { await rejects('AMD collateral validity', () => verifyAttestation(bundle.enclaveAttestationReport, bundle.vcek)); }
 finally { globalThis.Date = NativeDate; }
-await rejects('production API approval empty', () => prod.Channel.api());
+await rejects('incomplete production API attestation input', () => prod.Channel.api());
 assert.throws(()=>new prod.Channel(Symbol(),prod.WEB_APPROVAL.origin,{})); passed++;
 await rejects('fixture disabled in production build', () => prod.Channel.fixture('https://localhost:18443', key, verified.hpkeKey));
 await rejects('fixture cannot select production', () => fixture.Channel.fixture(prod.WEB_APPROVAL.origin, key, verified.hpkeKey));
@@ -81,7 +81,7 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
   const config = Uint8Array.from(meta.config.match(/../g), v => parseInt(v, 16));
   const c = await f.Channel.fixture(meta.origin, config, meta.key);
   const bearer = 'a'.repeat(43);
-  const chat = {model:'fixture',stream:true,submission:'s'.repeat(43),messages:[{role:'user',content:''}]};
+  const chat = {model:'fixture',stream:true,submission:'s'.repeat(43),messages:[{role:'user',content:'x'}]};
   const session = {challenge:'c'.repeat(43),credential:'c'.repeat(43)};
   const submission = {model:'fixture',new_conversation:true};
   let checks = 0, getterCalls = 0;
@@ -117,12 +117,13 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
     check(getterCalls === 0, name+' accessor invocation');
     checks++;
   }
-  await beforeWork('production API approval empty',()=>m.Channel.api());
+  await beforeWork('incomplete production API attestation input',()=>m.Channel.api());
   await beforeWork('production fixture disabled',()=>m.Channel.fixture(meta.origin,config,meta.key));
   await beforeWork('fixture cannot select production',()=>f.Channel.fixture(m.WEB_APPROVAL.origin,config,meta.key));
   await beforeWork('wide encodeChat',()=>m.encodeChat(wideChat),10);
   await beforeWork('wide public chat',()=>c.chat(wideChat,bearer),10);
-  await beforeWork('wide nested message',()=>c.chat({...chat,messages:[wideMessage]},bearer),16);
+  // Structured admission additionally validates both own array-length descriptors.
+  await beforeWork('wide nested message',()=>c.chat({...chat,messages:[wideMessage]},bearer),18);
   await beforeWork('wide session',()=>c.control('/v1/sessions',wideSession),6);
   await beforeWork('wide submission',()=>c.control('/v1/submissions',wideSubmission,bearer),6);
   await beforeWork('generic wide node limit',()=>m.serialize(wideChat,m.LIMITS.chat),2*m.LIMITS.nodes+2);
@@ -148,7 +149,8 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
   await beforeWork('malformed submission',()=>c.control('/v1/submissions',{...submission,new_conversation:'true'},bearer));
   await beforeWork('oversized session',()=>c.control('/v1/sessions',{...session,credential:'c'.repeat(m.LIMITS.control)}));
   await beforeWork('oversized submission',()=>c.control('/v1/submissions',{...submission,model:'m'.repeat(m.LIMITS.control)},bearer));
-  for (const value of [undefined,1,1n,()=>{},new Date(),new Uint8Array(1)]) await beforeWork('unsupported type',()=>m.serialize({value},m.LIMITS.control));
+  await beforeWork('empty final user',()=>m.encodeChat({...chat,messages:[{role:'user',content:''}]}));
+  for (const value of [undefined,NaN,Infinity,-Infinity,1n,()=>{},new Date(),new Uint8Array(1)]) await beforeWork('unsupported type',()=>m.serialize({value},m.LIMITS.control));
   await beforeWork('toJSON hook',()=>m.serialize({toJSON(){getterCalls++;return ''; }},m.LIMITS.control));
   await beforeWork('generic sparse array',()=>m.serialize(new Array(2),m.LIMITS.control));
   const nested = depth => {let v=null;while(depth--)v=[v];return v;};
@@ -164,9 +166,13 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
     check(new TextDecoder().decode(m.serialize(value,size))===expected,'Unicode/escaping bytes'); checks++;
     await beforeWork('Unicode/escaping one byte over',()=>m.serialize(value,size-1));
   }
+  for (const value of [-0,0,1,-1.5,1e-7,1e308]) {
+    const expected=JSON.stringify({value}), size=new TextEncoder().encode(expected).length;
+    check(new TextDecoder().decode(m.serialize({value},size))===expected,'finite JSON number'); checks++;
+  }
   check(m.serialize('x'.repeat(m.LIMITS.control-2),m.LIMITS.control).length===m.LIMITS.control,'control bytes inclusive'); checks++;
   await beforeWork('control bytes exceeded',()=>m.serialize('x'.repeat(m.LIMITS.control-1),m.LIMITS.control));
-  const overhead = new TextEncoder().encode(JSON.stringify(chat)).length;
+  const overhead = new TextEncoder().encode(JSON.stringify(chat)).length - chat.messages[0].content.length;
   const fullChat = {...chat,messages:[{role:'user',content:'x'.repeat(m.LIMITS.chat-overhead)}]};
   check(m.encodeChat(fullChat).length===m.LIMITS.chat,'chat bytes inclusive'); checks++;
   await beforeWork('chat bytes exceeded',()=>c.chat({...chat,messages:[{role:'user',content:fullChat.messages[0].content+'x'}]},bearer));

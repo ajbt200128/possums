@@ -1,6 +1,11 @@
 import { Identity, type RequestContext } from 'ehbp';
 import { WEB_APPROVAL, qualifyWeb, qualifyApi, requireApiApproval, validateKeyConfig } from './approval.js';
-import { LIMITS, ChannelError, Operation, base64, boundedReport, cleanup, collect, hex, mapData, parseJSON, requireThat, serialize } from './limits.js';
+import { LIMITS, ChannelError, Operation, base64, boundedReport, cleanup, collect, hex, parseJSON, requireThat, serialize } from './limits.js';
+import { admitInvocation, fields, type Chat } from './tools.js';
+export type { Chat, Invocation, Message, Tool, ToolChoice, ToolCall, JSONObject, JSONValue } from './tools.js';
+export type { LiveModel, Receipt, CompletionOptions, CompletionEvent, ChatOptions } from './client.js';
+export type ResponseInfo = Readonly<{ status: number; contentType: 'text/event-stream' | 'application/json' | null }>;
+export type ResponseOptions = { signal?: AbortSignal; onResponse?: (response: ResponseInfo) => void | Promise<void> };
 export { WEB_APPROVAL, API_APPROVALS, qualifyWeb, validateKeyConfig, checkApproval } from './approval.js';
 export { LIMITS, serialize, parseJSON } from './limits.js';
 export { ReferenceClient, consumeCompletion, validateModels } from './client.js';
@@ -17,6 +22,7 @@ function allowedAcquisition(url: string): boolean {
 // Fetch decodes HTTP compression. Every consumer caps decoded bytes while reading;
 // browser/network decompressor allocations and encoded bytes are not observable here.
 function request(url: string, op: Operation, method = 'GET', body?: Uint8Array<ArrayBuffer>, bearer?: string): Request {
+  op.check();
   const headers = new Headers();
   if (body) headers.set('Content-Type', 'application/json');
   if (bearer !== undefined) {
@@ -27,6 +33,7 @@ function request(url: string, op: Operation, method = 'GET', body?: Uint8Array<A
     credentials: 'omit', redirect: 'error', cache: 'no-store', referrerPolicy: 'no-referrer' });
 }
 async function send(req: Request, op: Operation): Promise<Response> {
+  op.check();
   const response = await op.wait(fetch(req), LIMITS.operationMs);
   if (response.redirected || (response.status >= 300 && response.status < 400) ||
       (response.headers.has('content-encoding') && !['identity', 'gzip', 'deflate', 'br'].includes(response.headers.get('content-encoding')!))) {
@@ -78,29 +85,9 @@ export async function observeWeb(manifest: Uint8Array<ArrayBuffer>) {
   return qualifyWeb(bytes, manifest, await acquire(WEB_APPROVAL.origin + publicPaths[2], LIMITS.key));
 }
 
-export type Chat = { model: string; stream: true; submission: string;
-  messages: { role: 'system' | 'user' | 'assistant'; content: string }[] };
 export type Control = { challenge: string; credential: string } | { model: string; new_conversation: boolean };
-function fields(value: unknown, keys: readonly string[]): Record<string, unknown> {
-  requireThat(!Array.isArray(value));
-  const snapshot = mapData(value, keys.length, (key, field) => {
-    requireThat(keys.includes(key));
-    return field;
-  });
-  for (const key of keys) requireThat(Object.hasOwn(snapshot, key));
-  return snapshot;
-}
 export function encodeChat(chat: Chat): Uint8Array<ArrayBuffer> {
-  const admitted = fields(chat, ['model', 'stream', 'submission', 'messages']);
-  requireThat(admitted.stream === true && typeof admitted.model === 'string' && typeof admitted.submission === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(admitted.model) && /^[A-Za-z0-9_-]{43}$/.test(admitted.submission));
-  requireThat(Array.isArray(admitted.messages));
-  admitted.messages = mapData(admitted.messages, LIMITS.messages, (_key, message) => {
-    const admittedMessage = fields(message, ['role', 'content']);
-    requireThat(['system', 'user', 'assistant'].includes(admittedMessage.role as string) && typeof admittedMessage.content === 'string');
-    return admittedMessage;
-  });
-  requireThat((admitted.messages as unknown[]).length > 0);
-  return serialize(admitted, LIMITS.chat);
+  return serialize(admitInvocation(chat, true), LIMITS.chat);
 }
 // Frame-size validation precedes the library's 64-MiB buffering boundary. This
 // parses framing only; authentication/decryption remains entirely published EHBP.
@@ -112,6 +99,7 @@ function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation): Reada
   return new ReadableStream({
     async pull(controller) {
       try {
+        op.check();
         const { done, value } = await op.wait(reader.read(), LIMITS.streamMs);
         if (done) { requireThat(prefix === 0 && remaining === 0 && frames > 0); controller.close(); return; }
         total += value.length;
@@ -138,6 +126,7 @@ function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean
   return new ReadableStream({
     async pull(controller) {
       try {
+        op.check();
         const { done, value } = await op.wait(reader.read(), sse ? LIMITS.streamMs : LIMITS.idleMs);
         if (done) { if (sse) decoder.decode(); op.close(); controller.close(); return; }
         total += value.length;
@@ -193,40 +182,49 @@ export class Channel {
     validateKeyConfig(snapshot, independentKey);
     return new Channel(channelAuthority, origin, await Identity.unmarshalPublicConfig(snapshot));
   }
-  async models(bearer: string): Promise<unknown> { return this.#get('/v1/models', LIMITS.catalog, bearer); }
-  async challenge(): Promise<unknown> { return this.#get('/v1/auth/challenge', LIMITS.control); }
-  async #get(path: '/v1/models' | '/v1/auth/challenge', cap: number, bearer?: string): Promise<unknown> {
+  async models(bearer: string, signal?: AbortSignal): Promise<unknown> { return this.#get('/v1/models', LIMITS.catalog, bearer, signal); }
+  async challenge(signal?: AbortSignal): Promise<unknown> { return this.#get('/v1/auth/challenge', LIMITS.control, undefined, signal); }
+  async #get(path: '/v1/models' | '/v1/auth/challenge', cap: number, bearer?: string, signal?: AbortSignal): Promise<unknown> {
     this.#policyCheck();
-    const op = new Operation();
-    let res: Response | undefined;
-    try { res = await send(request(this.#origin + path, op, 'GET', undefined, bearer), op);
+    const op = new Operation(LIMITS.operationMs, signal);
+    let sent = false, res: Response | undefined;
+    try {
+      const req = request(this.#origin + path, op, 'GET', undefined, bearer);
+      sent = true; res = await send(req, op);
       requireThat(res.ok); return parseJSON(await collect(res.body, cap, op), cap);
-    } catch { throw new ChannelError(); }
+    } catch { throw new ChannelError(sent && op.controller.signal.aborted ? 'uncertain' : 'rejected'); }
     finally { op.close(); if (res?.body && !res.body.locked) await cleanup(res.body.cancel()); }
   }
-  async control(path: '/v1/sessions' | '/v1/submissions', payload: Control, bearer?: string): Promise<unknown> {
+  async control(path: '/v1/sessions' | '/v1/submissions', payload: Control, bearer?: string, signal?: AbortSignal): Promise<unknown> {
     requireThat(path === '/v1/sessions' || path === '/v1/submissions');
     const admitted = fields(payload, path === '/v1/sessions' ? ['challenge', 'credential'] : ['model', 'new_conversation']);
     if (path === '/v1/sessions') {
       requireThat(typeof admitted.credential === 'string' && typeof admitted.challenge === 'string' && /^[A-Za-z0-9_-]{32,512}$/.test(admitted.credential) && /^[A-Za-z0-9_-]{32,512}$/.test(admitted.challenge) && bearer === undefined);
     } else { requireThat(typeof admitted.model === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(admitted.model) && typeof admitted.new_conversation === 'boolean' && bearer !== undefined); }
-    const body = await this.#encrypted(path, serialize(admitted, LIMITS.control), bearer);
-    const op = new Operation();
+    const body = await this.#encrypted(path, serialize(admitted, LIMITS.control), bearer, { signal });
+    const op = new Operation(LIMITS.operationMs, signal);
     try { return parseJSON(await collect(body, LIMITS.control, op), LIMITS.control); }
     catch { throw new ChannelError('uncertain'); } finally { op.close(); }
   }
-  async chat(chat: Chat, bearer: string): Promise<ReadableStream<Uint8Array>> {
-    return this.#encrypted('/v1/chat/completions', encodeChat(chat), bearer);
+  async chat(chat: Chat, bearer: string, options: ResponseOptions = {}): Promise<ReadableStream<Uint8Array>> {
+    return this.#encrypted('/v1/chat/completions', encodeChat(chat), bearer, options);
   }
-  async #encrypted(path: string, bytes: Uint8Array<ArrayBuffer>, bearer?: string): Promise<ReadableStream<Uint8Array>> {
+  async #encrypted(path: string, bytes: Uint8Array<ArrayBuffer>, bearer?: string, options: ResponseOptions = {}): Promise<ReadableStream<Uint8Array>> {
     this.#policyCheck();
-    const op = new Operation(LIMITS.streamMs);
+    const op = new Operation(LIMITS.streamMs, options.signal);
     let sent = false, res: Response | undefined;
     try {
       const encrypted = await op.wait<{ request: Request; context: RequestContext | null }>(this.#identity.encryptRequestWithContext(request(this.#origin + path, op, 'POST', bytes, bearer)));
       requireThat(encrypted.context && !op.controller.signal.aborted);
       sent = true; // Once handed to fetch, receipt/admission is uncertain on ANY failure.
       res = await send(encrypted.request, op);
+      if (options.onResponse) {
+        const mime = res.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+        // Never hand the Response, arbitrary header values, or EHBP diagnostics to hooks.
+        const info: ResponseInfo = Object.freeze({ status: res.status,
+          contentType: mime === 'text/event-stream' || mime === 'application/json' ? mime : null });
+        op.check(); await op.wait(Promise.resolve(options.onResponse(info)), LIMITS.streamMs);
+      }
       requireThat(res.body && /^[0-9a-f]{64}$/.test(res.headers.get('Ehbp-Response-Nonce') ?? ''));
       const bounded = new Response(encryptedFrames(res.body, op), { headers: res.headers });
       const decrypted = await op.wait<Response>(this.#identity.decryptResponseWithContext(bounded, encrypted.context));
