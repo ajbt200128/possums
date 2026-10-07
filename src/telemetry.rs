@@ -970,5 +970,8 @@ impl<C: Clock> Drop for StateGuard<'_, C> {
     }
 }
 
+// Qualification fixtures only; packet 2C is blocked before runtime handoff.
+#[cfg(test)]
+mod export;
 #[cfg(test)]
 mod tests;
