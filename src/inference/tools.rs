@@ -1,5 +1,5 @@
-//! Explicit structured protocol. No production model is qualified by catalog or
-//! environment. Adding a production entry requires independent protocol evidence.
+//! Structured protocol with a shared, assumed production wire profile.
+//! Catalog membership and caller-side execution validation remain separate.
 use super::{InferenceError, Message};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,14 +19,10 @@ impl ToolProfile {
     }
 }
 
-pub(super) fn production_profile(model: &str) -> Option<ToolProfile> {
-    // Kimi's named/auto calls and none choice passed the verified SDK path with
-    // final usage and transport EOF. Full Pi acceptance is recorded separately.
-    const QUALIFIED: &[(&str, ToolProfile)] = &[("kimi-k3", ToolProfile::OpenAiFunctionsV1)];
-    QUALIFIED
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, p)| *p)
+pub(super) fn production_profile(_model: &str) -> Option<ToolProfile> {
+    // Caller opts into a common wire profile; this is not per-model compatibility
+    // evidence. The authenticated catalog still gates model selection upstream.
+    Some(ToolProfile::OpenAiFunctionsV1)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -359,21 +355,11 @@ mod tests {
     }
 
     #[test]
-    fn production_profile_is_exact_and_not_catalog_or_environment_derived() {
-        assert_eq!(
-            production_profile("kimi-k3"),
-            Some(ToolProfile::OpenAiFunctionsV1)
-        );
-        for id in [
-            "",
-            "fixture",
-            "m",
-            "qwen3-coder",
-            "gpt-4o",
-            "Kimi-k3",
-            "kimi-k3 ",
-        ] {
-            assert_eq!(production_profile(id), None);
+    fn production_profile_is_shared_assumption_not_per_model_evidence() {
+        // Profile assignment is independent of catalog membership; submission
+        // still requires an authenticated catalog match before prompt uploads.
+        for id in ["kimi-k3", "qwen3-coder", "fixture", ""] {
+            assert_eq!(production_profile(id), Some(ToolProfile::OpenAiFunctionsV1));
         }
     }
 
