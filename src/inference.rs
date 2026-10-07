@@ -98,7 +98,8 @@ pub trait Inference: Send + Sync {
         Err(InferenceError::Unavailable)
     }
 
-    /// Explicit qualification only; catalog presence never grants this capability.
+    /// Mock implementations opt in explicitly; production assumes a shared wire
+    /// profile. Catalog validation and caller-side execution remain separate.
     fn tool_profile(&self, _model: &str) -> Option<ToolProfile> {
         None
     }

@@ -41,6 +41,7 @@ struct Provider {
     output_allowance: AtomicU64,
     price: AtomicU64,
     valid_catalog: AtomicBool,
+    catalog_has_m: AtomicBool,
     valid_evidence: AtomicBool,
     upstream_error: AtomicBool,
     invalid_usage: AtomicBool,
@@ -77,7 +78,12 @@ impl Inference for Provider {
             return Err(InferenceError::Unavailable);
         }
         let price = self.price.load(Ordering::SeqCst);
-        Ok(json!({"object":"list","data":[{"id":"m","type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"requestPrice":0}}]}).to_string().into_bytes())
+        let id = if self.catalog_has_m.load(Ordering::SeqCst) {
+            "m"
+        } else {
+            "other"
+        };
+        Ok(json!({"object":"list","data":[{"id":id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"requestPrice":0}}]}).to_string().into_bytes())
     }
     async fn count_tokens(
         &self,
@@ -281,6 +287,7 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         output_allowance: 0.into(),
         price: 1.into(),
         valid_catalog: true.into(),
+        catalog_has_m: true.into(),
         valid_evidence: true.into(),
         upstream_error: false.into(),
         invalid_usage: false.into(),
@@ -727,6 +734,27 @@ async fn structured_preflight_survives_request_cancellation_and_context_rejectio
             duplicate(&state, &bearer, &submission, "settled").await;
         }
     }
+}
+
+#[tokio::test]
+async fn structured_model_absent_from_authenticated_catalog_stops_before_upstream() {
+    let (state, provider, bearer, submission) = fixture(5_000_000);
+    provider.qualified.store(true, Ordering::SeqCst);
+    provider.catalog_has_m.store(false, Ordering::SeqCst);
+    // The fixture explicitly offers a wire profile for "m", but the live
+    // authenticated catalog now contains only "other".
+    assert_eq!(
+        provider.tool_profile("m"),
+        Some(ToolProfile::OpenAiFunctionsV1)
+    );
+    let response = router(state.clone())
+        .oneshot(json_request(&bearer, structured_input(&submission)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(state.accounting.available("demo"), Some(5_000_000));
 }
 
 #[tokio::test]
