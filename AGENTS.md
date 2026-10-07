@@ -47,13 +47,15 @@ Preserve these trust boundaries:
 
 ## Telemetry policy
 
+**Always read and reference [`PRIVACY.md`](PRIVACY.md) before touching telemetry**, including instrumentation, logs/traces, metrics, SDK defaults, collectors, resource discovery, dashboards, alerts, deployment, or diagnostic/support tooling. Link the applicable policy sections and privacy-test evidence in the change description and verification record. The policy applies to real data in testing as well as production; an environment label does not relax it. The testing-only first-pass plan is [`docs/telemetry-plan.md`](docs/telemetry-plan.md); it does not authorize production export.
+
 Production observability uses aggregate Honeycomb metrics only:
 
 - Sanitize and aggregate locally before export through an OpenTelemetry Collector.
 - Send sanitized aggregates to Honeycomb US with seven-day retention.
 - Do not export production logs or request-level traces.
 - Never export prompts, responses, conversation history, request bodies, URLs/query strings, headers, client IPs, user agents, credentials, account/payment identifiers, onion identifiers, stable pseudonyms, exact request timestamps, or per-request token/cost events.
-- Allowed signals are low-cardinality aggregates such as coarse request counts, status classes, latency buckets, queue depth, process health, and time-bucketed model/cost totals that cannot isolate a user or session.
+- Allowed signals are low-cardinality aggregates such as coarse request counts, status classes, latency buckets, queue depth, and process health, subject to the privacy-release gates in `PRIVACY.md`. Time-bucketed model token/cost totals require additional sparse-data review and are excluded from the first pass. No released aggregate may isolate a user or session.
 - Sampling is not sanitization. Do not rely on vendor-side deletion as the primary control.
 - Restrict access, document Honeycomb as a third-party processor, and provide a kill switch. Core service behavior must work with telemetry disabled.
 - Do not claim “no telemetry” or “no logs whatsoever.” Claim only that request content and identifying/request-level telemetry are not collected, within the tested configuration.
