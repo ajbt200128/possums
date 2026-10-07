@@ -1,5 +1,7 @@
 # Phase 0.2 local implementation handoff
 
+**Historical working record:** the packet-era status, empty qualification table, 0.99.2 memory-only auth and blocked compaction below are superseded for current operation by [release scope](phase02-pi-release.md) and [Pi usage](../clients/pi/README.md). Current `v0.0.11` advertises an assumed catalog-wide profile, not per-model qualification; Pi 1.0.4 uses native saved auth and compaction. Private funded qualification code is archived outside the published source; failed canaries, uncertain holds and exhausted authorizations remain unchanged.
+
 **Status:** implementation and local checks, not production acceptance. Accepted **v0.0.9 remains text-only**. No live model has been qualified for tools; the production qualification table is deliberately empty. No measured release, approval update, deployment, funded inference, credential use, or commit was performed for the initial packet below. Subsequent authorized upstream canaries and the SDK migration are recorded separately in [tool-qualification.md](tool-qualification.md); they do not establish acceptance.
 
 The Pi package's `0.2.0` version is not a gateway release or an acceptance claim. Original user planning documents, including `docs/pi-client.md`, are unchanged. Later, user-requested minimum-phase/SDK-reuse guidance was added to `AGENTS.md` without rewriting its existing guidance.

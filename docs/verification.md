@@ -1,5 +1,7 @@
 # Phase 0 verification record
 
+**Chronological evidence:** deployment/status statements belong to the release or packet where they were recorded, including the old buffered regime and later streaming entries. Current API `v0.0.11`/Pi acceptance is scoped in [the release record](phase02-pi-release.md). No historical FAILED or UNKNOWN result is upgraded by this checkout reconciliation.
+
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
 ## Evidence checklist

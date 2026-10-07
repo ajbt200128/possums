@@ -1,5 +1,7 @@
 # Phase 0.2 upstream tool qualification — working record
 
+**Historical probe record:** the v0.0.9 production/profile statements below describe their original checkpoints. Current `v0.0.11` uses a catalog-wide assumed profile; see [release scope](phase02-pi-release.md). That decision does not qualify these failed suites or resolve their uncertain billing. The private operator harness is retained in the reconciliation recovery archive, not enabled or shipped; old funding gates remain exhausted and must not be replayed.
+
 **No production tool model is qualified.** Accepted gateway v0.0.9 remains text-only. This record concerns test-only upstream protocol probes, not gateway/Pi end-to-end acceptance, provider invoices, a measured release or deployment.
 
 ## Authority and safety

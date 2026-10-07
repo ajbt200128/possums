@@ -1,5 +1,7 @@
 # Phase 0 contract
 
+**Historical contract and staging record:** retain the `v0.0.5`/packet-era statements below as their original evidence scope. The current deployed API is `v0.0.11`; see [current release scope](phase02-pi-release.md) and [verified API contract](phase01.md). The later local/release entries below supersede earlier staging statements without retroactively accepting failed or unknown gates.
+
 **Transition status:** the routes, limits, accounting lifecycle, and rendering below describe the implemented `v0.0.5` **previous buffered regime**. The [planned streaming-only replacement](#planned-streaming-only-replacement) is not implemented or verified. Do not apply its charging or rendering claims to the deployed release; migrate the code, tests, limits, and release evidence before calling it live.
 
 ## Implemented `v0.0.5`: buffered regime

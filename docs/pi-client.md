@@ -1,5 +1,7 @@
 # Pi client plan — Phase 0.2
 
+**Implemented status:** the historical plan below is retained, but its implementation/profile gates are superseded by the operator-approved scope in [release record](phase02-pi-release.md). The current provider targets Pi 1.0.4, loads as a normal package, persists credentials through native auth and supports native manual/threshold compaction. All authenticated catalog models advertise an assumed common tool profile, not individual qualification. See [usage and privacy boundaries](../clients/pi/README.md); exact live accounting and whole-runtime privacy acceptance remain unverified.
+
 **Status: planned, not implemented or verified.** This small integration follows the [verified streaming-only inference API](../OVERALL_PLAN.md#phases) in Phase 0.1 and precedes the [Obsidian client](obsidian-plugin.md) in Phase 0.3. It does not add a Pi runtime to the gateway image or change the Phase 0 no-JavaScript web interface. The deployed `v0.0.5` gateway still buffers responses; see the [Phase 0 transition contract](phase0.md#planned-streaming-only-replacement).
 
 ## Deliverable

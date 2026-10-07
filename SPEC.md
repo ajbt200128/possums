@@ -1,5 +1,7 @@
 # Possums Phase 0 specification
 
+**Scope:** preserved Phase 0 transition contract. The `v0.0.5` deployment/planning status below is historical, not the current deployment. Current API `v0.0.11` and the implemented Pi client are recorded in [release scope](docs/phase02-pi-release.md); broader verification unknowns remain explicit.
+
 Possums Phase 0 is a single attested clearnet gateway for manually provisioned demo accounts. It serves a plain HTML, no-JavaScript chat UI and sends prompts only to an attested Tinfoil inference endpoint after all security gates pass.
 
 `AGENTS.md` is authoritative where older designs disagree. **Transition status:** the deployed `v0.0.5` Phase 0 implementation buffers the complete inference response, renders sanitized Markdown, and refunds if delivery ends before HTTP-body completion. The streaming-only contract below is a planned replacement. It requires code changes, negative tests, and fresh deployed verification; the existing release is not evidence that it works.

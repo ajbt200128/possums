@@ -1,5 +1,7 @@
 # Private inference service
 
+**Current status:** API gateway `v0.0.11` and the installed Pi 1.0.4 provider with native compaction are implemented; see [release scope](docs/phase02-pi-release.md) and [client usage](clients/pi/README.md). The preserved roadmap and phase-status statements below describe earlier plans, not new guarantees or current deployment status. Obsidian and the later Tor/payment milestones remain deferred.
+
 > **Historical architecture; updated follow-on roadmap:** The architectural sections preserve the original long-term vision, including a **superseded buffered-response design**; they are not current guarantees about credentials, accounting, statelessness, or retention. The [Phases](#phases) section sets out the streaming-only Phase 0 replacement, verified inference API, Pi client, and Obsidian client milestones. For Phase 0 follow [`AGENTS.md`](AGENTS.md), [`SPEC.md`](SPEC.md), and [`docs/phase0.md`](docs/phase0.md), in that order; the deployed `v0.0.5` still uses the previous buffered regime. Client plans are in [`docs/pi-client.md`](docs/pi-client.md) and [`docs/obsidian-plugin.md`](docs/obsidian-plugin.md).
 
 Threat model, architecture, and stack. Metered LLM inference over Tor, sold as prepaid credits at a fixed markup over cost, served from an attested enclave.
