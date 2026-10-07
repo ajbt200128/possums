@@ -36,14 +36,20 @@ The current API approval is **v0.0.11**, with unchanged administrative expiry **
 - Discovery failure clears the provider's usable catalog. Every invocation independently refreshes and validates the authenticated catalog before obtaining a model-bound submission.
 - Only text content and OpenAI function declarations/results are supported. Images, grammar/custom namespaces, incompatible assistant-provider history, arbitrary fetch/sampling/output-cap overrides, incomplete tool batches, and unsupported models fail closed.
 - Tool deltas are provisional. Pi receives completed executable calls only after validated arguments and ordered **finish → settled usage → DONE → authenticated EOF**.
-- Only a user-authorized run start or a continuation containing all receipted tool results authorizes an invocation. Duplicate continuations and uncertain/error attempts cannot be replayed automatically. Cache warming and compaction requests are blocked for Possums.
+- Ordinary inference requires a user-authorized run start or a continuation containing all receipted tool results. Duplicate continuations and uncertain/error attempts cannot be replayed automatically. Cache warming remains blocked. Native compaction has a separate, scoped summary path that does not consume or replace ordinary run/continuation authorization.
 - Pi 1.0.4 removes recoverable `length` attempts before its compaction hook. A valid gateway `length` therefore becomes a **non-retryable terminal partial-answer error** in Pi, with paid text/usage retained and the original finish in `possums_settled_receipt` diagnostics. It is not a refund or an unpaid failure.
 - Receipt charges are authoritative. Submitted quote rates supply the displayed cost components; rounding remainder belongs to output. Legacy receipts without quote rates retain their settled total without invented components. Exact microunit strings are in receipt diagnostics.
 - A disconnect/abort does **not** promise server cancellation or a refund. Without a valid receipt, billing is **unknown**, even when Pi's numeric usage placeholders are zero. A deliberate new request may pay for both generations.
 
 ## Compaction
 
-Compaction is a Pi harness operation, not a missing Tinfoil endpoint: Pi sends conversation summaries through ordinary paid inference. The pinned summarizer also supplies output-cap overrides and automatic retries, which this adapter intentionally does not permit. Removing only the compaction hook would not make that safe or supported. Use `/new` for a fresh context; saved authentication and conversation persistence are separate.
+Manual `/compact` and automatic threshold compaction use the installed **Pi 1.0.4 native `compact()` helper**, with the selected model and ordinary native authentication. Pi owns serialization, prompts, previous-summary merging, split turns, file tracking, successful usage totals and checkpoint/context pruning. Other providers are unchanged; no settings are registered or changed.
+
+Compaction is paid harness summarization, not a new Tinfoil endpoint. It makes one summary call, or at most two sequential native calls for a split turn, with **no retry policy**. Only the private, model-bound summary callback ignores Pi's advisory output-token hint; ordinary output overrides remain rejected. The gateway still reserves the selected model's full output allowance at its submitted rate. Summary requests have no tools and cannot emit executable calls.
+
+Recovery compaction with `willRetry=true` is cancelled: compaction cannot authorize replay of an uncertain prior generation. Errors, length-limited/aborted/empty summaries, tool attempts and stale session/auth responses create **no checkpoint** and do not fall back to another summarizer. A short transient notification preserves the safe failure category/stage and observed settled charges, including a successful first summary when the second fails. Failed compaction does not undo settled charges; abort does not promise cancellation or refund. Failure charges are not added to a persistent local error ledger or checkpoint, so session totals need not include them. A deliberate `/compact` may incur new charges; `/new` starts fresh context instead.
+
+Offline actual-SDK regressions cover this path. No live summary or additional model qualification is claimed.
 
 ## Local privacy boundary
 

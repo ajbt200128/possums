@@ -11,6 +11,7 @@ assert(file && root && piRoot, 'explicit scratch bundle, scratch state and pinne
 const m = await import(pathToFileURL(file).href);
 const ai = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-ai/dist/index.js')).href);
 const coding = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js')).href);
+const { prepareCompaction } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js')).href);
 const { AuthStorage: NativeAuthStorage } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js')).href);
 fs.mkdirSync(root, { recursive: true });
 const passed = [];
@@ -44,6 +45,7 @@ async function setup(plan, tools = true) {
   const key = new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
   const channel = await m.Channel.fixture('https://localhost:18443', key, '07'.repeat(32));
   const client = new m.ReferenceClient(channel);
+  const requests = [];
   let sends = 0; let failModels = false; let abortSeen = false; let release;
   client.login = async () => {};
   client.models = async () => {
@@ -52,6 +54,7 @@ async function setup(plan, tools = true) {
   };
   client.chat = async (_model, messages, onDelta, _newConversation, options) => {
     const mode = plan[sends++];
+    requests.push({ messages: structuredClone(messages), newConversation: _newConversation, tools: options.tools });
     if (mode === 'held' || mode === 'held_tools') release=deferred();
     if (options.onPayload) await options.onPayload({model:'synthetic',stream:true,messages,...(options.tools?{tools:options.tools}:{})});
     await options.onResponse?.({status:200,contentType:'text/event-stream'});
@@ -60,8 +63,9 @@ async function setup(plan, tools = true) {
       await options.onEvent(event({tool_calls:[{index:0,...(mode==='late_tools'?{}:{id:'call_one',type:'function'}),function:{...(mode==='late_tools'?{}:{name:'echo'}),arguments:'{"value":'}}]}));
       if (mode !== 'length_partial') await options.onEvent(event({tool_calls:[{index:0,...(mode==='late_tools'?{id:'call_one',type:'function'}:{}),function:{...(mode==='late_tools'?{name:'echo'}:{}),arguments:'"ok"}'}}]}));
     } else {
-      await options.onEvent(event({content:'progressive'}));
-      onDelta('progressive');
+      const text = mode === 'empty' ? '   ' : 'progressive';
+      await options.onEvent(event({content:text}));
+      onDelta(text);
     }
     if (mode === 'held' || mode === 'held_tools') await release.promise;
     if (mode === 'uncertain') throw new m.ChannelError('uncertain');
@@ -75,7 +79,7 @@ async function setup(plan, tools = true) {
   const provider = new m.PossumsProvider(async()=>client);
   const credential = await provider.auth.apiKey.login({signal:new AbortController().signal,prompt:async()=> 'synthetic_not_a_usable_credential'});
   const selected = provider.getModels()[0];
-  return { provider, client, credential, selected, sends:()=>sends, failModels:()=>{failModels=true;}, abortSeen:()=>abortSeen, release:()=>release?.resolve() };
+  return { provider, client, credential, selected, requests, sends:()=>sends, failModels:()=>{failModels=true;}, abortSeen:()=>abortSeen, release:()=>release?.resolve() };
 }
 async function drain(stream) { const events=[];for await(const event of stream)events.push(event); return {events,message:await stream.result()}; }
 const context = tools => ai.normalizeContext({messages:[user],tools:tools?[tool]:[]});
@@ -322,12 +326,14 @@ await check('gateway failure descriptions preserve fixed reason and proven billi
  assert(!JSON.stringify(result).includes('PRIVATE_PROMPT'));
 });
 async function sdkSetup(name, plan, tools, compaction=false, qualified=true, restoreTools=false) {
- const s=await setup(plan,qualified);let toolRuns=0,provider,textOnlyCommand;
+ const s=await setup(plan,qualified);let toolRuns=0,provider,textOnlyCommand;const notices=[],compactions=[];
+ // Keep native physical-model lookup and the selected host model consistent.
+ const models=s.client.models;s.client.models=async()=> (await models()).map(model=>({...model,context_tokens:'64000'}));
  const settings=coding.SettingsManager.inMemory({compaction:{enabled:compaction,keepRecentTokens:4},retry:{baseDelayMs:1,maxAgentDelayMs:2},defaultTools:[],cacheWarming:'off',enableInstallTelemetry:false});
  const runtime=await coding.ModelRuntime.create({credentials:new ai.InMemoryCredentialStore(),modelsStore:new ai.InMemoryModelsStore(),modelsPath:null,allowModelNetwork:false,refreshOnCreate:false});
  const cwd=path.join(root,name);fs.mkdirSync(cwd,{recursive:true});
  const loader=new coding.DefaultResourceLoader({cwd,agentDir:cwd,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,systemPrompt:'Synthetic test',
-  extensionFactories:[pi=>m.extension({...pi,registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[])]});
+  extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[])]});
  await loader.reload();assert.deepEqual(loader.getExtensions().errors,[]);
  runtime.registerNativeProvider(provider);
  await runtime.refresh({providers:['possums'],allowNetwork:false});
@@ -339,7 +345,7 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
   thinkingLevel:'off',sessionManager:coding.SessionManager.inMemory(cwd),tools:tools?['echo']:[],customTools:[{...tool,label:'Echo',execute:async()=>{toolRuns++;return {content:[{type:'text',text:'ok'}],details:undefined};}}]});
  await session.bindExtensions({mode:'print'});
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
- return {session,s,runtime,provider,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
+ return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
 }
 await check('actual Pi SDK and shipped extension hooks run one receipted invocation per model turn',async()=>{
  const {session,s,toolRuns}=await sdkSetup('sdk-tools',['tool_calls','stop'],true);
@@ -405,4 +411,177 @@ await check('text-only command succeeds in isolation; a later tool-restoring ext
   }finally{session.dispose();}
  }
 });
+
+const syntheticAssistant = (content = [{type:'text',text:'Synthetic answer'}]) => ({role:'assistant',provider:'possums',api:'openai-completions',model:'synthetic',timestamp:2,content,stopReason:'stop',usage:{input:2,output:3,cacheRead:0,cacheWrite:0,totalTokens:5,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
+function seedCompaction(manager, split = false, previous = false) {
+ const id=manager.appendMessage({...user,content:'Synthetic old request'});
+ if(previous)manager.appendCompaction('SYNTHETIC PREVIOUS SUMMARY',id,100,{readFiles:['prior.txt'],modifiedFiles:[]});
+ for(const [name,file] of [['read','read.txt'],['write','written.txt']]) {
+  manager.appendMessage({...syntheticAssistant([{type:'toolCall',id:'file_'+name,name,arguments:{path:file,content:'Synthetic file'}}]),stopReason:'toolUse'});
+  manager.appendMessage({role:'toolResult',toolCallId:'file_'+name,toolName:name,content:[{type:'text',text:'Synthetic result'}],timestamp:3,isError:false});
+ }
+ manager.appendMessage(syntheticAssistant());
+ manager.appendMessage({...user,content:'Synthetic recent request '.repeat(20)});
+ if(split)manager.appendMessage(syntheticAssistant([{type:'text',text:'Synthetic retained answer '.repeat(20)}]));
+ return prepareCompaction(manager.getBranch(),{enabled:true,reserveTokens:10,keepRecentTokens:4});
+}
+async function compactionFixture(plan, split = false, previous = false) {
+ const fixture=await authFixture(plan), extension=fixtureExtension(fixture.establish);
+ const runtime=await nativeRuntime(extension.provider,new ai.InMemoryCredentialStore());
+ await runtime.login('possums','api_key',interaction());
+ const manager=coding.SessionManager.inMemory(root), preparation=seedCompaction(manager,split,previous),controller=new AbortController(),notices=[];
+ assert(preparation);assert.equal(preparation.isSplitTurn,split);
+ const ctx={model:extension.provider.getModels()[0],modelRegistry:new coding.ModelRegistry(runtime),thinkingLevel:'off',ui:{notify:text=>notices.push(text)}};
+ const event={type:'session_before_compact',preparation,branchEntries:manager.getBranch(),reason:'manual',willRetry:false,signal:controller.signal,customInstructions:'Synthetic focus'};
+ return {...fixture,...extension,runtime,manager,event,ctx,controller,notices,run:()=>extension.handlers.get('session_before_compact')(event,ctx)};
+}
+await check('native one/two-summary prompts, previous checkpoint, files, advisory hints and combined usage',async()=>{
+ for(const split of [false,true]) {
+  const f=await compactionFixture(['stop','stop'],split,true),nativeRequests=[],hints=[];
+  const expected=await coding.compact(f.event.preparation,f.ctx.model,requestMarker,{},f.event.customInstructions,f.event.signal,'off',async(model,context,options)=>{
+   nativeRequests.push(structuredClone(m.invocation(model,context).messages));hints.push(options.maxTokens);
+   const stream=ai.createAssistantMessageEventStream(),message={...syntheticAssistant([{type:'text',text:'progressive'}]),usage:{...syntheticAssistant().usage,cost:{input:2/1e6,output:7/1e6-2/1e6,cacheRead:0,cacheWrite:0,total:7/1e6}}};
+   stream.push({type:'done',reason:'stop',message});stream.end();return stream;
+  });
+  const result=await f.run();assert.deepEqual(result.compaction,expected);assert.equal(f.s.sends(),split?2:1);
+  assert.deepEqual(f.s.requests.map(r=>r.messages),nativeRequests);assert.deepEqual(hints,split?[8,5]:[8]);
+  assert(nativeRequests[0].some(msg=>msg.content.includes('<previous-summary>\nSYNTHETIC PREVIOUS SUMMARY')));
+  assert(nativeRequests[0].some(msg=>msg.content.includes('Additional focus: Synthetic focus')));
+  assert.deepEqual(result.compaction.details,{readFiles:['prior.txt','read.txt'],modifiedFiles:['written.txt']});
+  assert.equal(result.compaction.usage.cost.total,(split?14:7)/1e6);assert.equal(result.compaction.usage.totalTokens,split?10:5);
+  assert(f.s.requests.every(r=>!r.tools && r.newConversation));assert.deepEqual(f.notices,[]);
+  f.provider.beginRun();const ordinary=await drain(f.provider.streamSimple(f.ctx.model,context(false),{maxTokens:8}));
+  assert.match(ordinary.message.errorMessage,/possums_request_options_unsupported/);assert.equal(f.s.sends(),split?2:1);
+ }
+});
+await check('summary success/failure preserves ready run, receipted continuation and ordinary conversation state',async()=>{
+ for(const summary of ['stop','refund']) {
+  const ready=await compactionFixture([summary,'stop']);ready.provider.beginRun();await ready.run();
+  assert.equal((await drain(ready.provider.streamSimple(ready.ctx.model,context(false)))).message.stopReason,'stop');
+  assert.deepEqual(ready.s.requests.map(r=>r.newConversation),[true,true]);
+  const f=await compactionFixture(['tool_calls',summary,'stop']);f.provider.beginRun();
+  const first=(await drain(f.provider.streamSimple(f.ctx.model,context(true)))).message;
+  assert.equal(first.stopReason,'toolUse');await f.run();
+  const continuation=ai.normalizeContext({messages:[user,first,{role:'toolResult',toolCallId:'call_one',toolName:'echo',content:[{type:'text',text:'ok'}],timestamp:3}],tools:[tool]});
+  assert.equal((await drain(f.provider.streamSimple(f.ctx.model,continuation))).message.stopReason,'stop');
+  assert.equal((await drain(f.provider.streamSimple(f.ctx.model,continuation))).message.stopReason,'error');
+  assert.deepEqual(f.s.requests.map(r=>r.newConversation),[true,true,false]);assert.equal(f.s.sends(),3);
+ }
+});
+await check('summary errors, length, empty text and tool attempts fail closed with safe stages and no replay',async()=>{
+ for(const [mode,pattern] of [['refund',/Generation failed.*stream idle timeout.*Reservation refunded/],['unknown_bill',/Gateway unavailable.*inference unavailable.*Charge unknown/],['sdk_decode',/sdk stream decode failed/],['hostile',/request rejected/],['length',/possums_summary_length/],['empty',/possums_summary_empty/],['tool_calls',/possums_summary_tools/],['stop_tools',/possums_summary_tools/]]) {
+  const f=await compactionFixture([mode,'stop'],true),observed=[];const perform=f.provider.perform.bind(f.provider);
+  f.provider.perform=(...args)=>{const stream=perform(...args);observed.push(drain(stream));return stream;};
+  const result=await f.run();
+  assert((await Promise.all(observed)).every(({events})=>events.every(event=>!event.type.startsWith('toolcall_'))));
+  assert.deepEqual(result,{cancel:true});assert.equal(f.s.sends(),1);assert.match(f.notices[0],/summary 1/);assert.match(f.notices[0],pattern);
+  assert(!f.notices.join('').includes('PRIVATE_PROMPT'));assert.match(f.notices[0],/No checkpoint saved.*Not replayed/);
+  if(['length','empty','tool_calls','stop_tools'].includes(mode))assert.match(f.notices[0],/Observed settled charges: \$0.000007/);
+  assert.equal((await drain(f.provider.streamSimple(f.ctx.model,context(false)))).message.stopReason,'error');assert.equal(f.s.sends(),1);
+ }
+});
+await check('failed second summary reports first paid summary and observed second-call billing without a ledger',async()=>{
+ for(const [mode,amount] of [['refund','0.000007'],['unknown_bill','0.000007'],['length','0.000014']]) {
+  const f=await compactionFixture(['stop',mode],true);assert.deepEqual(await f.run(),{cancel:true});assert.equal(f.s.sends(),2);
+  assert.match(f.notices[0],/summary 2/);assert(f.notices[0].includes('Observed settled charges: $'+amount));
+  if(mode==='unknown_bill')assert.match(f.notices[0],/Additional charge unknown/);
+  if(mode==='refund')assert.match(f.notices[0],/stream idle timeout.*Reservation refunded/);
+  assert.equal(f.manager.getEntries().filter(e=>e.type==='compaction').length,0);
+ }
+});
+await check('summary abort/session/logout/auth replacement/run replacement rejects late receipt and stops split sends',async()=>{
+ for(const action of ['abort','session','logout','replace','run']) {
+  const f=await compactionFixture(['held','stop'],true),entered=deferred();const original=f.s.client.chat;
+  f.s.client.chat=(model,messages,onDelta,fresh,options)=>original(model,messages,text=>{onDelta(text);entered.resolve();},fresh,options);
+  const pending=f.run();await entered.promise;
+  if(action==='abort')f.controller.abort();
+  if(action==='session')f.provider.newSession();
+  if(action==='logout')await f.runtime.logout('possums');
+  if(action==='replace')await f.runtime.login('possums','api_key',interaction(envKey));
+  if(action==='run')f.provider.beginRun();
+  f.s.release();assert.deepEqual(await pending,{cancel:true});assert.equal(f.s.sends(),1);
+  assert.match(f.notices[0],/possums_run_replaced.*Observed settled charges: \$0.000007/);
+ }
+ const f=await compactionFixture(['stop']);f.controller.abort();assert.deepEqual(await f.run(),{cancel:true});assert.equal(f.s.sends(),0);
+ const aborted=await compactionFixture(['abort','stop'],true),entered=deferred(),original=aborted.s.client.chat;
+ aborted.s.client.chat=(model,messages,onDelta,fresh,options)=>original(model,messages,text=>{onDelta(text);entered.resolve();},fresh,options);
+ const pending=aborted.run();await entered.promise;await new Promise(setImmediate);aborted.controller.abort();
+ assert.deepEqual(await pending,{cancel:true});assert.equal(aborted.s.sends(),1);assert.match(aborted.notices[0],/charge unknown/);
+});
+await check('auth wait invalidation and throwing transient UI cannot enable default summary fallback',async()=>{
+ for(const action of ['abort','session','logout','replace']) {
+  const f=await compactionFixture(['stop']),held=deferred(),entered=deferred(),original=f.ctx.modelRegistry.getProviderAuth.bind(f.ctx.modelRegistry);
+  f.ctx.modelRegistry.getProviderAuth=async(...args)=>{const auth=await original(...args);entered.resolve();await held.promise;return auth;};
+  const pending=f.run();await entered.promise;
+  if(action==='abort')f.controller.abort();if(action==='session')f.provider.newSession();if(action==='logout')await f.runtime.logout('possums');if(action==='replace')await f.runtime.login('possums','api_key',interaction(envKey));
+  held.resolve();assert.deepEqual(await pending,{cancel:true});assert.equal(f.s.sends(),0);
+ }
+ const f=await compactionFixture(['hostile']);f.ctx.ui.notify=()=>{throw new Error('PRIVATE_PROMPT');};
+ assert.deepEqual(await f.run(),{cancel:true});assert.equal(f.s.sends(),1);
+});
+await check('willRetry recovery cancels before authentication; other providers remain untouched',async()=>{
+ const f=await compactionFixture(['stop']);let auth=0;f.ctx.modelRegistry.getProviderAuth=async()=>{auth++;throw new Error('PRIVATE_PROMPT');};
+ f.event.willRetry=true;f.event.reason='overflow';assert.deepEqual(await f.run(),{cancel:true});assert.match(f.notices[0],/possums_automatic_replay_blocked/);
+ assert.equal(auth,0);assert.equal(f.s.sends(),0);
+ for(const reason of ['manual','threshold','overflow']){f.ctx.model={...f.ctx.model,provider:'another'};f.event.reason=reason;assert.equal(await f.run(),undefined);}
+ assert.equal(auth,0);assert.equal(f.notices.length,1);
+});
+await check('private summary scope closes after native success or failure',async()=>{
+ for(const mode of ['stop','refund']) {
+  const f=await compactionFixture([mode]);let scope;const perform=f.provider.perform.bind(f.provider);
+  f.provider.perform=(...args)=>{scope=args[3];return perform(...args);};
+  await f.run();assert.equal(typeof scope,'function');assert.throws(scope,/possums_run_replaced/);
+  assert.equal(f.s.sends(),1);
+ }
+});
+await check('actual Pi overflow-retry hook cancellation prevents summary and replay',async()=>{
+ const f=await sdkSetup('sdk-compact-recovery',['stop'],false,true);
+ try {
+  seedCompaction(f.session.sessionManager,true);const before=f.session.sessionManager.getEntries();
+  assert.equal(await f.session._runAutoCompaction('overflow',true),false);
+  assert.equal(f.compactions.length,1);assert.equal(f.compactions[0].willRetry,true);assert.equal(f.s.sends(),0);
+  assert.deepEqual(f.session.sessionManager.getEntries(),before);assert.match(f.notices[0],/possums_automatic_replay_blocked/);
+ } finally {f.session.dispose();}
+});
+await check('actual Pi manual compaction checkpoints native summaries/files/usage and prunes via native projection',async()=>{
+ for(const split of [false,true]) {
+  const f=await sdkSetup('sdk-compact-'+split,['stop','stop'],true);
+  try {
+   seedCompaction(f.session.sessionManager,split,true);const before=f.session.sessionManager.getBranch();
+   const result=await f.session.compact('Synthetic focus');const saved=f.session.sessionManager.getEntries().filter(e=>e.type==='compaction').at(-1);
+   assert.equal(f.compactions.length,1);assert.equal(f.compactions[0].reason,'manual');assert.equal(f.compactions[0].willRetry,false);
+   assert.equal(f.s.sends(),split?2:1);assert.equal(saved.summary,result.summary);assert.equal(saved.firstKeptEntryId,f.compactions[0].preparation.firstKeptEntryId);
+   assert.equal(result.usage.cost.total,(split?14:7)/1e6);assert.deepEqual(result.details,{readFiles:['prior.txt','read.txt'],modifiedFiles:['written.txt']});
+   assert.equal(f.session.getSessionStats().cost,(split?14:7)/1e6);assert.equal(f.toolRuns(),0);assert.equal(f.notices.length,0);
+   const projected=f.session.sessionManager.buildSessionProjection().messages;
+   assert(projected.some(msg=>msg.role==='compactionSummary'));assert(!JSON.stringify(projected).includes('Synthetic old request'));
+   assert(f.session.sessionManager.getEntries().length>before.length,'raw native history retained; projection is pruned');
+  } finally {f.session.dispose();}
+ }
+});
+await check('actual Pi failed native compaction never saves checkpoint or persists transient diagnostics',async()=>{
+ for(const mode of ['refund','length','empty','tool_calls','abort']) {
+  const f=await sdkSetup('sdk-compact-failure-'+mode,['stop',mode],true);
+  try {
+   seedCompaction(f.session.sessionManager,true);const before=f.session.sessionManager.getEntries();let cancel;
+   if(mode==='abort') {const original=f.s.client.chat;f.s.client.chat=(model,messages,onDelta,fresh,options)=>original(model,messages,text=>{onDelta(text);if(f.s.sends()===2)cancel=setImmediate(()=>f.session.abortCompaction());},fresh,options);}
+   await assert.rejects(f.session.compact(),/Compaction cancelled/);if(cancel)clearImmediate(cancel);
+   assert.equal(f.s.sends(),2);assert.deepEqual(f.session.sessionManager.getEntries(),before);assert.equal(f.toolRuns(),0);
+   assert.equal(f.notices.length,1);assert.match(f.notices[0],/summary 2.*Observed settled charges: \$0.0000(07|14)/);
+  } finally {f.session.dispose();}
+ }
+});
+await check('actual Pi threshold compaction is native and never retries a completed turn',async()=>{
+ const f=await sdkSetup('sdk-compact-threshold',['stop','stop','stop'],false,true);
+ try {
+  // Synthetic usage crosses the host threshold, not the mock gateway's window.
+  const original=f.s.client.chat;f.s.client.chat=async(...args)=>{const receipt=await original(...args);return f.s.sends()===2?{...receipt,inputTokens:50000,totalTokens:50003,chargedMicrounits:'65004',refundedMicrounits:'0'}:receipt;};
+  await f.session.prompt('Synthetic prior threshold input');
+  await f.session.prompt('Synthetic threshold request '.repeat(100));
+  assert.equal(f.compactions.length,1);assert.equal(f.compactions[0].reason,'threshold');assert.equal(f.compactions[0].willRetry,false);
+  assert.equal(f.s.sends(),3);assert.equal(f.session.sessionManager.getEntries().filter(e=>e.type==='compaction').length,1);
+  assert.equal(f.session.messages.filter(e=>e.role==='assistant').length,1);assert.equal(f.notices.length,0);
+ } finally {f.session.dispose();}
+});
+
 fs.writeFileSync(path.join(root,'results.json'),JSON.stringify({pi:'1.0.4',passed,scope:'Synthetic provider/client mocks and actual Pi SDK; no production model qualification or gateway evidence'},null,2)+'\n');

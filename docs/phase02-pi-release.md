@@ -150,6 +150,49 @@ without a Possums-specific implementation or client-side spending reservation.
 No new live generation was sent for this release or auth work. Earlier manual
 user prompts still have unknown counts/charges and are not folded into the
 historical upstream qualification ledger. Exact live balance/accounting and
-whole-runtime privacy acceptance remain unverified. Compaction remains blocked:
-this is paid harness summarization, not a missing Tinfoil endpoint, and needs a
-separate safe call/retry/token-cap integration.
+whole-runtime privacy acceptance remain unverified. At that release, compaction
+remained blocked: paid harness summarization needed a separate safe
+call/retry/token-cap integration (implemented below).
+
+## Installed Pi 1.0.4 native compaction
+
+The current client targets the qualified installed **Pi 1.0.4** peers and normally
+loads through `pi install`, using the independently approved public manifest
+beside `extension.mjs`. Historical Pi 0.99.2, v0.0.10 and v0.0.11 evidence above
+is unchanged; this client change does not update gateway code or qualify models.
+
+Manual and threshold compaction now return the root-exported native `compact()`
+result through `session_before_compact`. Native Pi owns prompts, serialization,
+previous summaries, split turns, file operations, successful combined usage and
+checkpoint/context pruning. It makes one summary call, or two sequential calls
+for a split turn; omitting the retry policy disables native summarization retries.
+Recovery with `willRetry=true` is cancelled rather than authorizing regeneration.
+
+The private callback reuses the existing verified provider receipt/EOF path,
+selected model and native auth resolution. Only this callback removes the native
+output-token hint. Gateway maximum reservation and submitted-rate accounting
+remain authoritative; ordinary output overrides still fail closed. Summary
+requests have no tools, cannot emit executable tool calls, and neither consume
+ordinary run authorization nor change a pending receipted-tool continuation or
+its conversation state. The callback closes after compaction; signal, run,
+session and auth changes invalidate it before another send or checkpoint.
+
+Failure cancels the hook, including when notification fails, instead of allowing
+ExtensionRunner's default fallback. Safe, content-free category/stage and
+observed settled charges appear only in a transient notification. A paid first
+summary remains charged if the second fails; failing compaction creates no
+checkpoint or persistent local error ledger and does not undo settled charges.
+Consequently session totals need not include failed-summary charges. Abort does
+not establish cancellation or refund. A deliberate `/compact` may pay again;
+`/new` is the fresh-context alternative. Other providers are untouched.
+
+Verification uses Node 24.13.0, scratch builds and actual installed Pi 1.0.4 with
+synthetic credentials/transport only. Fresh strict TypeScript/build, **37 Pi
+checks (mocks and actual SDK) and 436 reference/admission checks** passed. Active LSP probes were
+inconclusive and are not counted as clean certificates. The redundant shell peer-link step was
+removed: `build.mjs` already creates these links, and relinking through them can
+write inside the installed SDK; the three self-links created by the initial
+builds were removed without changing SDK code or metadata. Compaction changes
+no dependencies or settings; normal installation adds only its package
+declaration. No credential inspection, paid inference, live summary or new live
+model qualification is part of this work.

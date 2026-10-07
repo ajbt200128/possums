@@ -51,8 +51,8 @@ export default function possums(pi: ExtensionAPI): void {
   pi.on('cache_warming_decision', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) return { action: 'stop' as const };
   });
-  pi.on('session_before_compact', (_event, ctx) => {
-    if (ctx.model?.provider === PROVIDER_ID) return { cancel: true };
+  pi.on('session_before_compact', (event, ctx) => {
+    if (ctx.model?.provider === PROVIDER_ID) return provider.compact(event, ctx);
   });
   pi.registerCommand('possums-text-only', {
     description: 'Explicitly disable active Pi tools for a text-only Possums model',
