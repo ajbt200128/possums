@@ -1,3 +1,5 @@
+mod adversarial;
+
 use super::*;
 use std::sync::atomic::AtomicBool;
 
@@ -485,7 +487,9 @@ fn briefly_held_leases_count_and_capacity_is_not_a_sample_count() {
     ready(&metrics);
     for j in 0..10 {
         drive(&metrics, 300 * SECOND + j * 10_000_000);
-        drop(metrics.lease(Lane::Connection));
+        let lease = metrics.lease(Lane::Connection);
+        drive(&metrics, 300 * SECOND + j * 10_000_000 + 1);
+        drop(lease);
     }
     drive(&metrics, 600 * SECOND);
     let view = metrics.request().unwrap();
@@ -503,8 +507,7 @@ fn briefly_held_leases_count_and_capacity_is_not_a_sample_count() {
 }
 
 fn ten_starts(metrics: &Metrics) {
-    // Preserve handles until a typed terminal, then drop. Start-only fixtures
-    // deliberately cross the window rather than fabricate loss/unknown terminals.
+    // Ten independent pre-router attempts need no fabricated HTTP lifecycle.
     for _ in 0..10 {
         metrics.reject(
             None,

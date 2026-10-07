@@ -282,7 +282,7 @@ impl<C: Clock> AggregateMetrics<C> {
             return false;
         };
         let old = self.epoch.load(Ordering::SeqCst);
-        let Some(epoch) = old.checked_add(1).filter(|e| e % 2 == 1) else {
+        let Some(epoch) = old.checked_add(1).filter(|e| e % 2 == 1 && *e < u64::MAX) else {
             return false;
         };
         if !state.restart(now, epoch) {
@@ -326,7 +326,7 @@ impl<C: Clock> AggregateMetrics<C> {
                 .attempted
                 .max(mapped / INFRA_WINDOW * INFRA_WINDOW);
             let old = state.epoch;
-            let Some(epoch) = old.checked_add(2) else {
+            let Some(epoch) = old.checked_add(2).filter(|e| *e < u64::MAX) else {
                 self.invalidate();
                 return false;
             };
@@ -548,6 +548,8 @@ impl<C: Clock> AggregateMetrics<C> {
         let pre_router = (reason as usize) < 4;
         if pre_router != endpoint.is_none()
             || (pre_router && model != AdmissionModel::NotApplicable)
+            || (endpoint.is_some_and(|e| e.chat().is_none())
+                && model != AdmissionModel::NotApplicable)
         {
             state.requests.active.valid = false;
             return;
@@ -565,6 +567,26 @@ impl<C: Clock> AggregateMetrics<C> {
             return;
         };
         let time = self.time(&mut state);
+        // Half-open lease lifetime: release exactly on the boundary must not
+        // touch the new window when advance marks still-held old leases.
+        if matches!(update, Update::Release)
+            && time.is_some_and(|(_, mapped)| mapped % REQUEST_WINDOW == 0)
+            && state
+                .record(key)
+                .is_some_and(|r| r.kind == Kind::Lease && !r.terminal)
+        {
+            let record = state.record(key).copied().unwrap();
+            if time.is_some_and(|(_, mapped)| record.lease_window == mapped) {
+                let table = &mut state.requests.active;
+                let count = &mut table.contributors[record.lane as usize];
+                if let Some(remaining) = count.checked_sub(1) {
+                    *count = remaining;
+                } else {
+                    table.valid = false;
+                }
+            }
+            state.records[key as usize & 255].terminal = true;
+        }
         if let Some((_, mapped)) = time {
             self.advance(&mut state, mapped);
         }
@@ -624,6 +646,15 @@ impl<C: Clock> AggregateMetrics<C> {
         let Some((_, mapped)) = self.time(&mut state) else {
             return;
         };
+        if state
+            .infrastructure
+            .start
+            .checked_add(INFRA_WINDOW)
+            .is_none_or(|end| mapped > end)
+            && !self.advance(&mut state, mapped)
+        {
+            return;
+        }
         let start = state.infrastructure.start;
         // No implicit closure here: all series at the sixth interval can arrive
         // before the explicit boundary poll. Stale intervals never fill holes.
@@ -677,6 +708,12 @@ impl State {
                 .is_none()
         {
             return false;
+        }
+        // Off/re-enable may revisit a never-attempted grid interval after a
+        // backward clock reset. A prior epoch's lease marker is not a fresh
+        // contributor, even when its numeric window start happens to match.
+        for record in &mut self.records {
+            record.lease_window = u64::MAX;
         }
         self.epoch = epoch;
         self.anchor = Some(now);
@@ -752,6 +789,14 @@ impl State {
                 }
             }
             (Kind::Http, Update::Http(status, terminal, disposition)) => {
+                if record.endpoint.chat().is_none()
+                    && matches!(
+                        disposition,
+                        Disposition::NewGeneration | Disposition::Duplicate
+                    )
+                {
+                    return false;
+                }
                 let Some(bucket) = duration_bucket(record.start, mono) else {
                     return false;
                 };
@@ -796,6 +841,11 @@ impl State {
                 return false;
             } // lost eligible lifecycle, not a fabricated terminal
             _ => return false,
+        }
+        if self.records[index].terminal {
+            self.records[index].start = 0;
+            self.records[index].dispatch = None;
+            self.records[index].first = None;
         }
         true
     }
