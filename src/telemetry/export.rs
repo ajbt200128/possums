@@ -1,6 +1,7 @@
 //! Test-only packet 2C exporter qualification, NOT a runtime sender.
 //! The stock 0.29 HTTP transport exceeds the frozen response allocation budget.
 //! Keep aggregation views and serving startup unchanged until reviewed resolution.
+mod handoff;
 mod materialize;
 mod transport;
 
@@ -317,6 +318,7 @@ fn clean_child_env(test: &str, environment: &[(&str, &str)]) -> bool {
             || line.starts_with("candidate case=")
             || line.starts_with("materialize max ")
             || line.starts_with("serialize and bounded peer max ")
+            || line.starts_with("handoff allocation ")
         {
             eprintln!("{line}");
         }

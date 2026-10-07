@@ -96,7 +96,7 @@ fn frozen_slot_pressure_discards_new_output_without_allocation() {
     for i in 2..100 {
         slots.active.rejected[1176] = 11;
         slots.freeze(1, i * 300 * SECOND, true);
-        assert_eq!(slots.frozen.rejected[1176], 10);
+        assert_eq!(slots.frozen.as_ref().unwrap().rejected[1176], 10);
         assert_eq!(slots.pending.unwrap().0.end_ns, 300 * SECOND);
         assert_eq!(slots.attempted, i * 300 * SECOND);
         assert_eq!(slots.active.rejected[1176], 0);
@@ -279,8 +279,11 @@ fn pending_expiry_and_kill_drop_both_slots_without_replacement() {
         assert!(metrics.request().is_none());
         assert!(metrics.infrastructure().is_none());
         let state = metrics.state.lock().unwrap();
-        assert_eq!(state.requests.frozen.series_count(), 0);
-        assert_eq!(state.infrastructure.frozen.series_count(), 0);
+        assert_eq!(state.requests.frozen.as_ref().unwrap().series_count(), 0);
+        assert_eq!(
+            state.infrastructure.frozen.as_ref().unwrap().series_count(),
+            0
+        );
     }
 }
 

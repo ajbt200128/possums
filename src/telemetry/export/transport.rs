@@ -13,7 +13,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     task::{Context, Poll},
@@ -67,6 +67,7 @@ pub(super) struct Client {
     // Sole seam: deterministic pending connect, rather than non-loopback routing
     // or platform-dependent backlog exhaustion. Normal tests use real TCP.
     pub(super) stall_connect: bool,
+    authority: Option<(Arc<AtomicU64>, u64, tokio::time::Instant)>,
 }
 
 impl fmt::Debug for Client {
@@ -91,7 +92,17 @@ impl Client {
                 evidence: Arc::new(Evidence::default()),
             }),
             stall_connect: false,
+            authority: None,
         })
+    }
+
+    pub(super) fn bind_epoch(
+        &mut self,
+        epoch: Arc<AtomicU64>,
+        expected: u64,
+        deadline: tokio::time::Instant,
+    ) {
+        self.authority = Some((epoch, expected, deadline));
     }
 
     pub(super) fn endpoint(&self) -> String {
@@ -105,8 +116,12 @@ impl Client {
     // Latch BEFORE waiting. All clones share both the latch and sole attempt
     // guard. Acquiring it certifies the owned attempt future/I/O has been dropped.
     // Callers must poll/join their attempt; this is not runtime kill wiring.
-    pub(super) async fn cancel(&self) {
+    pub(super) fn stop(&self) {
         self.state.stopped.send_replace(true);
+    }
+
+    pub(super) async fn cancel(&self) {
+        self.stop();
         let _quiescent = self.state.active.lock().await;
     }
 
@@ -134,10 +149,14 @@ impl Client {
         if self.stall_connect {
             std::future::pending::<()>().await;
         }
+        if !authorized(&self.authority) {
+            return Err(Failure::Unavailable);
+        }
         let stream = TcpStream::connect(self.address)
             .await
             .map_err(|_| Failure::Transport)?;
-        let io = ObservedIo::new(stream, self.evidence());
+        let mut io = ObservedIo::new(stream, self.evidence());
+        io.authority = self.authority.clone();
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
             .max_buf_size(32 * 1024)
             .max_headers(64)
@@ -205,11 +224,15 @@ impl HttpClient for Client {
             .try_lock()
             .map_err(|_| Failure::Unavailable)?;
         let mut stopped = self.state.stopped.subscribe();
-        if *stopped.borrow() {
+        if *stopped.borrow() || !authorized(&self.authority) {
             return Err(Failure::Unavailable.into());
         }
         // Box owns the actual future, not merely a pinned reference. Drop it
         // explicitly BEFORE releasing the guard or returning any acknowledgement.
+        // Retain the SAME serialized allocation through response/disposal. This
+        // is a shallow reference, not a body copy; composed peak tests keep it
+        // live alongside the SDK tables, frozen slots and bounded response.
+        let payload = request.body().clone();
         let mut attempt = Box::pin(self.attempt(request));
         let result = tokio::select! {
             biased;
@@ -218,22 +241,36 @@ impl HttpClient for Client {
             result = &mut attempt => result,
         };
         drop(attempt);
+        drop(payload);
         result.map_err(Into::into)
     }
 }
 
 // Test-only observation at the actual I/O boundary, not peer-buffer inference.
 // Also witnesses that cancellation drops the real stream before acknowledging.
+fn authorized(authority: &Option<(Arc<AtomicU64>, u64, tokio::time::Instant)>) -> bool {
+    authority
+        .as_ref()
+        .is_none_or(|(epoch, expected, deadline)| {
+            epoch.load(Ordering::SeqCst) == *expected && tokio::time::Instant::now() < *deadline
+        })
+}
+
 struct ObservedIo {
     stream: TcpStream,
     evidence: Arc<Evidence>,
+    authority: Option<(Arc<AtomicU64>, u64, tokio::time::Instant)>,
 }
 
 impl ObservedIo {
     fn new(stream: TcpStream, evidence: Arc<Evidence>) -> Self {
         evidence.connections.fetch_add(1, Ordering::SeqCst);
         evidence.live_io.fetch_add(1, Ordering::SeqCst);
-        Self { stream, evidence }
+        Self {
+            stream,
+            evidence,
+            authority: None,
+        }
     }
 
     fn record(&self, result: &Poll<std::io::Result<usize>>) {
@@ -269,6 +306,9 @@ impl AsyncWrite for ObservedIo {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        if !authorized(&self.authority) {
+            return Poll::Ready(Err(std::io::ErrorKind::ConnectionAborted.into()));
+        }
         let result = Pin::new(&mut self.stream).poll_write(cx, buf);
         self.record(&result);
         result
@@ -279,6 +319,9 @@ impl AsyncWrite for ObservedIo {
         cx: &mut Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<std::io::Result<usize>> {
+        if !authorized(&self.authority) {
+            return Poll::Ready(Err(std::io::ErrorKind::ConnectionAborted.into()));
+        }
         let result = Pin::new(&mut self.stream).poll_write_vectored(cx, bufs);
         self.record(&result);
         result

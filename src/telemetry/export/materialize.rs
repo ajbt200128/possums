@@ -246,6 +246,20 @@ fn wire_representable(t: &RequestTables) -> bool {
 }
 /// Returns no partial family on invalid/sparse data. No send permit is conferred.
 pub(super) fn request(t: &RequestTables, window: Window) -> Option<ResourceMetrics> {
+    request_paused(t, window, None)
+}
+
+// Fixed test rendezvous inside synchronous SDK construction, not a callback or
+// alternate encoder. Bounded even if its test controller disappears.
+pub(super) struct Checkpoint {
+    pub(super) entered: tokio::sync::oneshot::Sender<()>,
+    pub(super) resume: std::sync::mpsc::Receiver<()>,
+}
+pub(super) fn request_paused(
+    t: &RequestTables,
+    window: Window,
+    checkpoint: Option<Checkpoint>,
+) -> Option<ResourceMetrics> {
     if !request_window(window) || !t.releasable() || !wire_representable(t) {
         return None;
     }
@@ -309,6 +323,13 @@ pub(super) fn request(t: &RequestTables, window: Window) -> Option<ResourceMetri
         duration,
         window,
     );
+    if let Some(checkpoint) = checkpoint {
+        let _ = checkpoint.entered.send(());
+        checkpoint
+            .resume
+            .recv_timeout(Duration::from_millis(500))
+            .ok()?;
+    }
     let mut started = Vec::new();
     let mut terminal = Vec::new();
     let mut gen_duration = Vec::new();
@@ -474,4 +495,4 @@ pub(super) fn infrastructure(t: &Infrastructure, window: Window) -> Option<Resou
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

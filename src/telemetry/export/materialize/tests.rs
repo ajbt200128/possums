@@ -52,7 +52,7 @@ fn cohort(n: u64, mixed: bool, missing: u64) -> RequestTables {
     t.contributors = [n, n, n, n, 0, 0];
     t
 }
-fn decode(bytes: &[u8]) -> ExportMetricsServiceRequest {
+pub(in crate::telemetry) fn decode(bytes: &[u8]) -> ExportMetricsServiceRequest {
     let decoded = ExportMetricsServiceRequest::decode(bytes).unwrap();
     assert_eq!(decoded.encode_to_vec(), bytes);
     let resource = &decoded.resource_metrics[0];
@@ -90,7 +90,7 @@ fn decode(bytes: &[u8]) -> ExportMetricsServiceRequest {
 }
 type WirePoints =
     std::collections::BTreeMap<(String, Vec<(String, String)>), (String, i64, u64, u64)>;
-fn points(bytes: &[u8]) -> WirePoints {
+pub(in crate::telemetry) fn points(bytes: &[u8]) -> WirePoints {
     points_in(bytes, W)
 }
 fn points_in(bytes: &[u8], window: Window) -> WirePoints {
@@ -179,7 +179,7 @@ fn exact_bins(
         );
     }
 }
-fn expected(n: i64, mixed: bool, missing: i64) -> WirePoints {
+pub(in crate::telemetry) fn expected(n: i64, mixed: bool, missing: i64) -> WirePoints {
     let mut out = std::collections::BTreeMap::new();
     let mut add = |name: &str, unit: &str, attrs: Vec<(&str, &str)>, count: i64| {
         let mut attrs: Vec<_> = attrs
@@ -636,6 +636,11 @@ fn maximum() -> Box<RequestTables> {
         ticks: 300,
         ..Default::default()
     });
+    fill_maximum(&mut t);
+    t
+}
+pub(in crate::telemetry) fn fill_maximum(t: &mut RequestTables) {
+    t.ticks = 300;
     for i in 0..16 {
         t.http_starts[i] = 10;
     }
@@ -670,7 +675,6 @@ fn maximum() -> Box<RequestTables> {
         t.occupancy[i].0 = [30; 10];
     }
     assert!(t.releasable());
-    t
 }
 #[tokio::test]
 async fn maximum_reachable_cardinality_actual_wire_and_allocations() {

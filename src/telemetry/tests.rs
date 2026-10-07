@@ -3,7 +3,7 @@ mod adversarial;
 use super::*;
 use std::sync::atomic::AtomicBool;
 
-struct FakeClock {
+pub(super) struct FakeClock {
     mono: AtomicU64,
     wall: AtomicU64,
     available: AtomicBool,
@@ -16,10 +16,10 @@ impl FakeClock {
             available: AtomicBool::new(true),
         }
     }
-    fn set(&self, ns: u64) {
+    pub(super) fn set(&self, ns: u64) {
         self.pair(ns, ns);
     }
-    fn pair(&self, mono: u64, wall: u64) {
+    pub(super) fn pair(&self, mono: u64, wall: u64) {
         self.mono.store(mono, Ordering::SeqCst);
         self.wall.store(wall, Ordering::SeqCst);
     }
@@ -32,11 +32,11 @@ impl Clock for FakeClock {
         })
     }
 }
-type Metrics = AggregateMetrics<FakeClock>;
-fn new() -> Metrics {
+pub(super) type Metrics = AggregateMetrics<FakeClock>;
+pub(super) fn new() -> Metrics {
     Metrics::new(Deployment::IsolatedSynthetic, FakeClock::new(0))
 }
-fn drive(metrics: &Metrics, ns: u64) {
+pub(super) fn drive(metrics: &Metrics, ns: u64) {
     let now = metrics.clock.now().unwrap().wall_ns;
     assert!(ns >= now);
     let mut tick = now / SECOND * SECOND + SECOND / 2;
@@ -50,7 +50,7 @@ fn drive(metrics: &Metrics, ns: u64) {
     }
     metrics.clock.set(ns);
 }
-fn ready(metrics: &Metrics) {
+pub(super) fn ready(metrics: &Metrics) {
     drive(metrics, 300 * SECOND);
     metrics.poll();
 }
@@ -73,7 +73,7 @@ fn root_generation(metrics: &Metrics) -> Observation<'_, FakeClock> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Vector {
+pub(super) enum Vector {
     Plain,
     RareError,
     RareModel,
@@ -86,7 +86,11 @@ enum Vector {
     OutputFailure,
     Duplicate,
 }
-fn cohort(metrics: &Metrics, n: u64, vector: Vector) {
+pub(super) fn cohort(metrics: &Metrics, n: u64, vector: Vector) {
+    cohort_before_close(metrics, n, vector);
+    drive(metrics, 600 * SECOND);
+}
+pub(super) fn cohort_before_close(metrics: &Metrics, n: u64, vector: Vector) {
     for j in 0..n {
         let t = (300 + 10 * j) * SECOND;
         drive(metrics, t);
@@ -149,7 +153,6 @@ fn cohort(metrics: &Metrics, n: u64, vector: Vector) {
         }
         drop((http, connection, heavy));
     }
-    drive(metrics, 600 * SECOND);
 }
 
 /// Independent literal expansion of contract C+Q, not derived by observing the

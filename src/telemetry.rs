@@ -61,7 +61,7 @@ pub struct Window {
 }
 struct Slots<T> {
     active: Box<T>,
-    frozen: Box<T>,
+    frozen: Option<Box<T>>,
     start: u64,
     eligible: u64,
     attempted: u64,
@@ -71,7 +71,7 @@ impl<T: Default> Default for Slots<T> {
     fn default() -> Self {
         Self {
             active: Box::default(),
-            frozen: Box::default(),
+            frozen: Some(Box::default()),
             start: 0,
             eligible: u64::MAX,
             attempted: 0,
@@ -85,13 +85,15 @@ impl<T: Default> Slots<T> {
         self.eligible = self.start.checked_add(width)?.max(self.attempted);
         *self.active = T::default();
         self.pending = None;
-        *self.frozen = T::default();
+        if let Some(frozen) = &mut self.frozen {
+            **frozen = T::default();
+        }
         Some(())
     }
     fn freeze(&mut self, epoch: u64, end: u64, allowed: bool) {
         self.attempted = self.attempted.max(end);
-        if allowed && self.pending.is_none() {
-            std::mem::swap(&mut self.active, &mut self.frozen);
+        if allowed && self.pending.is_none() && self.frozen.is_some() {
+            std::mem::swap(&mut self.active, self.frozen.as_mut().unwrap());
             self.pending = Some((
                 Window {
                     start_ns: self.start,
@@ -105,7 +107,9 @@ impl<T: Default> Slots<T> {
     }
     fn discard(&mut self) {
         *self.active = T::default();
-        *self.frozen = T::default();
+        if let Some(frozen) = &mut self.frozen {
+            **frozen = T::default();
+        }
         self.pending = None;
     }
 }
@@ -176,7 +180,9 @@ pub struct AggregateMetrics<C: Clock = SystemClock> {
     // Odd = enabled; changing this token invalidates ALL open/pending observations.
     // A failed try_lock changes it before returning. Closure and consumption must
     // validate the same token, including after their last mutation.
-    epoch: AtomicU64,
+    epoch: std::sync::Arc<AtomicU64>,
+    #[cfg(test)]
+    handoff: handoff::Exchange,
     entrants: AtomicU64,
     retired: [AtomicU64; 4],
     untracked_lease: AtomicBool,
@@ -191,7 +197,9 @@ impl<C: Clock> AggregateMetrics<C> {
     pub fn new(mode: Deployment, clock: C) -> Self {
         let result = Self {
             clock,
-            epoch: AtomicU64::new(0),
+            epoch: std::sync::Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            handoff: handoff::Exchange::default(),
             entrants: AtomicU64::new(0),
             retired: std::array::from_fn(|_| AtomicU64::new(0)),
             untracked_lease: AtomicBool::new(false),
@@ -201,11 +209,18 @@ impl<C: Clock> AggregateMetrics<C> {
         result
     }
     fn invalidate(&self) {
-        let _ = self
+        let changed = self
             .epoch
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |epoch| {
                 (epoch % 2 == 1).then(|| epoch.saturating_add(1))
-            });
+            })
+            .is_ok();
+        #[cfg(test)]
+        if changed {
+            self.handoff.changed.send_replace(());
+        }
+        #[cfg(not(test))]
+        let _ = changed;
     }
     fn lock(&self) -> Option<StateGuard<'_, C>> {
         // Register BEFORE attempting state access: a preempted losing observer
@@ -219,6 +234,8 @@ impl<C: Clock> AggregateMetrics<C> {
         match self.state.try_lock() {
             Ok(mut state) => {
                 self.retire(&mut state);
+                #[cfg(test)]
+                self.handoff.reclaim(&mut state);
                 if state.epoch != self.epoch.load(Ordering::SeqCst) {
                     state.requests.discard();
                     state.infrastructure.discard();
@@ -251,13 +268,20 @@ impl<C: Clock> AggregateMetrics<C> {
     }
     /// Local acknowledgement only. False means a concurrent local operation is
     /// still disposing state; retry control polling, never block inference.
-    /// There is no network task to cancel in 2B.
+    /// Test-only handoff also requires actual owned attempt disposal. This is
+    /// nonblocking control polling, not exporter shutdown or a network flush.
     pub fn off(&self) -> bool {
         self.invalidate();
         if let Some(mut state) = self.lock() {
             state.requests.discard();
             state.infrastructure.discard();
             state.anchor = None;
+            #[cfg(test)]
+            if self.handoff.busy.load(Ordering::SeqCst) {
+                return false;
+            }
+            #[cfg(test)]
+            self.handoff.reclaim(&mut state);
             true
         } else {
             false
@@ -337,6 +361,8 @@ impl<C: Clock> AggregateMetrics<C> {
             {
                 return false;
             }
+            #[cfg(test)]
+            self.handoff.changed.send_replace(());
             let now = state.last.unwrap();
             if !state.restart(
                 ClockReading {
@@ -374,7 +400,7 @@ impl<C: Clock> AggregateMetrics<C> {
             .is_some_and(|(w, _)| mapped.saturating_sub(w.end_ns) >= 2 * SECOND)
         {
             state.requests.pending = None;
-            *state.requests.frozen = RequestTables::default();
+            **state.requests.frozen.as_mut().unwrap() = RequestTables::default();
         }
         if state
             .infrastructure
@@ -382,7 +408,7 @@ impl<C: Clock> AggregateMetrics<C> {
             .is_some_and(|(w, _)| mapped.saturating_sub(w.end_ns) >= 2 * SECOND)
         {
             state.infrastructure.pending = None;
-            *state.infrastructure.frozen = Infrastructure::default();
+            **state.infrastructure.frozen.as_mut().unwrap() = Infrastructure::default();
         }
         true
     }
@@ -906,13 +932,14 @@ impl<C: Clock> RequestView<'_, C> {
     pub fn tables(&self) -> Option<&RequestTables> {
         self.owner
             .eligible_token(self.epoch)
-            .then_some(&self.guard.requests.frozen)
+            .then(|| self.guard.requests.frozen.as_deref())
+            .flatten()
     }
 }
 impl<C: Clock> Drop for RequestView<'_, C> {
     fn drop(&mut self) {
         self.guard.requests.pending = None;
-        *self.guard.requests.frozen = RequestTables::default();
+        **self.guard.requests.frozen.as_mut().unwrap() = RequestTables::default();
     }
 }
 pub struct InfrastructureView<'a, C: Clock> {
@@ -928,13 +955,14 @@ impl<C: Clock> InfrastructureView<'_, C> {
     pub fn tables(&self) -> Option<&Infrastructure> {
         self.owner
             .eligible_token(self.epoch)
-            .then_some(&self.guard.infrastructure.frozen)
+            .then(|| self.guard.infrastructure.frozen.as_deref())
+            .flatten()
     }
 }
 impl<C: Clock> Drop for InfrastructureView<'_, C> {
     fn drop(&mut self) {
         self.guard.infrastructure.pending = None;
-        *self.guard.infrastructure.frozen = Infrastructure::default();
+        **self.guard.infrastructure.frozen.as_mut().unwrap() = Infrastructure::default();
     }
 }
 
@@ -970,8 +998,10 @@ impl<C: Clock> Drop for StateGuard<'_, C> {
     }
 }
 
-// Qualification fixtures only; packet 2C is blocked before runtime handoff.
+// Unwired ownership and export qualification only; no serving promotion.
 #[cfg(test)]
 mod export;
+#[cfg(test)]
+mod handoff;
 #[cfg(test)]
 mod tests;
