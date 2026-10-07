@@ -29,10 +29,7 @@ done
 ln -s ../../clients/pi/node_modules "$S/source/examples/phase01/node_modules"
 env -i HOME="$S/home" TMPDIR="$S/tmp" PATH="$(dirname "$NODE"):/usr/bin:/bin" PHASE02_OUT="$S/package" \
   "$NODE" build.mjs
-mkdir -p "$S/package/node_modules/@earendil-works"
-for PACKAGE in pi-ai pi-coding-agent pi-agent-core; do
-  ln -s "$PI_ROOT/node_modules/@earendil-works/$PACKAGE" "$S/package/node_modules/@earendil-works/$PACKAGE"
-done
+# build.mjs already links the runtime peers into the scratch package.
 printf '\nBuilt package: %s\n' "$S/package"
 printf 'Local checks: POSSUMS_PI_ROOT=%s %s %s/source/clients/pi/check.mjs\n' "$PI_ROOT" "$NODE" "$S"
 printf 'Load with pinned Pi: pi --no-session --no-extensions --no-tools -e %s/extension.mjs --possums-manifest /absolute/path/to/approved/tinfoil-deployment.json\n' "$S/package"
