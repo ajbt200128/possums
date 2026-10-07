@@ -76,3 +76,25 @@ remain unverified.** No new generation or usage quote was added by this rollout;
 historical quoted use/holds remain 11 attempts / 7,792,060 microunits under the
 10,000,000 quoted ceiling. This is not a provider-invoice or full Phase 0.2
 acceptance claim.
+
+## Subsequent user-observed Pi tool round
+
+The user ran the approved production Pi integration and reported native `ls`
+and `read` executions against public release metadata, followed by Kimi's final
+answer with the correct `v0.0.10` tag and matching public commit/image information.
+This is **user-observed live tool execution/result continuation**, not just a
+model's claim that it ran tools. No further paid probe is required to demonstrate
+the minimum tool loop. The pinned caller's receipt/epoch/result guards and
+synthetic actual-SDK tests remain the supporting execution-policy evidence.
+
+Exact model-turn count, single-batch timing, charges, account balance
+reconciliation and provider invoice were not independently instrumented. The
+user's other manual prompts and aborted/resubmitted request must not be assigned
+invented counts, costs or refunds, or silently folded into the historical direct
+upstream qualification ledger. An abort still does not prove provider cancellation.
+This observation does not complete a whole-runtime privacy/accounting audit.
+
+Pi 0.99.2 displays capability text in the highlighted **Model Name** detail below
+the picker list, not beside the model ID in each row. The restricted `read,ls`
+launch was for harmless testing; normal built-in coding tools can be selected
+without a Possums-specific implementation or client-side spending reservation.
