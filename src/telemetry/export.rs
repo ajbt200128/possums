@@ -1,6 +1,7 @@
 //! Test-only packet 2C exporter qualification, NOT a runtime sender.
 //! The stock 0.29 HTTP transport exceeds the frozen response allocation budget.
 //! Keep aggregation views and serving startup unchanged until reviewed resolution.
+mod materialize;
 mod transport;
 
 use hyper::body::Bytes;
@@ -314,6 +315,8 @@ fn clean_child_env(test: &str, environment: &[(&str, &str)]) -> bool {
         if line.starts_with("stock transport success=")
             || line.starts_with("qualification payload native=")
             || line.starts_with("candidate case=")
+            || line.starts_with("materialize max ")
+            || line.starts_with("serialize and bounded peer max ")
         {
             eprintln!("{line}");
         }
