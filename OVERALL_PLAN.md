@@ -1,6 +1,6 @@
 # Private inference service
 
-> **Historical plan:** This document preserves the original long-term product vision. It is not the implementation contract for Phase 0. For current Phase 0 requirements, follow [`AGENTS.md`](AGENTS.md), [`SPEC.md`](SPEC.md), and [`docs/phase0.md`](docs/phase0.md), in that order.
+> **Historical architecture; updated follow-on roadmap:** The architectural sections preserve the original long-term vision, including a **superseded buffered-response design**; they are not current guarantees about credentials, accounting, statelessness, or retention. The [Phases](#phases) section sets out the streaming-only Phase 0 replacement, verified inference API, Pi client, and Obsidian client milestones. For Phase 0 follow [`AGENTS.md`](AGENTS.md), [`SPEC.md`](SPEC.md), and [`docs/phase0.md`](docs/phase0.md), in that order; the deployed `v0.0.5` still uses the previous buffered regime. Client plans are in [`docs/pi-client.md`](docs/pi-client.md) and [`docs/obsidian-plugin.md`](docs/obsidian-plugin.md).
 
 Threat model, architecture, and stack. Metered LLM inference over Tor, sold as prepaid credits at a fixed markup over cost, served from an attested enclave.
 
@@ -17,7 +17,7 @@ Threat model, architecture, and stack. Metered LLM inference over Tor, sold as p
 ┌─────────────────────────────────────────────────────────┐
 │  GATEWAY — onion, ATTESTED ENCLAVE                      │
 │  Chat UI (no JS) · OpenAI-compatible API                │
-│  Buffered turns, two flushes, markdown rendered         │
+│  Historical sketch: buffered turns (superseded)         │
 │  No database. No disk. No logs.                         │
 │  Sees prompts in memory, never at rest                  │
 │  Egress open (Tor needs it); config is public           │
@@ -127,21 +127,21 @@ Client-supplied entropy means the number cannot encode anything about the purcha
 
 ### Gateway — inside the boundary
 
-Onion-only. The single attested image, kept small enough that one reviewer can read it end to end — that review is the first link in the verification chain.
+Onion-only. The single attested image, kept small enough that one reviewer can read it end to end — that review is the first link in the verification chain. **The route sketch below is historical; its buffered `/chat` is not the streaming-only target.**
 
 ```
 GET  /                        chat form, no JS
 POST /chat                    buffered turn, two flushes
-GET  /app                     single-file JS client (phase three)
+GET  /app                     single-file JS client (deferred)
 GET  /attestation             SEV-SNP quote, onion key endorsed
 POST /v1/chat/completions     OpenAI-compatible, Bearer = account number
 ```
 
 No database, no disk, no session store. Ramdisk filesystem, read-only root, all Linux capabilities dropped — platform defaults on Tinfoil Containers rather than things we configure.
 
-### Request lifecycle
+### Request lifecycle (historical buffered proposal; superseded)
 
-Responses are buffered, not streamed per token. That makes markdown render correctly, reduces the gateway to a very small auditable thing, and collapses billing to one debit with the exact amount.
+This proposal is not the target Phase 0 streaming contract in [`docs/phase0.md`](docs/phase0.md). Responses are buffered, not streamed per token. That makes markdown render correctly, reduces the gateway to a very small auditable thing, and collapses billing to one debit with the exact amount.
 
 1. Account number arrives in a cookie (web) or the `Authorization` header (API). The gateway validates its HMAC locally, in constant time, before any I/O — so garbage floods cost microseconds and no network round trip.
 2. The form carries a random idempotency token. A refresh during the placeholder re-POSTs the same token; the gateway recognises it and does not start a second generation. Without this, every impatient refresh is a double charge.
@@ -183,9 +183,9 @@ Rust for both services. One toolchain, one dependency audit — which matters mo
 |---|---|---|
 | Both services | Rust | One language; `axum` + `tokio` |
 | Inference client | Tinfoil Rust SDK | Verifies SEV-SNP and the Sigstore release before sending a byte |
-| Own attestation | `sev` / `sev-snp-utils` | Fetches and parses the guest report from inside the CVM |
-| Markdown | `pulldown-cmark` | Buffered response, so one render at the end |
-| Templates | `maud` or `askama` | Two flushes, no incremental templating needed |
+| Own attestation | Tinfoil platform evidence and pinned verifier SDKs | Reuse signed provenance, freshness, and attested channel keys; test external-client compatibility |
+| Markdown (historical buffered proposal) | `pulldown-cmark` | Superseded by streamed escaped plain text; optional safe client-side rendering is later work |
+| Templates (historical buffered proposal) | `maud` or `askama` | Superseded two-flush design; the target progressively emits escaped HTML |
 | Onion | Arti, in process | Onion key generated by measured code; vanguards and PoW built in |
 | Database | Postgres + `sqlx` | One row per account; streaming replica for failover, no sharding |
 | Jobs | `apalis` | Postgres backend with NOTIFY, heartbeats, orphan re-enqueue |
@@ -196,9 +196,10 @@ Rust for both services. One toolchain, one dependency audit — which matters mo
 
 ### Attestation coverage
 
-Everything the gateway needs inside the enclave has a Rust path, and in the SEV-SNP case Rust is where the reference tooling lives — `virtee/sev` and `snpguest` are AMD-adjacent. Tinfoil Containers is self-serve for CPU workloads; only GPU access is gated.
+**Current direction:** model gateway attestation and verified transport after Tinfoil's supported protocols, reusing reviewed, pinned SDKs instead of inventing another quote format or verifier. Phase 0 already uses platform evidence and a Go verification helper; Phase 0.1 must establish compatibility for external clients, including the browser-compatible TypeScript path needed by Obsidian on Android. This is a design goal, not evidence that current `/attestation` output or deployment is SDK-compatible. The onion/platform details below remain historical proposals requiring validation.
 
-- **Prove what we are.** `AttestationReport::request()` reads `/dev/sev-guest` and returns the signed report including the measurement. Served at `/attestation`.
+- **Prove what we are.** Clients independently validate signed hardware evidence, approved release provenance, freshness, and endorsed keys against their own trust policy. Do not trust gateway-supplied summary fields or a `verified` flag; a server-generated nonce alone is not an external client's freshness proof.
+- **Bind the client channel.** Verification must control the actual inference transport before credentials or content leave the device: attested TLS pinning where available, or a supported attested-key encrypted channel such as Tinfoil's EHBP for browser runtimes. EHBP encrypts bodies, not ordinary authorization headers; protected authentication is a separate compatibility gate. Fail closed rather than falling back to unrelated HTTPS. See the [client compatibility requirements](docs/obsidian-plugin.md#reuse-tinfoils-verification-and-transport-model).
 - **Bind the onion key.** Tinfoil's `attested-keys` generates Ed25519 key pairs at boot and endorses the public key in the attestation — and a v3 onion address *is* an Ed25519 public key. So the address-to-measurement binding is a platform feature, not something hand-rolled into `report_data`. Keys land as read-only PEM mounts granted to one container.
 - **Key lifetime.** A container restart keeps the keys; a CVM reboot rotates them. A stable address across releases therefore needs an encrypted persistent volume unlocked by the operator on each new CVM — attended deploys, and attended unplanned reboots. The alternative is rotating the address per release and publishing rotations to the transparency log.
 - **Verify Tinfoil.** Their Rust SDK does SEV-SNP plus Sigstore checking and refuses to send if verification fails.
@@ -221,10 +222,12 @@ Everything the gateway needs inside the enclave has a Rust path, and in the SEV-
 ## Access tiers
 
 - **No-JS web, both networks.** Canonical. Works at Tor Browser's Safest setting. Verified out of band, once, against the onion key. Clearnet is the same code, just faster.
-- **Static client at `/app`.** One self-contained HTML file served from the gateway, so it sits inside the measurement — one artifact, one hash, one review. Conversations stay on the device. Phase three.
-- **CLI and SDK.** Full attestation verification on every connection. The only tier where the guarantee is checked automatically.
+- **Pi client — Phase 0.2, after the verified inference API.** A small provider integration for verified, protected streaming chat and supported local tool rounds, not a new gateway or a bundled CLI/SDK. See the [Pi client plan](docs/pi-client.md).
+- **Obsidian plugin — Phase 0.3, after the Pi client.** One plugin for Android, macOS, and Linux, with client-side verification, scoped local note search/read, saved chats, and approved summary-note creation. It runs outside the gateway measurement and uses existing vault storage/sync. No custom app, Termux, native helper, or separate proxy is required by the intended design; compatibility must be demonstrated. See the [client plan](docs/obsidian-plugin.md).
+- **Static client at `/app`.** Deferred. One self-contained HTML file served from the gateway, so it sits inside the measurement — one artifact, one hash, one review. Client storage and sync boundaries must be disclosed.
+- **CLI and SDK.** Deferred clients with automatic attestation and channel verification, reusing the same verified API contract as the Obsidian plugin.
 
-Nothing in the design requires JavaScript. Stripe Checkout is hosted, so its JS runs on Stripe's domain, not ours; Monero invoices are server-rendered SVG. Requiring JS would also not help with denial of service, because intro-circuit flooding happens below HTTP entirely.
+The target no-JavaScript web path streams escaped plain text in an open `<pre>` and remains usable without scripting; optional safe Markdown rendering for JavaScript-enabled browsers is future work, not a buffered fallback. The Pi and Obsidian clients use JavaScript locally. Stripe Checkout is hosted, so its JS runs on Stripe's domain, not ours; Monero invoices are server-rendered SVG. Requiring JS would also not help with denial of service, because intro-circuit flooding happens below HTTP entirely.
 
 ---
 
@@ -238,10 +241,19 @@ Nothing in the design requires JavaScript. Stripe Checkout is hosted, so its JS 
 
 ## Phases
 
-Each phase has an acceptance criterion. Nothing starts the next until it is met.
+Each phase has an acceptance criterion. Nothing starts the next until it is met. The streaming-only revision of Phase 0 requires a new release; Phases 0.1, 0.2, and 0.3 follow it, not additions to the deployed `v0.0.5` image. The older Tor/payment phase numbers are retained. Later historical designs must be reconciled with current security/accounting requirements before implementation.
 
-**Phase 0 — Gateway, attested, clearnet.** Rust gateway on Tinfoil Containers with a hardcoded account, calling Tinfoil inference, buffered turns over HTTPS.
-*Acceptance:* deployed, and a stranger can verify it — `nix build` reproduces the digest in `tinfoil-config.yml`, and `/attestation` returns a quote whose measurement matches. This front-loads the biggest unknowns — attested keys, open egress, the Containers workflow — into the first week rather than the last.
+**Phase 0 — Gateway, attested, clearnet: streaming-only revision planned.** Deployed `v0.0.5` still uses complete-response buffering and refunds incomplete delivery. Replace it with reserved-cost streaming inference and a no-JavaScript HTML stream of escaped plain text; no complete-response buffer or buffered inference fallback. Charge authenticated actual usage when Tinfoil completes even after the client disconnects: keep consuming upstream until completion or error, without a special post-disconnect drain window. Upstream error or missing/invalid final usage refunds the user; the operator absorbs upstream cost. Preserve the remaining [Phase 0 contract](docs/phase0.md) and no public inference API.
+*Acceptance:* prove Tinfoil's live streaming and final-usage behavior; test interrupted streams, downstream disconnect and continued upstream consumption, upstream errors/missing usage, once-only settlement/refund, no replay, safe progressive no-JavaScript HTML with history-preserving next-turn forms, defensive resource limits, and real-browser rendering. Keep every model visible: a $5 balance attempting a Kimi request whose full-context maximum quote exceeds $5 gets a clear insufficient-credit error before upstream prompt transmission, never a model substitution or reduced output cap. Re-run the mandatory [verification gates](docs/verification.md) against a new release; `v0.0.5` buffered evidence does not verify this revision.
+
+**Phase 0.1 — Verified streaming inference API and client attestation.** Expose authenticated OpenAI-style model discovery and streaming-only chat completions, preserving context limits, maximum-output policy, quoted reservations, idempotency, usage-based settlement/refunds, and prompt-free accounting state. No buffered completion mode or fallback. Specify tool-call compatibility for models that support local client tools; the gateway never executes vault tools. Model attestation and channel establishment after Tinfoil so clients can reuse its reviewed SDKs, including a browser-compatible path, rather than implementing new cryptography. Protect credentials as well as bodies; OpenAI compatibility alone is not verified-transport compatibility.
+*Acceptance:* a pinned reference client independently verifies the approved Possums workload and actual protected request channel. Invalid/stale evidence, an unapproved release, or key mismatch sends no client credentials/content; catalog/reservation failure sends no prompt upstream; stale or duplicate requests never cause unintended inference replay. Record the API's restart/cancellation/duplicate and interrupted-stream billing semantics, and test Obsidian's Android-compatible transport with a minimal client spike before committing to the full plugin. Do not upgrade any existing UNKNOWN verification claim without evidence.
+
+**Phase 0.2 — Pi client.** Deliver the [small provider plan](docs/pi-client.md) over the verified, protected streaming API: live model selection, text and supported tool-call rounds, no custom Possums agent tools, and no automatic replay of uncertain requests. Pi session files and local tools remain outside the gateway measurement.
+*Acceptance:* a pinned Pi version independently verifies the approved Possums workload and protected request channel, streams real replies and tool results, fails closed before sending credentials/content on invalid evidence or key mismatch, and never silently retries a generation after an uncertain failure.
+
+**Phase 0.3 — Obsidian client.** Deliver the [scoped plugin plan](docs/obsidian-plugin.md) after Pi: one plugin on Android/macOS/Linux, verified chat, authenticated model selection, local note search/read within explicit scopes, automatic conversation saving, and preview/approval before creating summary notes. No web search, external embeddings, general note editing, shell/MCP tools, or additional sync service.
+*Acceptance:* the same plugin bundle works in actual Obsidian on all three platforms without a custom APK, Termux, helper, or separate proxy. Negative tests prove fail-closed verification, protected credentials, consistent note-access exclusions, safe rendering, no inference replay on resume, and no writes outside plugin-owned history or explicitly approved new summary notes. Scope enforcement is plugin policy, not an Obsidian sandbox; vault sync/backups and other plugins remain explicit trust boundaries.
 
 **Phase 1 — Gateway over Tor.** Arti in process, onion key from `attested-keys`, proof-of-work and intro-point rate limiting on.
 *Acceptance:* reachable at the onion address from Tor Browser at Safest, and the published address-to-measurement binding checks out.
@@ -252,9 +264,9 @@ Each phase has an acceptance criterion. Nothing starts the next until it is met.
 **Phase 3 — Intake over Tor.** Onion mirror for the store.
 *Acceptance:* top up from Tor Browser at Safest without touching clearnet via Monero; card path documented as clearnet-only.
 
-**Later.** Static client at `/app`, CLI with full attestation, OnionBalance replicas, audit.
+**Later.** Optional safe JavaScript Markdown rendering for completed web answers, static client at `/app`, general CLI/SDK, OnionBalance replicas, audit.
 
-Phase 2 is a working paid product. Because phase 0 is already attested, there is no "plain VM" period where the no-log claim is a policy.
+Phase 2 remains the intended paid-product milestone and requires durable, failure-tested accounting beyond Phase 0's demo balances. Attestation alone does not establish a no-retention claim; publish only scoped claims supported by evidence for the phase actually deployed.
 
 ---
 

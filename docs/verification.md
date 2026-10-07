@@ -1,6 +1,6 @@
 # Phase 0 verification record
 
-Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release.
+Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
 ## Evidence checklist
 
@@ -82,6 +82,12 @@ Review findings and current dispositions:
 | Upstream body boundary evidence absent | Local HTTP peers cover chunked, absent/oversized lengths, streamed oversize, and stalled bodies under the production collector | `tests/inference.rs` |
 | Lifecycle fault evidence absent | Local cancellation, socket disconnect, panic-after-reservation, expiry, settlement/refund race, and replay-after-reauthentication tests preserve full refunds and zero prompt calls where required | `tests/web.rs`; `tests/accounting.rs`; `tests/lifecycle.rs` |
 | Browser/deployed privacy evidence absent | A pinned Playwright test exercises the complete JavaScript-disabled local browser flow and rejects hostile-output network attempts. Seeded startup errors emit no canary and create no working-directory artifacts; the production binary suppresses panic-hook payloads before serving. Deployed runtime artifacts, platform logs, and production canaries remain release blockers | `tests/browser.mjs`, `examples/browser_fixture.rs`, and `tests/privacy.rs`; external rows above remain UNKNOWN |
+
+## Streaming-only replacement: new evidence required
+
+**Status: UNKNOWN / not implemented.** Before releasing a new Phase 0 image, exercise Tinfoil's live stream and establish whether valid authenticated final usage is available on normal completion and what happens on upstream errors. The planned gateway must reserve the maximum quoted cost before prompt transmission, stream escaped plain text to the no-JavaScript browser without buffering a complete answer, and keep consuming upstream after a client disconnect until completion or error. Successful upstream completion with valid final usage settles even when downstream delivery fails; upstream error or absent/invalid final usage refunds the user and leaves upstream cost with the operator. An ordinary client retry may be a second paid generation; duplicates must not silently replay.
+
+Add local and deployed tests for upstream completion/error/missing usage after client disconnect, once-only accounting races, malformed and stalled streams, output/transport ceilings, partial HTML and split UTF-8/HTML escapes, history-preserving streamed form reconstruction, browser progressive rendering with JavaScript disabled, and no automatic retries. Test a $5 balance against a Kimi maximum quote greater than $5: keep the model visible, return insufficient credit with no debit or upstream prompt call, and never substitute a cheaper model. Confirm Tinfoil's own balance/quota behavior separately rather than assuming it uses Possums' maximum-reservation policy. Reassess the buffered-era response-memory envelopes and limits; preserve pre-prompt fail-closed gates and perform fresh release/attestation checks. Document observed Tinfoil usage behavior and deployment artifacts here before promoting any streaming claim to VERIFIED.
 
 ## Independent release procedure
 

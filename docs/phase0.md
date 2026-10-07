@@ -1,6 +1,10 @@
 # Phase 0 contract
 
-## Routes
+**Transition status:** the routes, limits, accounting lifecycle, and rendering below describe the implemented `v0.0.5` **previous buffered regime**. The [planned streaming-only replacement](#planned-streaming-only-replacement) is not implemented or verified. Do not apply its charging or rendering claims to the deployed release; migrate the code, tests, limits, and release evidence before calling it live.
+
+## Implemented `v0.0.5`: buffered regime
+
+### Routes
 
 | Route | Method | Purpose |
 |---|---|---|
@@ -15,19 +19,19 @@
 
 There is no public signup or inference API.
 
-## Request limits
+### Request limits
 
 Limits are defensive transport controls, not a product limit on conversation history. The server admits at most 64 connections without a connection admission queue, caps each connection at ten minutes, accepts at most 64 headers and rejects aggregate header names/values over 32 KiB, and applies a ten-second total header deadline. Before consuming a body, a shared fail-fast gate reserves one conservative 128 MiB request-memory envelope from a 512 MiB application budget and retains it until the response body is consumed or dropped; consequently at most four requests are admitted. Each admitted request buffers at most 8 MiB of request body under one total 30-second deadline. Render input is checked with a conservative JSON/HTML expansion allowance before intermediates are built, and rendered responses are limited to 32 MiB. Inference responses are read incrementally, limited to 16 MiB, and covered by one five-minute send-and-body deadline. At most four generations run concurrently. These envelopes bound application-controlled request, upstream, parsing, escaped-render, and outstanding-response content across admitted requests; allocator/library overhead and the whole-process resident set still require runtime measurement. Request decompression is not enabled. Each authenticated catalog entry supplies a chat model's context window. Because Tinfoil's live catalog does not publish a separate maximum-output limit, the gateway requests the entire context remaining after model-specific tokenization rather than imposing a lower product limit.
 
-## Authentication
+### Authentication
 
 An operator provisions a random credential with at least 256 bits of entropy and a demo-credit budget through a runtime secret. Credentials never belong in source, images, URLs, telemetry, or errors. Authentication comparisons are constant-time. Sessions are capped, expire after twelve hours, and use random opaque cookies marked `Secure`, `HttpOnly`, and `SameSite=Strict`. Login uses a single-use, ten-minute, same-site cookie-bound CSRF challenge. Other mutating forms require a session-bound CSRF token. The recovery page is no-store and offers explicit copy/download instructions without JavaScript.
 
-## Catalog and quote
+### Catalog and quote
 
 The gateway fetches the bounded live `/v1/models` catalog over the attested, endpoint-key-bound inference channel. It accepts only unique `type: chat` entries advertising `/v1/chat/completions`, with valid context windows, positive input/output prices, and no unaccounted per-request fee. Decimal USD-per-million-token prices are converted exactly to fixed-point microunits without floating-point arithmetic; malformed, unsupported, duplicate, zero-price, or overflowing entries fail closed. All valid supported chat models are displayed without substitution. At submission, the gateway snapshots those rates and applies a 30% markup with checked integer arithmetic and round-up division. Because model-specific tokenization is an upstream operation, the gateway first reserves the greatest possible cost across the model's full context at either the input or output rate, then tokenizes and refunds the excess at settlement. This prevents insufficient credit from exposing prompt bytes upstream.
 
-## Accounting lifecycle
+### Accounting lifecycle
 
 State is single-process, short-lived, and contains no prompts or responses:
 
@@ -40,19 +44,29 @@ State is single-process, short-lived, and contains no prompts or responses:
 
 The buffered HTML response contains the transcript and a safe next-turn form using a new token; an old token cannot regenerate. Reservation ownership remains attached to the response body: cancellation, panic, body error, or abandonment before complete body consumption refunds, while complete body consumption atomically settles actual usage and releases the unused reservation. Local response-drop, socket, panic, rendering, catalog, token-capacity, and settlement/refund race tests cover these transitions. This server-side transport boundary does not prove browser receipt, and disconnects after it may still charge the user. Deployed write-failure behavior remains a release evidence requirement.
 
-### Restart semantics
+#### Restart semantics
 
 Phase 0 has no durable paid accounting. Operator-granted demo balances are loaded afresh on restart. Outstanding reservations disappear and are therefore conservatively treated as refunded; no inference is replayed. A random process epoch invalidates all pre-restart sessions and submission tokens. A pre-restart POST fails authentication and cannot become a fresh generation. These semantics are unsuitable for purchased credit.
 
-## Content and privacy
+### Content and privacy
 
 Conversation history is carried by the form and exists server-side only for the active request. HTML is escaped. Model Markdown is sanitized with raw HTML and automatic remote resources disabled. Responses set a restrictive Content Security Policy, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and `X-Content-Type-Options: nosniff`.
 
 No production request logs or request-level traces are exported. Telemetry export is disabled and unwired. The current local-only scaffold contains allowlisted lifetime counters with sparse-value suppression; because it does not implement time buckets or resource/datapoint sanitization, it must not be enabled in production. They never include bodies, prompts, responses, URLs, headers, addresses, agents, credentials, account/payment identifiers, stable pseudonyms, exact timestamps, or per-request token/cost events. Core behavior is unchanged when telemetry is off.
 
-## Deployment constraints
+### Deployment constraints
 
 The proposed container configuration declares a read-only root, a bounded memory-only `/tmp`, a process limit, and an inference/verifier-host egress allowlist. The OCI entrypoint disables core dumps before starting the gateway. Tinfoil CVM v0.14.12 exposes `/tinfoil/attestation.sock` only because the gateway declares `attestation: true`. Before each prompt, a measured helper requests a fresh random nonce-bound v3 quote and uses the pinned Tinfoil Go verifier to authenticate hardware evidence, release provenance, freshness witnesses, and the endorsed TLS-key fingerprint. Missing sockets, malformed or stale evidence, verifier errors, and helper timeouts fail closed. Deployed validation must still compare the endorsed key with the public serving certificate and verify mounts, egress, process/core limits, platform logging, and helper behavior. Configuration intent and local tests are not deployed evidence, and open egress, if required by the platform, is a residual risk.
+
+## Planned streaming-only replacement
+
+This replaces **complete-response buffering**, not defensive request-body ceilings, bounded parser state, or small transport chunks. Phase 0 retains the no-JavaScript web interface and demo-account/restart limitations; the public streaming API is a separate Phase 0.1 milestone. There is no buffered inference fallback in the target design.
+
+1. Preserve the authenticated catalog, price snapshot, context and maximum-output policy, attestation/key binding, and atomic maximum-cost reservation **before prompt content leaves the gateway**. Keep all supported models in the selector and display an indicative maximum reservation and available credit. If a selected model's submission-time maximum quote exceeds the balance, return an explicit insufficient-credit error **before committing streaming response headers or sending prompt content upstream**, without substituting a model, narrowing its output, or debiting the account. For example, a $5 demo balance cannot start a Kimi request if its quoted full-context maximum exceeds $5, even when the eventual answer might have been cheap; later paid phases can direct the user to top up, while Phase 0 credit is operator-granted. Revalidate at submission because catalog prices and concurrent reservations can change. This is Possums admission policy, **not proof** of how Tinfoil internally reserves its own account credit. Probe Tinfoil's live streaming usage contract before implementing charges; OpenAI compatibility does not prove when Tinfoil emits usage. Authenticate usage over the verified upstream channel; do not estimate tokens from streamed text.
+2. Stream verified model output through `/chat` as escaped plain text inside an open `<pre>` in chunked HTML. Close it and finish the safe next-turn form only on completion. Without JavaScript or server-side history, the form must still carry the generated answer into the next turn **without a full-response buffer**: prototype streaming each bounded answer chunk both as visible escaped text and as an ordered, escaped hidden form field inside the open form. Validate browser parsing, field counts, request-size ceilings, tampering, and history reconstruction before relying on this design. A disconnect may leave a partial page and no usable next-turn form; never infer that the browser received an answer. A future, optional measured JavaScript enhancement may safely render completed Markdown while the no-JavaScript path remains usable.
+3. On downstream disconnect, **continue consuming upstream until its stream completes or errors**, rather than cancelling it or imposing a special post-disconnect drain window. Hold the reservation and account concurrency state through that outcome. Existing transport deadlines, resource limits, and malformed/oversized-stream checks still produce upstream errors; streaming must not make memory or connection use unbounded.
+4. On successful upstream completion with authenticated, valid final usage, settle the actual charge exactly once at the submitted quote and refund unused reserved credit **regardless of downstream delivery**. On upstream error or absent/invalid final usage, refund the full reservation exactly once; the operator absorbs any upstream cost. The charge is for generation, not guaranteed receipt. Never automatically retry after generation may have started. A deliberate new submission after a disconnect may incur a second charge; replaying the old submission token never starts another generation.
+5. Rework response-memory bounds and body-lifetime accounting rather than reusing the buffered response's 16 MiB collection and render-expansion limits as proof of streaming safety. Test live Tinfoil final usage, incomplete and malformed streams, stalled upstream, client disconnect before/after usage, partial HTML and split UTF-8/HTML escapes, form-history chunk reconstruction, insufficient-credit rejection before any upstream prompt call, reservation races, duplicates, crash/restart behavior, and actual browser progress with JavaScript disabled. Reverify the deployed image and update [`verification.md`](verification.md) with new evidence; old buffered tests remain historical evidence only.
 
 ## Packet 1 — superseding user settlement decision
 
