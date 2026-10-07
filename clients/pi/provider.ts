@@ -1,5 +1,6 @@
 import {
-  createAssistantMessageEventStream, parseStreamingJson,
+  createAssistantMessageEventStream, parseStreamingJson, envApiKeyAuth,
+  type ApiKeyAuth,
   type Api, type ApiStreamOptions, type AssistantMessageEventStream, type StreamOptions,
   type AssistantMessage, type Model, type Provider, type SimpleStreamOptions,
   type TranscriptContext, type ToolCall,
@@ -13,7 +14,10 @@ import { invocation } from './wire.js';
 export const PROVIDER_ID = 'possums';
 const API = 'openai-completions';
 const ORIGIN = 'https://possum-phase0.possums.containers.tinfoil.dev';
-const MEMORY_AUTH = 'possums-memory-only-session';
+const LEGACY_AUTH = 'possums-memory-only-session';
+const REQUEST_AUTH = 'possums-verified-memory-session';
+const recoveryAuth = envApiKeyAuth('Possums recovery credential', ['POSSUMS_RECOVERY_CREDENTIAL']);
+const isRecoveryKey = (key: string | undefined): key is string => !!key && key !== LEGACY_AUTH && key !== REQUEST_AUTH;
 type RequestOptions = StreamOptions & { reasoning?: unknown; reasoningEffort?: unknown; toolChoice?: unknown };
 
 function safeNumber(value: string): number {
@@ -82,7 +86,7 @@ function safeFailure(error: unknown): string {
 
 export class PossumsProvider implements Provider {
   readonly id = PROVIDER_ID;
-  readonly name = 'Possums (verified, session-only)';
+  readonly name = 'Possums (verified)';
   readonly baseUrl = ORIGIN;
   private client: ReferenceClient | undefined;
   private catalog: readonly LiveModel[] = [];
@@ -90,50 +94,116 @@ export class PossumsProvider implements Provider {
   private readonly guard = new ReplayGuard();
   private newConversation = true;
   private epoch = 0;
+  private authEpoch = 0;
+  private recoveryKey: string | undefined;
+  private restoring: Promise<void> | undefined;
 
   constructor(private readonly establish: (signal: AbortSignal) => Promise<ReferenceClient>) {}
 
-  readonly auth = { apiKey: {
-    name: 'Possums recovery credential (memory only)',
-    check: async (input: { credential?: { key?: string } }) => this.client && input.credential?.key === MEMORY_AUTH ? { type: 'api_key' as const, source: 'verified memory session' } : undefined,
-    resolve: async (input: { credential?: { key?: string } }) => this.client && input.credential?.key === MEMORY_AUTH ? { auth: { apiKey: MEMORY_AUTH }, source: 'verified memory session' } : undefined,
-    login: async (interaction: { signal: AbortSignal; prompt: (prompt: { type: 'secret'; message: string; signal: AbortSignal }) => Promise<string> }) => {
+  readonly auth: { apiKey: ApiKeyAuth } = { apiKey: {
+    name: recoveryAuth.name,
+    // Only select configured material here: availability/listing must not connect.
+    check: async input => {
+      const result = await recoveryAuth.resolve(input);
+      return isRecoveryKey(result?.auth.apiKey) ? { type: 'api_key', source: result.source } : undefined;
+    },
+    resolve: async input => {
+      const epoch = this.authEpoch;
+      const result = await recoveryAuth.resolve(input);
+      this.requireCurrent(epoch, input.signal);
+      const key = result?.auth.apiKey;
+      if (!isRecoveryKey(key)) return undefined;
+      if (key !== this.recoveryKey) {
+        this.logout();
+        this.recoveryKey = key;
+      }
+      const current = this.authEpoch;
+      if (!this.client) {
+        if (!this.restoring) {
+          const pending = (async () => {
+            const candidate = await this.establish(input.signal);
+            Channel.requireVerified(candidate.channel);
+            this.requireCurrent(current, input.signal);
+            await this.authenticate(candidate, key, current, input.signal);
+          })();
+          this.restoring = pending;
+          // An obsolete attempt must not clear a replacement's in-flight work.
+          void pending.finally(() => { if (this.restoring === pending) this.restoring = undefined; }).catch(() => {});
+        }
+        try { await this.restoring; }
+        catch { throw new Error('possums_session_unavailable'); }
+      }
+      this.requireCurrent(current, input.signal);
+      // Never expose a recovery key or bearer token to Pi's request hooks.
+      return { auth: { apiKey: REQUEST_AUTH }, source: result?.source };
+    },
+    login: async interaction => {
       this.logout();
-      const epoch = this.epoch;
+      const epoch = this.authEpoch;
       // Verify public evidence and the actual channel before requesting a secret.
       const candidate = await this.establish(interaction.signal);
       Channel.requireVerified(candidate.channel);
-      if (epoch !== this.epoch || interaction.signal.aborted) throw new Error('possums_login_cancelled');
-      const credential = await interaction.prompt({ type: 'secret', message: 'Possums recovery credential (not saved)', signal: interaction.signal });
-      if (epoch !== this.epoch || interaction.signal.aborted) throw new Error('possums_login_cancelled');
-      await candidate.login(credential, interaction.signal);
-      const entries = await candidate.models(interaction.signal);
-      const listed = entries.map(model);
-      if (epoch !== this.epoch || interaction.signal.aborted) throw new Error('possums_login_cancelled');
-      this.client = candidate; this.catalog = entries; this.listed = listed;
-      // Pi persists this harmless marker, never the recovery or bearer credential.
-      return { type: 'api_key' as const, key: MEMORY_AUTH };
+      this.requireCurrent(epoch, interaction.signal);
+      const credential = await recoveryAuth.login!(interaction);
+      this.requireCurrent(epoch, interaction.signal);
+      if (!isRecoveryKey(credential.key)) throw new Error('possums_session_unavailable');
+      await this.authenticate(candidate, credential.key, epoch, interaction.signal);
+      // Native Pi login persists this ApiKeyCredential in its existing auth store.
+      return credential;
     },
   } };
+
+  private requireCurrent(epoch: number, signal: AbortSignal): void {
+    if (epoch !== this.authEpoch || signal.aborted) throw new Error('possums_login_cancelled');
+  }
+
+  private async authenticate(candidate: ReferenceClient, key: string, epoch: number, signal: AbortSignal): Promise<void> {
+    await candidate.login(key, signal);
+    this.requireCurrent(epoch, signal);
+    const entries = await candidate.models(signal);
+    const listed = entries.map(model);
+    this.requireCurrent(epoch, signal);
+    this.recoveryKey = key;
+    this.client = candidate; this.catalog = entries; this.listed = listed;
+  }
 
   getModels(): readonly Model<typeof API>[] { return this.listed; }
   beginRun(): void { this.epoch++; this.guard.beginRun(); }
   endRun(): void { this.guard.close(); }
   newSession(): void { this.epoch++; this.guard.close(); this.newConversation = true; }
   logout(): void {
-    this.epoch++; this.guard.close(); this.client = undefined; this.catalog = []; this.listed = [];
+    this.epoch++; this.authEpoch++; this.guard.close();
+    this.client = undefined; this.catalog = []; this.listed = [];
+    this.recoveryKey = undefined; this.restoring = undefined;
     this.newConversation = true;
   }
 
   async refreshModels(context: Parameters<NonNullable<Provider['refreshModels']>>[0]): Promise<void> {
-    if (!context.allowNetwork || !this.client) return;
+    if (!context.allowNetwork) {
+      // Pi supplies the stored credential in the offline phase, including after
+      // native /logout. No ambient lookup or network is needed to revoke state.
+      const key = context.credential?.type === 'api_key' ? context.credential.key : undefined;
+      await context.publish({ update: () => {
+        if (!isRecoveryKey(key) || key !== this.recoveryKey) this.logout();
+      } });
+      return;
+    }
+    // The network phase receives resolve()'s effective, non-secret credential.
+    if (context.credential?.type !== 'api_key' || context.credential.key !== REQUEST_AUTH || !this.client) return;
+    const client = this.client;
+    const epoch = this.authEpoch;
+    const current = () => epoch === this.authEpoch && !context.signal.aborted;
     try {
-      const entries = await this.client.models(context.signal);
+      const entries = await client.models(context.signal);
       const listed = entries.map(model);
-      await context.publish({ update: () => { this.catalog = entries; this.listed = listed; } });
+      await context.publish({ update: () => {
+        if (current()) { this.catalog = entries; this.listed = listed; }
+      } });
     } catch {
-      // Retain no usable stale catalog, regardless of Pi's default refresh policy.
-      this.catalog = []; this.listed = [];
+      // Neither a stale success nor a stale failure may mutate a newer account.
+      await context.publish({ update: () => {
+        if (current()) { this.catalog = []; this.listed = []; }
+      } });
       throw new Error('possums_catalog_unavailable');
     }
   }
@@ -226,7 +296,7 @@ export class PossumsProvider implements Provider {
           chargedMicrounits: receipt.chargedMicrounits, refundedMicrounits: receipt.refundedMicrounits,
           quotedCostComponents: quoted, finish: receipt.finish,
         } }];
-        if (epoch !== this.epoch) throw new Error('possums_run_replaced');
+        if (epoch !== this.epoch || options.signal?.aborted) throw new Error('possums_run_replaced');
         if (args.size && receipt.finish === 'length') throw new Error('possums_incomplete_tool_round');
         const toolUse = receipt.finish === 'tool_calls' || (receipt.finish === 'stop' && args.size > 0);
         for (const pending of args.values()) {

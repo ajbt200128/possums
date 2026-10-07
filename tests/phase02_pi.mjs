@@ -1,4 +1,4 @@
-// Credential-free SDK/provider checks. PHASE02_TEST_BUILD must be a separately
+// Offline, synthetic-credential SDK/provider checks. PHASE02_TEST_BUILD must be a separately
 // compiled test-entry.ts bundle with fixture capability, never the shipped package.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,6 +11,7 @@ assert(file && root && piRoot, 'explicit scratch bundle, scratch state and pinne
 const m = await import(pathToFileURL(file).href);
 const ai = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-ai/dist/index.js')).href);
 const coding = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js')).href);
+const { AuthStorage: NativeAuthStorage } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js')).href);
 fs.mkdirSync(root, { recursive: true });
 const passed = [];
 async function check(name, body) { await body(); passed.push(name); console.log('PASS '+name); }
@@ -22,6 +23,13 @@ const receipt = finish => ({ finish, inputTokens: 2, outputTokens: 3, totalToken
   quotedInputMicrounitsPerMillion: '1000000', quotedOutputMicrounitsPerMillion: '1000000' });
 const event = delta => ({ object: 'chat.completion.chunk', model: 'synthetic', choices: [{ index: 0, delta, finish_reason: null }] });
 const user = { role: 'user', content: 'Synthetic input', timestamp: 1 };
+const recoveryKey = 'synthetic_not_a_usable_credential';
+const envKey = 'synthetic_not_a_usable_env_credential';
+const legacyMarker = 'possums-memory-only-session';
+const requestMarker = 'possums-verified-memory-session';
+const authInput = (credential, env = undefined, signal = new AbortController().signal) => ({ credential, signal,
+ ctx: { env: async name => name === 'POSSUMS_RECOVERY_CREDENTIAL' ? env : undefined, fileExists: async () => false } });
+const interaction = (key = recoveryKey, signal = new AbortController().signal) => ({ signal, prompt: async () => key, notify: () => {} });
 const tool = { name: 'echo', description: 'Synthetic echo', parameters: ai.Type.Object({ value: ai.Type.String() }) };
 function deferred() { let resolve; const promise = new Promise(r => { resolve=r; }); return {promise,resolve}; }
 async function terminalGatewayError(code, detail, billing) {
@@ -72,12 +80,192 @@ async function setup(plan, tools = true) {
 async function drain(stream) { const events=[];for await(const event of stream)events.push(event); return {events,message:await stream.result()}; }
 const context = tools => ai.normalizeContext({messages:[user],tools:tools?[tool]:[]});
 
-await check('session-only auth marker; logout disables resolution',async()=>{
+// Native SDK storage is always injected beneath this test's isolated scratch root.
+async function nativeRuntime(provider, credentials, modelsStore = new ai.InMemoryModelsStore()) {
+ const runtime=await coding.ModelRuntime.create({credentials,modelsStore,modelsPath:null,allowModelNetwork:false,refreshOnCreate:false});
+ runtime.registerNativeProvider(provider);
+ await runtime.refresh({providers:['possums'],allowNetwork:false});
+ return runtime;
+}
+async function authFixture(plan = []) {
+ const s=await setup(plan);const trace={establish:0,keys:[],models:0,conversations:[]};
+ const establish=async()=>{
+  trace.establish++;
+  const candidate=new m.ReferenceClient(s.client.channel);
+  candidate.login=async key=>{trace.keys.push(key);};
+  candidate.models=async()=>{trace.models++;return s.client.models();};
+  candidate.chat=(model,messages,onDelta,newConversation,options)=>{
+   trace.conversations.push(newConversation);return s.client.chat(model,messages,onDelta,newConversation,options);
+  };
+  return candidate;
+ };
+ return {s,trace,establish};
+}
+function fixtureExtension(establish) {
+ let provider;const handlers=new Map(),commands=new Map();
+ m.extension({registerFlag:()=>{},getFlag:()=>undefined,registerProvider:value=>{provider=value;value.establish=establish;},
+  on:(name,handler)=>handlers.set(name,handler),registerCommand:(name,command)=>commands.set(name,command)});
+ return {provider,handlers,commands};
+}
+await check('native AuthStorage persists recovery key; cold extension start restores verified models without inference',async()=>{
+ const fixture=await authFixture(['stop','stop']);
+ const authPath=path.join(root,'native-auth','auth.json');
+ const storage=NativeAuthStorage.create(authPath);
+ const provider=new m.PossumsProvider(fixture.establish);
+ const modelsStore=new ai.InMemoryModelsStore();
+ const runtime=await nativeRuntime(provider,storage,modelsStore);
+ assert.equal(await runtime.checkAuth('possums'),undefined);assert.equal(fixture.trace.establish,0);
+ const credential=await runtime.login('possums','api_key',interaction());
+ assert.deepEqual(credential,{type:'api_key',key:recoveryKey});
+ assert.deepEqual(JSON.parse(fs.readFileSync(authPath,'utf8')),{possums:credential});
+ assert.equal(fs.statSync(authPath).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(authPath)).mode&0o777,0o700);
+ assert.equal(await modelsStore.read('possums'),undefined);
+ provider.logout();
+ const extension=fixtureExtension(fixture.establish);
+ assert(!extension.commands.has('possums-logout'));
+ const restored=await nativeRuntime(extension.provider,NativeAuthStorage.create(authPath),modelsStore);
+ const registry=new coding.ModelRegistry(restored);
+ const before=structuredClone(fixture.trace);
+ assert(await restored.checkAuth('possums'));assert.deepEqual(await restored.getAvailable('possums'),[]);
+ assert.deepEqual(fixture.trace,before,'availability is offline even with a saved key');
+ await extension.handlers.get('session_start')({}, {modelRegistry:registry});
+ assert.equal(registry.getAvailable().filter(value=>value.provider==='possums').length,1);
+ assert.equal(fixture.trace.establish,2);assert.deepEqual(fixture.trace.keys,[recoveryKey,recoveryKey]);
+ assert.equal(fixture.s.sends(),0);assert.equal(await modelsStore.read('possums'),undefined);
+ assert.equal((await registry.getProviderAuth('possums')).auth.apiKey,requestMarker);
+ const selected=extension.provider.getModels()[0];
+ extension.provider.beginRun();await drain(restored.streamSimple(selected,context(false)));
+ await extension.handlers.get('session_start')({}, {modelRegistry:registry});
+ extension.provider.beginRun();await drain(restored.streamSimple(selected,context(false)));
+ assert.deepEqual(fixture.trace.conversations,[true,true],'/new resets conversation, not saved authentication');
+ assert.equal(fixture.trace.establish,2);
+ await restored.logout('possums');
+ assert.equal(await NativeAuthStorage.create(authPath).read('possums'),undefined);
+ assert.deepEqual(JSON.parse(fs.readFileSync(authPath,'utf8')),{});
+ assert.deepEqual(extension.provider.getModels(),[]);assert.equal(await registry.getProviderAuth('possums'),undefined);
+});
+await check('pinned SDK checks stay offline; saved key wins over env; legacy marker requires fresh login',async()=>{
+ const fixture=await authFixture();const provider=new m.PossumsProvider(fixture.establish);
+ const credentials=new ai.InMemoryCredentialStore();
+ const models=ai.createModels({credentials,modelsStore:new ai.InMemoryModelsStore(),authContext:authInput(undefined,envKey).ctx});
+ models.setProvider(provider);
+ assert.equal((await models.checkAuth('possums')).source,'POSSUMS_RECOVERY_CREDENTIAL');
+ assert.deepEqual(await models.getAvailable('possums'),[]);assert.equal(fixture.trace.establish,0);
+ await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+ assert.equal((await models.checkAuth('possums')).source,'stored credential');assert.equal(fixture.trace.establish,0);
+ assert.equal((await models.refresh({providers:['possums'],allowNetwork:true})).errors.size,0);
+ assert.deepEqual(fixture.trace.keys,[recoveryKey]);
+ await models.logout('possums');await models.refresh({providers:['possums'],allowNetwork:false});
+ assert.deepEqual(provider.getModels(),[]);
+ assert.equal((await models.checkAuth('possums')).source,'POSSUMS_RECOVERY_CREDENTIAL');
+ await models.refresh({providers:['possums'],allowNetwork:true});assert.deepEqual(fixture.trace.keys,[recoveryKey,envKey]);
+ for(const marker of [legacyMarker,requestMarker]) {
+  await credentials.modify('possums',async()=>({type:'api_key',key:marker}));
+  assert.equal(await models.checkAuth('possums'),undefined);
+  await models.refresh({providers:['possums'],allowNetwork:true});
+  assert.equal(await models.getAuth('possums'),undefined);assert.deepEqual(provider.getModels(),[]);
+ }
+ assert.deepEqual(fixture.trace.keys,[recoveryKey,envKey],'neither marker is sent or silently falls back to env');
+ await models.login('possums','api_key',interaction());
+ assert.deepEqual(await credentials.read('possums'),{type:'api_key',key:recoveryKey});
+ assert.equal((await models.getAuth('possums')).auth.apiKey,requestMarker);assert.equal(fixture.s.sends(),0);
+});
+await check('failed channel verification prevents both interactive prompt and saved/env credential transmission',async()=>{
+ let prompts=0,sends=0;
+ const provider=new m.PossumsProvider(async()=>({channel:{},login:async()=>{sends++;}}));
+ await assert.rejects(provider.auth.apiKey.login({...interaction(),prompt:async()=>{prompts++;return recoveryKey;}}));
+ for(const input of [authInput({type:'api_key',key:recoveryKey}),authInput(undefined,envKey)]) {
+  await assert.rejects(provider.auth.apiKey.resolve(input));
+ }
+ assert.equal(prompts,0);assert.equal(sends,0);assert.deepEqual(provider.getModels(),[]);
+});
+await check('cancelled and replaced authentication cannot send late secrets or restore stale state',async()=>{
+ for(const action of ['cancel','logout','replace']) {
+  const fixture=await authFixture();const held=deferred(),entered=deferred();let calls=0;
+  const provider=new m.PossumsProvider(async()=>{const candidate=await fixture.establish();if(calls++===0){entered.resolve();await held.promise;}return candidate;});
+  const controller=new AbortController();
+  const pending=provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey},undefined,controller.signal));
+  const rejected=assert.rejects(pending);await entered.promise;
+  if(action==='cancel')controller.abort();
+  else if(action==='logout')provider.logout();
+  else await provider.auth.apiKey.resolve(authInput({type:'api_key',key:envKey}));
+  held.resolve();await rejected;
+  assert.deepEqual(fixture.trace.keys,action==='replace'?[envKey]:[]);
+  assert.equal(provider.getModels().length,action==='replace'?1:0);
+ }
+ for(const phase of ['prompt','login','catalog']) {
+  const fixture=await authFixture();const held=deferred(),entered=deferred();
+  const provider=new m.PossumsProvider(async()=>{const candidate=await fixture.establish();
+   if(phase!=='prompt'){const name=phase==='login'?'login':'models';const original=candidate[name];candidate[name]=async(...args)=>{const value=await original(...args);entered.resolve();await held.promise;return value;};}
+   return candidate;
+  });
+  const controller=new AbortController();
+  const pending=provider.auth.apiKey.login({...interaction(recoveryKey,controller.signal),prompt:async()=>{if(phase==='prompt'){entered.resolve();await held.promise;}return recoveryKey;}});
+  const rejected=assert.rejects(pending);await entered.promise;controller.abort();held.resolve();await rejected;
+  assert.deepEqual(provider.getModels(),[]);assert.equal(fixture.trace.keys.length,phase==='prompt'?0:1);
+  assert.equal(fixture.trace.models,phase==='catalog'?1:0);
+ }
+});
+await check('native SDK cancelled login never persists or restores a late candidate',async()=>{
+ const fixture=await authFixture();const held=deferred(),entered=deferred();
+ const provider=new m.PossumsProvider(async()=>{const candidate=await fixture.establish();
+  const models=candidate.models;candidate.models=async()=>{const entries=await models();entered.resolve();await held.promise;return entries;};
+  return candidate;
+ });
+ const authPath=path.join(root,'cancelled-login','auth.json');
+ const runtime=await nativeRuntime(provider,NativeAuthStorage.create(authPath));
+ const controller=new AbortController();
+ const pending=runtime.login('possums','api_key',interaction(recoveryKey,controller.signal));
+ const rejected=assert.rejects(pending);await entered.promise;controller.abort();held.resolve();await rejected;
+ await new Promise(setImmediate);
+ assert.equal(await NativeAuthStorage.create(authPath).read('possums'),undefined);
+ assert.deepEqual(provider.getModels(),[]);assert.equal(fixture.s.sends(),0);
+});
+await check('native logout/replacement revoke pending tools but retain settled receipt charges',async()=>{
+ for(const action of ['logout','replace','abort']) {
+  const fixture=await authFixture(['held_tools']);const provider=new m.PossumsProvider(fixture.establish);
+  const authPath=path.join(root,'pending-'+action,'auth.json');
+  const runtime=await nativeRuntime(provider,NativeAuthStorage.create(authPath));
+  await runtime.login('possums','api_key',interaction());provider.beginRun();
+  const controller=new AbortController();const stream=runtime.streamSimple(provider.getModels()[0],context(true),{signal:controller.signal});
+  let changed=false,ends=0;
+  for await(const event of stream){
+   if(event.type==='toolcall_delta'&&!changed){changed=true;
+    if(action==='logout')await runtime.logout('possums');
+    else if(action==='replace')await runtime.login('possums','api_key',interaction(envKey));
+    else controller.abort();
+    fixture.s.release();
+   }
+   if(event.type==='toolcall_end')ends++;
+  }
+  const result=await stream.result();assert(changed);assert.equal(ends,0);assert.notEqual(result.stopReason,'toolUse');
+  assert.equal(result.usage.cost.total,7/1e6);assert.equal(result.diagnostics[0].details.finish,'tool_calls');
+  assert.equal(fixture.s.sends(),1);
+  assert.equal((await NativeAuthStorage.create(authPath).read('possums'))?.key,action==='logout'?undefined:action==='replace'?envKey:recoveryKey);
+ }
+});
+await check('late catalog success/failure cannot replace a newer authenticated account',async()=>{
+ for(const fails of [false,true]) {
+  const fixture=await authFixture();const provider=new m.PossumsProvider(fixture.establish);
+  const runtime=await nativeRuntime(provider,new ai.InMemoryCredentialStore());
+  await runtime.login('possums','api_key',interaction());
+  const held=deferred(),entered=deferred();const original=fixture.s.client.models;
+  fixture.s.client.models=async()=>{entered.resolve();await held.promise;if(fails)throw new Error('synthetic failure');return [];};
+  const pending=runtime.refresh({providers:['possums'],allowNetwork:true});await entered.promise;
+  fixture.s.client.models=original;
+  await runtime.login('possums','api_key',interaction(envKey));held.resolve();await pending;
+  await new Promise(setImmediate); // Let the aborted provider operation reach its late publication.
+  assert.equal(provider.getModels().length,1);assert.equal((await runtime.getAuth('possums')).auth.apiKey,requestMarker);
+ }
+});
+
+await check('native recovery credential; request auth stays non-secret',async()=>{
  const s=await setup(['stop']);
- assert.equal(s.credential.key,'possums-memory-only-session');
- assert(await s.provider.auth.apiKey.resolve({credential:s.credential}));
- assert.equal(await s.provider.auth.apiKey.resolve({credential:undefined}),undefined);
- s.provider.logout();assert.equal(await s.provider.auth.apiKey.resolve({credential:s.credential}),undefined);
+ assert.equal(s.credential.key,recoveryKey);
+ assert.equal((await s.provider.auth.apiKey.resolve(authInput(s.credential))).auth.apiKey,requestMarker);
+ assert.equal(await s.provider.auth.apiKey.resolve(authInput(undefined)),undefined);
+ s.provider.logout();assert.equal(s.provider.getModels().length,0);
+ assert.equal(await s.provider.auth.apiKey.resolve(authInput(undefined)),undefined);
 });
 await check('progress before receipt, hooks and submitted-rate cost',async()=>{
  const s=await setup(['held']);s.provider.beginRun();let payload=0,response=0,raw=0;
@@ -105,7 +293,7 @@ await check('unqualified tools and image history rejected before invocation',asy
 });
 await check('failed catalog refresh removes prior usable list',async()=>{
  const s=await setup(['stop']);assert.equal(s.provider.getModels().length,1);s.failModels();
- await assert.rejects(s.provider.refreshModels({allowNetwork:true,signal:new AbortController().signal,publish:async value=>{value.update?.();return true;}}),/possums_catalog_unavailable/);
+ await assert.rejects(s.provider.refreshModels({credential:{type:'api_key',key:requestMarker},allowNetwork:true,signal:new AbortController().signal,publish:async value=>{value.update?.();return true;}}),/possums_catalog_unavailable/);
  assert.equal(s.provider.getModels().length,0);
 });
 await check('length after tool deltas never authorizes tool execution',async()=>{
@@ -141,8 +329,9 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  const loader=new coding.DefaultResourceLoader({cwd,agentDir:cwd,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,systemPrompt:'Synthetic test',
   extensionFactories:[pi=>m.extension({...pi,registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[])]});
  await loader.reload();assert.deepEqual(loader.getExtensions().errors,[]);
- const credential=await provider.auth.apiKey.login({signal:new AbortController().signal,prompt:async()=> 'synthetic_not_a_usable_credential'});
- runtime.registerNativeProvider(provider);await runtime.setRuntimeApiKey('possums',credential.key);
+ runtime.registerNativeProvider(provider);
+ await runtime.refresh({providers:['possums'],allowNetwork:false});
+ await runtime.login('possums','api_key',interaction());
  // Large synthetic host window isolates Pi recovery behavior from the separately
  // tested gateway context budget; the fake ReferenceClient has no tokenizer.
  const selected={...provider.getModels()[0],contextWindow:64000};
@@ -150,12 +339,29 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
   thinkingLevel:'off',sessionManager:coding.SessionManager.inMemory(cwd),tools:tools?['echo']:[],customTools:[{...tool,label:'Echo',execute:async()=>{toolRuns++;return {content:[{type:'text',text:'ok'}],details:undefined};}}]});
  await session.bindExtensions({mode:'print'});
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
- return {session,s,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
+ return {session,s,runtime,provider,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
 }
 await check('actual Pi SDK and shipped extension hooks run one receipted invocation per model turn',async()=>{
  const {session,s,toolRuns}=await sdkSetup('sdk-tools',['tool_calls','stop'],true);
  try{await session.prompt('Synthetic tool task');assert.equal(toolRuns(),1,session.messages.filter(value=>value.role==='assistant').at(-1)?.errorMessage);assert.equal(s.sends(),2);assert.equal(session.messages.filter(value=>value.role==='assistant').at(-1).content.find(value=>value.type==='text').text,'progressive');assert.equal(session.sessionManager.getSessionFile(),undefined);}
  finally{session.dispose();}
+});
+await check('actual Pi SDK native logout prevents a pending tool from executing and preserves its charge',async()=>{
+ const {session,s,runtime,toolRuns}=await sdkSetup('sdk-native-logout',['held_tools'],true);
+ let logout;
+ const unsubscribe=session.subscribe(event=>{
+  if(event.type==='message_update'&&event.assistantMessageEvent.type==='toolcall_delta'&&!logout) {
+   logout=runtime.logout('possums').finally(()=>s.release());
+  }
+ });
+ try {
+  await session.prompt('Synthetic pending logout');await logout;assert(logout);
+  assert.equal(toolRuns(),0);assert.equal(s.sends(),1);
+  const result=session.messages.filter(value=>value.role==='assistant').at(-1);
+  assert.equal(result.stopReason,'error');assert.equal(result.usage.cost.total,7/1e6);
+  assert.equal(result.diagnostics[0].details.finish,'tool_calls');
+  assert.deepEqual(await runtime.listCredentials(),[]);
+ } finally {unsubscribe();session.dispose();}
 });
 await check('actual Pi SDK executes stop-with-tool once and continues with its matching result',async()=>{
  const {session,s,toolRuns}=await sdkSetup('sdk-stop-tools',['stop_tools','stop'],true);
