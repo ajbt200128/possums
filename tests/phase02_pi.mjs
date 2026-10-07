@@ -405,4 +405,4 @@ await check('text-only command succeeds in isolation; a later tool-restoring ext
   }finally{session.dispose();}
  }
 });
-fs.writeFileSync(path.join(root,'results.json'),JSON.stringify({pi:'0.99.2',passed,scope:'Synthetic provider/client mocks and actual Pi SDK; no production model qualification or gateway evidence'},null,2)+'\n');
+fs.writeFileSync(path.join(root,'results.json'),JSON.stringify({pi:'1.0.4',passed,scope:'Synthetic provider/client mocks and actual Pi SDK; no production model qualification or gateway evidence'},null,2)+'\n');

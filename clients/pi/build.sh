@@ -2,7 +2,7 @@
 set -eu
 SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$SOURCE/../.." && pwd)
-PI_ROOT=${POSSUMS_PI_ROOT:?Set POSSUMS_PI_ROOT to the pinned Pi 0.99.2 release directory}
+PI_ROOT=${POSSUMS_PI_ROOT:?Set POSSUMS_PI_ROOT to the pinned Pi 1.0.4 release directory}
 NODE=${POSSUMS_NODE:-$(command -v node)}
 NPM=$(command -v npm)
 [ "$("$NODE" --version)" = v24.13.0 ] || { printf '%s\n' 'Node 24.13.0 required' >&2; exit 1; }
