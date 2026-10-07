@@ -982,6 +982,15 @@ mod route {
         complete(&peer, 2, 3).await;
         fixture.terminal(93).await;
         assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 1);
+        // Generation-slot availability alone is not a memory-lease rendezvous.
+        let memory = tokio::time::timeout(
+            Duration::from_secs(5),
+            fixture.state.chat_memory.clone().acquire_many_owned(4),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(memory);
         assert_eq!(fixture.state.chat_memory.available_permits(), 4);
     }
 
