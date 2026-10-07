@@ -37,7 +37,10 @@ export default function possums(pi: ExtensionAPI): void {
   pi.registerFlag('possums-manifest', { type: 'string', description: 'Independently hash-approved Possums release manifest (public file, never a credential)' });
   const provider = new PossumsProvider(async signal => connect(await manifest(pi.getFlag('possums-manifest')), signal));
   pi.registerProvider(provider);
-  pi.on('session_start', () => provider.newSession());
+  pi.on('session_start', async (_event, ctx) => {
+    provider.newSession();
+    await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], allowNetwork: true });
+  });
   pi.on('session_shutdown', () => provider.logout());
   pi.on('before_agent_start', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) provider.beginRun();
@@ -48,13 +51,6 @@ export default function possums(pi: ExtensionAPI): void {
   });
   pi.on('session_before_compact', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) return { cancel: true };
-  });
-  pi.registerCommand('possums-logout', {
-    description: 'Forget the in-memory Possums session and catalog',
-    handler: async (_args, ctx) => {
-      provider.logout();
-      ctx.ui.notify('Possums session forgotten. Previously accepted requests can still settle.', 'info');
-    },
   });
   pi.registerCommand('possums-text-only', {
     description: 'Explicitly disable active Pi tools for a text-only Possums model',
