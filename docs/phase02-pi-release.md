@@ -1,8 +1,8 @@
 # Minimal Pi integration release
 
-## Scope
+## Initial v0.0.10 scope
 
-Pi 0.99.2 uses the existing verified Possums provider: memory-only login/catalog,
+The initial Pi 0.99.2 client used the verified Possums provider: memory-only login/catalog,
 SDK transcript and tool events, caller-owned execution checks, and matching-result
 continuation. The Pi adapter has no credit reservation or spending-budget engine.
 Reservations and final-usage settlement remain gateway behavior. No dependency,
@@ -98,3 +98,58 @@ Pi 0.99.2 displays capability text in the highlighted **Model Name** detail belo
 the picker list, not beside the model ID in each row. The restricted `read,ls`
 launch was for harmless testing; normal built-in coding tools can be selected
 without a Possums-specific implementation or client-side spending reservation.
+
+## 2026-10-07 catalog-wide release and native login
+
+- PR #13 merged as `e189da8ed78911c09576cba95183de999af19761`. Every
+  authenticated catalog model now gets the assumed shared OpenAI-functions
+  wire profile. Unknown models still fail before tokenizer/generation; catalog,
+  context, maximum reservation, settlement and caller execution checks remain.
+  No paid per-model qualification or inference retry was added. The v0.0.10
+  Kimi observation is not evidence that every other model works.
+- Independent publication run `37572656156` reproduced and preserved image
+  `sha256:11dde8e753af5d2dcb438e8494d59b42e93d4d0a58e88c85d9917f1e38c88655`.
+  Digest-only PR #14 merged; **v0.0.11** pins source/config
+  `c369340d5306d1e3f2e17c7d3f3d3fcbda528944`. Measurement/publication invocation
+  is `37574318773/attempts/1`.
+- Manifest SHA-256:
+  `47aeaf9afa969814d2a8cb64d7f3008e3206d4173045f4f87bc27bdd8ea7b5ab`.
+  Decoded config SHA-256:
+  `a7777c6096d4d1b528105e581bfadd190d566880aa9c72d7c4f8999ad65725a0`.
+  Config bytes match the tag. Cryptographic Sigstore verification checked the
+  exact workflow/tag, source/signer digest, invocation and signed manifest.
+- Direct, unheld blue/green production update completed: serving container is
+  running **v0.0.11**, with no pending update. Native v3 verification accepted
+  the serving hardware/provenance/endpoint keys with exact tag/manifest pins.
+  Separately, the actual rebuilt Pi extension accepted the serving legacy-v2
+  bootstrap through its pinned JS verifier and stopped at the secret prompt:
+  zero credentials and zero inference requests. Accepted external-v2 freshness/
+  revocation limitations remain unchanged.
+  Runtime/CVM and administrative API approval expiry (**2026-10-11**) are
+  unchanged; independent WEB v0.0.8 approval is untouched.
+- Native Pi auth PR #15 merged as `fd5f50413353726e71933c6a5265e103defdc922`.
+  The pinned SDK saves the recovery key through its ordinary private plaintext
+  auth store, optionally resolves `POSSUMS_RECOVERY_CREDENTIAL`, restores a
+  verified bearer/catalog at session startup without inference, and handles
+  native `/logout`. Bearer/catalog remain memory-only. Request hooks receive a
+  non-secret marker. Old session-only markers require one fresh `/login`.
+  No global provider/default/history settings or separate Keychain store changed.
+- Fresh strict TS/build and **25 actual pinned-Pi / 436 reference-admission
+  checks** passed; native scratch-store/cancellation/logout/replacement tests
+  and an independent bounded review passed. Rust checks counted **285 tests**,
+  three ignored. Linux flake/browser/image/startup gates passed. Active LSP
+  probes were inconclusive and are not counted as clean certificates.
+- A memory-lease assertion exposed that generation-slot availability alone was
+  not a release rendezvous; a test-only bounded full-permit wait fixed that
+  assertion and passed 30 focused runs. Legacy attestation-helper and small-
+  deadline startup fixture assertions each passed one bounded Linux rerun;
+  their transient causes remain unestablished. An offline virtual-clock
+  experiment timed out and was fully reverted. No production timeout, security
+  gate or assertion was weakened.
+
+No new live generation was sent for this release or auth work. Earlier manual
+user prompts still have unknown counts/charges and are not folded into the
+historical upstream qualification ledger. Exact live balance/accounting and
+whole-runtime privacy acceptance remain unverified. Compaction remains blocked:
+this is paid harness summarization, not a missing Tinfoil endpoint, and needs a
+separate safe call/retry/token-cap integration.
