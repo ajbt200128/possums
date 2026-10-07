@@ -30,6 +30,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["catch-panic", "limit", "set-header", "timeout"] }
 
 [dev-dependencies]
+hyper = { version = "1", features = ["client", "http1"] }
 http-body-util = "0.1"
 # Packet 2C qualification only: rejected as a runtime exporter (see verification).
 opentelemetry = { version = "=0.29.1", default-features = false, features = ["metrics"] }
