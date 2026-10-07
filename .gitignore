@@ -6,3 +6,5 @@
 !.env.example
 .pi/
 /examples/phase01/node_modules/
+/node_modules/
+/vendor/tinfoil/target/
