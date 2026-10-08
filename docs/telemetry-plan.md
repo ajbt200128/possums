@@ -1,10 +1,18 @@
 # First-pass telemetry: four golden signals, privacy first
 
-**Status:** proposed implementation plan, 2026-10-07. This change adds documentation only; it does not enable telemetry, change deployment configuration, create Honeycomb resources or send inference traffic. **Read [`../PRIVACY.md`](../PRIVACY.md) before implementing or changing any part of this plan.**
+**Status:** implementation in progress; original plan 2026-10-07, MVP decisions updated 2026-10-08. Local aggregation, encoding, transport and handoff qualification are recorded in [`verification.md`](verification.md); the gateway is not yet emitting telemetry. **Read [`../PRIVACY.md`](../PRIVACY.md) before implementing or changing any part of this plan.**
+
+## Current MVP decisions
+
+- The operator authorizes deployment to the **existing production gateway**; a separate isolated test instance is not required. Normal build, attestation, accounting, runtime and privacy verification still apply.
+- Use the supplied Honeycomb **`dev`** configuration in `.env` for the MVP; never display/commit credentials or indiscriminately pass inherited OTEL defaults into the gateway. Read-only MCP on 2026-10-08 lists `dev`, `prod` and `fun`, all empty. A separate `prod` telemetry destination is not a prerequisite and was not selected merely because it exists.
+- **Provider-default retention is accepted for the MVP.** Verify/disclose the effective period when possible; custom seven-day retention is deferred, not a blocker. Unknown deletion/backup or transport/audit properties remain unknown, not automatically verified by this acceptance.
+- Deployment permission does not enable the synthetic-only schema on real or mixed traffic. Keep those exports off until the reviewed real-traffic release mode is ready; do not flip `IsolatedSynthetic` or retain a misleading `test` workload label on production. Continue isolated local fixture tests without requiring a new live instance.
+- These decisions supersede earlier separate-instance, no-production-deployment and seven-day-retention prerequisites in historical packet records, not their measured evidence or remaining content/identifier protections.
 
 ## Recommendation and scope
 
-Use **explicit Rust application metrics → local, measured OpenTelemetry Collector → Honeycomb US**, plus Tinfoil's existing resource metrics if they meet our needs. Start in the existing Honeycomb **`test`** environment with isolated synthetic traffic. No production environment, traces, logs, per-request records, GenAI content instrumentation, profiling, billing analytics or OBI in the first pass.
+Use **explicit Rust application metrics → local, measured OpenTelemetry Collector → Honeycomb US**, plus Tinfoil's existing resource metrics if they meet our needs. Use the configured Honeycomb **`dev`** destination for the MVP, with local synthetic qualification before the authorized production deployment. No traces, logs, per-request records, GenAI content instrumentation, profiling, billing analytics or OBI in the first pass.
 
 Organize the dashboard around Google's **latency, traffic, errors and saturation** [1]. Prioritize model reliability and speed, endpoint errors, and CPU/memory headroom for each gateway. Use the same safe metric schema in testing that we intend to review for production later; do not prototype with request traces and promise to sanitize them afterward.
 
@@ -15,7 +23,7 @@ Two explicit compromises:
 
 ## What we found
 
-### Repository and release boundaries
+### Initial repository findings (2026-10-07, before implementation)
 
 - `src/telemetry.rs` contains four allowlisted lifetime counters and a minimum-export-count of ten. It has no fixed windows, resource/datapoint sanitization or OTLP exporter. Repeated cumulative snapshots can reveal small increments after the threshold. **Do not just wire this scaffold to Honeycomb.**
 - `Cargo.toml` currently has no OpenTelemetry dependency. Prefer supported Rust OTel SDK/exporter types and existing resource-collection libraries when implementing; custom code should cover the privacy release policy and gateway lifecycle, not reimplement OTLP.
@@ -27,7 +35,7 @@ Two explicit compromises:
 
 On 2026-10-07, `get_workspace_context` reported team `possums`, an existing **`test`** environment with **zero datasets**, and no telemetry sent yet. The system Activity Log environment is not an application telemetry environment. There was no data to query, and no board/query was created.
 
-The MCP result does **not** establish data-region placement, seven-day retention, key permissions, plan support for native metrics, or backup deletion behavior. Verify those before export. Honeycomb's public documentation says 60-day retention for most customers [8]; seven days must be explicitly confirmed, not assumed from our policy.
+This historical MCP result did **not** establish data-region placement, key permissions, native metrics support, effective retention or backup deletion behavior. The 2026-10-08 MVP decision accepts default retention; seven days is a future goal. Honeycomb's public documentation says 60 days for most customers [8], not necessarily this account. Verify remaining capabilities and distinguish provider-default acceptance from observed retention/deletion evidence.
 
 ### What Tinfoil provides
 
@@ -43,7 +51,7 @@ Official documentation [2–5] exposes:
 
 **Not verified:** live access in this account; reporting cadence/lag; retention/deletion; whether “container” means the whole deployed enclave/instance or each named workload; memory units/denominator; whether CPU percentages are normalized across all CPUs; cgroup throttling/OOM/restart coverage; monitoring agent placement and attestation coverage. The gateway's pinned CVM may not support every feature in today's docs. No Tinfoil admin API was called and no secrets were inspected during this research.
 
-Before choosing a collector, inspect a synthetic instance's metrics and ask Tinfoil to resolve those questions. Test whether allocating memory/CPU in the gateway and a second workload changes the reported series as expected. Documentation is evidence of an API, **not evidence of its behavior on our deployment**.
+Before choosing a resource collector, inspect the authorized existing instance's metrics read-only and ask Tinfoil to resolve those questions. Use local fixtures for load/normalization tests first; do not run disruptive CPU/memory stress or add a second workload to the serving gateway merely to infer scope. Documentation is evidence of an API, **not evidence of its behavior on our deployment**.
 
 ## Questions, metrics and denominators
 
@@ -67,7 +75,7 @@ Lifecycle rules:
 
 ### Dimensions: useful, bounded, not arbitrary
 
-Resource labels: fixed `service.name=possums-gateway`, `deployment.environment.name=test`, operator-supplied `possums.gateway.slot` (initially one slot). Keep raw instance UUIDs, hostnames, IPs, repository paths and provider resource IDs out of OTLP; local operator inventory maps slots to instances. Do not add a fresh UUID on every restart. Release evidence can map the test run to a version without putting arbitrary resource metadata into every point.
+Resource labels: fixed `service.name=possums-gateway`, an accurately declared source deployment environment, and operator-supplied `possums.gateway.slot` (initially one slot). The frozen local fixture schema uses `deployment.environment.name=test`; a reviewed production schema must identify production honestly even when the Honeycomb destination is `dev`. Keep raw instance UUIDs, hostnames, IPs, repository paths and provider resource IDs out of OTLP; local operator inventory maps slots to instances. Do not add a fresh UUID on every restart. Release evidence can map the test run to a version without putting arbitrary resource metadata into every point.
 
 Datapoint labels, only where relevant:
 
@@ -100,14 +108,14 @@ CPU utilization: derive cores used from delta CPU-seconds / wall-seconds, then d
 
 1. Gateway code observes typed counts/timers/occupancy only. It has no telemetry API accepting a request, error string, account ID or arbitrary attributes.
 2. Local bounded aggregation performs the privacy release decision before OTLP crosses the enclave boundary. Keep genuine OTel histogram bucket populations without individual samples/exemplars; select a supported SDK/export representation that can omit sensitive sum/min/max fields, and verify the bytes on the wire. If the pinned SDK cannot represent this, use bounded bucket-count instruments rather than exporting those fields by default.
-3. A pinned **Collector inside the measured test deployment** accepts only the local metrics stream. Use a minimal metrics-only pipeline and a final metric/resource/datapoint allowlist; no log or trace receivers/exporters, no debug/file exporter, no automatic resource enrichment, no persistent queues. Do not rely on stock batching/filtering processors to implement privacy thresholds. Protect/private-bind ingestion; do not expose a public `/metrics` or OTLP endpoint through the shim.
-4. The Collector exports over verified TLS to Honeycomb US. Its key belongs to `test`, ingestion only. Add only the necessary Collector egress destination; do not grant the gateway unrestricted egress. Bound queues, retries and memory; drop telemetry under pressure instead of blocking inference. SDK/Collector self-diagnostics must not print payloads, headers, keys or upstream errors to platform logs.
+3. A pinned **Collector inside the measured deployment** accepts only the local metrics stream. Use a minimal metrics-only pipeline and a final metric/resource/datapoint allowlist; no log or trace receivers/exporters, no debug/file exporter, no automatic resource enrichment, no persistent queues. Do not rely on stock batching/filtering processors to implement privacy thresholds. Protect/private-bind ingestion; do not expose a public `/metrics` or OTLP endpoint through the shim.
+4. The Collector exports over verified TLS to Honeycomb US. Use the supplied `dev` environment's ingestion-only key after verifying its scope; do not copy unrelated OTEL headers or defaults. Add only the necessary Collector egress destination; do not grant the gateway unrestricted egress. Bound queues, retries and memory; drop telemetry under pressure instead of blocking inference. SDK/Collector self-diagnostics must not print payloads, headers, keys or upstream errors to platform logs.
 5. If using an external Tinfoil reader, sanitize resource metrics at that reader and apply the same final Collector allowlist. An external Collector for those already-sanitized platform values is outside attestation and must be documented separately; never send raw gateway observations to it.
 6. Maintain a deployment-level off switch and a tested export kill switch. No shutdown request-window flush, persistent backlog, or replay of inference. Collector/reader health can use content-free infrastructure signals, not rejected payload samples.
 
 Adding a Collector changes the measured image/configuration set and resource budget. Pin it and reproduce/reverify the release. Current Tinfoil networking support, CVM compatibility and enforced egress are deployment gates—not promises derived from YAML.
 
-## First dashboard: “Possums test — golden signals”
+## First dashboard: “Possums MVP — golden signals”
 
 Use native Honeycomb metrics; confirm `dataset_type=metrics` and each metric's actual attributes after first ingest. Do not guess a dataset slug or build queries before data exists.
 
@@ -125,12 +133,12 @@ No paging/SLOs in pass one. Start with dashboard verification and a non-paging t
 | Order | Packet / likely files | Done when |
 |---|---|---|
 | 0 | Policy anchor: `PRIVACY.md`, `AGENTS.md`, this plan | Every telemetry change is required to reference the policy; deployed vs proposed claims remain explicit. **This documentation change only.** |
-| 1 | Provider/Honeycomb capability spike; record in `docs/verification.md` | Confirm Honeycomb US routing, seven-day metrics retention/deletion, native metrics availability and scoped key permissions. Inspect Tinfoil resource values on a synthetic instance and document scope/units/lag/access/retention. If vendor controls cannot meet policy, stop external export. No new production environment. |
+| 1 | Provider/Honeycomb capability spike; record in `docs/verification.md` | Confirm Honeycomb US routing, native metrics and scoped key permissions; document default retention/deletion information without requiring a custom seven-day setting for MVP. Inspect authorized Tinfoil instance resource values read-only and document scope/units/lag/access/retention. Preserve unresolved properties; stop external export if remaining required controls fail. Reuse configured `dev` destination. |
 | 2 | Replace `src/telemetry.rs` scaffold; extend existing `tests/privacy.rs` coverage (split a telemetry suite only if needed); select/pin OTel deps in `Cargo.toml`/lockfile | Typed bounded dimensions, fixed windows, disabled-default behavior, synthetic-mode isolation and family-level privacy gate exist. No user/account/request data enters metrics. Test actual serialization and the chosen histogram representation. |
 | 3 | Lifecycle observations in server/router, generation and stream ownership code; related integration tests | Synthetic success, rejection, malformed/absent terminal usage, invalid stream, upstream error, disconnect, duplicate and settlement failure produce correct distinct counts. Worker terminal/delivery outcomes cannot double count or change billing. No inference replay. |
 | 4 | Resource source + pinned Collector config under `deploy/`; measured `tinfoil-config.yml` and build changes only as needed | CPU and memory scope is demonstrated by controlled loads; bounded metric pipeline, least privileges, private ingestion, sanitized self-diagnostics and correct egress work. No OBI/host-root/Docker socket added by default. Export outage/off switch leaves inference and accounting unaffected. |
-| 5 | Synthetic `test` rollout; Honeycomb board; `docs/verification.md` | Negative privacy payload inspection and known-load metric reconciliation pass locally and deployed. Read back actual Honeycomb metric/resource schemas; confirm forbidden fields absent. Record retention/access settings and image/config versions without secrets. |
-| Later | Separate production proposal/release | Approve real-traffic sparse-family/correlation policy, platform observability disclosures, measured deployment evidence and production retention/access. Only then create a separate production environment/key and choose operational alerting. Do not promote by flipping the test environment label. |
+| 5 | Authorized production deployment to existing gateway; Honeycomb `dev` board; `docs/verification.md` | Complete runtime/Collector verification and real-traffic sparse-family/correlation review before enabling applicable exports. Local synthetic payload inspection and scoped deployed verification pass. Read back actual metric/resource schemas; confirm forbidden fields absent. Record effective default retention/access and measured image/config versions without secrets. Never label mixed traffic synthetic. |
+| Later | Retention/environment/alerting follow-up | Request shorter retention (target seven days), consider a dedicated production Honeycomb destination, and choose operational alerts. These follow-ups do not replace current privacy/release gates. |
 
 ### Verification checklist
 
