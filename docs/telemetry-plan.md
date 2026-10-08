@@ -112,9 +112,9 @@ CPU utilization: derive cores used from delta CPU-seconds / wall-seconds, then d
 3. The in-process exporter performs supported OTel encoding with closed resource/scope/datapoint construction. No generic resource discovery, log/trace pipeline, automatic enrichment, persistent queue or diagnostic payload output is permitted. No public metrics/OTLP ingestion endpoint is added.
 4. Export directly over authenticated, certificate/hostname-verified TLS to Honeycomb US. Allow only the managed ingestion header, never arbitrary inherited headers. Bound complete attempts, response bodies and state; refuse redirects and automatic replay, and own cancellation through actual I/O disposal. Transport credentials never become metric fields or diagnostics.
 5. An external resource reader, if later approved, must sanitize before its own export boundary; document its separate trust boundary. No platform reader is required by this runtime packet.
-6. Maintain a deployment-level off switch and an owned runtime stop operation. No shutdown partial-window flush, disk backlog or automatic retries. Disablement/outage cannot own accounting or inference transitions.
+6. Keep `OTEL_SDK_DISABLED=true` as a deployment-level escape hatch, applied at process start. The MVP is expected to remain enabled; no live-toggle framework, custom DNS resolver or one-second global shutdown guarantee is required. Drop pending batches on shutdown without flushing partial windows, disk backlog or automatic retries. Disablement/outage cannot own accounting or inference transitions.
 
-Pinned libraries and direct TLS/DNS resource costs require scoped verification. Tinfoil egress and measured deployment configuration remain release gates; this packet performs no deployment or secret upload.
+Use standard DNS. A system lookup for the fixed Honeycomb hostname may finish after an export attempt is dropped; it holds no ingestion credential or metric payload. Resolver resource costs and process-exit latency remain unverified, not reasons to add bespoke shutdown infrastructure to this MVP. Preserve bounded metric tables, request/response bodies and one-at-a-time HTTP attempts. Tinfoil egress and measured deployment configuration remain release gates; this packet performs no deployment or secret upload.
 
 ## First dashboard: “Possums MVP — golden signals”
 
