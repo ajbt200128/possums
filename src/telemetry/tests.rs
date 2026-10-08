@@ -214,6 +214,15 @@ fn assert_export(actual: &RequestTables, expected: &RequestTables) {
 }
 #[test]
 fn frozen_cohort_vectors() {
+    cohort_vectors(Deployment::IsolatedSynthetic);
+}
+
+#[test]
+fn production_keeps_all_sparse_and_complement_checks() {
+    cohort_vectors(Deployment::Production);
+}
+
+fn cohort_vectors(mode: Deployment) {
     for (n, vector, release, series) in [
         (0, Vector::Plain, false, 0),
         (1, Vector::Plain, false, 0),
@@ -232,6 +241,7 @@ fn frozen_cohort_vectors() {
         (10, Vector::Duplicate, false, 0),
     ] {
         let metrics = new();
+        assert!(metrics.enable(mode));
         ready(&metrics);
         cohort(&metrics, n, vector);
         let view = metrics.request();

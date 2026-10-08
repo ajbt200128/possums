@@ -75,8 +75,8 @@ fn allowlisted_configuration_and_private_diagnostics() {
 
 #[tokio::test]
 async fn ordinary_component_start_stop_and_explicit_disable() {
-    // Application attachment is available, but production release remains closed;
-    // even observations cannot issue DNS or send with this synthetic config.
+    // The configured production source must first complete warmup and a full
+    // minute. This immediate start/stop test cannot release a payload or use DNS.
     let runtime = Runtime::start(config(&[]));
     assert!(runtime.enabled());
     let metrics = runtime.metrics().expect("configured attachment");

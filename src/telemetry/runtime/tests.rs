@@ -85,6 +85,30 @@ fn released() -> Arc<crate::telemetry::tests::Metrics> {
 }
 
 #[tokio::test]
+async fn configured_sender_rewarms_after_invalidation_without_replay() {
+    let (_listener, client, _acceptor) = fixture(true, "api.honeycomb.io").await;
+    let evidence = client.evidence();
+    let metrics = released();
+    metrics.invalidate();
+    let (stop, stopped) = watch::channel(false);
+    let task = tokio::spawn(sender(metrics.clone(), client, stopped));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while metrics.epoch.load(SeqCst) % 2 == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.send_replace(true);
+    assert!(task.await.unwrap());
+    assert_eq!(evidence.connecting.load(SeqCst), 0);
+    let state = metrics.state.lock().unwrap();
+    assert_eq!(state.requests.eligible, 900 * crate::telemetry::SECOND);
+    assert!(state.requests.attempted >= 600 * crate::telemetry::SECOND);
+    assert!(state.requests.pending.is_none());
+}
+
+#[tokio::test]
 async fn authenticated_tls_owned_sender_payload_stop_and_no_retry() {
     for status in ["200 OK", "307 Temporary Redirect", "503 Unavailable"] {
         let (listener, client, acceptor) = fixture(true, "api.honeycomb.io").await;

@@ -92,10 +92,10 @@ impl Runtime {
         let mut shared = None;
         let task = config.credential.and_then(|credential| {
             let client = Client::honeycomb(credential).ok()?;
-            // Deliberately closed: approved synthetic release tests do not prove
-            // real-traffic privacy. No fixture toggle is available at runtime.
+            // Configuration enables only the reviewed aggregate schema. No
+            // request can bypass its sparse-family or field allowlist checks.
             let metrics = Arc::new(AggregateMetrics::new(
-                Deployment::NonIsolated,
+                Deployment::Production,
                 SystemClock::default(),
             ));
             shared = Some(metrics.clone());
@@ -146,6 +146,12 @@ async fn sender<C: Clock + 'static>(
             biased;
             _ = stopped.wait_for(|stop| *stop) => break,
             _ = tick.tick() => {},
+        }
+        // A lost observation/window must not silently disable configured
+        // telemetry forever. Rewarm with retained attempted-window watermarks;
+        // never replay an old batch or change an inference lifecycle.
+        if metrics.epoch.load(std::sync::atomic::Ordering::SeqCst) % 2 == 0 {
+            metrics.enable(Deployment::Production);
         }
         process.sample(&metrics);
         metrics.poll();

@@ -1,4 +1,4 @@
-//! Bounded local aggregation. Real-traffic release remains closed pending review.
+//! Bounded local aggregation with linked sparse-family suppression.
 //! Runtime export ownership is independent of inference/accounting.
 pub mod hooks;
 mod infrastructure;
@@ -60,12 +60,15 @@ impl Clock for SystemClock {
         })
     }
 }
-/// Only a deployment owner may choose isolation. There is no request-field API.
+/// Deployment-owned release choice, never a request field or destination label.
 #[derive(Clone, Copy, Default)]
 pub enum Deployment {
     #[default]
     Off,
+    /// Unapproved source configuration; retained for fail-closed callers.
     NonIsolated,
+    /// Reviewed MVP aggregates; suppression is not an anonymity guarantee.
+    Production,
     #[cfg(test)]
     IsolatedSynthetic,
 }
@@ -301,12 +304,13 @@ impl<C: Clock> AggregateMetrics<C> {
         if !self.off() {
             return false;
         }
-        let fixture = match mode {
+        let approved = match mode {
+            Deployment::Production => true,
             #[cfg(test)]
             Deployment::IsolatedSynthetic => true,
             _ => false,
         };
-        if !fixture {
+        if !approved {
             return true;
         }
         // A lost lease cannot be reconstructed without owning the real permit.

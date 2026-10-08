@@ -74,6 +74,7 @@ fn missed_failed_regressed_and_zero_elapsed_readings_do_not_backfill() {
 #[test]
 fn jittered_batch_survives_request_observations_at_minute_close() {
     let metrics = new();
+    assert!(metrics.enable(Deployment::Production));
     let base = Instant::now();
     let mut sampler = Sampler::default();
     drive(&metrics, 300 * SECOND);
