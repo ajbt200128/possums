@@ -1,6 +1,6 @@
-//! Unwired local bridge: one owned permit, one owned attempt, no background task.
+//! Runtime bridge: one owned permit, one owned attempt, no background task.
 use super::{
-    candidate, materialize,
+    encode_and_send, materialize,
     transport::{Client, Failure},
     ATTEMPT_TIMEOUT,
 };
@@ -8,7 +8,6 @@ use crate::telemetry::{
     handoff::{Permit, Table},
     Clock,
 };
-use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use std::sync::atomic::Ordering;
 
 struct StopOnDrop(Client);
@@ -18,10 +17,10 @@ impl Drop for StopOnDrop {
     }
 }
 
-// Fixed phase barriers for deterministic kill/ownership tests, not callbacks or
-// sinks. None in ordinary bridge tests; no serving build includes this module.
+// Fixed test-only barriers, absent from the normal sender signature.
+#[cfg(test)]
 #[derive(Default)]
-pub(super) struct Pauses {
+pub(in crate::telemetry) struct Pauses {
     pub(super) before: Option<tokio::sync::oneshot::Receiver<()>>,
     pub(super) materialized: Option<tokio::sync::oneshot::Receiver<()>>,
     pub(super) during: Option<materialize::Checkpoint>,
@@ -32,10 +31,10 @@ struct Ownership<'a, C: Clock> {
     permit: Permit<'a, C>,
 }
 
-pub(super) fn send<'a, C: Clock>(
+pub(in crate::telemetry) fn send<'a, C: Clock>(
     permit: Permit<'a, C>,
     mut client: Client,
-    pauses: Pauses,
+    #[cfg(test)] pauses: Pauses,
 ) -> impl std::future::Future<Output = Result<(), Failure>> + 'a {
     // Bind and arm drop even if the returned future is never polled. Fields
     // drop in order: stop all client clones before returning the frozen box.
@@ -54,6 +53,7 @@ pub(super) fn send<'a, C: Clock>(
             if !permit.valid() {
                 return Err(Failure::Unavailable);
             }
+            #[cfg(test)]
             if let Some(before) = pauses.before {
                 let _ = before.await;
             }
@@ -62,13 +62,21 @@ pub(super) fn send<'a, C: Clock>(
             }
             // No state guard exists here. Supported conversion only; table remains
             // exclusively owned until SDK and serialized bytes have been disposed.
-            let mut metrics = match permit.table.as_ref().unwrap() {
+            let metrics = match permit.table.as_ref().unwrap() {
                 Table::Request(table) => {
-                    materialize::request_paused(table, permit.window, pauses.during)
+                    #[cfg(test)]
+                    {
+                        materialize::request_paused(table, permit.window, pauses.during)
+                    }
+                    #[cfg(not(test))]
+                    {
+                        materialize::request(table, permit.window)
+                    }
                 }
                 Table::Infrastructure(table) => materialize::infrastructure(table, permit.window),
             }
             .ok_or(Failure::Unavailable)?;
+            #[cfg(test)]
             if let Some(materialized) = pauses.materialized {
                 let _ = materialized.await;
             }
@@ -77,11 +85,7 @@ pub(super) fn send<'a, C: Clock>(
             if tokio::time::Instant::now() >= deadline || !permit.valid() {
                 return Err(Failure::Unavailable);
             }
-            let exporter = candidate(client.0.clone())?;
-            exporter
-                .export(&mut metrics)
-                .await
-                .map_err(|_| Failure::Transport)
+            encode_and_send(&client.0, &metrics).await
         });
         let result = tokio::select! {
             biased;

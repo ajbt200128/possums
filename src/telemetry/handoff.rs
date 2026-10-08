@@ -1,4 +1,4 @@
-//! Test-only ownership boundary. Two existing boxes per family, no backlog.
+//! Runtime ownership boundary. Two existing boxes per family, no backlog.
 //! A missing frozen box is in flight (including disposal); its metadata cannot
 //! be replaced. Return mail holds only that same box, never another window.
 use super::*;

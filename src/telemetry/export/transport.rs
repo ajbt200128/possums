@@ -1,6 +1,5 @@
-//! One test-only, numeric-loopback OTLP transport candidate. No runtime wiring.
-//! Hyper owns HTTP framing; OTel/prost still own OTLP. There is no executor,
-//! pool, retry, redirect, proxy, compression, DNS or detached connection driver.
+//! Direct OTLP transport. Hyper/rustls own HTTP/TLS, OTel/prost own encoding.
+//! No pool, retry, redirect, proxy, compression or detached HTTP/TLS driver.
 use super::ATTEMPT_TIMEOUT;
 use async_trait::async_trait;
 use http::{Request, Response, Uri};
@@ -13,7 +12,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     task::{Context, Poll},
@@ -24,12 +23,12 @@ use tokio::{
     sync::{watch, Mutex},
 };
 
-pub(super) const RESPONSE_LIMIT: usize = 64 * 1024;
-pub(super) const MAX_OUTBOUND: usize = 6_576_128;
+pub(in crate::telemetry) const RESPONSE_LIMIT: usize = 64 * 1024;
+pub(in crate::telemetry) const MAX_OUTBOUND: usize = 6_576_128;
 
 // Closed diagnostics: never retain or format an underlying error or metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub(super) enum Failure {
+pub(in crate::telemetry) enum Failure {
     #[error("telemetry configuration rejected")]
     Configuration,
     #[error("telemetry attempt unavailable")]
@@ -42,53 +41,64 @@ pub(super) enum Failure {
     Expired,
 }
 
+#[cfg(test)]
 #[derive(Default)]
-pub(super) struct Evidence {
-    pub(super) connections: AtomicUsize,
-    pub(super) live_io: AtomicUsize,
-    pub(super) write_polls: AtomicUsize,
-    pub(super) written: AtomicUsize,
-    pub(super) pending_writes: AtomicUsize,
-    pub(super) connecting: AtomicUsize,
-    pub(super) received: AtomicUsize,
+pub(in crate::telemetry) struct Evidence {
+    pub(in crate::telemetry) connections: std::sync::atomic::AtomicUsize,
+    pub(in crate::telemetry) live_io: std::sync::atomic::AtomicUsize,
+    pub(in crate::telemetry) write_polls: std::sync::atomic::AtomicUsize,
+    pub(in crate::telemetry) written: std::sync::atomic::AtomicUsize,
+    pub(in crate::telemetry) pending_writes: std::sync::atomic::AtomicUsize,
+    pub(in crate::telemetry) connecting: std::sync::atomic::AtomicUsize,
+    pub(in crate::telemetry) received: std::sync::atomic::AtomicUsize,
 }
 
 struct State {
     stopped: watch::Sender<bool>,
     active: Mutex<()>,
+    #[cfg(test)]
     evidence: Arc<Evidence>,
 }
 
 #[derive(Clone)]
-pub(super) struct Client {
-    address: SocketAddr,
+pub(in crate::telemetry) struct Client {
+    address: Option<SocketAddr>,
+    tls: Option<Arc<rustls::ClientConfig>>,
+    server_name: rustls::pki_types::ServerName<'static>,
+    credential: Option<http::HeaderValue>,
     uri: Uri,
     state: Arc<State>,
     // Sole seam: deterministic pending connect, rather than non-loopback routing
     // or platform-dependent backlog exhaustion. Normal tests use real TCP.
-    pub(super) stall_connect: bool,
+    #[cfg(test)]
+    pub(in crate::telemetry) stall_connect: bool,
     authority: Option<(Arc<AtomicU64>, u64, tokio::time::Instant)>,
 }
 
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("LoopbackTelemetryClient")
+        f.write_str("TelemetryClient")
     }
 }
 
 impl Client {
-    pub(super) fn new(address: SocketAddr) -> Result<Self, Failure> {
+    #[cfg(test)]
+    pub(in crate::telemetry) fn new(address: SocketAddr) -> Result<Self, Failure> {
         if !address.ip().is_loopback() || address.port() == 0 {
             return Err(Failure::Configuration);
         }
         Ok(Self {
-            address,
+            address: Some(address),
+            tls: None,
+            server_name: "api.honeycomb.io".try_into().unwrap(),
+            credential: None,
             uri: format!("http://{address}/v1/metrics")
                 .parse()
                 .map_err(|_| Failure::Configuration)?,
             state: Arc::new(State {
                 stopped: watch::channel(false).0,
                 active: Mutex::new(()),
+                #[cfg(test)]
                 evidence: Arc::new(Evidence::default()),
             }),
             stall_connect: false,
@@ -96,7 +106,67 @@ impl Client {
         })
     }
 
-    pub(super) fn bind_epoch(
+    pub(in crate::telemetry) fn honeycomb(credential: http::HeaderValue) -> Result<Self, Failure> {
+        let roots =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|_| Failure::Configuration)?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+        // No resumption cache or TLS early-data replay.
+        tls.resumption = rustls::client::Resumption::disabled();
+        Ok(Self {
+            address: None,
+            uri: Uri::from_static("https://api.honeycomb.io/v1/metrics"),
+            tls: Some(Arc::new(tls)),
+            server_name: "api.honeycomb.io"
+                .try_into()
+                .map_err(|_| Failure::Configuration)?,
+            credential: Some(credential),
+            state: Arc::new(State {
+                stopped: watch::channel(false).0,
+                active: Mutex::new(()),
+                #[cfg(test)]
+                evidence: Arc::new(Evidence::default()),
+            }),
+            #[cfg(test)]
+            stall_connect: false,
+            authority: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(in crate::telemetry) fn tls_fixture(
+        address: SocketAddr,
+        tls: rustls::ClientConfig,
+        name: &'static str,
+    ) -> Self {
+        assert!(address.ip().is_loopback());
+        let mut client =
+            Self::honeycomb(http::HeaderValue::from_static("synthetic-key-canary")).unwrap();
+        client.address = Some(address);
+        client.tls = Some(Arc::new(tls));
+        client.server_name = name.try_into().unwrap();
+        client
+    }
+
+    pub(in crate::telemetry) fn fresh(&self) -> Self {
+        let mut client = self.clone();
+        client.state = Arc::new(State {
+            stopped: watch::channel(false).0,
+            active: Mutex::new(()),
+            #[cfg(test)]
+            evidence: self.evidence(),
+        });
+        client.authority = None;
+        client
+    }
+
+    pub(in crate::telemetry) fn bind_epoch(
         &mut self,
         epoch: Arc<AtomicU64>,
         expected: u64,
@@ -105,22 +175,23 @@ impl Client {
         self.authority = Some((epoch, expected, deadline));
     }
 
-    pub(super) fn endpoint(&self) -> String {
+    pub(in crate::telemetry) fn endpoint(&self) -> String {
         self.uri.to_string()
     }
 
-    pub(super) fn evidence(&self) -> Arc<Evidence> {
+    #[cfg(test)]
+    pub(in crate::telemetry) fn evidence(&self) -> Arc<Evidence> {
         self.state.evidence.clone()
     }
 
     // Latch BEFORE waiting. All clones share both the latch and sole attempt
     // guard. Acquiring it certifies the owned attempt future/I/O has been dropped.
     // Callers must poll/join their attempt; this is not runtime kill wiring.
-    pub(super) fn stop(&self) {
+    pub(in crate::telemetry) fn stop(&self) {
         self.state.stopped.send_replace(true);
     }
 
-    pub(super) async fn cancel(&self) {
+    pub(in crate::telemetry) async fn cancel(&self) {
         self.stop();
         let _quiescent = self.state.active.lock().await;
     }
@@ -134,29 +205,55 @@ impl Client {
         }
         // Rebuild, do not inherit SDK headers/extensions (including User-Agent).
         // Full takes ownership of Bytes without cloning/copying its data.
-        let request = Request::builder()
+        let mut builder = Request::builder()
             .method(http::Method::POST)
             .uri("/v1/metrics") // origin-form on the one direct connection, never proxy-form
             .header(http::header::HOST, self.uri.authority().unwrap().as_str())
             .header(http::header::CONTENT_TYPE, "application/x-protobuf")
-            .header(http::header::CONNECTION, "close")
+            .header(http::header::CONNECTION, "close");
+        if let Some(credential) = &self.credential {
+            builder = builder.header("x-honeycomb-team", credential);
+        }
+        let request = builder
             .body(Full::new(request.into_body()))
             .map_err(|_| Failure::Configuration)?;
+        #[cfg(test)]
         self.state
             .evidence
             .connecting
             .fetch_add(1, Ordering::SeqCst);
+        #[cfg(test)]
         if self.stall_connect {
             std::future::pending::<()>().await;
         }
         if !authorized(&self.authority) {
             return Err(Failure::Unavailable);
         }
-        let stream = TcpStream::connect(self.address)
-            .await
-            .map_err(|_| Failure::Transport)?;
-        let mut io = ObservedIo::new(stream, self.evidence());
+        let stream = match self.address {
+            Some(address) => TcpStream::connect(address).await,
+            // Unqualified for rollout: Tokio resolves on its blocking pool, whose
+            // OS lookup can outlive cancellation. Production release is closed
+            // in runtime.rs until owned DNS is qualified; see verification.
+            // Never accept a configured host or pass credentials to DNS.
+            None => TcpStream::connect(("api.honeycomb.io", 443)).await,
+        }
+        .map_err(|_| Failure::Transport)?;
+        let mut io = ObservedIo::new(
+            stream,
+            #[cfg(test)]
+            self.evidence(),
+        );
         io.authority = self.authority.clone();
+        let io: Box<dyn Io> = if let Some(tls) = &self.tls {
+            let mut stream = tokio_rustls::TlsConnector::from(tls.clone())
+                .connect(self.server_name.clone(), io)
+                .await
+                .map_err(|_| Failure::Transport)?;
+            stream.get_mut().1.set_buffer_limit(Some(32 * 1024));
+            Box::new(stream)
+        } else {
+            Box::new(io)
+        };
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
             .max_buf_size(32 * 1024)
             .max_headers(64)
@@ -189,6 +286,7 @@ impl Client {
             while let Some(frame) = body.frame().await {
                 let frame = frame.map_err(|_| Failure::Response)?;
                 let data = frame.into_data().map_err(|_| Failure::Response)?;
+                #[cfg(test)]
                 self.state
                     .evidence
                     .received
@@ -258,21 +356,26 @@ fn authorized(authority: &Option<(Arc<AtomicU64>, u64, tokio::time::Instant)>) -
 
 struct ObservedIo {
     stream: TcpStream,
+    #[cfg(test)]
     evidence: Arc<Evidence>,
     authority: Option<(Arc<AtomicU64>, u64, tokio::time::Instant)>,
 }
 
 impl ObservedIo {
-    fn new(stream: TcpStream, evidence: Arc<Evidence>) -> Self {
+    fn new(stream: TcpStream, #[cfg(test)] evidence: Arc<Evidence>) -> Self {
+        #[cfg(test)]
         evidence.connections.fetch_add(1, Ordering::SeqCst);
+        #[cfg(test)]
         evidence.live_io.fetch_add(1, Ordering::SeqCst);
         Self {
             stream,
+            #[cfg(test)]
             evidence,
             authority: None,
         }
     }
 
+    #[cfg(test)]
     fn record(&self, result: &Poll<std::io::Result<usize>>) {
         self.evidence.write_polls.fetch_add(1, Ordering::SeqCst);
         if result.is_pending() {
@@ -284,6 +387,7 @@ impl ObservedIo {
     }
 }
 
+#[cfg(test)]
 impl Drop for ObservedIo {
     fn drop(&mut self) {
         self.evidence.live_io.fetch_sub(1, Ordering::SeqCst);
@@ -310,6 +414,7 @@ impl AsyncWrite for ObservedIo {
             return Poll::Ready(Err(std::io::ErrorKind::ConnectionAborted.into()));
         }
         let result = Pin::new(&mut self.stream).poll_write(cx, buf);
+        #[cfg(test)]
         self.record(&result);
         result
     }
@@ -323,6 +428,7 @@ impl AsyncWrite for ObservedIo {
             return Poll::Ready(Err(std::io::ErrorKind::ConnectionAborted.into()));
         }
         let result = Pin::new(&mut self.stream).poll_write_vectored(cx, bufs);
+        #[cfg(test)]
         self.record(&result);
         result
     }
@@ -332,6 +438,9 @@ impl AsyncWrite for ObservedIo {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if !authorized(&self.authority) {
+            return Poll::Ready(Err(std::io::ErrorKind::ConnectionAborted.into()));
+        }
         Pin::new(&mut self.stream).poll_flush(cx)
     }
 
@@ -339,3 +448,6 @@ impl AsyncWrite for ObservedIo {
         Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
+
+trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}

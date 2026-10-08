@@ -1,4 +1,4 @@
-//! Test-only SDK table conversion. The borrowed aggregation views are inspection,
+//! Supported SDK table conversion. The borrowed aggregation views are inspection,
 //! not send authority; callers must drop them before any network await.
 use crate::telemetry::{
     AdmissionModel, DeliveryTerminal, Endpoint, GenerationTerminal, HttpTerminal, Infrastructure,
@@ -144,7 +144,7 @@ fn envelope(metrics: Vec<Metric>) -> ResourceMetrics {
         resource: Resource::builder_empty()
             .with_attributes([
                 KeyValue::new("service.name", "possums-gateway"),
-                KeyValue::new("deployment.environment.name", "test"),
+                KeyValue::new("deployment.environment.name", "production"),
                 KeyValue::new("possums.gateway.slot", "gateway-01"),
             ])
             .build(),
@@ -246,11 +246,17 @@ fn wire_representable(t: &RequestTables) -> bool {
 }
 /// Returns no partial family on invalid/sparse data. No send permit is conferred.
 pub(super) fn request(t: &RequestTables, window: Window) -> Option<ResourceMetrics> {
-    request_paused(t, window, None)
+    request_paused(
+        t,
+        window,
+        #[cfg(test)]
+        None,
+    )
 }
 
 // Fixed test rendezvous inside synchronous SDK construction, not a callback or
 // alternate encoder. Bounded even if its test controller disappears.
+#[cfg(test)]
 pub(super) struct Checkpoint {
     pub(super) entered: tokio::sync::oneshot::Sender<()>,
     pub(super) resume: std::sync::mpsc::Receiver<()>,
@@ -258,7 +264,7 @@ pub(super) struct Checkpoint {
 pub(super) fn request_paused(
     t: &RequestTables,
     window: Window,
-    checkpoint: Option<Checkpoint>,
+    #[cfg(test)] checkpoint: Option<Checkpoint>,
 ) -> Option<ResourceMetrics> {
     if !request_window(window) || !t.releasable() || !wire_representable(t) {
         return None;
@@ -323,6 +329,7 @@ pub(super) fn request_paused(
         duration,
         window,
     );
+    #[cfg(test)]
     if let Some(checkpoint) = checkpoint {
         let _ = checkpoint.entered.send(());
         checkpoint

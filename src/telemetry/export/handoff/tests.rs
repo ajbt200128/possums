@@ -480,7 +480,7 @@ async fn composed_allocation_co_closing_pressure_cancel() {
     let peer = async {
         let (mut stream, _) = listener.accept().await.unwrap();
         let length = capture_header(&mut stream, true).await;
-        assert_eq!(length, 737_920);
+        assert_eq!(length, 737_926); // honest production source label adds six bytes
         let mut body = vec![0; length];
         stream.read_exact(&mut body).await.unwrap();
         // Keep the captured body, active/frozen tables, full pool, SDK data and
@@ -629,7 +629,7 @@ async fn co_closing_sequential_handoff_and_upload_cancel() {
         while evidence.pending_writes.load(SeqCst) == 0 || evidence.written.load(SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
-        assert!(evidence.written.load(SeqCst) < 737_920);
+        assert!(evidence.written.load(SeqCst) < 737_926);
         assert!(m.stop_export().await);
         assert_eq!(evidence.live_io.load(SeqCst), 0);
         done.send(()).unwrap();
@@ -729,4 +729,66 @@ async fn dropped_io_sender_and_old_return_after_skip() {
     assert!(sender.await.is_err());
     assert_eq!(evidence.connecting.load(SeqCst), 0);
     assert!(m.take_window().is_none());
+}
+
+#[tokio::test]
+async fn composed_tls_allocation_and_owned_cancel() {
+    if !clean_child("telemetry::export::handoff::tests::composed_tls_allocation_and_owned_cancel") {
+        return;
+    }
+    let before = phase();
+    let m = Box::new(new());
+    ready(&m);
+    infrastructure(&m);
+    oracle::fill_maximum(&mut m.state.lock().unwrap().requests.active);
+    m.poll();
+    let mut pool = Vec::with_capacity(agg::POOL);
+    for _ in 0..agg::POOL {
+        pool.push(m.http(Endpoint::Home));
+    }
+    let (listener, client, acceptor) = agg::runtime::tests::fixture(true, "api.honeycomb.io").await;
+    let evidence = client.evidence();
+    let permit = m.take_window().unwrap();
+    let peer = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = acceptor.accept(stream).await.unwrap();
+        let body = agg::runtime::tests::capture(&mut stream).await;
+        assert_eq!(body.len(), 737_926);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 65536\r\n\r\n")
+            .await
+            .unwrap();
+        stream.write_all(&[b'x'; 65535]).await.unwrap();
+        while evidence.received.load(SeqCst) < 65535 {
+            tokio::task::yield_now().await;
+        }
+        // Keep all tables, pool, SDK, serialized body, bounded response and both
+        // local TLS endpoints live. Certificate/key generation is also charged.
+        let snapshot = crate::process_alloc_tests::ALLOCATOR.snapshot();
+        if std::env::var_os("POSSUMS_TELEMETRY_ALLOCATION_TEST").is_some() {
+            let peak = snapshot.phase_peak.saturating_sub(before.live);
+            eprintln!("handoff allocation TLS baseline={} sampled_peak={} incremental={} overlap={} wire={}", before.live, snapshot.phase_peak, peak, snapshot.live, body.len());
+            assert!(peak <= 32 * 1024 * 1024);
+            assert!(peak <= super::super::LIBRARY_BUDGET);
+        }
+        assert!(m.stop_export().await);
+        assert_eq!(evidence.live_io.load(SeqCst), 0);
+        body
+    };
+    let sender = send(permit, client, Pauses::default());
+    let (result, body) =
+        tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(sender, peer) })
+            .await
+            .unwrap();
+    assert!(result.is_err());
+    assert_eq!(oracle::decode(&body).resource_metrics.len(), 1);
+    assert!(m.off());
+    drop(pool);
+    if std::env::var_os("POSSUMS_TELEMETRY_ALLOCATION_TEST").is_some() {
+        let peak = crate::process_alloc_tests::ALLOCATOR
+            .snapshot()
+            .phase_peak
+            .saturating_sub(before.live);
+        assert!(peak <= super::super::LIBRARY_BUDGET);
+    }
 }

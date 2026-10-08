@@ -1,7 +1,8 @@
-//! Packet 2B: bounded, unwired, synthetic-only private aggregation.
-//! No exporter, resource reader, server hook, diagnostics or accounting owner.
+//! Bounded local aggregation. Real-traffic release remains closed pending review.
+//! Runtime export ownership is independent of inference/accounting.
 mod infrastructure;
 mod labels;
+pub mod runtime;
 mod tables;
 pub use infrastructure::*;
 pub use labels::*;
@@ -51,6 +52,7 @@ pub enum Deployment {
     #[default]
     Off,
     NonIsolated,
+    #[cfg(test)]
     IsolatedSynthetic,
 }
 
@@ -181,7 +183,6 @@ pub struct AggregateMetrics<C: Clock = SystemClock> {
     // A failed try_lock changes it before returning. Closure and consumption must
     // validate the same token, including after their last mutation.
     epoch: std::sync::Arc<AtomicU64>,
-    #[cfg(test)]
     handoff: handoff::Exchange,
     entrants: AtomicU64,
     retired: [AtomicU64; 4],
@@ -198,7 +199,6 @@ impl<C: Clock> AggregateMetrics<C> {
         let result = Self {
             clock,
             epoch: std::sync::Arc::new(AtomicU64::new(0)),
-            #[cfg(test)]
             handoff: handoff::Exchange::default(),
             entrants: AtomicU64::new(0),
             retired: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -215,12 +215,9 @@ impl<C: Clock> AggregateMetrics<C> {
                 (epoch % 2 == 1).then(|| epoch.saturating_add(1))
             })
             .is_ok();
-        #[cfg(test)]
         if changed {
             self.handoff.changed.send_replace(());
         }
-        #[cfg(not(test))]
-        let _ = changed;
     }
     fn lock(&self) -> Option<StateGuard<'_, C>> {
         // Register BEFORE attempting state access: a preempted losing observer
@@ -234,7 +231,6 @@ impl<C: Clock> AggregateMetrics<C> {
         match self.state.try_lock() {
             Ok(mut state) => {
                 self.retire(&mut state);
-                #[cfg(test)]
                 self.handoff.reclaim(&mut state);
                 if state.epoch != self.epoch.load(Ordering::SeqCst) {
                     state.requests.discard();
@@ -268,7 +264,7 @@ impl<C: Clock> AggregateMetrics<C> {
     }
     /// Local acknowledgement only. False means a concurrent local operation is
     /// still disposing state; retry control polling, never block inference.
-    /// Test-only handoff also requires actual owned attempt disposal. This is
+    /// Handoff also requires actual owned attempt disposal. This is
     /// nonblocking control polling, not exporter shutdown or a network flush.
     pub fn off(&self) -> bool {
         self.invalidate();
@@ -276,11 +272,9 @@ impl<C: Clock> AggregateMetrics<C> {
             state.requests.discard();
             state.infrastructure.discard();
             state.anchor = None;
-            #[cfg(test)]
             if self.handoff.busy.load(Ordering::SeqCst) {
                 return false;
             }
-            #[cfg(test)]
             self.handoff.reclaim(&mut state);
             true
         } else {
@@ -291,7 +285,12 @@ impl<C: Clock> AggregateMetrics<C> {
         if !self.off() {
             return false;
         }
-        if !matches!(mode, Deployment::IsolatedSynthetic) {
+        let fixture = match mode {
+            #[cfg(test)]
+            Deployment::IsolatedSynthetic => true,
+            _ => false,
+        };
+        if !fixture {
             return true;
         }
         // A lost lease cannot be reconstructed without owning the real permit.
@@ -361,7 +360,6 @@ impl<C: Clock> AggregateMetrics<C> {
             {
                 return false;
             }
-            #[cfg(test)]
             self.handoff.changed.send_replace(());
             let now = state.last.unwrap();
             if !state.restart(
@@ -998,10 +996,7 @@ impl<C: Clock> Drop for StateGuard<'_, C> {
     }
 }
 
-// Unwired ownership and export qualification only; no serving promotion.
-#[cfg(test)]
 mod export;
-#[cfg(test)]
 mod handoff;
 #[cfg(test)]
 mod tests;

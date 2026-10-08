@@ -1876,6 +1876,7 @@ dependencies = [
  "prost",
  "pulldown-cmark",
  "rand 0.9.5",
+ "rcgen",
  "reqwest",
  "rustls",
  "serde",
@@ -1885,8 +1886,10 @@ dependencies = [
  "thiserror 2.0.21",
  "tinfoil",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-http",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2049,6 +2052,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
 ]
 
 [[package]]
@@ -3360,6 +3375,15 @@ dependencies = [
  "der",
  "spki",
  "tls_codec",
+]
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
 ]
 
 [[package]]

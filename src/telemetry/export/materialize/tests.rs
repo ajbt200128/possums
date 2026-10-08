@@ -62,7 +62,7 @@ pub(in crate::telemetry) fn decode(bytes: &[u8]) -> ExportMetricsServiceRequest 
     assert_eq!(attrs.len(), 3);
     for (k, v) in [
         ("service.name", "possums-gateway"),
-        ("deployment.environment.name", "test"),
+        ("deployment.environment.name", "production"),
         ("possums.gateway.slot", "gateway-01"),
     ] {
         assert_eq!(
