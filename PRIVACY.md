@@ -1,6 +1,6 @@
 # Possums privacy policy and engineering requirements
 
-**Status: engineering policy; not a claim that every control is deployed.** Last researched: 2026-10-07. Telemetry rollout is planned, not enabled by this document. See [`docs/telemetry-plan.md`](docs/telemetry-plan.md) for implementation gates and [`docs/verification.md`](docs/verification.md) for scoped release evidence. This is not yet a complete public legal notice: operator identity, jurisdiction, privacy contact, legal obligations, and support/deletion procedures need review before publication.
+**Status: engineering policy; not a claim that every control is deployed.** Last researched: 2026-10-07. The reviewed MVP runtime is deployed; live evidence and remaining gaps are recorded separately. See [`docs/telemetry-plan.md`](docs/telemetry-plan.md) for implementation gates and [`docs/verification.md`](docs/verification.md) for scoped release evidence. This is not yet a complete public legal notice: operator identity, jurisdiction, privacy contact, legal obligations, and support/deletion procedures need review before publication.
 
 ## Mandatory reference and change control
 
@@ -10,7 +10,7 @@ This policy applies to real data in **every environment**, including testing. A 
 
 ## MVP deployment and retention decision
 
-On 2026-10-08 the operator approved deploying this work to the existing production gateway without a separate isolated test instance, and accepted Honeycomb's default retention for the MVP. Seven days is now a future retention goal, not an MVP export prerequisite. Use the configured Honeycomb development-environment credentials without displaying or committing them. The Honeycomb environment is a destination/access boundary, not evidence that the source workload is synthetic.
+On 2026-10-08 the operator approved deploying this work to the existing production gateway without a separate isolated test instance, and accepted Honeycomb's default retention for the MVP. Seven days is now a future retention goal, not an MVP export prerequisite. The initial destination expectation was Honeycomb `dev`. During live verification, the supplied key sent the approved resource metrics to `prod/metrics`; the operator explicitly chose to keep `prod`. Use that confirmed destination without displaying or committing credentials. The Honeycomb environment is a destination/access boundary, not evidence that the source workload is synthetic.
 
 The operator subsequently selected direct authenticated OTLP HTTPS to Honeycomb US, with no Collector sidecar, and automatic runtime enablement when valid allowlisted configuration and ingestion credentials are present. `OTEL_SDK_DISABLED=true` disables export. Missing or invalid configuration fails closed without failing inference. Synthetic fixture mode is test-only, never a production requirement or source label.
 
@@ -89,7 +89,7 @@ This is **MVP data minimization, not anonymity**. The pipeline deliberately cann
 
 ## Synthetic testing exception
 
-Historical local qualification fixtures used the `test` label; the operator now supplies credentials for Honeycomb `dev`. Neither label grants the synthetic exception. To use this exception, use isolated, synthetic prompts and throwaway test accounts only, with no real user traffic or reused production credentials. The shared production gateway is not isolated merely because synthetic canaries are sent to it. This permits detailed **aggregate** breakdowns and controlled low-count fixtures to validate arithmetic and suppression behavior; it does not permit bodies, identifiers, logs or traces. The exception must be deployment-controlled, not activated by a client header or request field. Do not mix synthetic and real traffic to manufacture enough samples for export. Retention, access control, secret handling and the export allowlist still apply.
+Historical local qualification fixtures used the `test` label; the current Honeycomb destination is `prod` (initially expected to be `dev`). None of these labels grants the synthetic exception. To use this exception, use isolated, synthetic prompts and throwaway test accounts only, with no real user traffic or reused production credentials. The shared production gateway is not isolated merely because synthetic canaries are sent to it. This permits detailed **aggregate** breakdowns and controlled low-count fixtures to validate arithmetic and suppression behavior; it does not permit bodies, identifiers, logs or traces. The exception must be deployment-controlled, not activated by a client header or request field. Do not mix synthetic and real traffic to manufacture enough samples for export. Retention, access control, secret handling and the export allowlist still apply.
 
 ## Required evidence for every telemetry change
 
