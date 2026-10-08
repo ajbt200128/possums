@@ -1,3 +1,5 @@
+import { compact, type ExtensionContext, type SessionBeforeCompactEvent, type SessionBeforeCompactResult } from '@earendil-works/pi-coding-agent';
+import type { StreamFn } from '@earendil-works/pi-agent-core';
 import {
   createAssistantMessageEventStream, parseStreamingJson, envApiKeyAuth,
   type ApiKeyAuth,
@@ -46,6 +48,10 @@ function blank(selected: Model<typeof API>): AssistantMessage {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 }
 const localFailures: Readonly<Record<string, string>> = Object.freeze({
+  possums_compaction_failed: 'Native summary unavailable.',
+  possums_summary_empty: 'Summary was empty.',
+  possums_summary_tools: 'Summary attempted tool use; no tool executed.',
+  possums_summary_length: 'Summary hit the output limit.',
   possums_catalog_out_of_range: 'Model catalog exceeds supported limits.',
   possums_catalog_unavailable: 'Model catalog unavailable. Use /login to refresh the session.',
   possums_incomplete_tool_round: 'Tool response incomplete; no tool executed. Charge settled. Not automatically continued. A new request may incur another charge.',
@@ -216,7 +222,72 @@ export class PossumsProvider implements Provider {
     return this.perform(selected as Model<typeof API>, context, options);
   }
 
-  private perform(selected: Model<typeof API>, context: TranscriptContext, options: RequestOptions = {}): AssistantMessageEventStream {
+  // Native compaction is separate from run authorization: it must not consume a
+  // ready run or a receipted tool continuation, even when its second call fails.
+  async compact(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<SessionBeforeCompactResult> {
+    const selected = ctx.model;
+    const epoch = this.epoch;
+    const authEpoch = this.authEpoch;
+    let closed = false;
+    let stage = 'authorization';
+    let failure: string | undefined;
+    let settled = 0n;
+    let unknown = false;
+    const requireScope = () => {
+      if (closed || epoch !== this.epoch || authEpoch !== this.authEpoch || event.signal.aborted) {
+        throw new Error('possums_run_replaced');
+      }
+    };
+    try {
+      if (event.willRetry) throw new Error('possums_automatic_replay_blocked');
+      requireScope();
+      const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_ID);
+      requireScope();
+      if (!selected || selected.provider !== PROVIDER_ID || auth?.auth.apiKey !== REQUEST_AUTH || !this.client) {
+        throw new Error('possums_session_unavailable');
+      }
+      let calls = 0;
+      const streamFn: StreamFn = async (requested, context, options) => {
+        requireScope();
+        if (requested !== selected) throw new Error('possums_request_options_unsupported');
+        stage = `summary ${++calls}`;
+        // Only this closed-over native callback drops the SDK's advisory cap.
+        // The gateway still reserves/grants the selected model's full allowance.
+        const { maxTokens: _nativeHint, ...rest } = options ?? {};
+        const stream = this.perform(selected as Model<typeof API>, context, { ...rest, signal: event.signal }, requireScope);
+        const result = await stream.result();
+        for (const diagnostic of result.diagnostics ?? []) {
+          if (diagnostic.type === 'possums_settled_receipt' && typeof diagnostic.details?.chargedMicrounits === 'string') {
+            settled += BigInt(diagnostic.details.chargedMicrounits);
+          }
+          if (diagnostic.type === 'possums_billing_unknown') unknown = true;
+        }
+        // perform authors these messages locally; never display native exceptions.
+        if (result.stopReason !== 'stop') {
+          failure = result.errorMessage;
+          throw new Error('possums_compaction_failed');
+        }
+        requireScope();
+        return stream;
+      };
+      // No retry policy: Pi 1.0.4 makes one attempt per native summary (one or
+      // two sequential summaries). Native code owns prompts, files and usage.
+      const headers = Object.fromEntries(Object.entries(auth.auth.headers ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+      const result = await compact(event.preparation, selected, auth.auth.apiKey, headers,
+        event.customInstructions, event.signal, ctx.thinkingLevel, streamFn, auth.env);
+      requireScope();
+      return { compaction: result };
+    } catch (error) {
+      const billing = `${settled > 0n ? ` Observed settled charges: $${dollars(settled.toString())}; not undone.` : ''}${unknown ? ' Additional charge unknown.' : ''}`;
+      // ExtensionRunner swallows thrown hooks and would then use the default
+      // summarizer. Even a failing UI must not turn this into a fallback/replay.
+      try { ctx.ui.notify(`Possums compaction (${stage}): ${failure ?? safeFailure(error)}${billing} No checkpoint saved. Not replayed. Use /compact deliberately or /new.`, 'warning'); }
+      catch { /* Transient UI only; never log or persist failed summaries. */ }
+      return { cancel: true };
+    } finally { closed = true; }
+  }
+
+  private perform(selected: Model<typeof API>, context: TranscriptContext, options: RequestOptions = {}, summary?: () => void): AssistantMessageEventStream {
     const events = createAssistantMessageEventStream();
     const output = blank(selected);
     const epoch = this.epoch;
@@ -231,12 +302,14 @@ export class PossumsProvider implements Provider {
     };
     void (async () => {
       try {
-        this.guard.claim(selected.id, context.messages);
+        if (summary) summary();
+        else this.guard.claim(selected.id, context.messages);
         if (!this.client || options.signal?.aborted) throw new Error('possums_session_unavailable');
         if (selected.provider !== PROVIDER_ID || selected.api !== API || selected.baseUrl !== ORIGIN || options.fetch || options.maxTokens !== undefined || options.samplingParams || options.temperature !== undefined || options.reasoning !== undefined || options.reasoningEffort !== undefined) {
           throw new Error('possums_request_options_unsupported');
         }
         const payload = invocation(selected, context);
+        if (summary && payload.tools?.length) throw new Error('possums_summary_tools');
         if (options.toolChoice !== undefined) payload.tool_choice = options.toolChoice as NonNullable<typeof payload.tool_choice>;
         const entry = this.catalog.find(entry => entry.id === selected.id);
         if (!entry || (payload.tools?.length && entry.tool_protocol !== 'openai-functions-v1')) throw new Error('possums_tools_unsupported');
@@ -251,7 +324,7 @@ export class PossumsProvider implements Provider {
           if (block.type !== 'text') throw new Error('possums_invalid_stream');
           block.text += text;
           events.push({ type: 'text_delta', contentIndex: textIndex, delta: text, partial: output });
-        }, this.newConversation, {
+        }, summary ? true : this.newConversation, {
           signal: options.signal, tools: payload.tools, tool_choice: payload.tool_choice,
           onPayload: options.onPayload ? value => options.onPayload!(value, selected) : undefined,
           onResponse: options.onResponse ? value => options.onResponse!({ status: value.status, headers: value.contentType ? { 'content-type': value.contentType } : {} }, selected) : undefined,
@@ -269,18 +342,18 @@ export class PossumsProvider implements Provider {
                 const block: ToolCall = { type: 'toolCall', id: call.id ?? '', name: call.function.name ?? '', arguments: {} };
                 pending = { block, contentIndex: output.content.length, json: '' };
                 args.set(call.index, pending); output.content.push(block);
-                events.push({ type: 'toolcall_start', contentIndex: pending.contentIndex, partial: output });
+                if (!summary) events.push({ type: 'toolcall_start', contentIndex: pending.contentIndex, partial: output });
               }
               if (call.id !== undefined) pending.block.id = call.id;
               if (call.function.name !== undefined) pending.block.name = call.function.name;
               const fragment = call.function.arguments;
               pending.json += fragment;
               pending.block.arguments = parseStreamingJson(pending.json);
-              if (fragment) events.push({ type: 'toolcall_delta', contentIndex: pending.contentIndex, delta: fragment, partial: output });
+              if (fragment && !summary) events.push({ type: 'toolcall_delta', contentIndex: pending.contentIndex, delta: fragment, partial: output });
             }
           },
         });
-        if (epoch === this.epoch) this.newConversation = false;
+        if (!summary && epoch === this.epoch) this.newConversation = false;
         if (!started) throw new Error('possums_invalid_stream');
         endText();
         const charged = safeNumber(receipt.chargedMicrounits) / 1_000_000;
@@ -297,6 +370,12 @@ export class PossumsProvider implements Provider {
           quotedCostComponents: quoted, finish: receipt.finish,
         } }];
         if (epoch !== this.epoch || options.signal?.aborted) throw new Error('possums_run_replaced');
+        if (summary) {
+          summary();
+          if (args.size || receipt.finish === 'tool_calls') throw new Error('possums_summary_tools');
+          if (receipt.finish !== 'stop') throw new Error('possums_summary_length');
+          if (!output.content.some(block => block.type === 'text' && block.text.trim())) throw new Error('possums_summary_empty');
+        }
         if (args.size && receipt.finish === 'length') throw new Error('possums_incomplete_tool_round');
         const toolUse = receipt.finish === 'tool_calls' || (receipt.finish === 'stop' && args.size > 0);
         for (const pending of args.values()) {
@@ -312,11 +391,11 @@ export class PossumsProvider implements Provider {
           output.stopReason = 'error';
           output.errorMessage = 'Possums: partial answer; charge settled. Not automatically continued. A deliberate new request may incur another charge.';
         }
-        if (epoch === this.epoch) this.guard.complete(selected.id, toolUse ? 'tool_calls' : receipt.finish, [...args.values()].map(call => ({ id: call.block.id, name: call.block.name })));
+        if (!summary && epoch === this.epoch) this.guard.complete(selected.id, toolUse ? 'tool_calls' : receipt.finish, [...args.values()].map(call => ({ id: call.block.id, name: call.block.name })));
         if (output.stopReason === 'error') events.push({ type: 'error', reason: 'error', error: output });
         else events.push({ type: 'done', reason: output.stopReason, message: output });
       } catch (error) {
-        if (epoch === this.epoch) this.guard.close();
+        if (!summary && epoch === this.epoch) this.guard.close();
         output.stopReason = options.signal?.aborted ? 'aborted' : 'error';
         if (!output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_settled_receipt') &&
           ((error instanceof GatewayError && error.billing === 'unknown') ||

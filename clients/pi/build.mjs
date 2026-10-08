@@ -2,7 +2,7 @@
 import { build, version as esbuildVersion } from 'esbuild';
 import ts from 'typescript';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir, realpath, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, realpath, access, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,13 +11,15 @@ const source = path.resolve(root, '../..');
 const out = process.env.PHASE02_OUT;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const runtimePins = {};
+const runtimeRoots = {};
 try {
   for (const name of ['pi-ai', 'pi-coding-agent', 'pi-agent-core']) {
     const entry = fileURLToPath(import.meta.resolve(`@earendil-works/${name}`));
     const bytes = await readFile(path.join(path.dirname(entry), '..', 'package.json'));
     const metadata = JSON.parse(bytes);
-    if (metadata.version !== '0.99.2') throw new Error();
+    if (metadata.version !== '1.0.4') throw new Error();
     runtimePins[name] = { version: metadata.version, manifestSha256: sha(bytes) };
+    runtimeRoots[name] = path.join(path.dirname(entry), '..');
   }
 } catch { throw new Error('unqualified Pi runtime'); }
 let checkout = false;
@@ -36,7 +38,10 @@ if (diagnostics.length) {
   process.exit(1);
 }
 await mkdir(out, { recursive: true });
-const buildReport = { node: process.version, pi: '0.99.2', runtimePins, typescript: ts.version, esbuild: esbuildVersion,
+const peers = path.join(out, 'node_modules', '@earendil-works');
+await mkdir(peers, { recursive: true });
+for (const [name, directory] of Object.entries(runtimeRoots)) await symlink(directory, path.join(peers, name));
+const buildReport = { node: process.version, pi: '1.0.4', runtimePins, typescript: ts.version, esbuild: esbuildVersion,
   lock: sha(await readFile('package-lock.json')), artifacts: {} };
 const file = path.join(out, 'extension.mjs');
 const result = await build({ entryPoints: ['index.ts'], outfile: file, bundle: true, platform: 'node',
@@ -55,4 +60,4 @@ await writeFile(path.join(out, 'package.json'), JSON.stringify({
   peerDependencies: { '@earendil-works/pi-ai': '*', '@earendil-works/pi-coding-agent': '*' },
 }, null, 2) + '\n');
 await writeFile(path.join(out, 'build-report.json'), JSON.stringify(buildReport, null, 2) + '\n');
-console.log(JSON.stringify({ output: out, pi: '0.99.2', artifacts: Object.keys(buildReport.artifacts) }));
+console.log(JSON.stringify({ output: out, pi: '1.0.4', artifacts: Object.keys(buildReport.artifacts) }));

@@ -6,6 +6,7 @@
 //! must install a content-suppressing panic hook (as `main` does): Tokio catches
 //! unwinds only AFTER the hook runs.
 
+use crate::telemetry::{hooks::Lease, GenerationTerminal, OwnedObservation, QualifiedModel};
 use crate::{
     accounting::{Accounting, AccountingError, FinalUsage, Outcome},
     inference::{stream::StreamUsage, InferenceError},
@@ -17,10 +18,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use tokio::{
-    sync::{oneshot, OwnedSemaphorePermit},
-    task::JoinHandle,
-};
+use tokio::{sync::oneshot, task::JoinHandle};
 
 /// One synchronous terminal attempt, including when the task is never polled.
 /// Only prompt-free accounting state is retained here; no inference data/errors.
@@ -28,6 +26,9 @@ struct Terminal {
     accounting: Arc<Accounting>,
     id: [u8; 32],
     armed: bool,
+    observation: Option<OwnedObservation>,
+    failure: Option<GenerationTerminal>,
+    model: Option<QualifiedModel>,
 }
 
 impl Terminal {
@@ -35,7 +36,18 @@ impl Terminal {
         // Even an accounting error must not cause a second, conflicting attempt.
         // Such errors indicate a broken reservation/ledger invariant, not retry.
         self.armed = false;
-        self.accounting.finish(self.id, usage)
+        let result = self.accounting.finish(self.id, usage);
+        // Accounting has returned and released its lock. Telemetry never retries it.
+        let terminal = match (&result, usage.is_some(), self.failure) {
+            (Ok(Outcome::Settled { .. }), true, None) => GenerationTerminal::Success,
+            (Ok(Outcome::Refunded), false, Some(failure)) => failure,
+            (Ok(Outcome::Refunded), false, None) => GenerationTerminal::Unknown,
+            _ => GenerationTerminal::Settlement,
+        };
+        if let Some(mut observation) = self.observation.take() {
+            observation.finish_generation(terminal);
+        }
+        result
     }
 }
 
@@ -53,15 +65,27 @@ impl Drop for Terminal {
 /// captured input and rendering state is destroyed, even after settlement.
 pub(crate) struct Settlement {
     terminal: Terminal,
+    first_output_seen: bool,
 }
 
 impl Settlement {
+    pub(crate) fn first_output(&mut self) {
+        // Later stream fragments need no global aggregation lock.
+        if std::mem::replace(&mut self.first_output_seen, true) {
+            return;
+        }
+        if let Some(o) = &mut self.terminal.observation {
+            o.first_output();
+        }
+    }
+
     /// Consume verified adapter completion, not an intermediate usage event.
     /// `Ok` is trusted ONLY after successful finish, DONE and EOF with no upstream
     /// error; this capability cannot establish stream authenticity itself.
     /// Accounting rechecks arithmetic and refunds invalid usage. No error text
     /// is retained or formatted. Even accounting failure is a single attempt.
     pub(crate) fn finish(mut self, result: &Result<StreamUsage, InferenceError>) -> SettledReceipt {
+        self.terminal.failure = result.as_ref().err().map(|e| e.failure().into());
         SettledReceipt {
             completion: self
                 .terminal
@@ -109,8 +133,8 @@ impl SettledReceipt {
 /// Field order keeps the resource and generation leases until terminal cleanup.
 pub(crate) struct ReservedGeneration {
     terminal: Terminal,
-    _resources: Arc<OwnedSemaphorePermit>,
-    _generation: OwnedSemaphorePermit,
+    _resources: Arc<crate::telemetry::hooks::Lease>,
+    _generation: Lease,
 }
 
 /// Fixed, content-free supervision result. Never carry a JoinError/panic payload
@@ -128,18 +152,45 @@ impl ReservedGeneration {
     pub(crate) fn new(
         accounting: Arc<Accounting>,
         id: [u8; 32],
-        generation: OwnedSemaphorePermit,
-        resources: impl Into<Arc<OwnedSemaphorePermit>>,
+        generation: impl Into<Lease>,
+        resources: impl Into<Arc<crate::telemetry::hooks::Lease>>,
     ) -> Self {
         Self {
             terminal: Terminal {
                 accounting,
                 id,
                 armed: true,
+                observation: None,
+                failure: None,
+                model: None,
             },
             _resources: resources.into(),
-            _generation: generation,
+            _generation: generation.into(),
         }
+    }
+
+    pub(crate) fn observed(
+        mut self,
+        observation: Option<OwnedObservation>,
+        model: QualifiedModel,
+    ) -> Self {
+        if let Some(observation) = &observation {
+            self._resources.observe_generation(observation);
+        }
+        self.terminal.observation = observation;
+        self.terminal.model = Some(model);
+        self
+    }
+    pub(crate) fn failure(&mut self, failure: GenerationTerminal) {
+        self.terminal.failure = Some(failure);
+    }
+    pub(crate) fn delivery_observation(&self) -> Option<OwnedObservation> {
+        Some(
+            self.terminal
+                .observation
+                .as_ref()?
+                .delivery(self.terminal.model?),
+        )
     }
 
     /// Synchronous handoff. The work factory is invoked ONLY inside the spawned
@@ -216,7 +267,10 @@ impl ReservedGeneration {
             _resources,
             _generation,
         } = self;
-        let settlement = Settlement { terminal };
+        let settlement = Settlement {
+            terminal,
+            first_output_seen: false,
+        };
         tokio::spawn(Worker {
             // The SAME guard moves into Worker before the factory can run.
             work: Box::pin(async move { work(delivery, settlement).await }),
@@ -231,8 +285,8 @@ impl ReservedGeneration {
 // Do not rely on the unspecified field order of an async block's captures.
 struct Worker<Fut> {
     work: Pin<Box<Fut>>,
-    _resources: Arc<OwnedSemaphorePermit>,
-    _generation: OwnedSemaphorePermit,
+    _resources: Arc<crate::telemetry::hooks::Lease>,
+    _generation: Lease,
 }
 
 impl<Fut> Future for Worker<Fut>

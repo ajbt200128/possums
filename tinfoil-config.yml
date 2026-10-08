@@ -8,6 +8,7 @@ networks:
       - inference.tinfoil.sh
       - github-proxy.tinfoil.sh
       - kds-proxy.tinfoil.sh
+      - api.honeycomb.io
 containers:
   - name: gateway
     image: ghcr.io/ajbt200128/possums-gateway@sha256:11dde8e753af5d2dcb438e8494d59b42e93d4d0a58e88c85d9917f1e38c88655
@@ -18,6 +19,8 @@ containers:
       - POSSUMS_GATEWAY_REPOSITORY: "ajbt200128/possums"
       - POSSUMS_TINFOIL_HOST: "inference.tinfoil.sh"
       - POSSUMS_TINFOIL_REPOSITORY: "tinfoilsh/confidential-model-router"
+      - OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io"
+      - OTEL_SERVICE_NAME: "possums-gateway"
     networks: [inference]
     attestation: true
     pids_limit: 256
@@ -27,6 +30,7 @@ containers:
     secrets:
       - POSSUMS_ACCOUNTS_JSON
       - TINFOIL_API_KEY
+      - OTEL_EXPORTER_OTLP_HEADERS
 shim:
   upstream-port: 8080
   paths:

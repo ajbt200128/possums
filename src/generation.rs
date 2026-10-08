@@ -2,6 +2,11 @@
 //! Adapters supply bounded, decoded owned input and a synchronous renderer handoff.
 //! Acceptance is the locked reservation, not receipt of the handoff result.
 
+use crate::telemetry::{
+    self,
+    hooks::{Lease, RequestContext},
+    AdmissionModel, Disposition, GenerationTerminal, QualifiedModel,
+};
 use crate::{
     accounting::{Accounting, Outcome, ReserveResult},
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
@@ -21,7 +26,7 @@ use std::{
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, Semaphore};
 
 const PREFLIGHT_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -32,6 +37,8 @@ pub(crate) struct Generation<'a> {
     pub inference: &'a SharedInference,
     pub evidence_path: &'a str,
     pub evidence_verifier: &'a Arc<dyn EvidenceVerifier>,
+    pub metrics: Option<&'a Arc<telemetry::AggregateMetrics>>,
+    pub observation: RequestContext,
     pub slots: &'a Arc<Semaphore>,
     #[cfg(test)]
     pub hooks: &'a Arc<crate::web::resource_streaming_tests::PreflightHooks>,
@@ -115,6 +122,31 @@ pub(crate) enum Rejection {
 }
 
 impl Generation<'_> {
+    pub(crate) fn observed(mut self, observation: RequestContext) -> Self {
+        self.observation = observation;
+        self
+    }
+    fn reject(&self, rejection: Rejection, model: AdmissionModel) -> Rejection {
+        use telemetry::Rejection as R;
+        let reason = match &rejection {
+            Rejection::Busy => R::GenerationCapacity,
+            Rejection::InvalidModel => R::Input,
+            Rejection::Admission(AdmissionError::Auth(_)) => R::Auth,
+            Rejection::Admission(AdmissionError::Accounting(
+                crate::accounting::AccountingError::InsufficientCredit,
+            )) => R::Credit,
+            Rejection::Admission(AdmissionError::Accounting(
+                crate::accounting::AccountingError::Concurrency,
+            )) => R::AccountLimit,
+            Rejection::Upstream(
+                InferenceFailure::VerificationFailed | InferenceFailure::EndpointBindingFailed,
+            ) => R::Verification,
+            Rejection::Upstream(InferenceFailure::CatalogFailed) => R::Catalog,
+            _ => R::Internal,
+        };
+        self.observation.reject(model, reason);
+        rejection
+    }
     pub(crate) async fn evidence(&self) -> Result<GatewayEvidence, EvidenceError> {
         self.evidence_verifier
             .verify(self.evidence_path, now_unix())
@@ -129,7 +161,7 @@ impl Generation<'_> {
         self,
         submission: Submission<'_>,
         input: GenerationInput,
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
         handoff: F,
     ) -> Result<T, Rejection>
     where
@@ -154,7 +186,7 @@ impl Generation<'_> {
         self,
         submission: Submission<'_>,
         input: StructuredGenerationInput,
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
         handoff: F,
     ) -> Result<T, Rejection>
     where
@@ -179,34 +211,52 @@ impl Generation<'_> {
         self,
         submission: Submission<'_>,
         input: RequestInput,
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
         handoff: F,
     ) -> Result<T, Rejection>
     where
         T: Send + 'static,
         F: FnOnce(ReservedGeneration, Prepared) -> T + Send + 'static,
     {
-        let profile = input.profile(self.inference)?;
-        self.evidence()
-            .await
-            .map_err(|_| Rejection::Upstream(InferenceFailure::VerificationFailed))?;
+        let profile = input
+            .profile(self.inference)
+            .map_err(|error| self.reject(error, AdmissionModel::Unknown))?;
+        self.evidence().await.map_err(|_| {
+            self.reject(
+                Rejection::Upstream(InferenceFailure::VerificationFailed),
+                AdmissionModel::Unknown,
+            )
+        })?;
         let catalog = authenticated_catalog(self.inference.as_ref(), now_unix())
             .await
-            .map_err(|error| Rejection::Upstream(error.failure()))?;
+            .map_err(|error| {
+                self.reject(
+                    Rejection::Upstream(error.failure()),
+                    AdmissionModel::Unknown,
+                )
+            })?;
         let quote = catalog
             .reservation_quote(input.model())
-            .map_err(|_| Rejection::InvalidModel)?;
+            .map_err(|_| self.reject(Rejection::InvalidModel, AdmissionModel::Unknown))?;
+        let model = QualifiedModel::from_authenticated_quote(&quote);
+        let admission_model = AdmissionModel::Qualified(model);
         let permit = self
             .slots
             .clone()
             .try_acquire_owned()
-            .map_err(|_| Rejection::Busy)?;
+            .map_err(|_| self.reject(Rejection::Busy, admission_model))?;
+        let permit = Lease::observed(permit, self.metrics, telemetry::Lane::Generation);
         let reserved_microunits = quote.reserved_microunits;
         // Qualification is independent of catalog data and must still match before
         // reservation. There are no prompt-bearing calls before this point.
-        if input.profile(self.inference)? != profile {
-            return Err(Rejection::Upstream(
-                InferenceFailure::ToolProfileUnqualified,
+        if input
+            .profile(self.inference)
+            .map_err(|error| self.reject(error, admission_model))?
+            != profile
+        {
+            return Err(self.reject(
+                Rejection::Upstream(InferenceFailure::ToolProfileUnqualified),
+                admission_model,
             ));
         }
         // Session -> submission -> accounting locks remain inside Auth. No await
@@ -220,8 +270,9 @@ impl Generation<'_> {
                 submission.token,
                 quote,
             )
-            .map_err(Rejection::Admission)?;
+            .map_err(|error| self.reject(Rejection::Admission(error), admission_model))?;
         if let ReserveResult::Duplicate(outcome) = admission.result {
+            self.observation.disposition(Disposition::Duplicate);
             return Err(Rejection::Duplicate(outcome));
         }
         let owner = ReservedGeneration::new(
@@ -229,7 +280,9 @@ impl Generation<'_> {
             admission.submission.id,
             permit,
             heavy.clone(),
-        );
+        )
+        .observed(self.observation.generation(model), model);
+        self.observation.disposition(Disposition::NewGeneration);
         let (sender, receiver) = oneshot::channel();
         // Construct BEFORE creating the future: even a pre-poll drop destroys
         // prompt/renderer captures before the sole refund owner and its leases.
@@ -285,6 +338,13 @@ impl Generation<'_> {
                             _ => Rejection::Unavailable,
                         };
                         let sender = job.sender.take().expect("preflight observer");
+                        if let Some(owner) = &mut job.owner {
+                            owner.failure(match &rejection {
+                                Rejection::Upstream(failure) => (*failure).into(),
+                                Rejection::Context => GenerationTerminal::Admission,
+                                _ => GenerationTerminal::Internal,
+                            });
+                        }
                         drop(job); // Refund once BEFORE reporting rejection.
                         let _ = sender.send(Err(rejection));
                         return;
@@ -339,7 +399,7 @@ struct PreflightInput<F, T> {
 // All work/input/unclaimed output dies before returning the last heavy lease.
 struct ChargedPreflight<F> {
     work: Pin<Box<F>>,
-    _heavy: Arc<OwnedSemaphorePermit>,
+    _heavy: Arc<crate::telemetry::hooks::Lease>,
 }
 
 impl<F: Future<Output = ()>> Future for ChargedPreflight<F> {

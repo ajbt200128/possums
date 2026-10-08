@@ -188,7 +188,7 @@ impl Inference for UnusedInference {
         &self,
         _: &str,
         _: &[Message],
-        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        _heavy: std::sync::Arc<possums::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         unreachable!()
     }
@@ -197,7 +197,7 @@ impl Inference for UnusedInference {
         &self,
         _: &Model,
         _: &[Message],
-        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        _heavy: std::sync::Arc<possums::telemetry::hooks::Lease>,
         _: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<possums::inference::stream::StreamUsage, InferenceError> {
         unreachable!("transport rejection must precede generation")

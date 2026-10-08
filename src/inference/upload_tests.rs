@@ -10,9 +10,9 @@ use tokio::{
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-fn admission() -> (Arc<Semaphore>, Arc<OwnedSemaphorePermit>) {
+fn admission() -> (Arc<Semaphore>, Arc<crate::telemetry::hooks::Lease>) {
     let lane = Arc::new(Semaphore::new(1));
-    let heavy = Arc::new(lane.clone().try_acquire_owned().unwrap());
+    let heavy = Arc::new(lane.clone().try_acquire_owned().unwrap().into());
     (lane, heavy)
 }
 

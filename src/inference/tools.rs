@@ -373,7 +373,8 @@ mod tests {
         ] {
             let invocation = input(choice);
             let slots = Arc::new(Semaphore::new(1));
-            let heavy = Arc::new(slots.clone().try_acquire_owned().unwrap());
+            let heavy: Arc<crate::telemetry::hooks::Lease> =
+                Arc::new(slots.clone().try_acquire_owned().unwrap().into());
             let (tokenizer, released) =
                 invocation_tokenizer_body("fixture", &invocation, heavy.clone()).unwrap();
             let request = reqwest::Client::new()

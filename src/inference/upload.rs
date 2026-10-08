@@ -1,14 +1,14 @@
 //! Request DATA owns admission, not just the request future or outer Body.
 use axum::body::Bytes;
 use std::sync::Arc;
-use tokio::sync::{oneshot, OwnedSemaphorePermit};
+use tokio::sync::oneshot;
 
 // Field drop order matters: signal only AFTER the serialized allocation and its
 // lease are gone. Bytes clones/slices (including Hyper's write queue) share this
 // owner. Never derive Debug: bytes contain prompt plaintext.
 struct Upload {
     bytes: Vec<u8>,
-    _heavy: Option<Arc<OwnedSemaphorePermit>>,
+    _heavy: Option<Arc<crate::telemetry::hooks::Lease>>,
     _released: oneshot::Sender<()>,
 }
 
@@ -30,7 +30,7 @@ impl UploadReleased {
 // None is reserved for the private, fixed-input funded diagnostic, never routes.
 pub(super) fn body(
     bytes: Vec<u8>,
-    heavy: Option<Arc<OwnedSemaphorePermit>>,
+    heavy: Option<Arc<crate::telemetry::hooks::Lease>>,
 ) -> (reqwest::Body, UploadReleased) {
     let (released, receipt) = oneshot::channel();
     let bytes = Bytes::from_owner(Upload {

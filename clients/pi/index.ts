@@ -7,7 +7,7 @@ import { LIMITS } from '../../examples/phase01/limits.js';
 import { connect } from './bootstrap.js';
 import { PossumsProvider, PROVIDER_ID } from './provider.js';
 
-export const PI_PIN = '0.99.2';
+export const PI_PIN = '1.0.4';
 function requirePinnedRuntime(): void {
   try {
     for (const name of ['pi-ai', 'pi-coding-agent', 'pi-agent-core']) {
@@ -15,7 +15,7 @@ function requirePinnedRuntime(): void {
       const metadata = JSON.parse(readFileSync(join(dirname(entry), '..', 'package.json'), 'utf8'));
       if (metadata.version !== PI_PIN) throw new Error();
     }
-  } catch { throw new Error('possums_requires_pi_0_99_2'); }
+  } catch { throw new Error('possums_requires_pi_1_0_4'); }
 }
 async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
   if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('possums_manifest_required');
@@ -35,7 +35,9 @@ async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
 export default function possums(pi: ExtensionAPI): void {
   requirePinnedRuntime();
   pi.registerFlag('possums-manifest', { type: 'string', description: 'Independently hash-approved Possums release manifest (public file, never a credential)' });
-  const provider = new PossumsProvider(async signal => connect(await manifest(pi.getFlag('possums-manifest')), signal));
+  const provider = new PossumsProvider(async signal => connect(await manifest(
+    pi.getFlag('possums-manifest') ?? fileURLToPath(new URL('./tinfoil-deployment.json', import.meta.url)),
+  ), signal));
   pi.registerProvider(provider);
   pi.on('session_start', async (_event, ctx) => {
     provider.newSession();
@@ -49,8 +51,8 @@ export default function possums(pi: ExtensionAPI): void {
   pi.on('cache_warming_decision', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) return { action: 'stop' as const };
   });
-  pi.on('session_before_compact', (_event, ctx) => {
-    if (ctx.model?.provider === PROVIDER_ID) return { cancel: true };
+  pi.on('session_before_compact', (event, ctx) => {
+    if (ctx.model?.provider === PROVIDER_ID) return provider.compact(event, ctx);
   });
   pi.registerCommand('possums-text-only', {
     description: 'Explicitly disable active Pi tools for a text-only Possums model',

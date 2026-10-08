@@ -43,7 +43,7 @@ impl Inference for Fixture {
         &self,
         _: &str,
         _: &[Message],
-        _: Arc<tokio::sync::OwnedSemaphorePermit>,
+        _: Arc<possums::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         panic!("control cannot tokenize")
     }

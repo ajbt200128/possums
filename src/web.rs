@@ -1,3 +1,7 @@
+use crate::telemetry::{
+    hooks::{HttpObservation, Lease, RequestContext},
+    AdmissionModel, Endpoint, HttpTerminal, Lane, Rejection as MetricRejection,
+};
 use crate::{
     accounting::{Accounting, AccountingError, Outcome},
     attestation::{EvidenceVerifier, GatewayEvidence},
@@ -31,10 +35,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::{
-    net::TcpListener,
-    sync::{OwnedSemaphorePermit, Semaphore},
-};
+use tokio::{net::TcpListener, sync::Semaphore};
 use tower_http::catch_panic::CatchPanicLayer;
 
 #[cfg(test)]
@@ -72,11 +73,29 @@ pub struct AppState {
     new_chat_memory: Arc<Semaphore>,
     control_memory: Arc<Semaphore>,
     generation_slots: Arc<Semaphore>,
+    telemetry: Option<Arc<crate::telemetry::AggregateMetrics>>,
     #[cfg(test)]
     preflight_hooks: Arc<resource_streaming_tests::PreflightHooks>,
 }
 
 impl AppState {
+    pub fn with_telemetry(
+        mut self,
+        metrics: Option<Arc<crate::telemetry::AggregateMetrics>>,
+    ) -> Self {
+        self.telemetry = metrics;
+        self
+    }
+    #[cfg(test)]
+    pub(crate) fn available_lanes(&self) -> [usize; 5] {
+        [
+            self.generation_slots.available_permits(),
+            self.chat_memory.available_permits(),
+            self.chat_ingress.available_permits(),
+            self.new_chat_memory.available_permits(),
+            self.control_memory.available_permits(),
+        ]
+    }
     pub(crate) fn generation(&self) -> Generation<'_> {
         Generation {
             auth: &self.auth,
@@ -85,6 +104,8 @@ impl AppState {
             evidence_path: &self.gateway_evidence_path,
             evidence_verifier: &self.gateway_evidence_verifier,
             slots: &self.generation_slots,
+            metrics: self.telemetry.as_ref(),
+            observation: Default::default(),
             #[cfg(test)]
             hooks: &self.preflight_hooks,
         }
@@ -108,6 +129,7 @@ impl AppState {
             new_chat_memory: Arc::new(Semaphore::new(1)),
             control_memory: Arc::new(Semaphore::new(1)),
             generation_slots: Arc::new(Semaphore::new(CHAT_LANES)),
+            telemetry: None,
             #[cfg(test)]
             preflight_hooks: Arc::default(),
         }
@@ -157,14 +179,31 @@ pub async fn serve_with_header_deadline(
     header_deadline: Duration,
 ) -> std::io::Result<()> {
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let telemetry = state.telemetry.clone();
     let app = router(state);
     loop {
         let (stream, _) = listener.accept().await?;
         let Ok(permit) = connections.clone().try_acquire_owned() else {
+            if let Some(metrics) = &telemetry {
+                metrics.reject(
+                    None,
+                    AdmissionModel::NotApplicable,
+                    MetricRejection::ConnectionCapacity,
+                );
+            }
             drop(stream);
             continue;
         };
+        let permit = Lease::observed(permit, telemetry.as_ref(), Lane::Connection);
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = entered.clone();
         let service = TowerToHyperService::new(app.clone());
+        let service = hyper::service::service_fn(move |request| {
+            seen.store(true, std::sync::atomic::Ordering::Release);
+            let service = service.clone();
+            async move { hyper::service::Service::call(&service, request).await }
+        });
+        let metrics = telemetry.clone();
         tokio::spawn(async move {
             let mut builder = http1::Builder::new();
             builder
@@ -173,7 +212,21 @@ pub async fn serve_with_header_deadline(
                 .max_headers(MAX_HEADERS)
                 .max_buf_size(MAX_HEADER_BYTES);
             let connection = builder.serve_connection(TokioIo::new(stream), service);
-            let _ = tokio::time::timeout(CONNECTION_DEADLINE, connection).await;
+            let result = tokio::time::timeout(CONNECTION_DEADLINE, connection).await;
+            if !entered.load(std::sync::atomic::Ordering::Acquire) {
+                let reason = match result {
+                    Err(_) => Some(MetricRejection::ConnectionDeadline),
+                    Ok(Err(error)) if error.is_timeout() => {
+                        Some(MetricRejection::ConnectionDeadline)
+                    }
+                    Ok(Err(error)) if error.is_parse() => Some(MetricRejection::HeaderProtocol),
+                    Ok(Err(_)) => Some(MetricRejection::TransportUnknown),
+                    Ok(Ok(())) => None, // clean idle close is not a rejection
+                };
+                if let (Some(metrics), Some(reason)) = (&metrics, reason) {
+                    metrics.reject(None, AdmissionModel::NotApplicable, reason);
+                }
+            }
             drop(permit);
         });
     }
@@ -187,20 +240,25 @@ async fn request_admission(
     // Match the router's exact method/path semantics; query strings do not
     // affect routing. Wrong methods, trailing slashes and encoded aliases stay
     // in the bounded control lane and cannot reach a heavy handler.
-    let lane = match (request.method(), request.uri().path()) {
-        (&Method::POST, "/chat" | "/v1/chat/completions") => &state.chat_memory,
-        (&Method::POST, "/chat/new") => &state.new_chat_memory,
-        _ => &state.control_memory,
+    let endpoint = Endpoint::route(request.method().as_str(), request.uri().path());
+    let (observation, context) = HttpObservation::new(state.telemetry.as_ref(), endpoint);
+    request.extensions_mut().insert(context.clone());
+    let (lane, label) = match (request.method(), request.uri().path()) {
+        (&Method::POST, "/chat" | "/v1/chat/completions") => (&state.chat_memory, Lane::Heavy),
+        (&Method::POST, "/chat/new") => (&state.new_chat_memory, Lane::NewChat),
+        _ => (&state.control_memory, Lane::Control),
     };
     let api = crate::api::is_api(request.uri().path());
     let Ok(permit) = lane.clone().try_acquire_owned() else {
-        return if api {
+        context.reject(AdmissionModel::Unknown, MetricRejection::RequestCapacity);
+        let response = if api {
             crate::api::error(StatusCode::SERVICE_UNAVAILABLE)
         } else {
             (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response()
         };
+        return observed_response(response, None, observation);
     };
-    let lease = Arc::new(permit);
+    let lease = Arc::new(Lease::observed(permit, state.telemetry.as_ref(), label));
     if request.method() == Method::POST
         && matches!(request.uri().path(), "/chat" | "/v1/chat/completions")
     {
@@ -208,6 +266,7 @@ async fn request_admission(
         request.extensions_mut().insert(lease.clone());
     }
     let response = if api && (request.uri().query().is_some() || request.method() == Method::HEAD) {
+        context.reject(AdmissionModel::Unknown, MetricRejection::Input);
         crate::api::error(StatusCode::BAD_REQUEST)
     } else {
         next.run(request).await
@@ -225,13 +284,33 @@ async fn request_admission(
     } else {
         response
     };
+    observed_response(response, Some(lease), observation)
+}
+
+pub(crate) fn observed_response(
+    response: Response,
+    lease: Option<Arc<Lease>>,
+    mut observation: HttpObservation,
+) -> Response {
+    observation.status(response.status().as_u16());
     let (parts, body) = response.into_parts();
-    Response::from_parts(parts, Body::new(AdmissionBody { inner: body, lease }))
+    if body.is_end_stream() {
+        observation.finish(HttpTerminal::Eof);
+    }
+    Response::from_parts(
+        parts,
+        Body::new(AdmissionBody {
+            inner: body,
+            lease,
+            observation,
+        }),
+    )
 }
 
 struct AdmissionBody {
     inner: Body,
-    lease: Arc<OwnedSemaphorePermit>,
+    lease: Option<Arc<Lease>>,
+    observation: HttpObservation,
 }
 
 // Data drops BEFORE its lease. from_owner preserves the lease across frame
@@ -239,7 +318,7 @@ struct AdmissionBody {
 // payload. The same owner is used for raw request bytes through Form decoding.
 struct AdmittedBytes {
     data: Bytes,
-    _lease: Arc<OwnedSemaphorePermit>,
+    _lease: Arc<crate::telemetry::hooks::Lease>,
 }
 
 impl AsRef<[u8]> for AdmittedBytes {
@@ -256,18 +335,24 @@ impl HttpBody for AdmissionBody {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.inner).poll_frame(context).map(|frame| {
-            frame.map(|result| {
-                result.map(|frame| {
-                    frame.map_data(|data| {
-                        Bytes::from_owner(AdmittedBytes {
-                            data,
-                            _lease: self.lease.clone(),
-                        })
-                    })
+        let frame = std::task::ready!(Pin::new(&mut self.inner).poll_frame(context));
+        match &frame {
+            None => self.observation.finish(HttpTerminal::Eof),
+            Some(Err(_)) => self.observation.finish(HttpTerminal::Error),
+            _ if self.inner.is_end_stream() => self.observation.finish(HttpTerminal::Eof),
+            _ => {}
+        }
+        Poll::Ready(frame.map(|result| {
+            result.map(|frame| {
+                frame.map_data(|data| match &self.lease {
+                    Some(lease) => Bytes::from_owner(AdmittedBytes {
+                        data,
+                        _lease: lease.clone(),
+                    }),
+                    None => data,
                 })
             })
-        })
+        }))
     }
 
     fn is_end_stream(&self) -> bool {
@@ -285,14 +370,26 @@ async fn total_body_deadline(
     next: Next,
     deadline: Duration,
 ) -> Response {
+    let observation = request
+        .extensions()
+        .get::<RequestContext>()
+        .cloned()
+        .unwrap_or_default();
     let chat = request.method() == Method::POST
         && matches!(request.uri().path(), "/chat" | "/v1/chat/completions");
     // The outer heavy permit is already owned. Failure here rolls it back
     // through the bounded error response, with no waiter or body polling.
     let ingress = if chat {
         match state.chat_ingress.clone().try_acquire_owned() {
-            Ok(permit) => Some(Arc::new(permit)),
-            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response(),
+            Ok(permit) => Some(Arc::new(Lease::observed(
+                permit,
+                state.telemetry.as_ref(),
+                Lane::Ingress,
+            ))),
+            Err(_) => {
+                observation.reject(AdmissionModel::Unknown, MetricRejection::IngressCapacity);
+                return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response();
+            }
         }
     } else {
         None
@@ -302,9 +399,13 @@ async fn total_body_deadline(
     let bytes = match tokio::time::timeout(deadline, collect_request(body, limit)).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(())) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response()
+            observation.reject(AdmissionModel::Unknown, MetricRejection::Input);
+            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
         }
-        Err(_) => return (StatusCode::REQUEST_TIMEOUT, "request body timed out").into_response(),
+        Err(_) => {
+            observation.reject(AdmissionModel::Unknown, MetricRejection::Input);
+            return (StatusCode::REQUEST_TIMEOUT, "request body timed out").into_response();
+        }
     };
     let bytes = match ingress {
         Some(lease) => Bytes::from_owner(AdmittedBytes {
@@ -349,6 +450,9 @@ async fn header_size_limit(request: Request<Body>, next: Next) -> Response {
                 .saturating_add(value.as_bytes().len())
         });
     if header_bytes > MAX_HEADER_BYTES || request.headers().len() > MAX_HEADERS {
+        if let Some(observation) = request.extensions().get::<RequestContext>() {
+            observation.reject(AdmissionModel::Unknown, MetricRejection::Input);
+        }
         return (
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "request headers too large",
@@ -583,7 +687,8 @@ async fn attestation(State(state): State<AppState>) -> Response {
 // Delivery (64 KiB/eight outstanding frame owners) cannot cancel/reprice work.
 async fn chat(
     State(state): State<AppState>,
-    Extension(heavy): Extension<Arc<OwnedSemaphorePermit>>,
+    Extension(heavy): Extension<Arc<crate::telemetry::hooks::Lease>>,
+    Extension(observation): Extension<RequestContext>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -598,6 +703,7 @@ async fn chat(
             })
         })
     {
+        observation.reject(AdmissionModel::Unknown, MetricRejection::Input);
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "form content type required",
@@ -606,7 +712,10 @@ async fn chat(
     }
     let form = match decode_continuation(&body) {
         Ok(form) => form,
-        Err(_) => return bad_request(),
+        Err(_) => {
+            observation.reject(AdmissionModel::Unknown, MetricRejection::Input);
+            return bad_request();
+        }
     };
     #[cfg(test)]
     {
@@ -618,9 +727,15 @@ async fn chat(
     }
     drop(body); // Decoded storage is heavy-owned; the raw ingress owner ends here.
     let Some((session_id, session)) = session_from_headers(&state, &headers) else {
+        observation.reject(AdmissionModel::Unknown, MetricRejection::Auth);
         return unauthorized();
     };
-    if !Auth::verify_csrf(&session, &form.csrf) || form.prompt.is_empty() {
+    if !Auth::verify_csrf(&session, &form.csrf) {
+        observation.reject(AdmissionModel::Unknown, MetricRejection::Auth);
+        return bad_request();
+    }
+    if form.prompt.is_empty() {
+        observation.reject(AdmissionModel::Unknown, MetricRejection::Input);
         return bad_request();
     }
     // Only small renderer/admission metadata is copied; history/prompt move once.
@@ -635,6 +750,7 @@ async fn chat(
     let resource_hooks = Some(state.preflight_hooks.resources.clone());
     let result = state
         .generation()
+        .observed(observation)
         .submit(
             Submission {
                 session_id: &session_id,
@@ -984,7 +1100,7 @@ mod tests {
             &self,
             _: &str,
             _: &[Message],
-            _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+            _heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
         ) -> Result<u64, InferenceError> {
             self.prompts.fetch_add(1, Ordering::SeqCst);
             self.entered.notify_one();
@@ -996,7 +1112,7 @@ mod tests {
             &self,
             _: &Model,
             _: &[Message],
-            _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+            _heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
             on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
         ) -> Result<crate::inference::stream::StreamUsage, InferenceError> {
             let mut parser = crate::inference::stream::ProtocolParser::default();
@@ -1036,7 +1152,9 @@ mod tests {
         // The production handler consumes the same lease when handing off work.
         let app = Router::new()
             .fallback(|request: Request<Body>| async move {
-                let lease = request.extensions().get::<Arc<OwnedSemaphorePermit>>();
+                let lease = request
+                    .extensions()
+                    .get::<Arc<crate::telemetry::hooks::Lease>>();
                 assert_eq!(
                     lease.is_some(),
                     request.method() == Method::POST && request.uri().path() == "/chat"
@@ -1071,7 +1189,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK); // Only one free heavy slot needed.
         let lease = response
             .extensions_mut()
-            .remove::<Arc<OwnedSemaphorePermit>>()
+            .remove::<Arc<crate::telemetry::hooks::Lease>>()
             .unwrap();
         assert_eq!(state.chat_memory.available_permits(), 0);
         assert_eq!(state.chat_ingress.available_permits(), 4);

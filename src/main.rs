@@ -2,6 +2,7 @@ use possums::{
     attestation::TinfoilEvidenceVerifier,
     auth::Auth,
     inference::TinfoilInference,
+    telemetry::runtime::{Config as TelemetryConfig, Runtime as TelemetryRuntime},
     web::{serve, AppState},
 };
 use std::{env, process::ExitCode, sync::Arc};
@@ -38,5 +39,29 @@ async fn run() -> Result<(), ()> {
         )),
     );
     let listener = tokio::net::TcpListener::bind(bind).await.map_err(|_| ())?;
-    serve(listener, state).await.map_err(|_| ())
+    let telemetry = TelemetryRuntime::start(TelemetryConfig::from_env());
+    let state = state.with_telemetry(telemetry.metrics());
+    let result = tokio::select! {
+        result = serve(listener, state) => result.map_err(|_| ()),
+        _ = shutdown_signal() => Ok(()),
+    };
+    // Telemetry disposal failure must not replace the serving outcome.
+    let _ = telemetry.shutdown().await;
+    result
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! {
+                _ = terminate.recv() => {},
+                _ = tokio::signal::ctrl_c() => {},
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }

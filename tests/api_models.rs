@@ -40,7 +40,7 @@ impl Inference for Provider {
         &self,
         _: &str,
         _: &[Message],
-        _: Arc<tokio::sync::OwnedSemaphorePermit>,
+        _: Arc<possums::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         self.tokenizer_calls.fetch_add(1, Ordering::SeqCst);
         Err(InferenceError::Unavailable)
@@ -49,7 +49,7 @@ impl Inference for Provider {
         &self,
         _: &Model,
         _: &[Message],
-        _: Arc<tokio::sync::OwnedSemaphorePermit>,
+        _: Arc<possums::telemetry::hooks::Lease>,
         _: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         self.generation_calls.fetch_add(1, Ordering::SeqCst);
