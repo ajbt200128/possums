@@ -93,7 +93,7 @@ Proposed starting cadence: **five-minute, non-overlapping request windows**, **o
 
 Use bounded in-memory window state and delta exports, not lifetime counters. On restart, discard partial request windows; do not emit an immediate partial bucket or persist a spool. Request counts, latency distributions and outcome families must be released consistently, not independently filtered so that a published total exposes a suppressed failure count.
 
-For synthetic validation, exercise the existing threshold of ten at 0/1/9/10/11 observations and test rare histogram bins and complementary totals. **Ten is not sufficient protection for real traffic**, especially a one-user test gateway. A production-ready release algorithm must specify which related tables are withheld together or coarsened and how it prevents differencing across all released families. Until approved, request-derived exports are **synthetic-only**; no claim of anonymity and no silent relaxation to populate a dashboard. Postpone token/cost totals and throughput-per-token calculations to reduce the initial privacy surface.
+The [reviewed MVP release scope](../PRIVACY.md#reviewed-mvp-release-scope) uses the same linked-family filter for configured production and synthetic tests. Exercise ten-observation thresholds at 0/1/9/10/11, rare bins, all simultaneous partitions and hidden complements; withhold the whole family rather than expose suppressed cells by subtraction. **Ten observations do not prove multiple users or prevent timing correlation**, especially on a quiet gateway. Do not relax this filter to populate a dashboard, or describe it as anonymity. Token/cost totals and throughput-per-token calculations remain deferred.
 
 ## Resource instrumentation choice
 
