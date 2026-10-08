@@ -97,7 +97,9 @@ For synthetic validation, exercise the existing threshold of ten at 0/1/9/10/11 
 
 ## Resource instrumentation choice
 
-Prefer the least-privileged source that answers the question:
+**Implemented MVP source:** gateway-process CPU time (`cpu-time` 1.0.0) and RSS bytes (`memory-stats` 1.2.0, `always_use_statm`). This answers the gateway-process question without a Tinfoil administrative key, external reader, or host discovery. Linux reads numeric `/proc/self/statm`, not memory-map paths/addresses; its RSS is approximate. Tinfoil workload/enclave scopes and cgroup limits remain unavailable, not aliases for this source. No capacity percentage is inferred. Local Darwin smoke tests are not deployed Linux evidence; see [verification](verification.md#2026-10-08--gateway-process-cpu-and-rss).
+
+For additional scopes, prefer the least-privileged source that answers the question:
 
 1. **Tinfoil's native resource metrics first.** Inspect them without deploying another observer. If cadence/scope/retention fit, use a small external metrics reader (existing supported client/receiver if available) with a scoped Tinfoil key, mapping only approved numeric fields and configured instance slots to the same reviewed direct export boundary. No raw API payload export. Keep polling state bounded, deduplicate fixed buckets, and distinguish stale/missing data from zero. Account for collection lag; do not interpolate absent points into healthy values.
 2. **In-process process metrics if native data lacks gateway detail.** A supported Rust process-metrics library can read the gateway's own CPU time and RSS without broad host privileges. Separately test access to its own cgroup CPU/memory accounting. Process RSS, cgroup charged memory/working set and enclave memory are different metrics, not aliases. Include attestation-helper and exporter overhead in the appropriate container/enclave view.
