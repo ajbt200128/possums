@@ -2,9 +2,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join } from 'node:path';
 import { open, type FileHandle } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { LIMITS } from '../../examples/phase01/limits.js';
 import { connect } from './bootstrap.js';
+import { ConnectionFailure, approvalSummary } from './diagnostics.js';
 import { PossumsProvider, PROVIDER_ID } from './provider.js';
 
 export const PI_PIN = '1.0.4';
@@ -18,32 +19,51 @@ function requirePinnedRuntime(): void {
   } catch { throw new Error('possums_requires_pi_1_0_4'); }
 }
 async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
-  if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('possums_manifest_required');
-  let handle: FileHandle | undefined;
   try {
-    handle = await open(file, 'r');
-    const info = await handle.stat();
-    if (!info.isFile() || info.size > LIMITS.provenance) throw new Error('possums_invalid_manifest');
-    const buffer = new Uint8Array(LIMITS.provenance + 1);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    if (bytesRead !== info.size || bytesRead > LIMITS.provenance) throw new Error('possums_invalid_manifest');
-    return buffer.slice(0, bytesRead);
-  } catch { throw new Error('possums_invalid_manifest'); }
-  finally { await handle?.close(); }
+    if (typeof file !== 'string' || !isAbsolute(file)) throw new Error();
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(file, 'r');
+      const info = await handle.stat();
+      if (!info.isFile() || info.size > LIMITS.provenance) throw new Error();
+      const buffer = new Uint8Array(LIMITS.provenance + 1);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      if (bytesRead !== info.size || bytesRead > LIMITS.provenance) throw new Error();
+      return buffer.slice(0, bytesRead);
+    } finally { await handle?.close(); }
+  } catch { throw new ConnectionFailure('manifest_unavailable'); }
 }
 
 export default function possums(pi: ExtensionAPI): void {
   requirePinnedRuntime();
   pi.registerFlag('possums-manifest', { type: 'string', description: 'Independently hash-approved Possums release manifest (public file, never a credential)' });
+  let ui: ExtensionContext['ui'] | undefined;
+  let lastFailure: ConnectionFailure | undefined;
+  const notifiedCodes = new Set<ConnectionFailure['code']>();
   const provider = new PossumsProvider(async signal => connect(await manifest(
     pi.getFlag('possums-manifest') ?? fileURLToPath(new URL('./tinfoil-deployment.json', import.meta.url)),
-  ), signal));
+  ), signal), failure => {
+    lastFailure = failure;
+    if (!failure) { notifiedCodes.clear(); return; }
+    if (!ui || notifiedCodes.has(failure.code)) return;
+    notifiedCodes.add(failure.code);
+    try { ui.notify(failure.message, 'warning'); } catch { /* Transient UI only. */ }
+  });
   pi.registerProvider(provider);
   pi.on('session_start', async (_event, ctx) => {
+    ui = ctx.hasUI ? ctx.ui : undefined;
     provider.newSession();
     await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], allowNetwork: true });
   });
-  pi.on('session_shutdown', () => provider.logout());
+  pi.on('session_shutdown', () => { ui = undefined; provider.logout(); });
+  pi.registerCommand('possums-status', {
+    description: 'Show the last safe connection failure or compiled approval status (offline)',
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      try { ctx.ui.notify(lastFailure?.message ?? approvalSummary(), lastFailure ? 'warning' : 'info'); }
+      catch { /* Transient UI only. */ }
+    },
+  });
   pi.on('before_agent_start', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) provider.beginRun();
   });
