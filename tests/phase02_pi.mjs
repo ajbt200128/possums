@@ -174,6 +174,71 @@ await check('pinned SDK checks stay offline; saved key wins over env; legacy mar
  assert.deepEqual(await credentials.read('possums'),{type:'api_key',key:recoveryKey});
  assert.equal((await models.getAuth('possums')).auth.apiKey,requestMarker);assert.equal(fixture.s.sends(),0);
 });
+await check('local approval expiry and mismatched manifest fail before any evidence fetch',async()=>{
+ const now=Date.now,fetch=globalThis.fetch;let calls=0;
+ globalThis.fetch=async()=>{calls++;throw new Error('PRIVATE_URL_CREDENTIAL');};
+ try {
+  Date.now=()=>m.API_APPROVALS[0].expires-1000;
+  await assert.rejects(m.connect(new Uint8Array()),error=>error instanceof m.ConnectionFailure && error.code==='manifest_mismatch');
+  Date.now=()=>m.API_APPROVALS[0].expires;
+  await assert.rejects(m.connect(new Uint8Array()),error=>error instanceof m.ConnectionFailure && error.code==='approval_expired');
+  assert.equal(calls,0);
+ } finally {Date.now=now;globalThis.fetch=fetch;}
+});
+await check('extension reports missing or invalid manifest paths without revealing them or prompting',async()=>{
+ for(const manifest of ['PRIVATE_PATH',path.join(root,'PRIVATE_PATH_missing.json')]) {
+  let provider,prompts=0;
+  m.extension({registerFlag:()=>{},getFlag:()=>manifest,registerProvider:value=>{provider=value;},on:()=>{},registerCommand:()=>{}});
+  await assert.rejects(provider.auth.apiKey.login({...interaction(),prompt:async()=>{prompts++;return recoveryKey;}}),
+   error=>error.code==='manifest_unavailable' && !error.message.includes('PRIVATE_PATH'));
+  assert.equal(prompts,0);
+ }
+});
+await check('connection categories survive restoration and login without exposing hostile errors or prompting',async()=>{
+ for(const code of ['approval_expired','approval_unavailable','manifest_unavailable','manifest_mismatch','evidence_unavailable','verification_failed']) {
+  let prompts=0;const notices=[];
+  const provider=new m.PossumsProvider(async()=>{throw new m.ConnectionFailure(code);},failure=>notices.push(failure));
+  for(const operation of [()=>provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey})),
+   ()=>provider.auth.apiKey.login({...interaction(),prompt:async()=>{prompts++;return recoveryKey;}})]) {
+   await assert.rejects(operation(),error=>error instanceof m.ConnectionFailure && error.code===code && error.message.includes('No inference request was sent by this connection attempt'));
+  }
+  assert.equal(prompts,0);assert.equal(notices.length,2);assert.deepEqual(provider.getModels(),[]);
+ }
+ const hostile='PRIVATE_URL_CREDENTIAL\u001b[31m';
+ const provider=new m.PossumsProvider(async()=>{throw new Error(hostile);},()=>{throw new Error(hostile);});
+ await assert.rejects(provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey})),error=>error.code==='verification_failed' && !error.message.includes(hostile));
+ assert(!m.connectionFailure(new Error('possums_approval_expired')).message.includes('[possums_approval_expired]'));
+});
+await check('native refresh shows one actionable notice and offline status; successful verification clears it',async()=>{
+ const fixture=await authFixture();
+ const extension=fixtureExtension(async()=>{throw new m.ConnectionFailure('verification_failed');});
+ const credentials=new ai.InMemoryCredentialStore();
+ await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+ const runtime=await nativeRuntime(extension.provider,credentials),registry=new coding.ModelRegistry(runtime),notices=[];
+ const ctx={hasUI:true,ui:{notify:text=>notices.push(text)},modelRegistry:registry};
+ await extension.handlers.get('session_start')({},ctx);
+ await registry.refresh({providers:['possums'],allowNetwork:true});
+ assert.equal(notices.length,1);assert.match(notices[0],/possums_verification_failed/);assert.match(notices[0],/\/reload/);
+ assert.match(notices[0],/Cached models do not authorize inference/);assert.deepEqual(extension.provider.getModels(),[]);
+ await extension.commands.get('possums-status').handler('',ctx);
+ assert.equal(notices.length,2);assert.equal(notices[1],notices[0]);
+ assert.equal(fixture.trace.establish,0,'status does not connect');
+ extension.provider.establish=fixture.establish;
+ await registry.refresh({providers:['possums'],allowNetwork:true});
+ await extension.commands.get('possums-status').handler('',ctx);
+ assert.equal(notices.at(-1),m.approvalSummary());assert.equal(fixture.s.sends(),0);
+ assert(!notices.join('\n').includes(recoveryKey));
+});
+await check('cancelled or obsolete verification failures never publish a stale diagnostic',async()=>{
+ for(const action of ['cancel','logout']) {
+  const held=deferred(),entered=deferred(),notices=[],controller=new AbortController();
+  const provider=new m.PossumsProvider(async()=>{entered.resolve();await held.promise;throw new Error('PRIVATE_ERROR');},failure=>notices.push(failure));
+  const pending=assert.rejects(provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey},undefined,controller.signal)));
+  await entered.promise;
+  if(action==='cancel')controller.abort();else provider.logout();
+  held.resolve();await pending;assert.deepEqual(notices,[]);
+ }
+});
 await check('failed channel verification prevents both interactive prompt and saved/env credential transmission',async()=>{
  let prompts=0,sends=0;
  const provider=new m.PossumsProvider(async()=>({channel:{},login:async()=>{sends++;}}));

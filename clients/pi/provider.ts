@@ -10,6 +10,7 @@ import {
 import { Channel } from '../../examples/phase01/transport.js';
 import { ReferenceClient, GatewayError, gatewayDetailLabel, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
 import { ChannelError } from '../../examples/phase01/limits.js';
+import { ConnectionFailure, connectionFailure } from './diagnostics.js';
 import { ReplayGuard } from './replay.js';
 import { invocation } from './wire.js';
 
@@ -72,6 +73,7 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_unresolved_tool_calls: 'Tool calls lack results; complete the history.',
 });
 function safeFailure(error: unknown): string {
+  if (error instanceof ConnectionFailure) return error.message;
   if (error instanceof GatewayError) {
     const reason: Readonly<Record<string, string>> = {
       insufficient_credit: 'Insufficient credit for this model’s maximum reservation.',
@@ -104,7 +106,25 @@ export class PossumsProvider implements Provider {
   private recoveryKey: string | undefined;
   private restoring: Promise<void> | undefined;
 
-  constructor(private readonly establish: (signal: AbortSignal) => Promise<ReferenceClient>) {}
+  constructor(
+    private readonly establish: (signal: AbortSignal) => Promise<ReferenceClient>,
+    private readonly reportConnection: (failure: ConnectionFailure | undefined) => void = () => {},
+  ) {}
+
+  private async establishVerified(signal: AbortSignal, epoch: number): Promise<ReferenceClient> {
+    try {
+      const candidate = await this.establish(signal);
+      Channel.requireVerified(candidate.channel);
+      this.requireCurrent(epoch, signal);
+      try { this.reportConnection(undefined); } catch { /* UI reporting cannot change authentication. */ }
+      return candidate;
+    } catch (error) {
+      this.requireCurrent(epoch, signal);
+      const failure = connectionFailure(error);
+      try { this.reportConnection(failure); } catch { /* UI reporting cannot change authentication. */ }
+      throw failure;
+    }
+  }
 
   readonly auth: { apiKey: ApiKeyAuth } = { apiKey: {
     name: recoveryAuth.name,
@@ -127,9 +147,7 @@ export class PossumsProvider implements Provider {
       if (!this.client) {
         if (!this.restoring) {
           const pending = (async () => {
-            const candidate = await this.establish(input.signal);
-            Channel.requireVerified(candidate.channel);
-            this.requireCurrent(current, input.signal);
+            const candidate = await this.establishVerified(input.signal, current);
             await this.authenticate(candidate, key, current, input.signal);
           })();
           this.restoring = pending;
@@ -137,7 +155,10 @@ export class PossumsProvider implements Provider {
           void pending.finally(() => { if (this.restoring === pending) this.restoring = undefined; }).catch(() => {});
         }
         try { await this.restoring; }
-        catch { throw new Error('possums_session_unavailable'); }
+        catch (error) {
+          if (error instanceof ConnectionFailure) throw error;
+          throw new Error('possums_session_unavailable');
+        }
       }
       this.requireCurrent(current, input.signal);
       // Never expose a recovery key or bearer token to Pi's request hooks.
@@ -147,9 +168,7 @@ export class PossumsProvider implements Provider {
       this.logout();
       const epoch = this.authEpoch;
       // Verify public evidence and the actual channel before requesting a secret.
-      const candidate = await this.establish(interaction.signal);
-      Channel.requireVerified(candidate.channel);
-      this.requireCurrent(epoch, interaction.signal);
+      const candidate = await this.establishVerified(interaction.signal, epoch);
       const credential = await recoveryAuth.login!(interaction);
       this.requireCurrent(epoch, interaction.signal);
       if (!isRecoveryKey(credential.key)) throw new Error('possums_session_unavailable');

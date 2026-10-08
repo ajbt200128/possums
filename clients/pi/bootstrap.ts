@@ -1,13 +1,17 @@
-import { requireApiApproval } from '../../examples/phase01/approval.js';
+import { API_APPROVALS, requireApiApproval } from '../../examples/phase01/approval.js';
+import { ConnectionFailure, connectionFailure } from './diagnostics.js';
 import { ReferenceClient } from '../../examples/phase01/client.js';
-import { LIMITS, Operation, base64, boundedReport, cleanup, collect, digest, hex, parseJSON, requireThat, ChannelError } from '../../examples/phase01/limits.js';
+import { LIMITS, Operation, base64, boundedReport, cleanup, collect, digest, hex, parseJSON, requireThat } from '../../examples/phase01/limits.js';
 
 // Acquire only public bytes at the installed approval's exact destinations.
 // All these bytes remain untrusted until ReferenceClient.verified authenticates
 // provenance, hardware endorsements and the key used by the actual EHBP channel.
 export async function connect(manifest: Uint8Array<ArrayBuffer>, signal?: AbortSignal): Promise<ReferenceClient> {
-  const approval = requireApiApproval();
-  requireThat(manifest.length <= LIMITS.provenance && await digest(manifest) === approval.manifest);
+  if (API_APPROVALS.length === 1 && Date.now() >= API_APPROVALS[0].expires) throw new ConnectionFailure('approval_expired');
+  let approval;
+  try { approval = requireApiApproval(); }
+  catch { throw new ConnectionFailure('approval_unavailable'); }
+  if (manifest.length > LIMITS.provenance || await digest(manifest) !== approval.manifest) throw new ConnectionFailure('manifest_mismatch');
   const op = new Operation();
   const abort = () => op.close();
   signal?.addEventListener('abort', abort, { once: true });
@@ -21,7 +25,8 @@ export async function connect(manifest: Uint8Array<ArrayBuffer>, signal?: AbortS
       })), LIMITS.operationMs);
       requireThat(response.ok && !response.redirected && response.url === url);
       return await collect(response.body, cap, op);
-    } finally {
+    } catch { throw new ConnectionFailure('evidence_unavailable'); }
+    finally {
       if (response?.body && !response.body.locked) await cleanup(response.body.cancel());
     }
   }
@@ -46,6 +51,6 @@ export async function connect(manifest: Uint8Array<ArrayBuffer>, signal?: AbortS
     const client = await ReferenceClient.verified(bundle, new Uint8Array(manifest), config);
     requireThat(!signal?.aborted);
     return client;
-  } catch { throw new ChannelError(); }
+  } catch (error) { throw connectionFailure(error); }
   finally { signal?.removeEventListener('abort', abort); op.close(); }
 }
