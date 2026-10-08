@@ -196,3 +196,36 @@ builds were removed without changing SDK code or metadata. Compaction changes
 no dependencies or settings; normal installation adds only its package
 declaration. No credential inspection, paid inference, live summary or new live
 model qualification is part of this work.
+
+## 2026-10-08 telemetry release and client approval
+
+The serving gateway is now **v0.0.12**. Its tool/API profile and Pi 1.0.4
+integration are unchanged; this release adds the reviewed aggregate telemetry
+runtime, not new model qualification. See [privacy scope](../PRIVACY.md#reviewed-mvp-release-scope)
+and [release evidence](verification.md#2026-10-08--v0012-measured-telemetry-deployment).
+
+- Independent image publication `37733469152` produced matching digests:
+  `sha256:11b9e8e80d21b22c5b38642135307c6fa719af4311316a6b038366a9f1830da1`.
+- PR #18 pins the image; release source/config commit is
+  `362089ea560d22b2ec8499862aa800de0ac124f6`.
+- Manifest SHA-256 is
+  `3218e00bd17906e9ba08b528f378163e5748161f7988a7b101c65371b83c6f6b`;
+  decoded configuration SHA-256 is
+  `c82a1d0eed2d91a8a7e162033765d9b84cf3f6e96de43d099b43ce0c3b100ec2`.
+- Publication `37735269234/attempts/1` passed exact Sigstore workflow/tag,
+  source/signer digest, invocation and signed-manifest verification. Config
+  bytes match the tag; CVM remains `0.14.12`.
+- The unheld blue/green update is serving v0.0.12. Native pinned verification
+  accepted its hardware/provenance and matching endorsed/connection TLS keys.
+  The rebuilt extension also accepted the serving legacy-v2 public bootstrap
+  and stopped before credentials: no login or inference was sent.
+- Fresh strict TypeScript/build, **37 Pi checks and 436 reference/admission
+  checks** passed. The API approval alone changes; its administrative expiry
+  remains **2026-10-11**, and the independent WEB approval is untouched.
+
+Rebuild/reinstall the client package with the new approved public manifest;
+previously installed packages retain their old pin and must fail closed rather
+than silently trusting the new release. No global Pi settings or installed
+package were changed by this verification. Earlier funded observations and
+unresolved billing/privacy/legacy-v2 freshness properties remain historical;
+this release does not retrospectively qualify them.
