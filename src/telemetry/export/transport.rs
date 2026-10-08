@@ -249,10 +249,8 @@ impl Client {
                 socket.connect(address).await
             }
             Some(address) => TcpStream::connect(address).await,
-            // Unqualified for rollout: Tokio resolves on its blocking pool, whose
-            // OS lookup can outlive cancellation. Production release is closed
-            // in runtime.rs until owned DNS is qualified; see verification.
-            // Never accept a configured host or pass credentials to DNS.
+            // Standard DNS is the MVP choice. Its fixed-host OS lookup can
+            // outlive this attempt, but receives no credential or metric payload.
             None => TcpStream::connect(("api.honeycomb.io", 443)).await,
         }
         .map_err(|_| Failure::Transport)?;
