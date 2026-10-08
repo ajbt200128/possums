@@ -1,6 +1,6 @@
 # Possums provider for Pi 1.0.4
 
-The catalog-wide gateway tool profile is deployed as **v0.0.12** (the telemetry release; the tool profile is unchanged). All authenticated catalog models advertise the assumed shared OpenAI-functions wire profile; this is not per-model compatibility qualification. A real Kimi Pi round with local `ls`/`read` execution and a correct final continuation was observed on v0.0.10; exact live billing/balance reconciliation remains unverified. See [release scope](../../docs/phase02-pi-release.md).
+The catalog-wide gateway tool profile is deployed as **v0.0.13** (configured admission-capacity telemetry; the tool profile is unchanged). All authenticated catalog models advertise the assumed shared OpenAI-functions wire profile; this is not per-model compatibility qualification. A real Kimi Pi round with local `ls`/`read` execution and a correct final continuation was observed on v0.0.10; exact live billing/balance reconciliation remains unverified. See [release scope](../../docs/phase02-pi-release.md).
 
 ## Build and load
 
@@ -22,7 +22,7 @@ For an isolated one-session load, use the **package path printed by the build co
 
 `pi --no-session --no-extensions --no-tools -e /absolute/path/to/package/extension.mjs --possums-manifest /absolute/path/to/tinfoil-deployment.json`
 
-The current API approval is **v0.0.12**, with unchanged administrative expiry **2026-10-11**. Its independent image builds, exact signed release provenance and directly promoted production hardware/key identity were checked. Login and restoration independently verify the supplied public manifest and serving channel before requesting or transmitting a credential. Do not change pins to make a verification error disappear.
+The current API approval is **v0.0.13**, with unchanged administrative expiry **2026-10-11**. Its independent image builds, exact signed release provenance and directly promoted production hardware/key identity were checked. Login and restoration independently verify the supplied public manifest and serving channel before requesting or transmitting a credential. Do not change pins to make a verification error disappear.
 
 1. Use `/login`, choose Possums, and paste the manually issued recovery credential into its masked prompt. Public evidence and key binding are verified **before** the credential is requested. Pi saves the recovery credential through its normal `auth.json` credential store; subsequent starts restore a fresh verified bearer/catalog without inference. The old memory-only marker needs one fresh `/login`. An optional `POSSUMS_RECOVERY_CREDENTIAL` environment variable is supported; a stored recovery credential takes precedence. Do not put credentials in shell commands or conversation messages.
 2. Select a live Possums model in Pi's usual model picker. With `enabledModels` patterns configured, Pi 1.0.4 resolves its scoped list at startup, before Possums can authenticate. After successful login or startup restoration, use `/model possums` and press **Tab** to switch from `scoped` to `all` if the results are empty. This changes the picker view, not your saved provider filter. Selecting a model adds it to the current session's scope. Pi's list rows show only the model ID/provider. The highlighted **Model Name** detail below the list shows `text only` or `tools` and an **indicative**, not promised, maximum reservation.
@@ -38,6 +38,8 @@ Startup and model refresh show a transient, content-free warning when public ver
 - `possums_manifest_unavailable` / `possums_manifest_mismatch`: install the extension **and its matching approved public manifest together**, then `/reload` or restart. Re-entering credentials cannot repair this pair.
 - `possums_evidence_unavailable`: public evidence could not be retrieved within connection limits. Check connectivity and refresh; no inference is replayed.
 - `possums_verification_failed`: the gateway cannot be verified against this client's approval. A gateway update is one possible cause, not an authenticated diagnosis. If updated, install the independently approved client/manifest pair and reload. Do not trust a version merely advertised by the server.
+
+After replacing an installed extension/manifest pair, fully restart Pi: `/reload` alone did not activate an earlier replacement in the operator's session. `/possums-status` should show the new compiled approval; it is not a live connection check.
 
 Version wording comes from the compiled approval, not a hard-coded latest-version message or remote advertisement. These connection attempts send no inference and verify the channel before prompting for or transmitting a recovery credential. They do not establish the billing outcome of any earlier request. The extension's notifications and status command do not log, export telemetry or append session entries; native Pi error handling and ordinary session persistence remain separate. No automatic installer, remote update discovery or approval bypass is introduced.
 
