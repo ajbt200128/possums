@@ -47,6 +47,8 @@ struct Provider {
     failure: Failure,
     entered: Notify,
     finish: Notify,
+    startup_queued: Notify,
+    startup_drained: std::sync::Mutex<Option<Arc<Notify>>>,
 }
 #[async_trait]
 impl EvidenceVerifier for Provider {
@@ -96,8 +98,11 @@ impl Inference for Provider {
         delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<StreamCompletion, InferenceError> {
         heavy.dispatch_generation();
-        // Let the synthetic consumer drain startup before synchronous deltas.
-        tokio::task::yield_now().await;
+        self.startup_queued.notify_one();
+        let ready = self.startup_drained.lock().unwrap().take();
+        if let Some(ready) = ready {
+            ready.notified().await;
+        }
         delta("");
         delta("hostile-output-canary");
         delta("another fragment");
@@ -154,6 +159,8 @@ impl Fixture {
             failure,
             entered: Notify::new(),
             finish: Notify::new(),
+            startup_queued: Notify::new(),
+            startup_drained: std::sync::Mutex::new(None),
         });
         let state = AppState::new(auth, provider.clone(), "unused", provider.clone())
             .with_telemetry(metrics);
@@ -213,13 +220,44 @@ async fn web_and_api_terminal_hooks_preserve_accounting_and_duplicate_dispositio
         ] {
             let metrics = metrics(Deployment::IsolatedSynthetic);
             let f = Fixture::new(api, failure, Some(metrics.clone()));
+            let gate = (!matches!(failure, Failure::Preflight)).then(|| Arc::new(Notify::new()));
+            *f.provider.startup_drained.lock().unwrap() = gate.clone();
             let response = f.send().await;
             if !matches!(failure, Failure::Preflight) {
                 assert_eq!(response.status(), 200);
             }
-            let consumer = tokio::spawn(drain(response.into_body()));
+            if gate.is_some() {
+                // Deliberately backlog startup: yielding alone cannot guarantee a drain.
+                f.provider.startup_queued.notified().await;
+            }
+            let consumer = tokio::spawn(async move {
+                let mut body = response.into_body();
+                let marker = if api {
+                    &b"\"role\":\"assistant\""[..]
+                } else {
+                    &b"</pre><pre aria-label=\"Assistant\">"[..]
+                };
+                let mut gate = gate;
+                while let Some(frame) = body.frame().await {
+                    let frame = frame.unwrap();
+                    let at_startup = frame.into_data().ok().is_some_and(|data| {
+                        data.windows(marker.len()).any(|window| window == marker)
+                    });
+                    if at_startup {
+                        if let Some(gate) = gate.take() {
+                            gate.notify_one();
+                        }
+                    }
+                }
+                assert!(gate.is_none(), "startup marker missing");
+            });
             if !matches!(failure, Failure::Preflight) {
-                f.provider.entered.notified().await;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    f.provider.entered.notified(),
+                )
+                .await
+                .expect("fixture startup drain and output");
                 assert_eq!(totals(&metrics), (1, 0, 1, 0));
                 assert_eq!(f.state.available_lanes(), [3, 3, 4, 1, 1]);
                 f.provider.finish.notify_one();
