@@ -813,6 +813,7 @@ fn frozen_cardinality_and_layout_ceilings() {
     assert!(std::mem::size_of::<Infrastructure>() <= 2048);
     assert!(std::mem::size_of::<Record>() <= 128);
     assert!(std::mem::size_of::<Observation<'_, FakeClock>>() <= 16);
+    assert!(std::mem::size_of::<OwnedObservation<FakeClock>>() <= 16);
     assert!(std::mem::size_of::<Metrics>() <= 65_536);
     let mut table = RequestTables {
         ticks: 300,
@@ -914,4 +915,36 @@ fn bounded_allocation_repeated_windows_pressure_and_off_on() {
         );
         println!("aggregation requested allocation delta={} bytes; record={} handle={} controller={} request={} infrastructure={}",allocated.live-before.live,std::mem::size_of::<Record>(),std::mem::size_of::<Observation<'_,FakeClock>>(),std::mem::size_of::<Metrics>(),std::mem::size_of::<RequestTables>(),std::mem::size_of::<Infrastructure>());
     }
+}
+
+#[test]
+fn slightly_late_occupancy_ticks_sample_once_without_backfill() {
+    let metrics = new();
+    ready(&metrics);
+    let lease = metrics.lease(Lane::Heavy);
+    for second in 0..300 {
+        // Actual occupancy at a realistic 100-ms-late wakeup, not an invented
+        // midpoint value. Repeated polls in the same period cannot resample.
+        metrics.clock.set((300 + second) * SECOND + 600_000_000);
+        metrics.poll();
+        metrics.clock.set((300 + second) * SECOND + 800_000_000);
+        metrics.poll();
+        let state = metrics.state.lock().unwrap();
+        assert!(state.requests.active.valid);
+        assert_eq!(u64::from(state.requests.active.ticks), second + 1);
+    }
+    assert_eq!(
+        metrics.state.lock().unwrap().requests.active.occupancy[Lane::Heavy as usize].0[1],
+        300
+    );
+    drop(lease);
+    let metrics = new();
+    ready(&metrics);
+    metrics.clock.set(300 * SECOND + 600_000_000);
+    metrics.poll();
+    metrics.clock.set(302 * SECOND + 600_000_000); // missed an entire sampling period
+    metrics.poll();
+    let state = metrics.state.lock().unwrap();
+    assert!(!state.requests.active.valid);
+    assert_eq!(state.requests.active.ticks, 1); // no catch-up or backfill
 }

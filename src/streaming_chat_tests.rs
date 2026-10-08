@@ -74,8 +74,15 @@ impl Fixture {
         }
     }
 
-    fn accept(&self) -> (ReservedGeneration, Arc<OwnedSemaphorePermit>, AcceptedChat) {
-        let heavy = Arc::new(self.heavy.clone().try_acquire_owned().unwrap());
+    fn accept(
+        &self,
+    ) -> (
+        ReservedGeneration,
+        Arc<crate::telemetry::hooks::Lease>,
+        AcceptedChat,
+    ) {
+        let heavy: Arc<crate::telemetry::hooks::Lease> =
+            Arc::new(self.heavy.clone().try_acquire_owned().unwrap().into());
         let generation = self.generations.clone().try_acquire_owned().unwrap();
         let admission = self
             .auth
@@ -181,7 +188,7 @@ impl Inference for Mock {
         &self,
         _: &str,
         _: &[Message],
-        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        _heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         panic!("unexpected preflight call")
     }
@@ -194,7 +201,7 @@ impl Inference for Mock {
         &self,
         model: &Model,
         messages: &[Message],
-        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        _heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<StreamUsage, InferenceError> {
         assert_eq!(model, &quote().model); // No output/model reduction.

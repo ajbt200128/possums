@@ -63,7 +63,7 @@ pub enum Slot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QualifiedModel(pub(super) u8);
 impl QualifiedModel {
-    /// Unwired qualification boundary. Uses the existing verified provider client;
+    /// Standalone qualification boundary. Uses the existing verified provider client;
     /// no credentials, catalog bytes or submitted strings enter aggregation state.
     pub async fn authenticate(client: &TinfoilInference, selected: &str, now: u64) -> Option<Self> {
         qualify(client, selected, now).await
@@ -72,11 +72,17 @@ impl QualifiedModel {
 async fn qualify(client: &dyn Inference, selected: &str, now: u64) -> Option<QualifiedModel> {
     let catalog = authenticated_catalog(client, now).await.ok()?;
     let quote = catalog.reservation_quote(selected).ok()?;
-    Some(QualifiedModel(match quote.model.id.as_str() {
-        "kimi-k3" => 0,
-        "glm-5-3" => 1,
-        _ => 2,
-    }))
+    Some(QualifiedModel::from_authenticated_quote(&quote))
+}
+impl QualifiedModel {
+    /// Only call with the successful quote from the authenticated admission catalog.
+    pub(crate) fn from_authenticated_quote(quote: &crate::catalog::Quote) -> Self {
+        Self(match quote.model.id.as_str() {
+            "kimi-k3" => 0,
+            "glm-5-3" => 1,
+            _ => 2,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +196,48 @@ pub(super) fn duration_bucket(start: u64, end: u64) -> Option<u8> {
     Some(DURATION_BOUNDS_NS.partition_point(|bound| *bound < elapsed) as u8)
 }
 
+impl From<crate::inference::InferenceFailure> for GenerationTerminal {
+    fn from(failure: crate::inference::InferenceFailure) -> Self {
+        use crate::inference::InferenceFailure::*;
+        match failure {
+            VerificationFailed | EndpointBindingFailed => Self::Verification,
+            CatalogFailed => Self::Catalog,
+            RequestEncodingFailed => Self::Encoding,
+            TokenizerSendFailed
+            | TokenizerHttpFailed
+            | TokenizerUploadIncomplete
+            | GenerationSendFailed
+            | GenerationHttpFailed
+            | StreamTransportFailed
+            | StreamIdleTimeout
+            | StreamDeadlineExceeded
+            | UpstreamErrorEvent => Self::Transport,
+            SdkStreamDecodeFailed => Self::Decoding,
+            StreamFinishMissing
+            | StreamUsageMissing
+            | StreamUsageInvalid
+            | StreamUsageUnexpected => Self::TerminalUsage,
+            SettlementFailed => Self::Settlement,
+            InferenceUnavailable => Self::Internal,
+            ToolProfileUnqualified
+            | TokenizerResponseInvalid
+            | StreamContentTypeInvalid
+            | StreamEventSchemaInvalid
+            | StreamChoiceInvalid
+            | StreamDeltaUnsupported
+            | ToolIndexInvalid
+            | ToolIdentityInvalid
+            | ToolNameNotAllowed
+            | ToolChoiceViolated
+            | ToolCallIncomplete
+            | ToolArgumentsTooLarge
+            | StreamFinishInvalid
+            | StreamOutputAfterFinish
+            | UpstreamResponseInvalid => Self::Validation,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,7 +252,7 @@ mod tests {
             &self,
             _: &str,
             _: &[crate::inference::Message],
-            _: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+            _: std::sync::Arc<crate::telemetry::hooks::Lease>,
         ) -> Result<u64, InferenceError> {
             Err(InferenceError::Unavailable)
         }

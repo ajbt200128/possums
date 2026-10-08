@@ -121,7 +121,7 @@ impl Inference for FixtureInference {
         &self,
         _: &str,
         _: &[Message],
-        _heavy: Arc<tokio::sync::OwnedSemaphorePermit>,
+        _heavy: Arc<possums::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         Ok(1)
     }
@@ -130,7 +130,7 @@ impl Inference for FixtureInference {
         &self,
         model: &Model,
         messages: &[Message],
-        _heavy: Arc<tokio::sync::OwnedSemaphorePermit>,
+        _heavy: Arc<possums::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         let call = {

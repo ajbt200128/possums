@@ -61,7 +61,7 @@ pub(super) fn request_body(
     model: &str,
     max_output_tokens: u64,
     messages: &[Message],
-    heavy: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
+    heavy: Option<std::sync::Arc<crate::telemetry::hooks::Lease>>,
 ) -> Result<reqwest::Body, InferenceError> {
     let bytes = generation_bytes(super::text_request(model, messages)?, max_output_tokens)?;
     Ok(super::upload::body(bytes, heavy).0)
@@ -71,7 +71,7 @@ pub(super) fn invocation_body(
     model: &str,
     max_tokens: u64,
     invocation: &ToolInvocation,
-    heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
 ) -> Result<reqwest::Body, InferenceError> {
     let bytes = generation_bytes(super::invocation_request(model, invocation)?, max_tokens)?;
     Ok(super::upload::body(bytes, Some(heavy)).0)
@@ -983,11 +983,12 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn heavy() -> Arc<tokio::sync::OwnedSemaphorePermit> {
+    fn heavy() -> Arc<crate::telemetry::hooks::Lease> {
         Arc::new(
             Arc::new(tokio::sync::Semaphore::new(1))
                 .try_acquire_owned()
-                .unwrap(),
+                .unwrap()
+                .into(),
         )
     }
 

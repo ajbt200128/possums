@@ -27,7 +27,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Notify, OwnedSemaphorePermit};
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
 struct Provider {
@@ -89,7 +89,7 @@ impl Inference for Provider {
         &self,
         _: &str,
         _: &[Message],
-        _: Arc<OwnedSemaphorePermit>,
+        _: Arc<possums::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         self.tokenizer_calls.fetch_add(1, Ordering::SeqCst);
         self.tokenizer_started.notify_one();
@@ -105,7 +105,7 @@ impl Inference for Provider {
         &self,
         model: &Model,
         _: &[Message],
-        _: Arc<OwnedSemaphorePermit>,
+        _: Arc<possums::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<StreamCompletion, InferenceError> {
         self.generation_calls.fetch_add(1, Ordering::SeqCst);
@@ -162,7 +162,7 @@ impl Inference for Provider {
         &self,
         model: &str,
         invocation: &ToolInvocation,
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<possums::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         *self.invocation.lock().unwrap() = Some(serde_json::to_value(invocation).unwrap());
         self.count_tokens(model, &[], heavy).await
@@ -171,7 +171,7 @@ impl Inference for Provider {
         &self,
         model: &Model,
         invocation: &ToolInvocation,
-        _: Arc<OwnedSemaphorePermit>,
+        _: Arc<possums::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'d> FnMut(CompletionDelta<'d>) + Send),
     ) -> Result<StreamCompletion, InferenceError> {
         assert_eq!(

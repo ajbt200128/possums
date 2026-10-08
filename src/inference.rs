@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tinfoil::Client;
-use tokio::{sync::OwnedSemaphorePermit, time::Instant};
+use tokio::time::Instant;
 
 mod errors;
 pub use errors::InferenceFailure;
@@ -63,12 +63,14 @@ pub trait Inference: Send + Sync {
         &self,
         model: &str,
         messages: &[Message],
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError>;
     /// Stream only after trust/catalog/reservation and context preflight.
     /// `model` carries the full context-legal output allowance. Successful usage
     /// is terminal, withheld until validated finish, [DONE], and transport EOF.
     /// Serialized upload DATA must retain `heavy` even beyond this call's return.
+    /// Call `heavy.dispatch_generation()` just before the actual generation send
+    /// (after encoding/trust), never for tokenizer or role/usage-only events.
     ///
     /// The borrowed synchronous callback must not block, panic, or collect
     /// unbounded output. On delivery failure, detach delivery in the callback and
@@ -80,7 +82,7 @@ pub trait Inference: Send + Sync {
         &self,
         _model: &Model,
         _messages: &[Message],
-        _heavy: Arc<OwnedSemaphorePermit>,
+        _heavy: Arc<crate::telemetry::hooks::Lease>,
         _on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         Err(InferenceError::Unavailable)
@@ -92,7 +94,7 @@ pub trait Inference: Send + Sync {
         &self,
         _model: &Model,
         _messages: &[Message],
-        _heavy: Arc<OwnedSemaphorePermit>,
+        _heavy: Arc<crate::telemetry::hooks::Lease>,
         _on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<stream::StreamCompletion, InferenceError> {
         Err(InferenceError::Unavailable)
@@ -108,7 +110,7 @@ pub trait Inference: Send + Sync {
         &self,
         _model: &str,
         _invocation: &ToolInvocation,
-        _heavy: Arc<OwnedSemaphorePermit>,
+        _heavy: Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         Err(InferenceError::Unavailable)
     }
@@ -119,7 +121,7 @@ pub trait Inference: Send + Sync {
         &self,
         _model: &Model,
         _invocation: &ToolInvocation,
-        _heavy: Arc<OwnedSemaphorePermit>,
+        _heavy: Arc<crate::telemetry::hooks::Lease>,
         _on_delta: &mut (dyn for<'delta> FnMut(CompletionDelta<'delta>) + Send),
     ) -> Result<stream::StreamCompletion, InferenceError> {
         Err(InferenceError::Unavailable)
@@ -168,7 +170,7 @@ impl TinfoilInference {
         &self,
         model: &Model,
         messages: &[Message],
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
         on_delta: impl FnMut(&str) + Send,
     ) -> Result<stream::StreamUsage, InferenceError> {
         self.generate_completion_stream(model, messages, heavy, on_delta)
@@ -180,7 +182,7 @@ impl TinfoilInference {
         &self,
         model: &Model,
         messages: &[Message],
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
         on_delta: impl FnMut(&str) + Send,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         let http = self.http()?;
@@ -194,9 +196,10 @@ impl TinfoilInference {
                 &model.id,
                 model.max_output_tokens,
                 messages,
-                Some(heavy),
+                Some(heavy.clone()),
             )?);
         // Use the origin-bound raw transport, not the SDK's retrying chat layer.
+        heavy.dispatch_generation();
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
             .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?
@@ -255,7 +258,7 @@ impl TinfoilInference {
         &self,
         model: &str,
         messages: &[Message],
-        heavy: Option<Arc<OwnedSemaphorePermit>>,
+        heavy: Option<Arc<crate::telemetry::hooks::Lease>>,
     ) -> Result<u64, InferenceError> {
         let (body, released) = tokenizer_request_body(model, messages, heavy)?;
         let deadline = Instant::now() + Duration::from_secs(300);
@@ -849,7 +852,7 @@ fn tokenizer_request_bytes(model: &str, messages: &[Message]) -> Result<Vec<u8>,
 fn tokenizer_request_body(
     model: &str,
     messages: &[Message],
-    heavy: Option<Arc<OwnedSemaphorePermit>>,
+    heavy: Option<Arc<crate::telemetry::hooks::Lease>>,
 ) -> Result<(reqwest::Body, upload::UploadReleased), InferenceError> {
     Ok(upload::body(
         tokenizer_request_bytes(model, messages)?,
@@ -860,7 +863,7 @@ fn tokenizer_request_body(
 fn invocation_tokenizer_body(
     model: &str,
     invocation: &ToolInvocation,
-    heavy: Arc<OwnedSemaphorePermit>,
+    heavy: Arc<crate::telemetry::hooks::Lease>,
 ) -> Result<(reqwest::Body, upload::UploadReleased), InferenceError> {
     let bytes = crate::bounded_json::to_vec(
         &invocation_request(model, invocation)?.build(),
@@ -915,7 +918,7 @@ pub(crate) mod resource_fixtures {
     pub(crate) fn tokenizer_body(
         model: &str,
         messages: &[Message],
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<(reqwest::Body, impl std::future::Future<Output = ()>), InferenceError> {
         let (body, released) = tokenizer_request_body(model, messages, Some(heavy))?;
         Ok((body, released.wait()))
@@ -925,7 +928,7 @@ pub(crate) mod resource_fixtures {
         model: &str,
         max_output_tokens: u64,
         messages: &[Message],
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<reqwest::Body, InferenceError> {
         stream::request_body(model, max_output_tokens, messages, Some(heavy))
     }
@@ -958,7 +961,7 @@ impl Inference for TinfoilInference {
         &self,
         model: &str,
         messages: &[Message],
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         self.count_tokens_owned(model, messages, Some(heavy)).await
     }
@@ -967,7 +970,7 @@ impl Inference for TinfoilInference {
         &self,
         model: &Model,
         messages: &[Message],
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         TinfoilInference::generate_stream(self, model, messages, heavy, on_delta).await
@@ -977,7 +980,7 @@ impl Inference for TinfoilInference {
         &self,
         model: &Model,
         messages: &[Message],
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<stream::StreamCompletion, InferenceError> {
         TinfoilInference::generate_completion_stream(self, model, messages, heavy, on_delta).await
@@ -991,7 +994,7 @@ impl Inference for TinfoilInference {
         &self,
         model: &str,
         invocation: &ToolInvocation,
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         self.tool_profile(model)
             .ok_or(InferenceFailure::ToolProfileUnqualified)?;
@@ -1018,7 +1021,7 @@ impl Inference for TinfoilInference {
         &self,
         model: &Model,
         invocation: &ToolInvocation,
-        heavy: Arc<OwnedSemaphorePermit>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'delta> FnMut(CompletionDelta<'delta>) + Send),
     ) -> Result<stream::StreamCompletion, InferenceError> {
         let profile = self
@@ -1034,8 +1037,9 @@ impl Inference for TinfoilInference {
                 &model.id,
                 model.max_output_tokens,
                 invocation,
-                heavy,
+                heavy.clone(),
             )?);
+        heavy.dispatch_generation();
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
             .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?

@@ -8,6 +8,7 @@ mod resource_admission;
 mod stream_owner;
 
 use http_body_util::BodyExt;
+use possums::telemetry;
 use resource_admission::Admission;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

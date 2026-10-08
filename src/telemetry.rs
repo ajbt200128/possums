@@ -1,5 +1,6 @@
 //! Bounded local aggregation. Real-traffic release remains closed pending review.
 //! Runtime export ownership is independent of inference/accounting.
+pub mod hooks;
 mod infrastructure;
 mod labels;
 pub mod runtime;
@@ -27,16 +28,28 @@ pub struct ClockReading {
 pub trait Clock: Send + Sync {
     fn now(&self) -> Option<ClockReading>;
 }
-pub struct SystemClock(Instant);
+pub struct SystemClock {
+    start: Instant,
+    #[cfg(test)]
+    fixed: Option<ClockReading>,
+}
 impl Default for SystemClock {
     fn default() -> Self {
-        Self(Instant::now())
+        Self {
+            start: Instant::now(),
+            #[cfg(test)]
+            fixed: None,
+        }
     }
 }
 impl Clock for SystemClock {
     fn now(&self) -> Option<ClockReading> {
+        #[cfg(test)]
+        if let Some(now) = self.fixed {
+            return Some(now);
+        }
         Some(ClockReading {
-            monotonic_ns: self.0.elapsed().as_nanos().try_into().ok()?,
+            monotonic_ns: self.start.elapsed().as_nanos().try_into().ok()?,
             wall_ns: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .ok()?
@@ -136,6 +149,7 @@ struct Record {
     lane: Lane,
     first: Option<u8>,
     terminal: bool,
+    disposition: Disposition,
 }
 impl Default for Record {
     fn default() -> Self {
@@ -151,6 +165,7 @@ impl Default for Record {
             lane: Lane::Control,
             first: None,
             terminal: false,
+            disposition: Disposition::Unknown,
         }
     }
 }
@@ -387,7 +402,10 @@ impl<C: Clock> AggregateMetrics<C> {
             state.infrastructure.freeze(state.epoch, infra_end, allowed);
         }
         if mapped
-            > state.requests.start + u64::from(state.requests.active.ticks) * SECOND + SECOND / 2
+            >= state.requests.start
+                + u64::from(state.requests.active.ticks) * SECOND
+                + SECOND / 2
+                + SECOND
         {
             state.requests.active.valid = false;
         }
@@ -410,8 +428,9 @@ impl<C: Clock> AggregateMetrics<C> {
         }
         true
     }
-    /// Scheduler tick at each monotonic-mapped second midpoint, plus boundary
-    /// collection. Duplicate ticks do not create samples; missed ticks invalidate.
+    /// Sample once at/after each second midpoint, before the next midpoint.
+    /// This records actual occupancy at polling time, never backfills a missed
+    /// period. Duplicate polls do not sample; missed periods invalidate.
     pub fn poll(&self) {
         let Some(mut state) = self.lock() else {
             return;
@@ -424,7 +443,8 @@ impl<C: Clock> AggregateMetrics<C> {
         }
         let due =
             state.requests.start + u64::from(state.requests.active.ticks) * SECOND + SECOND / 2;
-        if mapped == due && state.requests.active.ticks < 300 {
+        if mapped >= due && mapped < due.saturating_add(SECOND) && state.requests.active.ticks < 300
+        {
             state.mark_leases();
             let mut occupied = [0_u64; 6];
             for record in &state.records {
@@ -794,6 +814,16 @@ impl State {
         let index = record.key as usize & 255;
         let table = &mut self.requests.active;
         match (record.kind, update) {
+            (Kind::Http, Update::Disposition(disposition)) => {
+                self.records[index].disposition = disposition;
+            }
+            (Kind::Http, Update::HttpSelected(status, terminal)) => {
+                return self.apply(
+                    record,
+                    mono,
+                    Update::Http(status, terminal, record.disposition),
+                );
+            }
             (Kind::Generation, Update::Dispatch) => {
                 if record.dispatch.is_none() && record.first.is_none() {
                     self.records[index].dispatch = Some(mono);
@@ -875,6 +905,8 @@ impl State {
     }
 }
 enum Update {
+    Disposition(Disposition),
+    HttpSelected(Status, HttpTerminal),
     Dispatch,
     First,
     Http(Status, HttpTerminal, Disposition),
@@ -912,6 +944,63 @@ impl<C: Clock> Observation<'_, C> {
     }
 }
 impl<C: Clock> Drop for Observation<'_, C> {
+    fn drop(&mut self) {
+        self.owner.release(self.key);
+    }
+}
+
+/// Arc-backed linear owner for detached application lifetimes. Conversion moves
+/// the original pool key; it does not start another observation.
+pub struct OwnedObservation<C: Clock = SystemClock> {
+    owner: std::sync::Arc<AggregateMetrics<C>>,
+    key: u64,
+}
+impl<C: Clock> Observation<'_, C> {
+    pub fn into_owned(
+        mut self,
+        owner: &std::sync::Arc<AggregateMetrics<C>>,
+    ) -> OwnedObservation<C> {
+        let key = if std::ptr::eq(self.owner, owner.as_ref()) {
+            std::mem::take(&mut self.key)
+        } else {
+            owner.invalidate();
+            0
+        };
+        OwnedObservation {
+            owner: owner.clone(),
+            key,
+        }
+    }
+}
+impl<C: Clock> OwnedObservation<C> {
+    fn update(&mut self, update: Update) {
+        self.owner.update(self.key, update);
+    }
+    pub fn dispatch(&mut self) {
+        self.update(Update::Dispatch);
+    }
+    pub fn first_output(&mut self) {
+        self.update(Update::First);
+    }
+    pub fn finish_generation(&mut self, terminal: GenerationTerminal) {
+        self.update(Update::Generation(terminal));
+    }
+    pub fn finish_delivery(&mut self, terminal: DeliveryTerminal) {
+        self.update(Update::Delivery(terminal));
+    }
+    pub(crate) fn delivery(&self, model: QualifiedModel) -> Self {
+        self.owner
+            .create(
+                Kind::Delivery,
+                Endpoint::Other,
+                model,
+                Lane::Control,
+                Some(self.key),
+            )
+            .into_owned(&self.owner)
+    }
+}
+impl<C: Clock> Drop for OwnedObservation<C> {
     fn drop(&mut self) {
         self.owner.release(self.key);
     }
@@ -1000,3 +1089,6 @@ mod export;
 mod handoff;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lifecycle_tests;

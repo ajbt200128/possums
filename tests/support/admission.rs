@@ -96,7 +96,11 @@ impl Admitted {
 
 impl ResponseAdmission {
     pub fn into_delivery(self, limits: Limits) -> (DeliveryTx, DeliveryBody) {
-        let (startup, body) = delivery(self.0, limits, Duration::from_secs(1));
+        let (startup, body) = delivery(
+            possums::telemetry::hooks::Lease::from(self.0),
+            limits,
+            Duration::from_secs(1),
+        );
         (startup.into_streaming(), body)
     }
 }

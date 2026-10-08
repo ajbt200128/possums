@@ -117,7 +117,7 @@ impl Inference for Probe {
         &self,
         model: &str,
         messages: &[Message],
-        heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         self.tokenizer.fetch_add(1, Ordering::SeqCst);
         let (body, released) = resource_fixtures::tokenizer_body(model, messages, heavy)?;
@@ -138,7 +138,7 @@ impl Inference for Probe {
         &self,
         model: &Model,
         messages: &[Message],
-        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        _heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<stream::StreamUsage, InferenceError> {
         self.generations.fetch_add(1, Ordering::SeqCst);

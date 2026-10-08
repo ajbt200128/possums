@@ -40,10 +40,11 @@ async fn production_client_authenticates_catalog_tokenization_and_streaming() {
     }];
     // Synthetic admission for this ignored production-adapter canary only;
     // the separate fixed-input diagnostic has no route lease.
-    let heavy = std::sync::Arc::new(
+    let heavy: std::sync::Arc<possums::telemetry::hooks::Lease> = std::sync::Arc::new(
         std::sync::Arc::new(tokio::sync::Semaphore::new(1))
             .try_acquire_owned()
-            .unwrap(),
+            .unwrap()
+            .into(),
     );
     let input_tokens = inference
         .count_tokens(&model.id, &messages, heavy.clone())
@@ -95,10 +96,11 @@ async fn production_adapter_streams_all_catalog_models() {
             role: "user".into(),
             content: "Reply with exactly: possums-production-adapter-canary".into(),
         }];
-        let heavy = std::sync::Arc::new(
+        let heavy: std::sync::Arc<possums::telemetry::hooks::Lease> = std::sync::Arc::new(
             std::sync::Arc::new(tokio::sync::Semaphore::new(1))
                 .try_acquire_owned()
-                .unwrap(),
+                .unwrap()
+                .into(),
         );
         let input_tokens = inference
             .count_tokens(&model.id, &messages, heavy.clone())

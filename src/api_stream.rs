@@ -13,13 +13,12 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
-use tokio::sync::OwnedSemaphorePermit;
 
 const CHUNK_BYTES: usize = 8 * 1024;
 
 pub(crate) fn compose(
     owner: ReservedGeneration,
-    heavy: Arc<OwnedSemaphorePermit>,
+    heavy: Arc<crate::telemetry::hooks::Lease>,
     input: PreparedGeneration,
     inference: SharedInference,
 ) -> DeliveryBody {
@@ -38,7 +37,7 @@ pub(crate) fn compose(
 
 pub(crate) fn compose_structured(
     owner: ReservedGeneration,
-    heavy: Arc<OwnedSemaphorePermit>,
+    heavy: Arc<crate::telemetry::hooks::Lease>,
     input: PreparedStructuredGeneration,
     inference: SharedInference,
 ) -> DeliveryBody {
@@ -62,7 +61,7 @@ enum RenderInput {
 
 fn compose_core(
     owner: ReservedGeneration,
-    heavy: Arc<OwnedSemaphorePermit>,
+    heavy: Arc<crate::telemetry::hooks::Lease>,
     model: Model,
     reserved_microunits: u64,
     mut input: RenderInput,
@@ -77,8 +76,9 @@ fn compose_core(
         },
         Duration::from_secs(30),
     );
+    let body = body.observed(owner.delivery_observation());
     let tx = tx.into_streaming();
-    let observer = owner.spawn_settling(tx, move |tx, settlement| async move {
+    let observer = owner.spawn_settling(tx, move |tx, mut settlement| async move {
         let mut output = Output {
             tx,
             model: &model.id,
@@ -89,17 +89,20 @@ fn compose_core(
         let result = match &mut input {
             RenderInput::Text { history, prompt } => {
                 history.push(Message { role: "user".into(), content: std::mem::take(prompt) });
-                inference.generate_completion_stream(&model, history, heavy, &mut |delta| output.delta(delta)).await
+                inference.generate_completion_stream(&model, history, heavy, &mut |delta| { if !delta.is_empty() { settlement.first_output(); } output.delta(delta) }).await
             }
             RenderInput::Structured(invocation) => inference.generate_invocation_stream(
-                &model, invocation, heavy, &mut |delta| output.structured_delta(delta),
+                &model, invocation, heavy, &mut |delta| {
+                    if match &delta { CompletionDelta::Text(text) => !text.is_empty(), CompletionDelta::ToolCall { .. } => true } { settlement.first_output(); }
+                    output.structured_delta(delta)
+                },
             ).await,
         };
         let failure = result.as_ref().err().map(|error| error.failure());
         let usage = result
             .as_ref()
             .map(|completion| completion.usage)
-            .map_err(|_| crate::inference::InferenceError::InvalidResponse);
+            .map_err(|error| crate::inference::InferenceError::from(error.failure()));
         // Only validated upstream EOF can produce success. Commit the ledger BEFORE
         // publishing finish/usage/DONE; delivery failure never changes this receipt.
         let receipt = settlement.finish(&usage);
@@ -124,6 +127,7 @@ fn compose_core(
             }
             _ => output.failure(InferenceFailure::SettlementFailed, "unknown"),
         }
+        output.tx.finish();
         receipt
     });
     drop(observer); // Observation has no cancellation authority.

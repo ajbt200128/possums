@@ -75,7 +75,12 @@ impl Fixture {
         let generation = self.generations.clone().try_acquire_owned().unwrap();
         let resources = self.resources.clone().try_acquire_owned().unwrap();
         assert_eq!(self.reserve(account, id).unwrap(), ReserveResult::Reserved);
-        ReservedGeneration::new(self.ledger.clone(), [id; 32], generation, resources)
+        ReservedGeneration::new(
+            self.ledger.clone(),
+            [id; 32],
+            generation,
+            Lease::from(resources),
+        )
     }
 
     fn pending(&self, id: u8) -> ReservedGeneration {
@@ -84,7 +89,7 @@ impl Fixture {
 
     fn delivery(&self) -> (DeliveryTx, DeliveryBody) {
         let (startup, body) = delivery(
-            self.lanes.clone().try_acquire_owned().unwrap(),
+            Lease::from(self.lanes.clone().try_acquire_owned().unwrap()),
             Limits {
                 frames: 1,
                 payload_bytes: 8,
@@ -140,7 +145,7 @@ async fn settling_handoff_accepts_owned_startup_before_any_blocking_write() {
     let f = Fixture::new();
     let pending = f.pending(1);
     let (startup, mut body) = delivery(
-        f.lanes.clone().try_acquire_owned().unwrap(),
+        Lease::from(f.lanes.clone().try_acquire_owned().unwrap()),
         Limits {
             frames: 1,
             payload_bytes: 8,
@@ -178,7 +183,8 @@ async fn shared_heavy_admission_returns_only_after_worker_body_and_slices_releas
         // Leave exactly one heavy slot: constructing BOTH owners must not need
         // a second permit. The independent four-slot work lease is unchanged.
         let other_heavy = f.resources.clone().try_acquire_many_owned(3).unwrap();
-        let heavy = Arc::new(f.resources.clone().try_acquire_owned().unwrap());
+        let heavy: Arc<crate::telemetry::hooks::Lease> =
+            Arc::new(f.resources.clone().try_acquire_owned().unwrap().into());
         let generation = f.generations.clone().try_acquire_owned().unwrap();
         assert_eq!(f.reserve(ACCOUNT, 1).unwrap(), ReserveResult::Reserved);
         let pending = ReservedGeneration::new(f.ledger.clone(), [1; 32], generation, heavy.clone());

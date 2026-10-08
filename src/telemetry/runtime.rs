@@ -1,4 +1,4 @@
-//! Startup-owned, best-effort direct export. No request/generation hooks yet.
+//! Startup-owned, best-effort direct export, independent of application owners.
 use super::{
     export::{handoff, transport::Client},
     AggregateMetrics, Clock, Deployment, SystemClock,
@@ -82,12 +82,14 @@ impl Config {
 /// Owns the sender, not inference or accounting. Explicit shutdown joins actual
 /// disposal; Drop latches stop and aborts as a fallback, never claims a join.
 pub struct Runtime {
+    metrics: Option<Arc<AggregateMetrics>>,
     stop: watch::Sender<bool>,
     task: Option<JoinHandle<bool>>,
 }
 impl Runtime {
     pub fn start(config: Config) -> Self {
         let (stop, stopped) = watch::channel(false);
+        let mut shared = None;
         let task = config.credential.and_then(|credential| {
             let client = Client::honeycomb(credential).ok()?;
             // Deliberately closed: approved synthetic release tests do not prove
@@ -96,9 +98,17 @@ impl Runtime {
                 Deployment::NonIsolated,
                 SystemClock::default(),
             ));
+            shared = Some(metrics.clone());
             Some(tokio::spawn(sender(metrics, client, stopped)))
         });
-        Self { stop, task }
+        Self {
+            metrics: shared,
+            stop,
+            task,
+        }
+    }
+    pub fn metrics(&self) -> Option<Arc<AggregateMetrics>> {
+        self.metrics.clone()
     }
     pub fn enabled(&self) -> bool {
         self.task.is_some()
@@ -136,6 +146,7 @@ async fn sender<C: Clock + 'static>(
             _ = stopped.wait_for(|stop| *stop) => break,
             _ = tick.tick() => {},
         }
+        metrics.poll();
         while let Some(permit) = metrics.take_window() {
             // Fresh attempt state; never retry the consumed window. Connection
             // and payload ownership live inside this future, not a driver task.

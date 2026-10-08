@@ -75,14 +75,21 @@ fn allowlisted_configuration_and_private_diagnostics() {
 
 #[tokio::test]
 async fn ordinary_component_start_stop_and_explicit_disable() {
-    // No source is wired; production release remains closed, so this enabled
-    // runtime cannot issue DNS or send to Honeycomb (even with synthetic config).
+    // Application attachment is available, but production release remains closed;
+    // even observations cannot issue DNS or send with this synthetic config.
     let runtime = Runtime::start(config(&[]));
     assert!(runtime.enabled());
+    let metrics = runtime.metrics().expect("configured attachment");
+    drop(metrics.http(possums::telemetry::Endpoint::ChatApi));
+    assert!(metrics.request().is_none());
     tokio::task::yield_now().await;
     assert!(runtime.shutdown().await);
     let runtime = Runtime::start(config(&[("OTEL_SDK_DISABLED", Some("true"))]));
     assert!(!runtime.enabled());
+    assert!(runtime.metrics().is_none());
+    assert!(runtime.shutdown().await);
+    let runtime = Runtime::start(Config::from_lookup(|_| None));
+    assert!(runtime.metrics().is_none());
     assert!(runtime.shutdown().await);
     drop(Runtime::start(config(&[])));
 }

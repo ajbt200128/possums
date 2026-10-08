@@ -17,7 +17,7 @@ use crate::{
     stream_owner::{delivery, DeliveryBody, DeliveryTx, Limits, StartupTx},
 };
 use std::{sync::Arc, time::Duration};
-use tokio::sync::{oneshot, OwnedSemaphorePermit};
+use tokio::sync::oneshot;
 
 const LIMITS: Limits = Limits {
     frames: 8,
@@ -75,7 +75,7 @@ pub(crate) struct ContinuationCredit {
 /// The optional observer has no cancellation authority over accepted work.
 pub(crate) fn compose_with_credit(
     owner: ReservedGeneration,
-    heavy: Arc<OwnedSemaphorePermit>,
+    heavy: Arc<crate::telemetry::hooks::Lease>,
     input: AcceptedChat,
     auth: Arc<Auth>,
     inference: SharedInference,
@@ -95,7 +95,7 @@ pub(crate) fn compose_with_credit(
 #[cfg(test)]
 fn compose(
     owner: ReservedGeneration,
-    heavy: Arc<OwnedSemaphorePermit>,
+    heavy: Arc<crate::telemetry::hooks::Lease>,
     input: AcceptedChat,
     auth: Arc<Auth>,
     inference: SharedInference,
@@ -107,7 +107,7 @@ fn compose(
 #[cfg(test)]
 fn compose_with_startup(
     owner: ReservedGeneration,
-    heavy: Arc<OwnedSemaphorePermit>,
+    heavy: Arc<crate::telemetry::hooks::Lease>,
     input: AcceptedChat,
     auth: Arc<Auth>,
     inference: SharedInference,
@@ -128,7 +128,7 @@ fn compose_with_startup(
 // Keep the blocking boundary injectable privately for panic/shutdown tests.
 fn compose_inner(
     owner: ReservedGeneration,
-    heavy: Arc<OwnedSemaphorePermit>,
+    heavy: Arc<crate::telemetry::hooks::Lease>,
     input: AcceptedChat,
     auth: Arc<Auth>,
     inference: SharedInference,
@@ -139,11 +139,12 @@ fn compose_inner(
     ),
 ) -> (DeliveryBody, Observer) {
     let (tx, body) = delivery(heavy.clone(), LIMITS, timeout);
+    let body = body.observed(owner.delivery_observation());
     #[cfg(test)]
     if let Some(hooks) = &input.resource_hooks {
         hooks.delivery(&body);
     }
-    let observer = owner.spawn_settling(tx, move |tx, settlement| async move {
+    let observer = owner.spawn_settling(tx, move |tx, mut settlement| async move {
         // spawn_blocking outlives cancellation of its async waiter. Carry the
         // SAME heavy lease with both its input AND its unclaimed return value,
         // even after a failed sender has detached and the body has disappeared.
@@ -179,6 +180,9 @@ fn compose_inner(
         });
         let result = inference
             .generate_stream(&input.model, &input.history, _heavy.clone(), &mut |delta| {
+                if !delta.is_empty() {
+                    settlement.first_output();
+                }
                 renderer.delta(delta, |html| {
                     tx.try_send(html.as_bytes())
                         .map_err(|_| RenderOutcome::DeliveryFailed)
@@ -239,6 +243,7 @@ fn compose_inner(
                     .map_err(|_| RenderOutcome::DeliveryFailed)
             },
         );
+        tx.finish();
         receipt
     });
     (body, observer)
@@ -249,14 +254,14 @@ fn compose_inner(
 struct Startup {
     input: AcceptedChat,
     tx: StartupTx,
-    _heavy: Arc<OwnedSemaphorePermit>,
+    _heavy: Arc<crate::telemetry::hooks::Lease>,
 }
 
 struct Started {
     renderer: Result<IncrementalRenderer<'static>, RenderOutcome>,
     input: AcceptedChat,
     tx: DeliveryTx,
-    _heavy: Arc<OwnedSemaphorePermit>,
+    _heavy: Arc<crate::telemetry::hooks::Lease>,
 }
 
 fn start(mut job: Startup) -> Started {

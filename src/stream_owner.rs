@@ -4,6 +4,7 @@
 //! bounded independently. This is not an RSS/allocator or whole-worker budget.
 //! Delivery shares a heavy admission lease, never a reservation or inference task.
 
+use crate::telemetry::{DeliveryTerminal, OwnedObservation};
 use axum::body::{Bytes, HttpBody};
 use std::{
     convert::Infallible,
@@ -47,6 +48,7 @@ struct Budget {
     used_frames: AtomicUsize,
     high_bytes: AtomicUsize,
     high_frames: AtomicUsize,
+    producer: AtomicUsize,
 }
 
 impl Budget {
@@ -71,7 +73,7 @@ pub(crate) struct StartupTx {
 }
 
 pub(crate) fn delivery(
-    lease: impl Into<Arc<OwnedSemaphorePermit>>,
+    lease: impl Into<Arc<crate::telemetry::hooks::Lease>>,
     limits: Limits,
     startup_timeout: Duration,
 ) -> (StartupTx, DeliveryBody) {
@@ -86,6 +88,7 @@ pub(crate) fn delivery(
         used_frames: AtomicUsize::new(0),
         high_bytes: AtomicUsize::new(0),
         high_frames: AtomicUsize::new(0),
+        producer: AtomicUsize::new(0),
     });
     (
         StartupTx {
@@ -101,6 +104,7 @@ pub(crate) fn delivery(
         DeliveryBody {
             rx,
             _lease: lease,
+            observation: None,
             budget,
         },
     )
@@ -108,7 +112,7 @@ pub(crate) fn delivery(
 
 pub(crate) struct DeliveryTx {
     sender: Option<mpsc::Sender<Bytes>>,
-    lease: Option<Arc<OwnedSemaphorePermit>>,
+    lease: Option<Arc<crate::telemetry::hooks::Lease>>,
     budget: Arc<Budget>,
     chunk_bytes: u32,
     failure: Option<DeliveryError>,
@@ -126,7 +130,7 @@ struct Credit {
     size: usize,
     _bytes: OwnedSemaphorePermit,
     _frame: OwnedSemaphorePermit,
-    _lease: Arc<OwnedSemaphorePermit>,
+    _lease: Arc<crate::telemetry::hooks::Lease>,
 }
 
 impl Drop for Credit {
@@ -185,6 +189,7 @@ impl DeliveryTx {
     fn detach_on_error(&mut self, result: Result<(), DeliveryError>) -> Result<(), DeliveryError> {
         if let Err(error) = result {
             self.failure = Some(error);
+            self.budget.producer.store(2, Ordering::Release);
             // Drop our lease and close the queue, but leave accepted frames for
             // the consumer. A retained detached sender cannot pin a lane forever.
             self.sender.take();
@@ -225,6 +230,15 @@ impl DeliveryTx {
             Ok(())
         })();
         self.detach_on_error(result)
+    }
+
+    /// Explicit normal producer termination, including a normally delivered error.
+    pub(crate) fn finish(&mut self) {
+        let _ = self
+            .budget
+            .producer
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+        self.sender.take();
     }
 
     pub(crate) fn detach(&mut self) {
@@ -284,12 +298,22 @@ impl StartupTx {
 }
 
 pub(crate) struct DeliveryBody {
+    observation: Option<OwnedObservation>,
     rx: mpsc::Receiver<Bytes>,
-    _lease: Arc<OwnedSemaphorePermit>,
+    _lease: Arc<crate::telemetry::hooks::Lease>,
     budget: Arc<Budget>,
 }
 
 impl DeliveryBody {
+    pub(crate) fn observed(mut self, observation: Option<OwnedObservation>) -> Self {
+        self.observation = observation;
+        self
+    }
+    fn finish(&mut self, terminal: DeliveryTerminal) {
+        if let Some(mut observation) = self.observation.take() {
+            observation.finish_delivery(terminal);
+        }
+    }
     pub(crate) fn usage(&self) -> Usage {
         self.budget.usage()
     }
@@ -308,7 +332,7 @@ impl DeliveryBody {
 #[cfg(test)]
 pub(crate) struct DeliveryProbe {
     budget: Arc<Budget>,
-    heavy: std::sync::Weak<OwnedSemaphorePermit>,
+    heavy: std::sync::Weak<crate::telemetry::hooks::Lease>,
 }
 
 #[cfg(test)]
@@ -330,8 +354,21 @@ impl HttpBody for DeliveryBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, Infallible>>> {
-        self.rx
-            .poll_recv(cx)
-            .map(|part| part.map(|bytes| Ok(http_body::Frame::data(bytes))))
+        let part = std::task::ready!(self.rx.poll_recv(cx));
+        if part.is_none() {
+            let terminal = match self.budget.producer.load(Ordering::Acquire) {
+                1 => DeliveryTerminal::Completed,
+                2 => DeliveryTerminal::Interrupted,
+                _ => DeliveryTerminal::Unknown,
+            };
+            self.finish(terminal);
+        }
+        Poll::Ready(part.map(|bytes| Ok(http_body::Frame::data(bytes))))
+    }
+}
+
+impl Drop for DeliveryBody {
+    fn drop(&mut self) {
+        self.finish(DeliveryTerminal::Interrupted);
     }
 }

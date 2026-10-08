@@ -5,6 +5,7 @@
 mod stream_owner;
 
 use http_body_util::BodyExt;
+use possums::telemetry;
 use std::{sync::Arc, time::Duration};
 use stream_owner::{delivery, DeliveryError, Limits};
 use tokio::sync::Semaphore;
@@ -15,9 +16,9 @@ const LIMITS: Limits = Limits {
     chunk_bytes: 8,
 };
 
-fn lane() -> (Arc<Semaphore>, tokio::sync::OwnedSemaphorePermit) {
+fn lane() -> (Arc<Semaphore>, possums::telemetry::hooks::Lease) {
     let lane = Arc::new(Semaphore::new(1));
-    let lease = lane.clone().try_acquire_owned().unwrap();
+    let lease = possums::telemetry::hooks::Lease::from(lane.clone().try_acquire_owned().unwrap());
     (lane, lease)
 }
 
@@ -219,7 +220,7 @@ async fn closed_sink_and_empty_body_have_explicit_lifetimes() {
     assert_eq!(tx.usage().bytes, 0);
     assert_eq!(lane.available_permits(), 1);
 
-    let lease = lane.clone().try_acquire_owned().unwrap();
+    let lease = possums::telemetry::hooks::Lease::from(lane.clone().try_acquire_owned().unwrap());
     let (startup, mut body) = delivery(lease, LIMITS, Duration::from_secs(1));
     drop(startup);
     assert!(body.frame().await.is_none());

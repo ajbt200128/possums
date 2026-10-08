@@ -19,7 +19,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use tokio::sync::{Notify, OwnedSemaphorePermit};
+use tokio::sync::Notify;
 
 struct Provider {
     tokenizations: AtomicUsize,
@@ -39,7 +39,7 @@ impl Inference for Provider {
         &self,
         _: &str,
         _: &[Message],
-        _: Arc<OwnedSemaphorePermit>,
+        _: Arc<possums::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         self.tokenizations.fetch_add(1, Ordering::SeqCst);
         Ok(2)
@@ -48,7 +48,7 @@ impl Inference for Provider {
         &self,
         _: &Model,
         _: &[Message],
-        _: Arc<OwnedSemaphorePermit>,
+        _: Arc<possums::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<StreamCompletion, InferenceError> {
         self.generations.fetch_add(1, Ordering::SeqCst);

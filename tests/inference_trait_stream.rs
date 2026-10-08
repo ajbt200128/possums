@@ -17,7 +17,7 @@ impl Inference for NoStreaming {
         &self,
         _: &str,
         _: &[Message],
-        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        _heavy: std::sync::Arc<possums::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         panic!("unexpected tokenizer call")
     }
@@ -45,7 +45,7 @@ impl Inference for StreamingMock {
         &self,
         model: &str,
         messages: &[Message],
-        heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        heavy: std::sync::Arc<possums::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         NoStreaming.count_tokens(model, messages, heavy).await
     }
@@ -54,7 +54,7 @@ impl Inference for StreamingMock {
         &self,
         model: &Model,
         messages: &[Message],
-        _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+        _heavy: std::sync::Arc<possums::telemetry::hooks::Lease>,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
     ) -> Result<StreamUsage, InferenceError> {
         assert_eq!(model.id, "fixture");
@@ -144,11 +144,12 @@ async fn default_streaming_fails_closed_without_callback() {
     assert!(matches!(result, Err(InferenceError::Unavailable)));
 }
 
-fn heavy() -> Arc<tokio::sync::OwnedSemaphorePermit> {
+fn heavy() -> Arc<possums::telemetry::hooks::Lease> {
     Arc::new(
         Arc::new(tokio::sync::Semaphore::new(1))
             .try_acquire_owned()
-            .unwrap(),
+            .unwrap()
+            .into(),
     )
 }
 

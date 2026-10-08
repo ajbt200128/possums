@@ -572,7 +572,7 @@ mod route {
             &self,
             model: &str,
             messages: &[Message],
-            heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+            heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
         ) -> Result<u64, InferenceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let (body, released) = resource_fixtures::tokenizer_body(model, messages, heavy)?;
@@ -594,7 +594,7 @@ mod route {
             &self,
             model: &Model,
             messages: &[Message],
-            _heavy: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+            _heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
             on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
         ) -> Result<stream::StreamUsage, InferenceError> {
             self.generations.fetch_add(1, Ordering::SeqCst);
@@ -834,7 +834,8 @@ mod route {
                         .chat_memory
                         .clone()
                         .try_acquire_owned()
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                 ),
                 move |owner, _| {
                     drop(probe);
@@ -890,7 +891,14 @@ mod route {
         let prompt_ptr = prompt.as_ptr() as usize;
         let waiter = tokio::spawn(async move {
             let inference = state.inference.clone();
-            let heavy = Arc::new(state.chat_memory.clone().try_acquire_owned().unwrap());
+            let heavy: Arc<crate::telemetry::hooks::Lease> = Arc::new(
+                state
+                    .chat_memory
+                    .clone()
+                    .try_acquire_owned()
+                    .unwrap()
+                    .into(),
+            );
             let work_heavy = heavy.clone();
             state
                 .generation()
@@ -964,7 +972,8 @@ mod route {
                         .chat_memory
                         .clone()
                         .try_acquire_owned()
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                 ),
                 |_, _| panic!("duplicate handoff must not run"),
             )
@@ -1364,7 +1373,8 @@ async fn proof_seams_use_real_serializers_and_consumer() {
         content: "borrowed \"<&>🐾\r\n".into(),
     }];
     let lane = Arc::new(Semaphore::new(1));
-    let heavy = Arc::new(lane.clone().try_acquire_owned().unwrap());
+    let heavy: Arc<crate::telemetry::hooks::Lease> =
+        Arc::new(lane.clone().try_acquire_owned().unwrap().into());
     for (body, streaming) in [
         (
             resource_fixtures::tokenizer_body("fixture", &messages, heavy.clone())
@@ -1416,7 +1426,7 @@ async fn proof_probe_does_not_pin_heavy_and_observes_sliced_frames() {
     let lane = Arc::new(Semaphore::new(1));
     let lease = lane.clone().try_acquire_owned().unwrap();
     let (tx, mut body) = stream_owner::delivery(
-        lease,
+        crate::telemetry::hooks::Lease::from(lease),
         stream_owner::Limits {
             frames: 8,
             payload_bytes: 64 * 1024,

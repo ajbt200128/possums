@@ -26,7 +26,6 @@ use serde::{
     Deserialize, Serialize,
 };
 use std::{fmt, sync::Arc, time::Duration};
-use tokio::sync::OwnedSemaphorePermit;
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
@@ -394,17 +393,23 @@ fn chat_messages<'de, D: serde::Deserializer<'de>>(
 
 async fn chat(
     State(state): State<AppState>,
-    Extension(heavy): Extension<Arc<OwnedSemaphorePermit>>,
+    Extension(heavy): Extension<Arc<crate::telemetry::hooks::Lease>>,
+    Extension(observation): Extension<crate::telemetry::hooks::RequestContext>,
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Response {
+    use crate::telemetry::{AdmissionModel, Rejection as MetricRejection};
+    let reject = |status, reason| {
+        observation.reject(AdmissionModel::Unknown, reason);
+        error(status)
+    };
     let (session_id, session) = match authenticated(&state, &headers) {
         Ok(auth) => auth,
-        Err(status) => return error(status),
+        Err(status) => return reject(status, MetricRejection::Auth),
     };
     let mut input: ChatRequest = match parse(&headers, &bytes) {
         Ok(input) => input,
-        Err(status) => return error(status),
+        Err(status) => return reject(status, MetricRejection::Input),
     };
     drop(bytes);
     if !input.stream
@@ -417,7 +422,7 @@ async fn chat(
         || input.model.len() > 128
         || input.messages.is_empty()
     {
-        return error(StatusCode::BAD_REQUEST);
+        return reject(StatusCode::BAD_REQUEST, MetricRejection::Input);
     }
     let inference = state.inference.clone();
     let delivery_heavy = heavy.clone();
@@ -432,10 +437,11 @@ async fn chat(
     let result = if structured {
         let invocation = match ToolInvocation::new(input.messages, input.tools, input.tool_choice) {
             Ok(invocation) => invocation,
-            Err(_) => return error(StatusCode::BAD_REQUEST),
+            Err(_) => return reject(StatusCode::BAD_REQUEST, MetricRejection::Input),
         };
         state
             .generation()
+            .observed(observation.clone())
             .submit_structured(
                 submission,
                 StructuredGenerationInput {
@@ -455,10 +461,10 @@ async fn chat(
             .await
     } else {
         let Some(ToolMessage::User { content: prompt }) = input.messages.pop() else {
-            return error(StatusCode::BAD_REQUEST);
+            return reject(StatusCode::BAD_REQUEST, MetricRejection::Input);
         };
         if prompt.is_empty() {
-            return error(StatusCode::BAD_REQUEST);
+            return reject(StatusCode::BAD_REQUEST, MetricRejection::Input);
         }
         let history = match input
             .messages
@@ -467,10 +473,11 @@ async fn chat(
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(history) => history,
-            Err(_) => return error(StatusCode::BAD_REQUEST),
+            Err(_) => return reject(StatusCode::BAD_REQUEST, MetricRejection::Input),
         };
         state
             .generation()
+            .observed(observation.clone())
             .submit(
                 submission,
                 GenerationInput {
