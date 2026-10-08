@@ -55,11 +55,25 @@ const MAX_HEADER_BYTES: usize = 32 * 1024;
 // storage; it is NOT a standalone allowance for decoded history. SDK/TLS, shared
 // auth/accounting state and allocator overhead are outside these envelopes.
 const CHAT_LANES: usize = 4;
+const NEW_CHAT_LANES: usize = 1;
+const CONTROL_LANES: usize = 1;
 // Native control forms contain only CSRF/credentials (43/128 bytes), never
 // conversation history. Apply this ceiling to fallbacks/wrong methods as well.
 const CONTROL_BODY_LIMIT: usize = 4 * 1024;
 const MAX_CONTROL_RENDERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ATTESTATION_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Fixed configured admission limits, not currently available permits.
+pub fn admission_capacities() -> [(Lane, u64); 6] {
+    [
+        (Lane::Connection, MAX_CONNECTIONS as u64),
+        (Lane::Generation, CHAT_LANES as u64),
+        (Lane::Heavy, CHAT_LANES as u64),
+        (Lane::Ingress, CHAT_LANES as u64),
+        (Lane::NewChat, NEW_CHAT_LANES as u64),
+        (Lane::Control, CONTROL_LANES as u64),
+    ]
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -126,8 +140,8 @@ impl AppState {
             gateway_evidence_verifier,
             chat_memory: Arc::new(Semaphore::new(CHAT_LANES)),
             chat_ingress: Arc::new(Semaphore::new(CHAT_LANES)),
-            new_chat_memory: Arc::new(Semaphore::new(1)),
-            control_memory: Arc::new(Semaphore::new(1)),
+            new_chat_memory: Arc::new(Semaphore::new(NEW_CHAT_LANES)),
+            control_memory: Arc::new(Semaphore::new(CONTROL_LANES)),
             generation_slots: Arc::new(Semaphore::new(CHAT_LANES)),
             telemetry: None,
             #[cfg(test)]

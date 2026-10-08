@@ -1,6 +1,7 @@
-//! Gateway process only, not enclave/cgroup allocation or model GPU usage.
-//! Per PRIVACY.md: numeric CPU time and RSS only; source errors are discarded.
-use super::{AggregateMetrics, Clock, ResourceMetric, ResourceScope, SECOND};
+//! Process CPU/RSS and fixed application admission limits, not enclave/cgroup
+//! allocation or model GPU usage. Per PRIVACY.md: numeric sources only; errors
+//! are discarded, and configured capacity never means currently free permits.
+use super::{AggregateMetrics, Clock, Lane, ResourceMetric, ResourceScope, SECOND};
 use std::time::{Duration, Instant};
 
 const INTERVAL: u64 = 10 * SECOND;
@@ -25,12 +26,20 @@ impl Reading {
     }
 }
 
-#[derive(Default)]
 pub(super) struct Sampler {
+    capacities: [(Lane, u64); 6],
     last: Option<u64>,
     previous: Option<(Instant, Duration)>,
 }
 impl Sampler {
+    pub(super) fn new(capacities: [(Lane, u64); 6]) -> Self {
+        Self {
+            capacities,
+            last: None,
+            previous: None,
+        }
+    }
+
     pub(super) fn sample<C: Clock>(&mut self, metrics: &AggregateMetrics<C>) {
         self.sample_with(metrics, Reading::now);
     }
@@ -56,6 +65,9 @@ impl Sampler {
             return;
         };
         if !metrics.infrastructure_sample(end, |table, interval| {
+            for &(lane, capacity) in &self.capacities {
+                table.configuration(lane, interval, capacity);
+            }
             for (metric, value) in [
                 (ResourceMetric::CpuUsed, cpu),
                 (ResourceMetric::MemoryUsed, rss),

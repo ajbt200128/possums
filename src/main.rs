@@ -39,7 +39,10 @@ async fn run() -> Result<(), ()> {
         )),
     );
     let listener = tokio::net::TcpListener::bind(bind).await.map_err(|_| ())?;
-    let telemetry = TelemetryRuntime::start(TelemetryConfig::from_env());
+    let telemetry = TelemetryRuntime::start(
+        TelemetryConfig::from_env(),
+        possums::web::admission_capacities(),
+    );
     let state = state.with_telemetry(telemetry.metrics());
     let result = tokio::select! {
         result = serve(listener, state) => result.map_err(|_| ()),

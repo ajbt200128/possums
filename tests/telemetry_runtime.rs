@@ -77,21 +77,30 @@ fn allowlisted_configuration_and_private_diagnostics() {
 async fn ordinary_component_start_stop_and_explicit_disable() {
     // The configured production source must first complete warmup and a full
     // minute. This immediate start/stop test cannot release a payload or use DNS.
-    let runtime = Runtime::start(config(&[]));
+    let runtime = Runtime::start(config(&[]), possums::web::admission_capacities());
     assert!(runtime.enabled());
     let metrics = runtime.metrics().expect("configured attachment");
     drop(metrics.http(possums::telemetry::Endpoint::ChatApi));
     assert!(metrics.request().is_none());
     tokio::task::yield_now().await;
     assert!(runtime.shutdown().await);
-    let runtime = Runtime::start(config(&[("OTEL_SDK_DISABLED", Some("true"))]));
+    let runtime = Runtime::start(
+        config(&[("OTEL_SDK_DISABLED", Some("true"))]),
+        possums::web::admission_capacities(),
+    );
     assert!(!runtime.enabled());
     assert!(runtime.metrics().is_none());
     assert!(runtime.shutdown().await);
-    let runtime = Runtime::start(Config::from_lookup(|_| None));
+    let runtime = Runtime::start(
+        Config::from_lookup(|_| None),
+        possums::web::admission_capacities(),
+    );
     assert!(runtime.metrics().is_none());
     assert!(runtime.shutdown().await);
-    drop(Runtime::start(config(&[])));
+    drop(Runtime::start(
+        config(&[]),
+        possums::web::admission_capacities(),
+    ));
 }
 
 #[test]

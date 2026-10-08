@@ -91,7 +91,12 @@ async fn configured_sender_rewarms_after_invalidation_without_replay() {
     let metrics = released();
     metrics.invalidate();
     let (stop, stopped) = watch::channel(false);
-    let task = tokio::spawn(sender(metrics.clone(), client, stopped));
+    let task = tokio::spawn(sender(
+        metrics.clone(),
+        client,
+        stopped,
+        crate::web::admission_capacities(),
+    ));
     tokio::time::timeout(Duration::from_secs(2), async {
         while metrics.epoch.load(SeqCst) % 2 == 0 {
             tokio::task::yield_now().await;
@@ -115,7 +120,12 @@ async fn authenticated_tls_owned_sender_payload_stop_and_no_retry() {
         let evidence = client.evidence();
         let metrics = released();
         let (stop, stopped) = watch::channel(false);
-        let task = tokio::spawn(sender(metrics.clone(), client, stopped));
+        let task = tokio::spawn(sender(
+            metrics.clone(),
+            client,
+            stopped,
+            crate::web::admission_capacities(),
+        ));
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = acceptor.accept(stream).await.unwrap();
         let bytes = capture(&mut stream).await;
@@ -204,7 +214,12 @@ async fn tls_timeout_stop_and_epoch_invalidation_own_actual_io() {
         let evidence = client.evidence();
         let metrics = released();
         let (stop, stopped) = watch::channel(false);
-        let task = tokio::spawn(sender(metrics.clone(), client, stopped));
+        let task = tokio::spawn(sender(
+            metrics.clone(),
+            client,
+            stopped,
+            crate::web::admission_capacities(),
+        ));
         let (stream, _) = listener.accept().await.unwrap();
         let mut tls_stream = None;
         let mut raw_stream = None;
