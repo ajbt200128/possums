@@ -65,10 +65,15 @@ impl Drop for Terminal {
 /// captured input and rendering state is destroyed, even after settlement.
 pub(crate) struct Settlement {
     terminal: Terminal,
+    first_output_seen: bool,
 }
 
 impl Settlement {
     pub(crate) fn first_output(&mut self) {
+        // Later stream fragments need no global aggregation lock.
+        if std::mem::replace(&mut self.first_output_seen, true) {
+            return;
+        }
         if let Some(o) = &mut self.terminal.observation {
             o.first_output();
         }
@@ -262,7 +267,10 @@ impl ReservedGeneration {
             _resources,
             _generation,
         } = self;
-        let settlement = Settlement { terminal };
+        let settlement = Settlement {
+            terminal,
+            first_output_seen: false,
+        };
         tokio::spawn(Worker {
             // The SAME guard moves into Worker before the factory can run.
             work: Box::pin(async move { work(delivery, settlement).await }),
