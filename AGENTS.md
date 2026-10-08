@@ -47,11 +47,11 @@ Preserve these trust boundaries:
 
 ## Telemetry policy
 
-**Always read and reference [`PRIVACY.md`](PRIVACY.md) before touching telemetry**, including instrumentation, logs/traces, metrics, SDK defaults, collectors, resource discovery, dashboards, alerts, deployment, or diagnostic/support tooling. Link the applicable policy sections and privacy-test evidence in the change description and verification record. The policy applies to real data in testing as well as production; an environment label does not relax it. The rollout plan is [`docs/telemetry-plan.md`](docs/telemetry-plan.md). The operator's 2026-10-08 MVP decision permits deployment to the existing production gateway and Honeycomb's default retention; other privacy/runtime gates still apply. A development telemetry destination does not make production traffic synthetic.
+**Always read and reference [`PRIVACY.md`](PRIVACY.md) before touching telemetry**, including instrumentation, logs/traces, metrics, SDK defaults, collectors, resource discovery, dashboards, alerts, deployment, or diagnostic/support tooling. Link the applicable policy sections and privacy-test evidence in the change description and verification record. The policy applies to real data in testing as well as production; an environment label does not relax it. The rollout plan is [`docs/telemetry-plan.md`](docs/telemetry-plan.md). The operator's 2026-10-08 MVP decision permits deployment to the existing production gateway and Honeycomb's default retention. Direct authenticated Honeycomb US OTLP HTTPS (no Collector) and enablement with valid allowlisted credentials are now selected; `OTEL_SDK_DISABLED=true` is the off switch. Other privacy/runtime gates still apply. A development telemetry destination does not make production traffic synthetic.
 
 Production observability uses aggregate Honeycomb metrics only:
 
-- Sanitize and aggregate locally before export through an OpenTelemetry Collector.
+- Sanitize and aggregate locally before direct authenticated TLS export; enforce the final allowlist in-process, without a Collector.
 - Send sanitized aggregates to Honeycomb US with provider-default retention for the MVP, per the explicit operator decision in `PRIVACY.md`. Record effective retention when verified; request shorter retention (target: seven days) after the MVP. Do not claim that the default is seven days.
 - Do not export production logs or request-level traces.
 - Never export prompts, responses, conversation history, request bodies, URLs/query strings, headers, client IPs, user agents, credentials, account/payment identifiers, onion identifiers, stable pseudonyms, exact request timestamps, or per-request token/cost events.
