@@ -1,7 +1,7 @@
 //! Startup-owned, best-effort direct export, independent of application owners.
 use super::{
     export::{handoff, transport::Client},
-    AggregateMetrics, Clock, Deployment, SystemClock,
+    AggregateMetrics, Clock, Deployment, Lane, SystemClock,
 };
 use http::HeaderValue;
 use std::{fmt, sync::Arc, time::Duration};
@@ -87,7 +87,7 @@ pub struct Runtime {
     task: Option<JoinHandle<bool>>,
 }
 impl Runtime {
-    pub fn start(config: Config) -> Self {
+    pub fn start(config: Config, capacities: [(Lane, u64); 6]) -> Self {
         let (stop, stopped) = watch::channel(false);
         let mut shared = None;
         let task = config.credential.and_then(|credential| {
@@ -99,7 +99,7 @@ impl Runtime {
                 SystemClock::default(),
             ));
             shared = Some(metrics.clone());
-            Some(tokio::spawn(sender(metrics, client, stopped)))
+            Some(tokio::spawn(sender(metrics, client, stopped, capacities)))
         });
         Self {
             metrics: shared,
@@ -137,8 +137,9 @@ async fn sender<C: Clock + 'static>(
     metrics: Arc<AggregateMetrics<C>>,
     template: Client,
     mut stopped: watch::Receiver<bool>,
+    capacities: [(Lane, u64); 6],
 ) -> bool {
-    let mut process = super::process::Sampler::default();
+    let mut process = super::process::Sampler::new(capacities);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {

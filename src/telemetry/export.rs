@@ -5,6 +5,14 @@ pub(super) mod transport;
 
 const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+#[cfg(test)]
+pub(in crate::telemetry) fn encoded_infrastructure(
+    table: &super::Infrastructure,
+    window: super::Window,
+) -> opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest {
+    (&materialize::infrastructure(table, window).unwrap()).into()
+}
+
 async fn encode_and_send(
     client: &transport::Client,
     metrics: &opentelemetry_sdk::metrics::data::ResourceMetrics,
