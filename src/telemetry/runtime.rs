@@ -138,6 +138,7 @@ async fn sender<C: Clock + 'static>(
     template: Client,
     mut stopped: watch::Receiver<bool>,
 ) -> bool {
+    let mut process = super::process::Sampler::default();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -146,6 +147,7 @@ async fn sender<C: Clock + 'static>(
             _ = stopped.wait_for(|stop| *stop) => break,
             _ = tick.tick() => {},
         }
+        process.sample(&metrics);
         metrics.poll();
         while let Some(permit) = metrics.take_window() {
             // Fresh attempt state; never retry the consumed window. Connection

@@ -3,6 +3,7 @@
 pub mod hooks;
 mod infrastructure;
 mod labels;
+mod process;
 pub mod runtime;
 mod tables;
 pub use infrastructure::*;
@@ -343,6 +344,12 @@ impl<C: Clock> AggregateMetrics<C> {
         result
     }
     fn advance(&self, state: &mut State, mapped: u64) -> bool {
+        self.advance_for_collection(state, mapped, true)
+    }
+    fn advance_observation(&self, state: &mut State, mapped: u64) -> bool {
+        self.advance_for_collection(state, mapped, false)
+    }
+    fn advance_for_collection(&self, state: &mut State, mapped: u64, collect: bool) -> bool {
         let Some(request_end) = state.requests.start.checked_add(REQUEST_WINDOW) else {
             self.invalidate();
             return false;
@@ -395,7 +402,9 @@ impl<C: Clock> AggregateMetrics<C> {
             state.requests.freeze(state.epoch, request_end, allowed);
             state.mark_leases();
         }
-        if mapped >= infra_end {
+        // Only the sampling/collection owner closes during the one-second
+        // grace. Request observations must not race the final resource batch.
+        if mapped >= infra_end && (collect || mapped - infra_end > SECOND) {
             let allowed = mapped - infra_end <= SECOND
                 && state.infrastructure.start >= state.infrastructure.eligible
                 && state.infrastructure.active.series_count() > 0;
@@ -528,7 +537,7 @@ impl<C: Clock> AggregateMetrics<C> {
         };
         let time = self.time(&mut state);
         if let Some((_, mapped)) = time {
-            self.advance(&mut state, mapped);
+            self.advance_observation(&mut state, mapped);
         }
         let eligible = time.is_some_and(|(_, mapped)| mapped >= state.requests.eligible)
             && state.epoch == self.epoch.load(Ordering::SeqCst)
@@ -586,7 +595,7 @@ impl<C: Clock> AggregateMetrics<C> {
         let Some((_, mapped)) = self.time(&mut state) else {
             return;
         };
-        if !self.advance(&mut state, mapped) || mapped < state.requests.eligible {
+        if !self.advance_observation(&mut state, mapped) || mapped < state.requests.eligible {
             return;
         }
         let pre_router = (reason as usize) < 4;
@@ -632,7 +641,7 @@ impl<C: Clock> AggregateMetrics<C> {
             state.records[key as usize & 255].terminal = true;
         }
         if let Some((_, mapped)) = time {
-            self.advance(&mut state, mapped);
+            self.advance_observation(&mut state, mapped);
         }
         let Some(record) = state.record(key).copied() else {
             return;
@@ -671,8 +680,10 @@ impl<C: Clock> AggregateMetrics<C> {
         let index = key as usize & 255;
         self.retired[index / 64].fetch_or(1 << (index % 64), Ordering::Release);
     }
-    /// Synthetic interval ingestion. Call before boundary poll for the last
-    /// interval; attempted minutes are never reopened for late/revised input.
+    /// Interval ingestion within one second after a ten-second boundary.
+    /// Insert every series before the collection owner's boundary poll;
+    /// request observations defer closure during this grace. Attempted minutes
+    /// are never reopened for late/revised input.
     pub fn resource(&self, end_ns: u64, scope: ResourceScope, metric: ResourceMetric, value: f64) {
         self.infrastructure_sample(end_ns, |table, interval| {
             table.observe(scope, metric, interval, value)
@@ -683,21 +694,26 @@ impl<C: Clock> AggregateMetrics<C> {
             table.configuration(lane, interval, capacity)
         });
     }
-    fn infrastructure_sample(&self, end_ns: u64, observe: impl FnOnce(&mut Infrastructure, usize)) {
+    fn infrastructure_sample(
+        &self,
+        end_ns: u64,
+        observe: impl FnOnce(&mut Infrastructure, usize),
+    ) -> bool {
         let Some(mut state) = self.lock() else {
-            return;
+            return false;
         };
         let Some((_, mapped)) = self.time(&mut state) else {
-            return;
+            return false;
         };
+        let timely = mapped >= end_ns && mapped - end_ns <= SECOND;
         if state
             .infrastructure
             .start
             .checked_add(INFRA_WINDOW)
-            .is_none_or(|end| mapped > end)
-            && !self.advance(&mut state, mapped)
+            .is_none_or(|end| mapped.saturating_sub(end) > SECOND)
+            && !self.advance_observation(&mut state, mapped)
         {
-            return;
+            return false;
         }
         let start = state.infrastructure.start;
         // No implicit closure here: all series at the sixth interval can arrive
@@ -709,13 +725,14 @@ impl<C: Clock> AggregateMetrics<C> {
         {
             observe(
                 &mut state.infrastructure.active,
-                if mapped == end_ns {
+                if timely {
                     ((end_ns - start) / (10 * SECOND) - 1) as usize
                 } else {
                     6
                 },
             );
         }
+        timely
     }
     /// Local immutable inspection, not a send permit. Packet 2C must coordinate
     /// in-flight cancellation with the epoch and may not retain a borrowed view.
