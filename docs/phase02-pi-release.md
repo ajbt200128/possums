@@ -199,7 +199,7 @@ model qualification is part of this work.
 
 ## 2026-10-08 telemetry release and client approval
 
-The serving gateway is now **v0.0.12**. Its tool/API profile and Pi 1.0.4
+The serving gateway at this checkpoint was **v0.0.12**. Its tool/API profile and Pi 1.0.4
 integration are unchanged; this release adds the reviewed aggregate telemetry
 runtime, not new model qualification. See [privacy scope](../PRIVACY.md#reviewed-mvp-release-scope)
 and [release evidence](verification.md#2026-10-08--v0012-measured-telemetry-deployment).
@@ -229,3 +229,37 @@ than silently trusting the new release. No global Pi settings or installed
 package were changed by this verification. Earlier funded observations and
 unresolved billing/privacy/legacy-v2 freshness properties remain historical;
 this release does not retrospectively qualify them.
+
+## 2026-10-08 configured-capacity release and paired client refresh
+
+The serving gateway is now **v0.0.13**, adding only the six approved fixed
+application admission-capacity gauges; the tool/API profile and linked request
+suppression are unchanged. See [privacy scope](../PRIVACY.md#reviewed-mvp-release-scope)
+and [scoped evidence](verification.md#2026-10-08--v0013-measured-capacity-release).
+
+- Image publication `37831871064` produced matching independent digests:
+  `sha256:d3d6bbbc5f856fd525792deeec1dfdcf3f717daba6004bf1d7a57cd198a8222e`.
+- Release source is `ca4de91aeca61d1b7ac8501db27b8fed357ba444`;
+  manifest SHA-256 is `d92ef5447f894f395c6b9b8dbfcfa97764d82a408cc88d604815446fc70d23f9`;
+  config SHA-256 is `def47fe4df15aebb4f48b8caa5af8882a6bd4a3f96efc52a472cb4efc7dd1134`.
+- Publication `37834605451/attempts/1` passed exact cryptographic identity,
+  tag, source/signer digest, hosted-runner, invocation and signed-predicate
+  checks. Config bytes match source; CVM remains `0.14.12`.
+- The supported unheld blue/green update reached v0.0.13 with no pending update,
+  preserving variables, secret references, SSH keys and resources. Debug is off
+  and confidential mode on. Native manifest-pinned serving verification passed,
+  with matching endorsed/connection TLS keys and a future explicit expiry.
+  This does not prove uninterrupted availability or legacy-v2 freshness.
+- Fresh strict TypeScript, **42 Pi checks and 436 reference/admission checks**
+  passed. Actual rebuilt and installed extensions accepted the serving public
+  legacy-v2 bootstrap and deliberately stopped before credentials: no login,
+  catalog request, inference or compaction was sent.
+- The operator-authorized installed pair now contains extension SHA-256
+  `98b21c39b60733c8ceb116c493efa38beca2d738743b8b4ba711e1eb0d4ea7c8`
+  and the matching v0.0.13 manifest. The previous versioned package is retained.
+  Credentials, settings and Pi runtime are unchanged. Fully restart Pi to load
+  the replacement; offline `/possums-status` reports v0.0.13.
+
+Only API identity pins change. The independent WEB approval and API administrative
+expiry **2026-10-11** remain unchanged. Earlier funded tool/billing observations
+and unresolved model, retention and privacy properties are not requalified.

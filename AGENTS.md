@@ -10,7 +10,7 @@
 
 ## Product decisions
 
-For Phase 0, follow this file first, then `SPEC.md` and `docs/phase0.md`. `OVERALL_PLAN.md` preserves historical, long-term context and is not authoritative for Phase 0. The `v0.0.5` buffered gateway is historical. The current deployed API gateway is `v0.0.12`; streaming, tool-profile assumptions, Pi 1.0.4 installation/compaction and scoped acceptance are recorded in `docs/phase02-pi-release.md` and `clients/pi/README.md`. Preserve historical buffered evidence and unresolved live billing/privacy properties; do not turn later implementation into retrospective verification.
+For Phase 0, follow this file first, then `SPEC.md` and `docs/phase0.md`. `OVERALL_PLAN.md` preserves historical, long-term context and is not authoritative for Phase 0. The `v0.0.5` buffered gateway is historical. The current deployed API gateway is `v0.0.13`; streaming, tool-profile assumptions, Pi 1.0.4 installation/compaction and scoped acceptance are recorded in `docs/phase02-pi-release.md` and `clients/pi/README.md`. Preserve historical buffered evidence and unresolved live billing/privacy properties; do not turn later implementation into retrospective verification.
 
 - Phase 0 is an attested clearnet gateway with a plain, no-JavaScript interface. Issue demo credentials manually; do not add public signup or payments to this phase.
 - Expose all supported Tinfoil models through a live, authenticated Tinfoil catalog and an OpenAI-style model selector. Catalog contents are outside the gateway measurement; disclose that boundary and fail closed when catalog authentication or validation fails.
