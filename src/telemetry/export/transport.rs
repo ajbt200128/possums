@@ -68,10 +68,12 @@ pub(in crate::telemetry) struct Client {
     credential: Option<http::HeaderValue>,
     uri: Uri,
     state: Arc<State>,
-    // Sole seam: deterministic pending connect, rather than non-loopback routing
+    // Deterministic pending connect, rather than non-loopback routing
     // or platform-dependent backlog exhaustion. Normal tests use real TCP.
     #[cfg(test)]
     pub(in crate::telemetry) stall_connect: bool,
+    #[cfg(test)]
+    pub(in crate::telemetry) send_buffer_size: Option<u32>,
     authority: Option<(Arc<AtomicU64>, u64, tokio::time::Instant)>,
 }
 
@@ -102,6 +104,7 @@ impl Client {
                 evidence: Arc::new(Evidence::default()),
             }),
             stall_connect: false,
+            send_buffer_size: None,
             authority: None,
         })
     }
@@ -135,6 +138,8 @@ impl Client {
             }),
             #[cfg(test)]
             stall_connect: false,
+            #[cfg(test)]
+            send_buffer_size: None,
             authority: None,
         })
     }
@@ -230,6 +235,19 @@ impl Client {
             return Err(Failure::Unavailable);
         }
         let stream = match self.address {
+            #[cfg(test)]
+            Some(address) if self.send_buffer_size.is_some() => {
+                let socket = if address.is_ipv4() {
+                    tokio::net::TcpSocket::new_v4()
+                } else {
+                    tokio::net::TcpSocket::new_v6()
+                }
+                .map_err(|_| Failure::Transport)?;
+                socket
+                    .set_send_buffer_size(self.send_buffer_size.unwrap())
+                    .map_err(|_| Failure::Transport)?;
+                socket.connect(address).await
+            }
             Some(address) => TcpStream::connect(address).await,
             // Unqualified for rollout: Tokio resolves on its blocking pool, whose
             // OS lookup can outlive cancellation. Production release is closed

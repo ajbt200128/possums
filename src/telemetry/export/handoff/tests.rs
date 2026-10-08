@@ -621,7 +621,16 @@ async fn co_closing_sequential_handoff_and_upload_cancel() {
         oracle::fill_maximum(&mut s.requests.active);
     }
     m.poll();
-    let (listener, client) = listener().await;
+    // Kernel defaults can absorb this entire upload without the peer reading.
+    // Bound both real socket buffers so cancellation observes actual backpressure.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    socket
+        .bind((std::net::Ipv4Addr::LOCALHOST, 0).into())
+        .unwrap();
+    let listener = socket.listen(1).unwrap();
+    let mut client = Client::new(listener.local_addr().unwrap()).unwrap();
+    client.send_buffer_size = Some(4096);
     let evidence = client.evidence();
     let (done, wait) = tokio::sync::oneshot::channel();
     let peer = async {
