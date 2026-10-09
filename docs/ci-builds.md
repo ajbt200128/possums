@@ -13,8 +13,11 @@ cache-write secret or new OIDC permission is added. Check jobs do not persist
 checkout credentials. Cache availability is an optimization, not a release gate:
 a miss must build from the pinned source. GitHub cache scope/eviction and upload
 cost still apply. The flake job seeds common dependencies before the remaining
-three jobs start in parallel. This avoids four daemons simultaneously querying an
-empty cache; it is not a guarantee against GitHub throttling or eviction.
+three jobs start in parallel. It also builds the fixture, both image archives and
+release dependency roots once in that same store, so consumers can restore their
+final outputs without querying/building an entire cold dependency graph. This
+avoids four daemons simultaneously querying an empty cache; it is not a guarantee
+against GitHub throttling or eviction.
 
 The flake already separates Cargo dependencies with Crane `buildDepsOnly`.
 Ordinary checks may reuse these artifacts and unchanged application/check/image

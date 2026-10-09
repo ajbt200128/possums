@@ -1455,3 +1455,23 @@ avoiding simultaneous cold-cache queries. This is a minimal mitigation to qualif
 not proof that GitHub rate limits are solved. No release publishing or production
 deployment is authorized by these CI passes; fresh release-stage runtime evidence
 and actual warm-cache timings remain separate.
+
+The initial identical-source rerun also passed but still throttled and rebuilt.
+The seeded layout at `739fc97` then passed
+[attempt 1](https://github.com/ajbt200128/possums/actions/runs/37968416685/attempts/1)
+and its identical-commit
+[attempt 2](https://github.com/ajbt200128/possums/actions/runs/37968416685/attempts/2).
+The seed job's first log contained zero occurrences of the observed throttle
+category and populated Nix-output cache entries. Initial seeding cost **22m33s**
+from workflow creation to completion, including cache upload and downstream
+builds. The warm rerun cost **6m31s**: flake **57s**, gateway image **1m12s**,
+browser **5m25s**, startup **4m48s** (job totals, with parallel downstream jobs).
+This is one unchanged-commit observation, not a source-edit benchmark or general
+latency guarantee. Warm browser/startup logs still rebuilt the shared Cargo
+artifacts and fixture; full output reuse was not established for those jobs.
+
+The next small follow-up explicitly seeds the fixture, both archives and release
+dependency roots in the flake job's existing store, before downstream consumers.
+This reuses already-built inputs and avoids duplicate cold fixture/dependency
+builds across runners. Its final hosted outcome must be recorded separately;
+the earlier partial-cache timing is not promoted to its verified performance.
