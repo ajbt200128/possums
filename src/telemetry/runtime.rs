@@ -142,7 +142,7 @@ async fn sender<C: Clock + 'static>(
     let mut process = super::process::Sampler::new(capacities);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
+    'running: loop {
         tokio::select! {
             biased;
             _ = stopped.wait_for(|stop| *stop) => break,
@@ -166,10 +166,17 @@ async fn sender<C: Clock + 'static>(
                 Default::default(),
             );
             tokio::pin!(attempt);
-            tokio::select! {
-                biased;
-                _ = stopped.wait_for(|stop| *stop) => break,
-                _ = &mut attempt => {},
+            // Network progress must not suspend complete-window sampling.
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = stopped.wait_for(|stop| *stop) => break 'running,
+                    _ = tick.tick() => {
+                        process.sample(&metrics);
+                        metrics.poll();
+                    },
+                    _ = &mut attempt => break,
+                }
             }
         }
         if *stopped.borrow() {

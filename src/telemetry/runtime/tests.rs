@@ -172,6 +172,92 @@ async fn authenticated_tls_owned_sender_payload_stop_and_no_retry() {
 }
 
 #[tokio::test]
+async fn pending_export_keeps_sampling_and_polling_until_joined_stop() {
+    let (listener, client, acceptor) = fixture(true, "api.honeycomb.io").await;
+    let evidence = client.evidence();
+    let metrics = released();
+    // Leave interval zero for the runtime sampler; the other five are fixtures.
+    {
+        let mut state = metrics.state.lock().unwrap();
+        for interval in 1..6 {
+            for (lane, capacity) in crate::web::admission_capacities() {
+                state
+                    .infrastructure
+                    .active
+                    .configuration(lane, interval, capacity);
+            }
+        }
+    }
+    let (stop, stopped) = watch::channel(false);
+    let task = tokio::spawn(sender(
+        metrics.clone(),
+        client,
+        stopped,
+        crate::web::admission_capacities(),
+    ));
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut stream = acceptor.accept(stream).await.unwrap();
+    capture(&mut stream).await;
+    // The peer deliberately withholds its response: this attempt is still owned.
+    for ticks in 1..=2 {
+        metrics.clock.set(
+            600 * crate::telemetry::SECOND
+                + (ticks - 1) * crate::telemetry::SECOND
+                + crate::telemetry::SECOND / 2,
+        );
+        tokio::time::timeout(Duration::from_millis(450), async {
+            loop {
+                let observed = metrics.state.lock().unwrap().requests.active.ticks;
+                if u64::from(observed) >= ticks {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(metrics.state.lock().unwrap().requests.active.valid);
+        assert_eq!(evidence.live_io.load(SeqCst), 1);
+    }
+    // A ten-second source boundary is serviced even while the same send waits.
+    // This deliberate clock jump misses occupancy periods; that gate must stay closed.
+    metrics.clock.set(610 * crate::telemetry::SECOND);
+    tokio::time::timeout(Duration::from_millis(450), async {
+        loop {
+            let complete = metrics
+                .state
+                .lock()
+                .unwrap()
+                .infrastructure
+                .active
+                .capacity(Lane::Heavy);
+            if complete == Some(4.) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!metrics.state.lock().unwrap().requests.active.valid);
+    assert_eq!(evidence.live_io.load(SeqCst), 1);
+    stop.send_replace(true);
+    assert!(tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap());
+    assert_eq!(evidence.live_io.load(SeqCst), 0);
+    assert_eq!(evidence.connections.load(SeqCst), 1);
+    assert!(metrics.off());
+    assert!(metrics.take_window().is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn tls_certificate_hostname_and_header_boundary() {
     for (trust, name, success) in [
         (true, "api.honeycomb.io", true),
