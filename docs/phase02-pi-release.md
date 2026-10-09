@@ -306,3 +306,38 @@ Fully restart Pi after replacement. WEB approval remains independent and
 unchanged. Legacy-v2 freshness/revocation limitations, earlier funded evidence,
 live billing/model compatibility and telemetry/privacy unknowns remain as
 recorded; passing v2 is not a retrospective v3 verification pass.
+
+## 2026-10-09 official v3 helper release and paired refresh
+
+The deployed gateway and current API approval are **v0.0.15**. The gateway
+helper pins official Go SDK fix `31c57af7d7b4fedf1724cb3552924dc6ecebf109`,
+using default production v3 trust. No v2 fallback or freshness bypass was needed.
+Pi keeps its accepted pinned JavaScript legacy-v2 verifier; WEB approval and API
+administrative expiry **2026-10-11** are unchanged.
+
+- Helper PR #30 and digest-only PR #31 passed all eight jobs each without
+  retries. Independent image builds agreed; release/main CI passed first attempt.
+- Release source: `30f480a48129c445de3a7dbe9c04ccdf589a67c6`.
+  Publication: `37891319005/attempts/1`. Exact cryptographic and signed-predicate
+  checks passed independently; CVM remains `0.14.12`.
+- One supported unheld blue/green update reached v0.0.15 running with no pending
+  update. Opaque variables, all secret references, SSH keys and resources were
+  preserved; debug is off and confidential mode on. This does not measure uptime.
+- The new helper and real Rust validator accepted fresh public v15 nonce
+  evidence, exact manifest, future verified expiry and matching peer TLS key;
+  wrong nonce/workload pins rejected. This forwards public evidence through a
+  local socket, not an observation of the deployed Unix socket or catalog.
+- Fresh strict TypeScript, **50 Pi plus 436 reference/admission checks**, and
+  normal-bundle diagnostics passed. Actual rebuilt and installed packages passed
+  public v2 bootstrap before credentials and offline v15 status with zero network.
+- Installed extension SHA-256:
+  `a0acbfbfc9c6c64981693d105bc1d0cd8bbfa4ceb5b01090915705c710239234`;
+  paired manifest SHA-256:
+  `cbbd5c5adce7594d7ccee19e96d88b38d096ee3290f880d4c2cf548a2387960f`.
+  Atomic replacement retained v14; settings, credentials and Pi runtime are untouched.
+
+Fully quit/restart Pi before testing authenticated model refresh and inference;
+`/reload` alone is insufficient. These verification calls sent no credential,
+login, authenticated catalog or inference. Native CLI v3 incompatibility,
+legacy-v2 freshness, original-request billing, model compatibility and privacy/
+request-metric unknowns remain unresolved. See [full scoped evidence](verification.md#2026-10-09--v0015-official-v3-helper-release-and-paired-pi-refresh).
