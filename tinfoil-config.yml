@@ -11,7 +11,7 @@ networks:
       - api.honeycomb.io
 containers:
   - name: gateway
-    image: ghcr.io/ajbt200128/possums-gateway@sha256:6027863e9e269c8389684e40cab5245eac7110179aaa583f514eecde272f741c
+    image: ghcr.io/ajbt200128/possums-gateway@sha256:a51babebbd0bcf642eaac8964e9c94799589eeb55477a09b25bc1400ada10eea
     env:
       - HOME: "/tmp"
       - POSSUMS_BIND: "0.0.0.0:8080"
