@@ -58,9 +58,13 @@ Version wording comes from the verified context, not a hard-coded latest-version
 - Receipt charges are authoritative. Submitted quote rates supply the displayed cost components; rounding remainder belongs to output. Legacy receipts without quote rates retain their settled total without invented components. Exact microunit strings are in receipt diagnostics.
 - A disconnect/abort does **not** promise server cancellation or a refund. Without a valid receipt, billing is **unknown**, even when Pi's numeric usage placeholders are zero. A deliberate new request may pay for both generations.
 
+## Quota simplification candidate
+
+The source candidate removes advertised-tool/message counts, historical tool-call/argument quotas, the three-reservation-per-account quota and the independent generation semaphore. Existing body/parser/context, memory-admission and live-completion bounds remain: this does **not** permit unlimited parallelism. It needs a paired gateway/client rollout; neither gateway deployment nor local installation is included. See [removed and retained bounds](../../docs/quota-simplification.md).
+
 ## Request encoding diagnostics
 
-`possums_request_json_depth` means local request encoding exceeded the defensive **32-level** JSON nesting limit. Simplify deeply nested tool schemas or history; this attempt sent no inference request and was not replayed. Tool schemas count inside the full request envelope, not in isolation. Byte, node and tool-count ceilings still apply. This diagnostic does not establish billing for earlier attempts; post-submission transport failures still report unknown billing. See the [offline fix evidence](../../docs/verification.md#local-pi-json-depth-compatibility-fix).
+`possums_request_json_depth` means local request encoding exceeded the defensive **32-level** JSON nesting limit. Simplify deeply nested tool schemas or history; this attempt sent no inference request and was not replayed. Tool schemas count inside the full request envelope, not in isolation. Byte/node ceilings and live-completion tool bounds still apply; the source candidate above removes historical tool-count quotas. This diagnostic does not establish billing for earlier attempts; post-submission transport failures still report unknown billing. See the [offline fix evidence](../../docs/verification.md#local-pi-json-depth-compatibility-fix).
 
 ## Compaction
 
