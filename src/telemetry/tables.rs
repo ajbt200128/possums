@@ -56,9 +56,6 @@ impl Default for RequestTables {
         }
     }
 }
-fn sparse(values: &[u64]) -> bool {
-    values.iter().any(|n| (1..10).contains(n))
-}
 fn sum(values: &[u64]) -> Option<u64> {
     values.iter().try_fold(0_u64, |a, b| a.checked_add(*b))
 }
@@ -80,23 +77,10 @@ impl RequestTables {
         if !self.valid || self.ticks != 300 {
             return false;
         }
-        for cells in [
-            self.http_starts.as_slice(),
-            &self.http_completed,
-            &self.generation_starts,
-            &self.generation_completed,
-            &self.delivery,
-            &self.rejected,
-            &self.contributors,
-        ] {
-            if sparse(cells) {
-                return false;
-            }
-        }
+        // Complete aggregates have no minimum population. The linked family
+        // still fails closed on arithmetic or lifecycle inconsistency.
         for i in 0..288 {
-            if sparse(&self.http_duration[i].0)
-                || sparse(&self.dispositions[i])
-                || self.http_duration[i].count() != Some(self.http_completed[i])
+            if self.http_duration[i].count() != Some(self.http_completed[i])
                 || sum(&self.dispositions[i]) != Some(self.http_completed[i])
             {
                 return false;
@@ -106,21 +90,14 @@ impl RequestTables {
             let Some(output) = self.first_output[i].count() else {
                 return false;
             };
-            let Some(missing) = self.generation_completed[i].checked_sub(output) else {
-                return false;
-            };
-            if sparse(&self.generation_duration[i].0)
-                || sparse(&self.first_output[i].0)
-                || sparse(&[missing])
+            if output > self.generation_completed[i]
                 || self.generation_duration[i].count() != Some(self.generation_completed[i])
             {
                 return false;
             }
         }
         for i in 0..6 {
-            if self.contributors[i] > 0
-                && (sparse(&self.occupancy[i].0) || self.occupancy[i].count() != Some(300))
-            {
+            if self.contributors[i] > 0 && self.occupancy[i].count() != Some(300) {
                 return false;
             }
         }

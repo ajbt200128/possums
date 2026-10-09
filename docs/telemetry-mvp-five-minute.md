@@ -24,7 +24,13 @@ This follow-up improves classification; the deployed absence of request columns 
 
 ## Verification and rollout status
 
-Implementation and scoped local checks are in progress. No new release/deployment or live request-query success is established by this policy document. The deployed gateway remains v0.0.15 with its previous release behavior until a measured update is verified. No paid/filler production traffic is authorized.
+Local implementation is qualified; rollout and live request-query verification remain pending. The deployed gateway remains v0.0.15 with its previous release behavior until a measured update is verified. No paid/filler production traffic is authorized.
+
+`RequestTables::releasable` no longer rejects small counts, bins, contributor populations or complements; it retains validity, 300 samples, checked/matched lifecycle/distribution sums, first-output count ≤ generation terminals, touched-lane completeness and nonempty-family requirements. Exact source and decoded-wire oracles verify 0 absent and valid 1/9/10/11, rare model/endpoint/error/bin, missing-output and duplicate partitions released under the same production and synthetic contract. Invalid pairs, overflow, incomplete sampling, loss, clock/off/warmup/restart and ownership/no-replay negatives remain.
+
+Real router tests cover sole typed API/web control rejections, no generation starts or balance changes, and ordinary 404/anonymous home non-rejections. A production-mode router-to-loopback TLS test now drives normal warmup/all window polls and verifies sparse 1/9/10 HTTP/control counts on the wire with boundary timestamps, exact integer totals/names and absent synthetic sentinels; 0 remains absent. This is local qualification, not paid inference or live backend evidence. Existing real generation/delivery ownership and accounting tests retain their separately scoped coverage.
+
+Parent `devenv test` passed formatting, strict all-target/all-feature Clippy, the complete locked Rust suite with funded tests ignored, and Go helper tests. Active LSP probes of nine changed Rust paths found no errors/warnings, only one pre-existing informational let-chain suggestion. Independent read-only review found no supported defects and successfully reran both control-rejection tests after correcting an initially empty test filter. `git diff --check` passed. Historical native CLI v3, legacy-v2 freshness, platform privacy and live billing unknowns remain unresolved. Client fixes from the concurrent Pi thread are retained independently and are not telemetry evidence.
 
 Fresh read-only Honeycomb checks found no request-family columns in `prod/metrics`. Metric-scoped attributes remain allowlisted for process CPU/RSS and configured capacity. Verified two-hour, sixty-second aggregate query candidates for the eventual **full** dashboard:
 

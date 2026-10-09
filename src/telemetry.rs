@@ -1,4 +1,4 @@
-//! Bounded local aggregation with linked sparse-family suppression.
+//! Bounded local aggregation with complete, coherent five-minute request families.
 //! Runtime export ownership is independent of inference/accounting.
 pub mod hooks;
 mod infrastructure;
@@ -67,7 +67,7 @@ pub enum Deployment {
     Off,
     /// Unapproved source configuration; retained for fail-closed callers.
     NonIsolated,
-    /// Reviewed MVP aggregates; suppression is not an anonymity guarantee.
+    /// Reviewed MVP aggregates, including low counts; no anonymity guarantee.
     Production,
     #[cfg(test)]
     IsolatedSynthetic,

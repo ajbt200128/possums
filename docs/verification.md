@@ -1315,6 +1315,8 @@ The rebuilt extension SHA-256 is **`edc6b7ea2b1034f92db696676ab24260f46cafbf2307
 
 ## 2026-10-09 — local production-mode router-to-wire request qualification
 
+**Historical minimum-ten qualification.** The later, explicitly approved [five-minute MVP contract and verification record](telemetry-mvp-five-minute.md) supersedes the sparsity rule below. It records sparse-window and typed control-rejection implementation, exact source/wire negatives, fresh local checks and pending rollout/live query verification. This does not retroactively change the evidence or deployed behavior described here.
+
 Policy: [reviewed release scope](../PRIVACY.md#reviewed-mvp-release-scope), [linked suppression and unavailable-data semantics](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [synthetic testing](../PRIVACY.md#synthetic-testing-exception), and [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).
 
 A fresh read-only `prod/metrics` metadata/schema inspection still listed only process CPU/RSS, configured capacity and Honeycomb signal metadata. Source inspection confirmed that `main.rs` attaches the configured production aggregator to `AppState`, router/owner hooks update it, and the sender polls occupancy and hands eligible request windows to the same bounded allowlisted exporter used for infrastructure. Complete five-minute windows require all 300 occupancy polls; any sparse populated cell/bin/complement or invalid/lost observation withholds the entire request family. Infrastructure release is independent. No concrete production-path defect or live suppression/failure cause was established; these facts do not prove why the backend lacks request metrics.

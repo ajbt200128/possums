@@ -598,7 +598,7 @@ async fn exhausted_observation_pool_cannot_reject_or_cancel_a_generation() {
 }
 
 #[tokio::test]
-async fn production_router_window_reaches_local_tls_only_when_releasable() {
+async fn production_router_releases_sparse_complete_windows_to_local_tls() {
     use opentelemetry_proto::tonic::{
         collector::metrics::v1::ExportMetricsServiceRequest,
         metrics::v1::{metric::Data, number_data_point::Value},
@@ -613,132 +613,154 @@ async fn production_router_window_reaches_local_tls_only_when_releasable() {
         });
     }
 
-    for n in [9, 10] {
-        let mut metrics = Arc::new(AggregateMetrics::new(
-            Deployment::Production,
-            SystemClock {
-                start: Instant::now(),
-                fixed: Some(ClockReading {
-                    monotonic_ns: 0,
-                    wall_ns: 125 * SECOND,
-                }),
-            },
-        ));
-        for second in 125..=300 {
-            at(&mut metrics, second * SECOND + SECOND / 2);
+    for (endpoint, path, status, terminal_status, rejection) in [
+        (
+            Endpoint::Claims,
+            "/claims?hostile-query-canary",
+            200,
+            Status::Success,
+            None,
+        ),
+        (
+            Endpoint::Models,
+            "/v1/models",
+            401,
+            Status::ClientError,
+            Some(Rejection::Auth),
+        ),
+    ] {
+        for n in [0, 1, 9, 10] {
+            let mut metrics = Arc::new(AggregateMetrics::new(
+                Deployment::Production,
+                SystemClock {
+                    start: Instant::now(),
+                    fixed: Some(ClockReading {
+                        monotonic_ns: 0,
+                        wall_ns: 125 * SECOND,
+                    }),
+                },
+            ));
+            for second in 125..=300 {
+                at(&mut metrics, second * SECOND + SECOND / 2);
+                metrics.poll();
+            }
+            at(&mut metrics, 301 * SECOND);
+            {
+                let f = Fixture::new(false, Failure::None, Some(metrics.clone()));
+                for _ in 0..n {
+                    let response = router(f.state.clone())
+                        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status().as_u16(), status);
+                    drain(response.into_body()).await;
+                }
+                f.quiescent().await;
+            }
+            assert_eq!(totals(&metrics), (n, n, 0, 0));
+            // Complete all 300 actual fake-clock polls, without bypassing warmup.
+            // These instantaneous control lifetimes end between occupancy samples.
+            for second in 301..600 {
+                at(&mut metrics, second * SECOND + SECOND / 2);
+                metrics.poll();
+            }
+            at(&mut metrics, 600 * SECOND);
             metrics.poll();
-        }
-        at(&mut metrics, 301 * SECOND);
-        {
-            let f = Fixture::new(false, Failure::None, Some(metrics.clone()));
-            for _ in 0..n {
-                let response = router(f.state.clone())
-                    .oneshot(
-                        Request::get("/claims?hostile-query-canary")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
+            if n == 0 {
+                assert!(metrics.take_window().is_none());
+                continue;
+            }
+            let permit = metrics
+                .take_window()
+                .expect("eligible production request window");
+            assert_eq!(permit.window.start_ns, 300 * SECOND);
+            assert_eq!(permit.window.end_ns, 600 * SECOND);
+            let handoff::Table::Request(table) = permit.table.as_ref().unwrap() else {
+                panic!("unexpected infrastructure window");
+            };
+            assert_eq!(table.http_started(endpoint), Some(n));
+            assert_eq!(
+                table.http_terminal(endpoint, terminal_status, HttpTerminal::Eof),
+                Some(n)
+            );
+            assert_eq!(table.contributors[Lane::Control as usize], n);
+            if let Some(reason) = rejection {
+                assert_eq!(
+                    table.rejected(Some(endpoint), AdmissionModel::NotApplicable, reason),
+                    Some(n)
+                );
+            }
+
+            let (listener, client, acceptor) =
+                runtime::tests::fixture(true, "api.honeycomb.io").await;
+            let receive = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = acceptor.accept(stream).await.unwrap();
+                let bytes = runtime::tests::capture(&mut stream).await;
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                     .await
                     .unwrap();
-                assert_eq!(response.status(), 200);
-                drain(response.into_body()).await;
+                bytes
+            };
+            let (sent, bytes) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                tokio::join!(
+                    export::handoff::send(permit, client, Default::default()),
+                    receive
+                )
+            })
+            .await
+            .unwrap();
+            assert!(sent.is_ok());
+            for sentinel in [
+                b"hostile-query-canary".as_slice(),
+                b"private-account-canary",
+                b"synthetic-key-canary",
+            ] {
+                assert!(!bytes.windows(sentinel.len()).any(|value| value == sentinel));
             }
-            f.quiescent().await;
-        }
-        assert_eq!(totals(&metrics), (n, n, 0, 0));
-        // Complete all 300 actual fake-clock polls, without bypassing warmup.
-        // These instantaneous control lifetimes end between occupancy samples.
-        for second in 301..600 {
-            at(&mut metrics, second * SECOND + SECOND / 2);
-            metrics.poll();
-        }
-        at(&mut metrics, 600 * SECOND);
-        metrics.poll();
-        if n == 9 {
-            assert!(metrics.take_window().is_none());
-            continue;
-        }
-        let permit = metrics
-            .take_window()
-            .expect("eligible production request window");
-        assert_eq!(permit.window.start_ns, 300 * SECOND);
-        assert_eq!(permit.window.end_ns, 600 * SECOND);
-        let handoff::Table::Request(table) = permit.table.as_ref().unwrap() else {
-            panic!("unexpected infrastructure window");
-        };
-        assert_eq!(table.http_started(Endpoint::Claims), Some(10));
-        assert_eq!(
-            table.http_terminal(Endpoint::Claims, Status::Success, HttpTerminal::Eof),
-            Some(10)
-        );
-        assert_eq!(table.contributors[Lane::Control as usize], 10);
-
-        let (listener, client, acceptor) = runtime::tests::fixture(true, "api.honeycomb.io").await;
-        let receive = async {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut stream = acceptor.accept(stream).await.unwrap();
-            let bytes = runtime::tests::capture(&mut stream).await;
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .unwrap();
-            bytes
-        };
-        let (sent, bytes) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            tokio::join!(
-                export::handoff::send(permit, client, Default::default()),
-                receive
-            )
-        })
-        .await
-        .unwrap();
-        assert!(sent.is_ok());
-        for sentinel in [
-            b"hostile-query-canary".as_slice(),
-            b"private-account-canary",
-            b"synthetic-key-canary",
-        ] {
-            assert!(!bytes.windows(sentinel.len()).any(|value| value == sentinel));
-        }
-        let decoded = ExportMetricsServiceRequest::decode(bytes.as_slice()).unwrap();
-        let wire = &decoded.resource_metrics[0].scope_metrics[0].metrics;
-        let mut names: Vec<_> = wire.iter().map(|metric| metric.name.as_str()).collect();
-        names.sort_unstable();
-        assert_eq!(
-            names,
-            [
+            let decoded = ExportMetricsServiceRequest::decode(bytes.as_slice()).unwrap();
+            let wire = &decoded.resource_metrics[0].scope_metrics[0].metrics;
+            let mut names: Vec<_> = wire.iter().map(|metric| metric.name.as_str()).collect();
+            names.sort_unstable();
+            let mut expected_names = vec![
                 "possums.admission.occupancy.bucket",
                 "possums.http.completed",
                 "possums.http.duration.bucket",
                 "possums.http.requests",
-            ]
-        );
-        for metric in wire {
-            let Some(Data::Sum(sum)) = &metric.data else {
-                panic!("expected delta count encoding");
-            };
-            let total: i64 = sum
-                .data_points
-                .iter()
-                .map(|point| {
-                    assert_eq!(point.start_time_unix_nano, 300 * SECOND);
-                    assert_eq!(point.time_unix_nano, 600 * SECOND);
-                    let Some(Value::AsInt(value)) = point.value else {
-                        panic!("expected integer count");
-                    };
-                    value
-                })
-                .sum();
-            assert_eq!(
-                total,
-                if metric.name == "possums.admission.occupancy.bucket" {
-                    300
-                } else {
-                    10
-                }
-            );
+            ];
+            if rejection.is_some() {
+                expected_names.push("possums.admission.rejected");
+            }
+            expected_names.sort_unstable();
+            assert_eq!(names, expected_names);
+            for metric in wire {
+                let Some(Data::Sum(sum)) = &metric.data else {
+                    panic!("expected delta count encoding");
+                };
+                let total: i64 = sum
+                    .data_points
+                    .iter()
+                    .map(|point| {
+                        assert_eq!(point.start_time_unix_nano, 300 * SECOND);
+                        assert_eq!(point.time_unix_nano, 600 * SECOND);
+                        let Some(Value::AsInt(value)) = point.value else {
+                            panic!("expected integer count");
+                        };
+                        value
+                    })
+                    .sum();
+                assert_eq!(
+                    total,
+                    if metric.name == "possums.admission.occupancy.bucket" {
+                        300
+                    } else {
+                        i64::try_from(n).unwrap()
+                    }
+                );
+            }
+            assert!(metrics.take_window().is_none());
         }
-        assert!(metrics.take_window().is_none());
     }
 }
 
