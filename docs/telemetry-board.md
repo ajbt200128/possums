@@ -1,8 +1,14 @@
 # Possums production aggregate board proposal
 
-**Status: verified queries; awaiting operator approval, not created.** Scope: Honeycomb `prod/metrics`, service `possums-gateway`, production slot `gateway-01`. No existing production board or trigger was returned during discovery. No SLO is included or created.
+**Status: verified queries; exact proposal approved by operator; creation blocked.** Scope: Honeycomb `prod/metrics`, service `possums-gateway`, production slot `gateway-01`. No existing production board or trigger was returned during discovery. No SLO is included or created.
 
 Policy: [permitted/forbidden signals](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [complete-window and missing-data semantics](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [access/retention](../PRIVACY.md#processors-retention-access-and-shutdown), [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change). Source/wire negative tests, deployed artifact identity, live checks and remaining limitations are linked in [rollout verification](combined-rollout-verification.md#v0017-sampler-rollout-and-dashboard-qualification--2026-10-09).
+
+## Creation attempt and blocker
+
+The operator explicitly approved the displayed exact eleven-panel private proposal. Two calls to Honeycomb MCP `create_board` used the unchanged approved arguments, the second specifying team `possums` after an empty production-board readback and workspace confirmation. Both returned a generic creation failure with no HTTP status, failing field or permission category. The second production-board readback was also empty. No board URL/ID or successful creation/readback is established; do not claim the dashboard is ready.
+
+The [official Boards create API](https://docs.honeycomb.io/api/boards/create-a-board) requires board-management authorization and documents flexible query/text/SLO panels, but does not document a creator-private field. This is not proof of the MCP failure's cause: the MCP tool advertises `private=true` and may use a different path. No direct API/public-board fallback, credential mutation, reduced panel subset or access-scope change was attempted. Next gate: confirm a working creator-private board-write path/permission, or create the approved private board in the Honeycomb UI and provide its nonsecret URL for readback. Preserve the private setting unless the operator separately approves another audience.
 
 ## Creation settings
 
