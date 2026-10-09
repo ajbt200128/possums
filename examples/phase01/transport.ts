@@ -1,4 +1,5 @@
 import { Identity, type RequestContext } from 'ehbp';
+import { CatalogFailure } from './client.js';
 import { WEB_APPROVAL, qualifyWeb, qualifyApi, requireApiApproval, validateKeyConfig } from './approval.js';
 import { LIMITS, ChannelError, Operation, base64, boundedReport, cleanup, collect, hex, parseJSON, requireThat, serialize } from './limits.js';
 import { admitInvocation, fields, type Chat } from './tools.js';
@@ -32,9 +33,11 @@ function request(url: string, op: Operation, method = 'GET', body?: Uint8Array<A
   return new Request(url, { method, headers, body, signal: op.controller.signal,
     credentials: 'omit', redirect: 'error', cache: 'no-store', referrerPolicy: 'no-referrer' });
 }
-async function send(req: Request, op: Operation): Promise<Response> {
+async function send(req: Request, op: Operation, observeStatus?: (status: number) => void): Promise<Response> {
   op.check();
   const response = await op.wait(fetch(req), LIMITS.operationMs);
+  // Catalog-only observation, before transport rejection/cleanup (e.g. redirects).
+  observeStatus?.(response.status);
   if (response.redirected || (response.status >= 300 && response.status < 400) ||
       (response.headers.has('content-encoding') && !['identity', 'gzip', 'deflate', 'br'].includes(response.headers.get('content-encoding')!))) {
     op.close();
@@ -182,17 +185,37 @@ export class Channel {
     validateKeyConfig(snapshot, independentKey);
     return new Channel(channelAuthority, origin, await Identity.unmarshalPublicConfig(snapshot));
   }
-  async models(bearer: string, signal?: AbortSignal): Promise<unknown> { return this.#get('/v1/models', LIMITS.catalog, bearer, signal); }
+  async models(bearer: string, signal?: AbortSignal): Promise<unknown> {
+    try { return await this.#get('/v1/models', LIMITS.catalog, bearer, signal); }
+    catch (error) {
+      if (error instanceof CatalogFailure) throw error;
+      throw new CatalogFailure('request', error instanceof ChannelError ? error.code : 'rejected');
+    }
+  }
   async challenge(signal?: AbortSignal): Promise<unknown> { return this.#get('/v1/auth/challenge', LIMITS.control, undefined, signal); }
   async #get(path: '/v1/models' | '/v1/auth/challenge', cap: number, bearer?: string, signal?: AbortSignal): Promise<unknown> {
     this.#policyCheck();
     const op = new Operation(LIMITS.operationMs, signal);
-    let sent = false, res: Response | undefined;
+    let sent = false, res: Response | undefined, status: number | undefined;
+    const catalog = path === '/v1/models';
     try {
       const req = request(this.#origin + path, op, 'GET', undefined, bearer);
-      sent = true; res = await send(req, op);
+      sent = true; res = await send(req, op, catalog ? value => { status = value; } : undefined);
+      if (catalog && !res.ok) {
+        let value: unknown;
+        try { value = parseJSON(await collect(res.body, LIMITS.error, op), LIMITS.error); }
+        catch { /* Keep the observed HTTP rejection even if its bounded body fails. */ }
+        throw new CatalogFailure('http', sent && op.controller.signal.aborted ? 'uncertain' : 'rejected', status, value);
+      }
       requireThat(res.ok); return parseJSON(await collect(res.body, cap, op), cap);
-    } catch { throw new ChannelError(sent && op.controller.signal.aborted ? 'uncertain' : 'rejected'); }
+    } catch (error) {
+      const code = sent && op.controller.signal.aborted ? 'uncertain' : 'rejected';
+      if (catalog) {
+        if (error instanceof CatalogFailure) throw error;
+        throw new CatalogFailure(status === undefined ? 'request' : status >= 200 && status < 300 ? 'body' : 'http', code, status);
+      }
+      throw new ChannelError(code);
+    }
     finally { op.close(); if (res?.body && !res.body.locked) await cleanup(res.body.cancel()); }
   }
   async control(path: '/v1/sessions' | '/v1/submissions', payload: Control, bearer?: string, signal?: AbortSignal): Promise<unknown> {

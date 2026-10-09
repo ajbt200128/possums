@@ -32,12 +32,16 @@ The current API approval is **v0.0.14**, with unchanged administrative expiry **
 
 ## Connection diagnostics
 
-Startup and model refresh show a transient, content-free warning when public verification fails. Repeated warnings for the same category are suppressed until a successful verified connection. `/possums-status` repeats the last diagnostic or displays the compiled approval version/expiry **without a network call**; local approval information is not proof of a healthy connection. Pi may still show its generic cached-models warning, but cached entries do not authorize inference.
+Startup and model refresh show a transient, content-free warning when public verification, session establishment or catalog refresh fails. Repeated warnings for the same category are suppressed until authentication and catalog loading complete successfully; public verification alone does not clear a session/catalog failure. `/possums-status` repeats the last diagnostic or displays the compiled approval version/expiry **without a network call**; local approval information is not proof of a healthy connection. Pi may still show its generic cached-models warning, but cached entries do not authorize inference.
 
 - `possums_approval_expired` / `possums_approval_unavailable`: obtain a newly independently approved client release; do not extend expiry or bypass pins locally.
 - `possums_manifest_unavailable` / `possums_manifest_mismatch`: install the extension **and its matching approved public manifest together**, then `/reload` or restart. Re-entering credentials cannot repair this pair.
 - `possums_evidence_unavailable`: public evidence could not be retrieved within connection limits. Check connectivity and refresh; no inference is replayed.
 - `possums_verification_failed`: the gateway cannot be verified against this client's approval. A gateway update is one possible cause, not an authenticated diagnosis. If updated, install the independently approved client/manifest pair and reload. Do not trust a version merely advertised by the server.
+- `possums_session_unavailable`: public verification passed, but the challenge/login exchange did not complete. This does not establish that the credential is invalid. Check connectivity; a deliberate `/login` can establish a fresh session without inference.
+- `possums_catalog_request_failed` / `possums_catalog_http_rejected`: catalog transport failed before a response, or the gateway returned an HTTP rejection. The latter includes only the observed status and recognized gateway code/detail, never response text or billing claims.
+- `possums_catalog_body_invalid` / `possums_catalog_validation_failed` / `possums_catalog_conversion_failed`: response reading/JSON decoding, catalog schema/quote validation, or conversion to Pi metadata failed, respectively. Refresh models and share only the closed diagnostic if it persists.
+- `possums_catalog_unavailable`: fallback for an unexpected catalog-stage failure. A previously authenticated session is not proof that it remains valid now. None of these catalog errors establishes an inference charge or refund.
 
 After replacing an installed extension/manifest pair, fully restart Pi: `/reload` alone did not activate an earlier replacement in the operator's session. `/possums-status` should show the new compiled approval; it is not a live connection check.
 

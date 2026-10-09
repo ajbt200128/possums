@@ -106,6 +106,29 @@ function gatewayError(value: any): GatewayError {
   return failure;
 }
 
+export type CatalogFailureStage = 'request' | 'http' | 'body' | 'validation' | 'conversion';
+// Catalog diagnostics retain only closed stages and validated observations, never
+// the response, original exception or inference billing claims.
+export class CatalogFailure extends ChannelError {
+  readonly status?: number;
+  readonly reason?: string;
+  readonly detail?: string;
+  constructor(readonly stage: CatalogFailureStage, code: ChannelError['code'] = 'rejected', status?: number, response?: unknown) {
+    super(code);
+    requireThat(['request', 'http', 'body', 'validation', 'conversion'].includes(stage));
+    requireThat(code === 'rejected' || code === 'uncertain');
+    this.message = `catalog_${stage}_failed`;
+    if (stage === 'http' && Number.isInteger(status) && status! >= 100 && status! <= 599) {
+      this.status = status;
+      try {
+        const failure = gatewayError(response);
+        this.reason = failure.reason; this.detail = failure.detail;
+      } catch { /* An unreadable/unknown error body does not erase the HTTP status. */ }
+    }
+    Object.freeze(this);
+  }
+}
+
 // Success requires the ordered, authenticated gateway receipt AND stream EOF.
 // No answer is accumulated; interruption is uncertain and never causes a resend.
 export async function consumeCompletion(body: ReadableStream<Uint8Array>, model: string | LiveModel,
@@ -288,7 +311,15 @@ export class ReferenceClient {
     } finally { op.close(); }
   }
   async models(signal?: AbortSignal): Promise<readonly LiveModel[]> {
-    requireThat(this.#bearer); return validateModels(await this.channel.models(this.#bearer, signal));
+    let value: unknown;
+    try {
+      requireThat(this.#bearer); value = await this.channel.models(this.#bearer, signal);
+    } catch (error) {
+      if (error instanceof CatalogFailure) throw error;
+      throw new CatalogFailure('request', error instanceof ChannelError ? error.code : 'rejected');
+    }
+    try { return validateModels(value); }
+    catch { throw new CatalogFailure('validation'); }
   }
   async chat(model: string, messages: Chat['messages'], onDelta: (text: string) => void, newConversation = false,
     options: ChatOptions = {}): Promise<Receipt> {
