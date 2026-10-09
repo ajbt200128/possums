@@ -588,3 +588,148 @@ async fn exhausted_observation_pool_cannot_reject_or_cancel_a_generation() {
     drop(held);
     assert!(metrics.request().is_none());
 }
+
+#[tokio::test]
+async fn production_router_window_reaches_local_tls_only_when_releasable() {
+    use opentelemetry_proto::tonic::{
+        collector::metrics::v1::ExportMetricsServiceRequest,
+        metrics::v1::{metric::Data, number_data_point::Value},
+    };
+    use prost::Message;
+    use tokio::io::AsyncWriteExt;
+
+    fn at(metrics: &mut Arc<AggregateMetrics>, wall_ns: u64) {
+        Arc::get_mut(metrics).unwrap().clock.fixed = Some(ClockReading {
+            monotonic_ns: wall_ns - 125 * SECOND,
+            wall_ns,
+        });
+    }
+
+    for n in [9, 10] {
+        let mut metrics = Arc::new(AggregateMetrics::new(
+            Deployment::Production,
+            SystemClock {
+                start: Instant::now(),
+                fixed: Some(ClockReading {
+                    monotonic_ns: 0,
+                    wall_ns: 125 * SECOND,
+                }),
+            },
+        ));
+        for second in 125..=300 {
+            at(&mut metrics, second * SECOND + SECOND / 2);
+            metrics.poll();
+        }
+        at(&mut metrics, 301 * SECOND);
+        {
+            let f = Fixture::new(false, Failure::None, Some(metrics.clone()));
+            for _ in 0..n {
+                let response = router(f.state.clone())
+                    .oneshot(
+                        Request::get("/claims?hostile-query-canary")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), 200);
+                drain(response.into_body()).await;
+            }
+            f.quiescent().await;
+        }
+        assert_eq!(totals(&metrics), (n, n, 0, 0));
+        // Complete all 300 actual fake-clock polls, without bypassing warmup.
+        // These instantaneous control lifetimes end between occupancy samples.
+        for second in 301..600 {
+            at(&mut metrics, second * SECOND + SECOND / 2);
+            metrics.poll();
+        }
+        at(&mut metrics, 600 * SECOND);
+        metrics.poll();
+        if n == 9 {
+            assert!(metrics.take_window().is_none());
+            continue;
+        }
+        let permit = metrics
+            .take_window()
+            .expect("eligible production request window");
+        assert_eq!(permit.window.start_ns, 300 * SECOND);
+        assert_eq!(permit.window.end_ns, 600 * SECOND);
+        let handoff::Table::Request(table) = permit.table.as_ref().unwrap() else {
+            panic!("unexpected infrastructure window");
+        };
+        assert_eq!(table.http_started(Endpoint::Claims), Some(10));
+        assert_eq!(
+            table.http_terminal(Endpoint::Claims, Status::Success, HttpTerminal::Eof),
+            Some(10)
+        );
+        assert_eq!(table.contributors[Lane::Control as usize], 10);
+
+        let (listener, client, acceptor) = runtime::tests::fixture(true, "api.honeycomb.io").await;
+        let receive = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            let bytes = runtime::tests::capture(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            bytes
+        };
+        let (sent, bytes) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(
+                export::handoff::send(permit, client, Default::default()),
+                receive
+            )
+        })
+        .await
+        .unwrap();
+        assert!(sent.is_ok());
+        for sentinel in [
+            b"hostile-query-canary".as_slice(),
+            b"private-account-canary",
+            b"synthetic-key-canary",
+        ] {
+            assert!(!bytes.windows(sentinel.len()).any(|value| value == sentinel));
+        }
+        let decoded = ExportMetricsServiceRequest::decode(bytes.as_slice()).unwrap();
+        let wire = &decoded.resource_metrics[0].scope_metrics[0].metrics;
+        let mut names: Vec<_> = wire.iter().map(|metric| metric.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "possums.admission.occupancy.bucket",
+                "possums.http.completed",
+                "possums.http.duration.bucket",
+                "possums.http.requests",
+            ]
+        );
+        for metric in wire {
+            let Some(Data::Sum(sum)) = &metric.data else {
+                panic!("expected delta count encoding");
+            };
+            let total: i64 = sum
+                .data_points
+                .iter()
+                .map(|point| {
+                    assert_eq!(point.start_time_unix_nano, 300 * SECOND);
+                    assert_eq!(point.time_unix_nano, 600 * SECOND);
+                    let Some(Value::AsInt(value)) = point.value else {
+                        panic!("expected integer count");
+                    };
+                    value
+                })
+                .sum();
+            assert_eq!(
+                total,
+                if metric.name == "possums.admission.occupancy.bucket" {
+                    300
+                } else {
+                    10
+                }
+            );
+        }
+        assert!(metrics.take_window().is_none());
+    }
+}
