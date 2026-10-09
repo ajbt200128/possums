@@ -554,6 +554,53 @@ fn structured_input(submission: &str) -> Value {
 }
 
 #[tokio::test]
+async fn long_tool_descriptions_reach_tokenization_and_generation_unchanged() {
+    for description in [
+        "x".repeat(16 * 1024),
+        "x".repeat(16 * 1024 + 1),
+        "🐾".repeat(16 * 1024 + 1),
+    ] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        provider.qualified.store(true, Ordering::SeqCst);
+        let mut input = structured_input(&submission);
+        input["tools"][0]["function"]["description"] = json!(description);
+        let response = router(state.clone())
+            .oneshot(json_request(&bearer, input))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        wait(&provider.started).await;
+        assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            provider.invocation.lock().unwrap().as_ref().unwrap()["tools"][0]["function"]
+                ["description"],
+            description
+        );
+        provider.finish.notify_one();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.ends_with(b"data: [DONE]\n\n"));
+        terminal(&state, 5_000_000 - 7).await;
+    }
+}
+
+#[tokio::test]
+async fn oversized_tool_description_still_hits_aggregate_body_limit() {
+    let (state, provider, bearer, submission) = fixture(5_000_000);
+    provider.qualified.store(true, Ordering::SeqCst);
+    let mut input = structured_input(&submission);
+    input["tools"][0]["function"]["description"] = json!("x".repeat(BODY_LIMIT + 1));
+    let response = router(state.clone())
+        .oneshot(json_request(&bearer, input))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(state.accounting.available("demo"), Some(5_000_000));
+}
+
+#[tokio::test]
 async fn tools_require_independent_qualification_rechecked_before_reservation() {
     for revoked in [false, true] {
         let (state, provider, bearer, submission) = fixture(5_000_000);
