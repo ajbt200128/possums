@@ -705,7 +705,7 @@ mod route {
         }
         async fn terminal(&self, expected: u64) {
             tokio::time::timeout(Duration::from_secs(5), async {
-                while self.state.generation_slots.available_permits() != 4 {
+                while self.state.generation_headroom() != 4 {
                     tokio::task::yield_now().await;
                 }
             })
@@ -793,13 +793,14 @@ mod route {
 
         struct DropProbe {
             heavy: Arc<Semaphore>,
-            slots: Arc<Semaphore>,
+            activity: Arc<AtomicUsize>,
             dropped_while_charged: Arc<AtomicBool>,
         }
         impl Drop for DropProbe {
             fn drop(&mut self) {
                 self.dropped_while_charged.store(
-                    self.heavy.available_permits() == 3 && self.slots.available_permits() == 3,
+                    self.heavy.available_permits() == 3
+                        && self.activity.load(Ordering::Relaxed) == 1,
                     Ordering::SeqCst,
                 );
             }
@@ -813,7 +814,7 @@ mod route {
         let dropped = Arc::new(AtomicBool::new(false));
         let probe = DropProbe {
             heavy: fixture.state.chat_memory.clone(),
-            slots: fixture.state.generation_slots.clone(),
+            activity: fixture.state.generation_activity.clone(),
             dropped_while_charged: dropped.clone(),
         };
         runtime.block_on(async {
@@ -857,7 +858,7 @@ mod route {
         drop(runtime);
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(fixture.state.accounting.available("a"), Some(100));
-        assert_eq!(fixture.state.generation_slots.available_permits(), 4);
+        assert_eq!(fixture.state.generation_headroom(), 4);
         assert_eq!(fixture.state.chat_memory.available_permits(), 4);
         assert_eq!(fixture.probe.calls.load(Ordering::SeqCst), 0);
         assert_eq!(fixture.probe.generations.load(Ordering::SeqCst), 0);
@@ -1019,7 +1020,7 @@ mod route {
                 .unwrap()
                 .unwrap();
             assert_eq!(fixture.state.accounting.available("a"), Some(48));
-            assert_eq!(fixture.state.generation_slots.available_permits(), 3);
+            assert_eq!(fixture.state.generation_headroom(), 3);
             assert_eq!(fixture.state.chat_memory.available_permits(), 3);
             waiter.abort();
             assert!(waiter.await.unwrap_err().is_cancelled());

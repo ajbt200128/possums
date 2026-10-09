@@ -67,6 +67,11 @@ export function invocation(model: Model<'openai-completions'>, context: Transcri
       if (message.content.some((block: { type: string }) => block.type !== 'text')) throw new Error('possums_images_unsupported');
       return { ...message, content: message.content.map((block: { type: string; text?: string }) => block.text ?? '').join('') };
     }
+    // OpenAI permits null here, but the upstream tokenizer rejects tool-only
+    // assistant history with null content. Empty text preserves the same turn.
+    if (message.role === 'assistant' && message.content === null && message.tool_calls?.length) {
+      return { ...message, content: '' };
+    }
     return message;
   });
   return admitInvocation({

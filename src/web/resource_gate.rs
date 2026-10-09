@@ -375,7 +375,7 @@ impl Fixture {
     }
     async fn slots(&self, n: usize) {
         bounded(async {
-            while self.state.generation_slots.available_permits() != n {
+            while self.state.generation_headroom() != n {
                 tokio::task::yield_now().await;
             }
         })
@@ -416,7 +416,7 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
         std::env::consts::OS,
         std::env::consts::ARCH
     );
-    account_limit(&f, baseline).await;
+    one_account_uses_all_memory_lanes(&f, baseline).await;
     for mixed in [false, true] {
         round(&f, baseline, mixed).await;
     }
@@ -426,13 +426,13 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
     phase("fixture-release-after", baseline);
 }
 
-async fn account_limit(f: &Fixture, baseline: Snapshot) {
+async fn one_account_uses_all_memory_lanes(f: &Fixture, baseline: Snapshot) {
     let hooks = &f.probe.hooks;
     hooks.capture.store(false, Ordering::SeqCst);
     let mut waiters = Vec::new();
     let mut gates = Vec::new();
     let mut peers = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let (response, peer) = support::raw_response().await;
         f.probe.responses.lock().unwrap().push_back(response);
         peers.push(peer);
@@ -445,21 +445,21 @@ async fn account_limit(f: &Fixture, baseline: Snapshot) {
         bounded(&mut gate.reached).await.unwrap();
         gates.push(gate);
     }
-    assert_eq!(f.state.generation_slots.available_permits(), 1);
-    assert_eq!(f.state.chat_memory.available_permits(), 1);
+    assert_eq!(f.state.generation_headroom(), 0);
+    assert_eq!(f.state.chat_memory.available_permits(), 0);
     let calls = f.probe.tokenizer.load(Ordering::SeqCst);
     let response = router(f.state.clone())
         .oneshot(f.request(0, "/chat", f.wire(0, 3, 0)))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     drop(response);
     assert_eq!(f.probe.tokenizer.load(Ordering::SeqCst), calls);
     assert_eq!(
         f.state.accounting.available("account-0"),
-        Some(CREDIT - 3 * RESERVATION)
+        Some(CREDIT - 4 * RESERVATION)
     );
-    phase("three-account-reject-fourth-with-global-free", baseline);
+    phase("four-account-reject-fifth-at-memory-bound", baseline);
     open(gates);
     for waiter in waiters {
         drop(bounded(waiter).await.unwrap().unwrap());
@@ -479,8 +479,8 @@ async fn account_limit(f: &Fixture, baseline: Snapshot) {
         }
     })
     .await;
-    assert_eq!(f.state.accounting.available("account-0"), Some(CREDIT - 21));
-    assert_eq!(f.probe.generations.load(Ordering::SeqCst), 3);
+    assert_eq!(f.state.accounting.available("account-0"), Some(CREDIT - 28));
+    assert_eq!(f.probe.generations.load(Ordering::SeqCst), 4);
     for peer in peers {
         peer.finished().await;
     }
@@ -507,7 +507,7 @@ async fn replacement_cleanup(f: &Fixture, baseline: Snapshot) {
     bounded(&mut input.reached).await.unwrap();
     drop(response); // Failed sends cannot cancel this blocking input/accepted work.
     assert_eq!(f.state.chat_memory.available_permits(), 0);
-    assert_eq!(f.state.generation_slots.available_permits(), 3);
+    assert_eq!(f.state.generation_headroom(), 3);
     phase("replacement-observer-gone-blocking-input", baseline);
     input.release.send(()).unwrap();
     bounded(&mut queued.reached).await.unwrap(); // JoinHandle IS finished, unclaimed result lives.
@@ -521,7 +521,7 @@ async fn replacement_cleanup(f: &Fixture, baseline: Snapshot) {
         .await;
     peer.send(&support::event(support::usage(2, 3)), 1024).await;
     peer.send(b"data: [DONE]\n\n", 1024).await;
-    assert_eq!(f.state.generation_slots.available_permits(), 3);
+    assert_eq!(f.state.generation_headroom(), 3);
     peer.eof().await;
     f.slots(4).await;
     bounded(async {
@@ -608,7 +608,7 @@ async fn round(f: &Fixture, baseline: Snapshot, mixed: bool) {
     phase("four-decoded-with-raw-owners", baseline);
     open(decoded);
     reached(&mut tokenizer).await;
-    assert_eq!(f.state.generation_slots.available_permits(), 0);
+    assert_eq!(f.state.generation_headroom(), 0);
     assert_eq!(f.probe.tokenizer.load(Ordering::SeqCst), calls + 4);
     assert_eq!(
         f.state.accounting.available("account-0"),
@@ -838,18 +838,18 @@ async fn round(f: &Fixture, baseline: Snapshot, mixed: bool) {
         peer.send(&support::event(support::usage(9, 9)), 1024).await;
     }
     phase("parser-delivery-finish-held", baseline);
-    assert_eq!(f.state.generation_slots.available_permits(), 0);
+    assert_eq!(f.state.generation_headroom(), 0);
     for peer in &peers {
         peer.send(&support::event(support::choice(None, Some("stop"))), 1024)
             .await;
         peer.send(&support::event(support::usage(2, 3)), 1024).await;
     }
-    assert_eq!(f.state.generation_slots.available_permits(), 0);
+    assert_eq!(f.state.generation_headroom(), 0);
     phase("terminal-done-held", baseline);
     for peer in &peers {
         peer.send(b"data: [DONE]\n\n", 1024).await;
     }
-    assert_eq!(f.state.generation_slots.available_permits(), 0);
+    assert_eq!(f.state.generation_headroom(), 0);
     phase("terminal-eof-held", baseline);
     for peer in &peers {
         peer.eof().await;

@@ -113,7 +113,7 @@ pub enum ToolMessage {
         content: Option<String>,
         #[serde(
             default,
-            deserialize_with = "bounded_list",
+            deserialize_with = "present",
             skip_serializing_if = "Option::is_none"
         )]
         tool_calls: Option<Vec<ToolCall>>,
@@ -184,8 +184,6 @@ impl ToolInvocation {
     fn validate(&self) -> Result<(), InferenceError> {
         let invalid = || InferenceError::InvalidResponse;
         if self.messages.is_empty()
-            || self.messages.len() > 4096
-            || self.tools().len() > MAX_CALLS
             || self.tools.as_ref().is_some_and(Vec::is_empty)
             || self.tool_choice.is_some() && self.tools.is_none()
         {
@@ -208,7 +206,6 @@ impl ToolInvocation {
         }
         let mut ids = BTreeSet::new();
         let mut pending = BTreeSet::new();
-        let mut total = 0usize;
         for message in &self.messages {
             if !pending.is_empty() && !matches!(message, ToolMessage::Tool { .. }) {
                 return Err(invalid());
@@ -222,24 +219,18 @@ impl ToolInvocation {
                         return Err(invalid());
                     }
                     if let Some(calls) = tool_calls {
-                        if calls.is_empty() || calls.len() > MAX_CALLS {
+                        if calls.is_empty() {
                             return Err(invalid());
                         }
                         for call in calls {
                             let function = call.function();
-                            total = total
-                                .checked_add(function.arguments.len())
-                                .ok_or_else(invalid)?;
                             if !valid_id(&call.id)
                                 || !ids.insert(call.id.as_str())
-                                || ids.len() > MAX_CALLS
                                 || !valid_name(&function.name)
-                                || function.arguments.len() > MAX_ARGUMENT_BYTES
-                                || total > MAX_TOTAL_ARGUMENT_BYTES
                             {
                                 return Err(invalid());
                             }
-                            // Arguments are bounded, opaque transcript data here;
+                            // Arguments are opaque transcript data within the body bound;
                             // executable-object validation belongs to the caller.
                             pending.insert(call.id.as_str());
                         }
@@ -266,31 +257,6 @@ pub(crate) fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     decoder: D,
 ) -> Result<Option<T>, D::Error> {
     T::deserialize(decoder).map(Some)
-}
-
-pub(crate) fn bounded_list<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
-    decoder: D,
-) -> Result<Option<Vec<T>>, D::Error> {
-    struct List<T>(std::marker::PhantomData<T>);
-    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for List<T> {
-        type Value = Vec<T>;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("bounded function list")
-        }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
-            let mut items = Vec::new();
-            while let Some(item) = seq.next_element()? {
-                if items.len() == MAX_CALLS {
-                    return Err(serde::de::Error::custom("function limit"));
-                }
-                items.push(item);
-            }
-            Ok(items)
-        }
-    }
-    decoder
-        .deserialize_seq(List(std::marker::PhantomData))
-        .map(Some)
 }
 
 pub(crate) fn valid_name(name: &str) -> bool {

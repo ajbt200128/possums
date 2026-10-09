@@ -27,13 +27,13 @@ export function toolName(value: unknown): asserts value is string {
 export function toolID(value: unknown): asserts value is string {
   requireThat(typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value));
 }
-export function objectArguments(value: unknown): number {
-  requireThat(typeof value === 'string' && value.length <= LIMITS.toolArguments);
+export function objectArguments(value: unknown, cap = LIMITS.toolArguments): number {
+  requireThat(typeof value === 'string' && value.length <= cap);
   const bytes = utf8.encode(value);
-  const parsed = parseJSON(bytes, LIMITS.toolArguments);
+  const parsed = parseJSON(bytes, cap);
   requireThat(parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed));
   // Reject JSON numeric overflow as well as duplicate keys / excessive structure.
-  serialize(parsed, LIMITS.toolArguments);
+  serialize(parsed, cap);
   return bytes.length;
 }
 export function freezeJSON<T>(value: T): T {
@@ -47,7 +47,7 @@ export function admitTools(value: unknown): Tool[] {
   requireThat(Array.isArray(value) && value.length > 0);
   const names = new Set<string>();
   let schemaBytes = 0;
-  const result = mapData(value, LIMITS.tools, (_key, item) => {
+  const result = mapData(value, LIMITS.nodes, (_key, item) => {
     const tool = fields(item, ['type', 'function']);
     requireThat(tool.type === 'function');
     const fn = fields(tool.function, ['name', 'parameters'], ['description']);
@@ -92,8 +92,8 @@ export function admitInvocation(value: unknown, withSubmission = false): any {
   }
   requireThat(Array.isArray(chat.messages));
   const ids = new Set<string>(), pending = new Set<string>();
-  let calls = 0, argumentBytes = 0, finalRole = '', finalContent = '';
-  chat.messages = mapData(chat.messages, LIMITS.messages, (_key, value) => {
+  let finalRole = '', finalContent = '';
+  chat.messages = mapData(chat.messages, LIMITS.nodes, (_key, value) => {
     const message = fields(value, ['role', 'content'], ['tool_calls', 'tool_call_id']);
     const role = message.role;
     requireThat(['system', 'user', 'assistant', 'tool'].includes(role));
@@ -108,15 +108,13 @@ export function admitInvocation(value: unknown, withSubmission = false): any {
       requireThat(pending.size === 0);
       if (Object.hasOwn(message, 'tool_calls')) {
         requireThat(Array.isArray(message.tool_calls) && message.tool_calls.length > 0);
-        message.tool_calls = mapData(message.tool_calls, LIMITS.tools, (_key, value) => {
-          requireThat(++calls <= LIMITS.tools);
+        message.tool_calls = mapData(message.tool_calls, LIMITS.nodes, (_key, value) => {
           const call = fields(value, ['id', 'type', 'function']);
           toolID(call.id); requireThat(!ids.has(call.id) && call.type === 'function');
           ids.add(call.id); pending.add(call.id);
           call.function = fields(call.function, ['name', 'arguments']);
           toolName(call.function.name); requireThat(!names || names.has(call.function.name));
-          argumentBytes += objectArguments(call.function.arguments);
-          requireThat(argumentBytes <= LIMITS.totalToolArguments);
+          objectArguments(call.function.arguments, LIMITS.chat);
           return call;
         });
       }

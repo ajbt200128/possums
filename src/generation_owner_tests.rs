@@ -113,18 +113,14 @@ impl Fixture {
         assert_eq!(self.resources.available_permits(), 4);
     }
 
-    // Probe the real account counter without adding inspection APIs: exactly
-    // three new reservations fit, a fourth does not, and cleanup restores credit.
+    // Credit-backed reservations remain usable after cleanup without an account
+    // request-count quota. Refunding the probes restores the original balance.
     fn account_slots_returned(&self, balance: u64) {
-        for id in 240..243 {
+        for id in 240..244 {
             assert_eq!(self.reserve(ACCOUNT, id).unwrap(), ReserveResult::Reserved);
         }
-        assert_eq!(
-            self.reserve(ACCOUNT, 243),
-            Err(AccountingError::Concurrency)
-        );
-        assert_eq!(self.ledger.available(ACCOUNT), Some(balance - 3 * 52));
-        for id in 240..243 {
+        assert_eq!(self.ledger.available(ACCOUNT), Some(balance - 4 * 52));
+        for id in 240..244 {
             assert_eq!(
                 self.ledger.finish([id; 32], None).unwrap(),
                 Outcome::Refunded
@@ -138,6 +134,68 @@ async fn bounded<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(5), future)
         .await
         .unwrap()
+}
+
+#[test]
+fn generation_tracking_retires_before_memory_handoff_in_both_owner_envelopes() {
+    struct Handoff {
+        activity: Arc<AtomicUsize>,
+        observed: AtomicUsize,
+    }
+    impl std::task::Wake for Handoff {
+        fn wake(self: Arc<Self>) {
+            self.observed
+                .store(self.activity.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+    }
+
+    for worker_envelope in [false, true] {
+        let f = Fixture::new();
+        let resources = Arc::new(Semaphore::new(1));
+        let activity = Arc::new(AtomicUsize::new(0));
+        assert_eq!(f.reserve(ACCOUNT, 1).unwrap(), ReserveResult::Reserved);
+        let owner = ReservedGeneration::new(
+            f.ledger.clone(),
+            [1; 32],
+            Lease::tracking(activity.clone(), None, crate::telemetry::Lane::Generation),
+            Lease::from(resources.clone().try_acquire_owned().unwrap()),
+        );
+        let handoff = Arc::new(Handoff {
+            activity: activity.clone(),
+            observed: AtomicUsize::new(usize::MAX),
+        });
+        let waker = std::task::Waker::from(handoff.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut next = Box::pin(resources.clone().acquire_owned());
+        assert!(next.as_mut().poll(&mut cx).is_pending());
+        if worker_envelope {
+            let ReservedGeneration {
+                terminal,
+                _generation,
+                _resources,
+            } = owner;
+            let settlement = Settlement {
+                terminal,
+                first_output_seen: false,
+            };
+            drop(Worker {
+                work: Box::pin(async move {
+                    let _settlement = settlement;
+                    std::future::pending::<SettledReceipt>().await
+                }),
+                _generation,
+                _resources,
+            });
+        } else {
+            drop(owner);
+        }
+        // Semaphore release wakes the replacement synchronously, exposing the
+        // precise retirement order rather than depending on scheduler timing.
+        assert_eq!(handoff.observed.load(Ordering::SeqCst), 0);
+        assert_eq!(activity.load(Ordering::SeqCst), 0);
+        assert!(next.as_mut().poll(&mut cx).is_ready());
+        f.outcome(1, Outcome::Refunded, 1000);
+    }
 }
 
 #[tokio::test]
@@ -302,9 +360,9 @@ async fn caller_cancel_body_and_observer_drop_cannot_cancel_handed_off_generatio
     assert_eq!(f.generations.available_permits(), 3);
     assert_eq!(f.resources.available_permits(), 3);
     finish_tx.send(()).unwrap();
-    // Slot return is a deterministic task-destruction barrier, even without an
-    // observer/receipt. No sleep or client-lifetime cancellation token is used.
-    let all = bounded(f.generations.clone().acquire_many_owned(4))
+    // Memory admission returns after generation tracking retires. Its return is
+    // the cleanup barrier; the earlier marker return alone is not sufficient.
+    let all = bounded(f.resources.clone().acquire_many_owned(4))
         .await
         .unwrap();
     f.outcome(1, Outcome::Settled { charged: 29 }, 971);
@@ -581,11 +639,11 @@ fn runtime_shutdown_drops_worker_and_refunds_without_supervisor_progress() {
 }
 
 #[tokio::test]
-async fn three_per_account_four_global_remain_held_after_disconnect() {
+async fn one_account_uses_all_supplied_resource_leases_after_disconnect() {
     let f = Fixture::new();
     let mut finishers = Vec::new();
     let mut completions = Vec::new();
-    for (account, id) in [("a", 1), ("a", 2), ("a", 3), ("b", 4)] {
+    for (account, id) in [("a", 1), ("a", 2), ("a", 3), ("a", 4)] {
         let pending = f.pending_for(account, id);
         let (tx, body) = f.delivery();
         drop(body);
@@ -602,9 +660,11 @@ async fn three_per_account_four_global_remain_held_after_disconnect() {
     assert_eq!(f.generations.available_permits(), 0);
     assert_eq!(f.resources.available_permits(), 0);
     assert!(f.generations.clone().try_acquire_owned().is_err());
-    assert_eq!(f.reserve("a", 5), Err(AccountingError::Concurrency));
-    assert_eq!(f.ledger.available("a"), Some(844));
-    assert_eq!(f.ledger.available("b"), Some(948));
+    assert_eq!(f.reserve("a", 5), Ok(ReserveResult::Reserved));
+    assert_eq!(f.ledger.available("a"), Some(740));
+    assert_eq!(f.ledger.finish([5; 32], None), Ok(Outcome::Refunded));
+    assert_eq!(f.ledger.available("a"), Some(792));
+    assert_eq!(f.ledger.available("b"), Some(1000));
     for finish in finishers {
         finish.send(()).unwrap();
     }
@@ -614,11 +674,11 @@ async fn three_per_account_four_global_remain_held_after_disconnect() {
             Ok(Outcome::Settled { charged: 29 })
         );
     }
-    assert_eq!(f.ledger.available("a"), Some(913));
-    assert_eq!(f.ledger.available("b"), Some(971));
+    assert_eq!(f.ledger.available("a"), Some(884));
+    assert_eq!(f.ledger.available("b"), Some(1000));
     f.leases_returned();
     assert_eq!(f.lanes.available_permits(), 4);
-    f.account_slots_returned(913);
+    f.account_slots_returned(884);
 }
 
 #[tokio::test]
@@ -934,7 +994,8 @@ async fn settling_observer_and_body_loss_while_held_never_abort_work() {
     // Wait for the probe before reserving permits for this barrier: a queued
     // acquire_many itself reduces available_permits and would distort the probe.
     bounded(dropped).await.unwrap();
-    let all = bounded(f.generations.clone().acquire_many_owned(4))
+    // Generation tracking retires before memory admission returns.
+    let all = bounded(f.resources.clone().acquire_many_owned(4))
         .await
         .unwrap();
     f.outcome(1, Outcome::Settled { charged: 29 }, 971);

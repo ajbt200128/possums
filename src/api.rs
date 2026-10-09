@@ -10,6 +10,7 @@ use crate::{
         tools::{Tool, ToolChoice, ToolInvocation, ToolMessage},
         InferenceFailure,
     },
+    telemetry::{hooks::RequestContext, AdmissionModel, Rejection as MetricRejection},
     web::AppState,
 };
 use axum::{
@@ -21,11 +22,8 @@ use axum::{
     Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use serde::{
-    de::{DeserializeOwned, SeqAccess, Visitor},
-    Deserialize, Serialize,
-};
-use std::{fmt, sync::Arc, time::Duration};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{sync::Arc, time::Duration};
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
@@ -69,6 +67,23 @@ pub(crate) fn error(status: StatusCode) -> Response {
     response
 }
 
+fn reject(observation: &RequestContext, status: StatusCode, reason: MetricRejection) -> Response {
+    observation.reject(AdmissionModel::Unknown, reason);
+    error(status)
+}
+
+fn control_inference_error(observation: &RequestContext, failure: InferenceFailure) -> Response {
+    let reason = match failure {
+        InferenceFailure::VerificationFailed | InferenceFailure::EndpointBindingFailed => {
+            MetricRejection::Verification
+        }
+        InferenceFailure::CatalogFailed => MetricRejection::Catalog,
+        _ => MetricRejection::Internal,
+    };
+    observation.reject(AdmissionModel::Unknown, reason);
+    inference_error(failure)
+}
+
 fn inference_error(failure: InferenceFailure) -> Response {
     let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -82,17 +97,29 @@ fn inference_error(failure: InferenceFailure) -> Response {
     response
 }
 
-fn auth_error(error: AuthError) -> Response {
-    self::error(match error {
-        AuthError::Invalid => StatusCode::UNAUTHORIZED,
-        _ => StatusCode::SERVICE_UNAVAILABLE,
-    })
+fn auth_error(observation: &RequestContext, error: AuthError) -> Response {
+    let reason = match error {
+        AuthError::Invalid => MetricRejection::Auth,
+        AuthError::Capacity | AuthError::Configuration => MetricRejection::Internal,
+    };
+    reject(
+        observation,
+        match error {
+            AuthError::Invalid => StatusCode::UNAUTHORIZED,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        },
+        reason,
+    )
 }
 
-fn json(value: &impl Serialize, cap: usize) -> Response {
+fn json(observation: &RequestContext, value: &impl Serialize, cap: usize) -> Response {
     match bounded_json::to_vec(value, cap) {
         Ok(bytes) => ([(header::CONTENT_TYPE, "application/json")], bytes).into_response(),
-        Err(_) => error(StatusCode::SERVICE_UNAVAILABLE),
+        Err(_) => reject(
+            observation,
+            StatusCode::SERVICE_UNAVAILABLE,
+            MetricRejection::Internal,
+        ),
     }
 }
 
@@ -120,8 +147,11 @@ fn anonymous(headers: &HeaderMap) -> Result<(), StatusCode> {
 
 // Exact one-header grammar, no comma folding, alternate scheme, whitespace or
 // recovery-credential fallback. Only API-kind sessions are usable here.
-fn authenticated(state: &AppState, headers: &HeaderMap) -> Result<(String, Session), StatusCode> {
-    no_cookie_or_encoding(headers)?;
+fn authenticated(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(String, Session), (StatusCode, MetricRejection)> {
+    no_cookie_or_encoding(headers).map_err(|status| (status, MetricRejection::Input))?;
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let value = values.next().and_then(|value| value.to_str().ok());
     let id = value.and_then(|value| value.strip_prefix("Bearer "));
@@ -129,9 +159,12 @@ fn authenticated(state: &AppState, headers: &HeaderMap) -> Result<(String, Sessi
         .filter(|id| token(id))
         .filter(|_| values.next().is_none())
     else {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err((StatusCode::UNAUTHORIZED, MetricRejection::Auth));
     };
-    let session = state.auth.api_session(id).ok_or(StatusCode::UNAUTHORIZED)?;
+    let session = state
+        .auth
+        .api_session(id)
+        .ok_or((StatusCode::UNAUTHORIZED, MetricRejection::Auth))?;
     Ok((id.to_owned(), session))
 }
 
@@ -157,16 +190,22 @@ fn parse<T: DeserializeOwned>(headers: &HeaderMap, bytes: &Bytes) -> Result<T, S
     serde_json::from_slice(bytes).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
-async fn challenge(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes) -> Response {
+async fn challenge(
+    State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Response {
     if let Err(status) = anonymous(&headers).and_then(|()| empty(&headers, &bytes)) {
-        return error(status);
+        return reject(&observation, status, MetricRejection::Input);
     }
     match state.auth.issue_api_challenge() {
         Ok(challenge) => json(
+            &observation,
             &serde_json::json!({"challenge": challenge, "expires_in": 600}),
             4096,
         ),
-        Err(error) => auth_error(error),
+        Err(error) => auth_error(&observation, error),
     }
 }
 
@@ -177,26 +216,36 @@ struct SessionRequest {
     credential: String,
 }
 
-async fn session(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes) -> Response {
+async fn session(
+    State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Response {
     if let Err(status) = anonymous(&headers) {
-        return error(status);
+        return reject(&observation, status, MetricRejection::Input);
     }
     let input: SessionRequest = match parse(&headers, &bytes) {
         Ok(input) => input,
-        Err(status) => return error(status),
+        Err(status) => return reject(&observation, status, MetricRejection::Input),
     };
     if !token(&input.challenge) {
-        return error(StatusCode::BAD_REQUEST);
+        return reject(
+            &observation,
+            StatusCode::BAD_REQUEST,
+            MetricRejection::Input,
+        );
     }
     match state
         .auth
         .authenticate_api(&input.credential, &input.challenge)
     {
         Ok((id, _)) => json(
+            &observation,
             &serde_json::json!({"token": id, "token_type": "Bearer", "expires_in": 43200}),
             4096,
         ),
-        Err(error) => auth_error(error),
+        Err(error) => auth_error(&observation, error),
     }
 }
 
@@ -222,52 +271,78 @@ async fn live_catalog(state: &AppState) -> Result<Catalog, InferenceFailure> {
     .map_err(|_| InferenceFailure::InferenceUnavailable)?
 }
 
-async fn submission(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes) -> Response {
+async fn submission(
+    State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Response {
     let (id, _) = match authenticated(&state, &headers) {
         Ok(auth) => auth,
-        Err(status) => return error(status),
+        Err((status, reason)) => return reject(&observation, status, reason),
     };
     let input: SubmissionRequest = match parse(&headers, &bytes) {
         Ok(input) => input,
-        Err(status) => return error(status),
+        Err(status) => return reject(&observation, status, MetricRejection::Input),
     };
     if input.model.is_empty() || input.model.len() > 128 {
-        return error(StatusCode::BAD_REQUEST);
+        return reject(
+            &observation,
+            StatusCode::BAD_REQUEST,
+            MetricRejection::Input,
+        );
     }
     let catalog = match live_catalog(&state).await {
         Ok(catalog) => catalog,
-        Err(failure) => return inference_error(failure),
+        Err(failure) => return control_inference_error(&observation, failure),
     };
     if catalog.reservation_quote(&input.model).is_err() {
-        return error(StatusCode::BAD_REQUEST);
+        return reject(
+            &observation,
+            StatusCode::BAD_REQUEST,
+            MetricRejection::Input,
+        );
     }
     match state
         .auth
         .issue_api_submission(&id, &input.model, input.new_conversation)
     {
-        Ok(submission) => json(&serde_json::json!({"submission": submission}), 4096),
+        Ok(submission) => json(
+            &observation,
+            &serde_json::json!({"submission": submission}),
+            4096,
+        ),
         Err(AuthError::Invalid) => {
             if state.auth.api_session(&id).is_none() {
-                error(StatusCode::UNAUTHORIZED)
+                reject(
+                    &observation,
+                    StatusCode::UNAUTHORIZED,
+                    MetricRejection::Auth,
+                )
             } else {
-                error(StatusCode::CONFLICT)
+                reject(&observation, StatusCode::CONFLICT, MetricRejection::Auth)
             }
         }
-        Err(error) => auth_error(error),
+        Err(error) => auth_error(&observation, error),
     }
 }
 
-async fn logout(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes) -> Response {
+async fn logout(
+    State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Response {
     let (id, _) = match authenticated(&state, &headers) {
         Ok(auth) => auth,
-        Err(status) => return error(status),
+        Err((status, reason)) => return reject(&observation, status, reason),
     };
     if let Err(status) = empty(&headers, &bytes) {
-        return error(status);
+        return reject(&observation, status, MetricRejection::Input);
     }
     match state.auth.logout_api(&id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => auth_error(error),
+        Err(error) => auth_error(&observation, error),
     }
 }
 
@@ -286,23 +361,30 @@ struct ModelEntry {
     tool_protocol: Option<&'static str>,
 }
 
-async fn models(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes) -> Response {
+async fn models(
+    State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Response {
     let (id, _) = match authenticated(&state, &headers) {
         Ok(auth) => auth,
-        Err(status) => return error(status),
+        Err((status, reason)) => return reject(&observation, status, reason),
     };
     if let Err(status) = empty(&headers, &bytes) {
-        return error(status);
+        return reject(&observation, status, MetricRejection::Input);
     }
     let catalog = match live_catalog(&state).await {
         Ok(catalog) => catalog,
-        Err(failure) => return inference_error(failure),
+        Err(failure) => return control_inference_error(&observation, failure),
     };
     let mut data = Vec::with_capacity(catalog.models.len());
     for model in &catalog.models {
         let quote = match catalog.reservation_quote(&model.id) {
             Ok(quote) => quote,
-            Err(_) => return inference_error(InferenceFailure::CatalogFailed),
+            Err(_) => {
+                return control_inference_error(&observation, InferenceFailure::CatalogFailed)
+            }
         };
         data.push(ModelEntry {
             object: "model",
@@ -323,7 +405,11 @@ async fn models(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes)
         });
     }
     if state.auth.api_session(&id).is_none() {
-        return error(StatusCode::UNAUTHORIZED);
+        return reject(
+            &observation,
+            StatusCode::UNAUTHORIZED,
+            MetricRejection::Auth,
+        );
     }
     #[derive(Serialize)]
     struct List {
@@ -331,6 +417,7 @@ async fn models(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes)
         data: Vec<ModelEntry>,
     }
     json(
+        &observation,
         &List {
             object: "list",
             data,
@@ -347,9 +434,8 @@ struct ChatRequest {
     submission: String,
     stream_options: Option<StreamOptions>,
     n: Option<u8>,
-    #[serde(deserialize_with = "chat_messages")]
     messages: Vec<ToolMessage>,
-    #[serde(default, deserialize_with = "crate::inference::tools::bounded_list")]
+    #[serde(default, deserialize_with = "present")]
     tools: Option<Vec<Tool>>,
     #[serde(default, deserialize_with = "present")]
     tool_choice: Option<ToolChoice>,
@@ -368,44 +454,17 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     T::deserialize(decoder).map(Some)
 }
 
-fn chat_messages<'de, D: serde::Deserializer<'de>>(
-    decoder: D,
-) -> Result<Vec<ToolMessage>, D::Error> {
-    struct Messages;
-    impl<'de> Visitor<'de> for Messages {
-        type Value = Vec<ToolMessage>;
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("bounded text messages")
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
-            let mut messages = Vec::new();
-            while let Some(message) = sequence.next_element()? {
-                if messages.len() == 4096 {
-                    return Err(serde::de::Error::custom("message limit"));
-                }
-                messages.push(message);
-            }
-            Ok(messages)
-        }
-    }
-    decoder.deserialize_seq(Messages)
-}
-
 async fn chat(
     State(state): State<AppState>,
     Extension(heavy): Extension<Arc<crate::telemetry::hooks::Lease>>,
-    Extension(observation): Extension<crate::telemetry::hooks::RequestContext>,
+    Extension(observation): Extension<RequestContext>,
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Response {
-    use crate::telemetry::{AdmissionModel, Rejection as MetricRejection};
-    let reject = |status, reason| {
-        observation.reject(AdmissionModel::Unknown, reason);
-        error(status)
-    };
+    let reject = |status, reason| reject(&observation, status, reason);
     let (session_id, session) = match authenticated(&state, &headers) {
         Ok(auth) => auth,
-        Err(status) => return reject(status, MetricRejection::Auth),
+        Err((status, reason)) => return reject(status, reason),
     };
     let mut input: ChatRequest = match parse(&headers, &bytes) {
         Ok(input) => input,

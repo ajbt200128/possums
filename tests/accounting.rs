@@ -280,17 +280,13 @@ fn malformed_totals_and_charge_overflow_refund_once_even_if_later_usage_is_valid
 }
 
 #[test]
-fn conflicting_terminal_calls_return_one_outcome_and_release_capacity_once() {
+fn conflicting_terminal_calls_return_one_outcome_and_refund_once() {
     let ledger = Arc::new(Accounting::new([("a".into(), 10_000)]));
-    for id in 1..=3 {
+    for id in 1..=4 {
         ledger
             .reserve("a", [id; 32], [2; 32], operational_quote(), token_expiry())
             .unwrap();
     }
-    assert_eq!(
-        ledger.reserve("a", [4; 32], [2; 32], operational_quote(), token_expiry()),
-        Err(AccountingError::Concurrency)
-    );
     let barrier = Arc::new(std::sync::Barrier::new(12));
     let handles: Vec<_> = (0..12)
         .map(|n| {
@@ -314,21 +310,25 @@ fn conflicting_terminal_calls_return_one_outcome_and_release_capacity_once() {
         Outcome::Refunded => 0,
         _ => panic!("unexpected outcome"),
     };
-    assert_eq!(ledger.available("a"), Some(10_000 - 2 * 650 - charge));
+    assert_eq!(ledger.available("a"), Some(10_000 - 3 * 650 - charge));
     ledger
-        .reserve("a", [4; 32], [2; 32], operational_quote(), token_expiry())
+        .reserve("a", [5; 32], [2; 32], operational_quote(), token_expiry())
         .unwrap();
-    assert_eq!(
-        ledger.reserve("a", [5; 32], [2; 32], operational_quote(), token_expiry()),
-        Err(AccountingError::Concurrency)
-    );
+    for id in 2..=5 {
+        assert_eq!(ledger.finish([id; 32], None).unwrap(), Outcome::Refunded);
+        assert_eq!(
+            ledger.finish([id; 32], usage(5, 4)).unwrap(),
+            Outcome::Refunded
+        );
+    }
+    assert_eq!(ledger.available("a"), Some(10_000 - charge));
 }
 
 #[test]
-fn reserve_racing_terminal_transition_preserves_three_account_slots() {
+fn reserve_racing_terminal_transition_conserves_credit_without_account_quota() {
     for _ in 0..32 {
         let ledger = Arc::new(Accounting::new([("a".into(), 10_000)]));
-        for id in 1..=3 {
+        for id in 1..=4 {
             ledger
                 .reserve("a", [id; 32], [2; 32], operational_quote(), token_expiry())
                 .unwrap();
@@ -341,22 +341,14 @@ fn reserve_racing_terminal_transition_preserves_three_account_slots() {
             finishing.finish([1; 32], usage(5, 4)).unwrap()
         });
         barrier.wait();
-        let reserve = ledger.reserve("a", [4; 32], [2; 32], operational_quote(), token_expiry());
+        let reserve = ledger.reserve("a", [5; 32], [2; 32], operational_quote(), token_expiry());
         assert_eq!(terminal.join().unwrap(), Outcome::Settled { charged: 29 });
-        match reserve {
-            Ok(ReserveResult::Reserved) => {}
-            Err(AccountingError::Concurrency) => {
-                ledger
-                    .reserve("a", [4; 32], [2; 32], operational_quote(), token_expiry())
-                    .unwrap();
-            }
-            other => panic!("unexpected reservation {other:?}"),
+        assert_eq!(reserve, Ok(ReserveResult::Reserved));
+        assert_eq!(ledger.available("a"), Some(10_000 - 4 * 650 - 29));
+        for id in 2..=5 {
+            assert_eq!(ledger.finish([id; 32], None).unwrap(), Outcome::Refunded);
         }
-        assert_eq!(ledger.available("a"), Some(10_000 - 3 * 650 - 29));
-        assert_eq!(
-            ledger.reserve("a", [5; 32], [2; 32], operational_quote(), token_expiry()),
-            Err(AccountingError::Concurrency)
-        );
+        assert_eq!(ledger.available("a"), Some(10_000 - 29));
         assert_eq!(
             ledger
                 .reserve("a", [1; 32], [2; 32], operational_quote(), token_expiry())

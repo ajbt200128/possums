@@ -83,40 +83,21 @@ async fn captured(m: &Metrics) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn real_aggregation_wire_and_suppression() {
-    if !clean_child("telemetry::export::handoff::tests::real_aggregation_wire_and_suppression") {
+async fn real_aggregation_wire_includes_complete_low_count_families() {
+    if !clean_child(
+        "telemetry::export::handoff::tests::real_aggregation_wire_includes_complete_low_count_families",
+    ) {
         return;
     }
     for (n, vector) in [
+        (1, Vector::Plain),
+        (9, Vector::Plain),
         (10, Vector::Plain),
         (11, Vector::Plain),
         (20, Vector::Mixed),
         (20, Vector::MissingRelease),
         (10, Vector::MissingAll),
-    ] {
-        let m = new();
-        ready(&m);
-        cohort(&m, n, vector);
-        let bytes = captured(&m).await;
-        assert_eq!(
-            oracle::points(&bytes),
-            oracle::expected(
-                n as i64,
-                vector == Vector::Mixed,
-                if vector == Vector::MissingRelease || vector == Vector::MissingAll {
-                    10
-                } else {
-                    0
-                }
-            )
-        );
-        assert!(m.take_window().is_none());
-    }
-    let (listener, client) = listener().await;
-    for (n, vector) in [
-        (0, Vector::Plain),
-        (1, Vector::Plain),
-        (9, Vector::Plain),
+        (10, Vector::OutputFailure),
         (11, Vector::RareError),
         (11, Vector::RareModel),
         (11, Vector::RareEndpoint),
@@ -127,8 +108,18 @@ async fn real_aggregation_wire_and_suppression() {
         let m = new();
         ready(&m);
         cohort(&m, n, vector);
+        let bytes = captured(&m).await;
+        assert_eq!(
+            oracle::points(&bytes),
+            oracle::expected_vector(n as i64, vector)
+        );
         assert!(m.take_window().is_none());
     }
+    let (listener, client) = listener().await;
+    let m = new();
+    ready(&m);
+    cohort(&m, 0, Vector::Plain);
+    assert!(m.take_window().is_none());
     assert_eq!(client.evidence().connecting.load(SeqCst), 0);
     assert!(
         tokio::time::timeout(Duration::from_millis(10), listener.accept())

@@ -76,7 +76,7 @@ fn strict_schema_and_completed_history_without_fake_user() {
     ] {
         assert!(invocation(messages, Some(tools()), None).is_err());
     }
-    for mutate in 0..7 {
+    for mutate in 0..6 {
         let mut messages = history();
         match mutate {
             0 => {
@@ -89,13 +89,9 @@ fn strict_schema_and_completed_history_without_fake_user() {
                 messages[1]["tool_calls"][0]["function"]["name"] = json!("n".repeat(65));
             }
             3 => {
-                messages[1]["tool_calls"][0]["function"]["arguments"] =
-                    json!("x".repeat(64 * 1024 + 1));
-            }
-            4 => {
                 messages[1]["tool_calls"][0]["function"]["arguments"] = json!({});
             }
-            5 => {
+            4 => {
                 messages
                     .as_array_mut()
                     .unwrap()
@@ -136,6 +132,38 @@ fn strict_schema_and_completed_history_without_fake_user() {
         )
         .is_err());
     }
+}
+
+#[test]
+fn historical_calls_catalog_and_messages_use_body_bounds_not_stream_quotas() {
+    let calls: Vec<_> = (0..66).map(|i| json!({"id":format!("call_{i}"),"type":"function","function":{"name":"lookup","arguments":serde_json::to_string(&json!({"x":"a".repeat(65 * 1024)})).unwrap()}})).collect();
+    let mut messages = vec![json!({"role":"assistant","content":null,"tool_calls":calls})];
+    messages.extend(
+        (0..66).map(
+            |i| json!({"role":"tool","tool_call_id":format!("call_{i}"),"content":"synthetic"}),
+        ),
+    );
+    messages.extend((0..4097).map(|_| json!({"role":"user","content":"synthetic"})));
+    let catalog = (0..65).map(|i| json!({"type":"function","function":{"name":format!("tool_{i}"),"parameters":{"type":"object"}}})).collect::<Vec<_>>();
+    let messages = json!(messages);
+    let catalog = json!(catalog);
+    assert!(
+        serde_json::to_vec(&json!({"messages":messages,"tools":catalog}))
+            .unwrap()
+            .len()
+            < 8 * 1024 * 1024
+    );
+    let input = invocation(messages.clone(), Some(catalog), None).unwrap();
+    assert_eq!(serde_json::to_value(input).unwrap()["messages"], messages);
+    let sequential: Vec<_> = (0..66)
+        .flat_map(|i| {
+            let mut batch = history().as_array().unwrap().clone();
+            batch[1]["tool_calls"][0]["id"] = json!(format!("prior_{i}"));
+            batch[2]["tool_call_id"] = json!(format!("prior_{i}"));
+            batch
+        })
+        .collect();
+    assert!(invocation(json!(sequential), Some(tools()), None).is_ok());
 }
 
 // Every fixture goes through the actual pinned SDK decoder, not a shadow SSE parser.

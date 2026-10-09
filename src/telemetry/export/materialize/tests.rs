@@ -1,6 +1,6 @@
 use super::super::{candidate, capture_header, clean_child};
 use super::*;
-use crate::telemetry::Histogram;
+use crate::telemetry::{tests::Vector, Histogram};
 use opentelemetry_otlp::MetricExporter;
 use opentelemetry_proto::tonic::{
     collector::metrics::v1::ExportMetricsServiceRequest,
@@ -265,6 +265,90 @@ pub(in crate::telemetry) fn expected(n: i64, mixed: bool, missing: i64) -> WireP
     }
     out
 }
+/// Independent wire expansion of rare cohort partitions, including every zero
+/// bin and the absence of extra marginals or gate-only disposition counts.
+pub(in crate::telemetry) fn expected_vector(n: i64, vector: Vector) -> WirePoints {
+    let missing = match vector {
+        Vector::MissingRare => 1,
+        Vector::MissingRelease => 10,
+        Vector::MissingAll => n,
+        _ => 0,
+    };
+    let base = expected(n, vector == Vector::Mixed, missing);
+    let mut out = WirePoints::new();
+    for ((name, mut attrs), (unit, mut value, start, end)) in base {
+        let generation_terminal =
+            name.starts_with("possums.generation.") && name != "possums.generation.started";
+        let split_label = match vector {
+            Vector::RareError if generation_terminal => Some(("outcome", "failure")),
+            Vector::RareModel if attrs.iter().any(|(k, _)| k == "possums.model") => {
+                Some(("possums.model", "glm-5-3"))
+            }
+            Vector::RareEndpoint if attrs.iter().any(|(k, _)| k == "possums.endpoint") => {
+                Some(("possums.endpoint", "chat_web"))
+            }
+            _ => None,
+        };
+        if let Some((key, replacement)) = split_label {
+            let mut rare = attrs.clone();
+            for (k, v) in &mut rare {
+                if k == key {
+                    *v = replacement.into();
+                } else if vector == Vector::RareError && k == "failure_stage" {
+                    *v = "transport".into();
+                }
+            }
+            let rare_value = i64::from(value != 0);
+            out.insert((name.clone(), rare), (unit.clone(), rare_value, start, end));
+            value -= rare_value;
+        }
+        if vector == Vector::RareBin && name == "possums.generation.first_output.bucket" {
+            match attrs
+                .iter()
+                .find(|(k, _)| k == "bucket")
+                .unwrap()
+                .1
+                .as_str()
+            {
+                "b01" => value = 10,
+                "b02" => value = 1,
+                _ => {}
+            }
+        }
+        if vector == Vector::Duplicate {
+            if name.starts_with("possums.generation.") || name == "possums.delivery.completed" {
+                if value != 0 {
+                    value = 9;
+                }
+            } else if name == "possums.admission.occupancy.bucket"
+                && attrs.iter().any(|(k, v)| k == "lane" && v == "generation")
+            {
+                match attrs
+                    .iter()
+                    .find(|(k, _)| k == "bucket")
+                    .unwrap()
+                    .1
+                    .as_str()
+                {
+                    "b00" => value = 291,
+                    "b01" => value = 9,
+                    _ => {}
+                }
+            }
+        }
+        if vector == Vector::OutputFailure && generation_terminal {
+            for (k, v) in &mut attrs {
+                if k == "outcome" {
+                    *v = "failure".into();
+                } else if k == "failure_stage" {
+                    *v = "terminal_usage".into();
+                }
+            }
+        }
+        out.insert((name, attrs), (unit, value, start, end));
+    }
+    out
+}
 async fn wire(mut metrics: opentelemetry_sdk::metrics::data::ResourceMetrics) -> Vec<u8> {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
@@ -298,14 +382,13 @@ async fn linked_wire_vectors() {
     if !clean_child("telemetry::export::materialize::tests::linked_wire_vectors") {
         return;
     }
-    let empty = RequestTables::default();
-    assert!(request(&empty, W).is_none());
-    for n in [1, 9] {
-        assert!(request(&cohort(n, false, 0), W).is_none());
-    }
+    assert!(request(&cohort(0, false, 0), W).is_none());
     for (n, mixed, missing) in [
+        (1, false, 0),
+        (9, false, 0),
         (10, false, 0),
         (11, false, 0),
+        (11, false, 1),
         (20, true, 0),
         (20, false, 10),
         (10, false, 10),
@@ -317,7 +400,8 @@ async fn linked_wire_vectors() {
     let mut t = cohort(11, false, 0);
     t.first_output[36].0[2] = 1;
     t.first_output[36].0[1] -= 1;
-    assert!(request(&t, W).is_none());
+    let bytes = wire(request(&t, W).unwrap()).await;
+    assert_eq!(points(&bytes), expected_vector(11, Vector::RareBin));
 }
 
 #[tokio::test]
@@ -327,24 +411,83 @@ async fn sparse_and_cross_window_wire() {
     }
     for change in 0..9 {
         let mut t = cohort(10, false, 0);
+        let mut exact = expected(10, false, 0);
+        let ep = ("possums.endpoint", "chat_api");
+        let model = ("possums.model", "kimi-k3");
         match change {
             0 => {
                 t.generation_completed[41] = 1;
                 t.generation_duration[41].0[2] = 1;
                 t.first_output[41].0[1] = 1;
+                let attrs = [
+                    ep,
+                    model,
+                    ("outcome", "failure"),
+                    ("failure_stage", "transport"),
+                ];
+                add_exact(
+                    &mut exact,
+                    "possums.generation.completed",
+                    "{generation}",
+                    &attrs,
+                    1,
+                    W,
+                );
+                exact_bins(
+                    &mut exact,
+                    "possums.generation.duration.bucket",
+                    &attrs,
+                    2,
+                    1,
+                    W,
+                );
+                exact_bins(
+                    &mut exact,
+                    "possums.generation.first_output.bucket",
+                    &attrs,
+                    1,
+                    1,
+                    W,
+                );
             }
             1 => {
                 t.generation_starts[4] = 1;
+                add_exact(
+                    &mut exact,
+                    "possums.generation.started",
+                    "{generation}",
+                    &[ep, ("possums.model", "glm-5-3")],
+                    1,
+                    W,
+                );
             }
             2 => {
                 t.http_starts[3] = 1;
+                add_exact(
+                    &mut exact,
+                    "possums.http.requests",
+                    "{request}",
+                    &[("possums.endpoint", "chat_web")],
+                    1,
+                    W,
+                );
             }
             3 => {
                 t.first_output[36].0[1] = 9;
                 t.first_output[36].0[2] = 1;
+                for ((name, attrs), (_, value, _, _)) in &mut exact {
+                    if name == "possums.generation.first_output.bucket" {
+                        if attrs.iter().any(|(k, v)| k == "bucket" && v == "b01") {
+                            *value = 9;
+                        } else if attrs.iter().any(|(k, v)| k == "bucket" && v == "b02") {
+                            *value = 1;
+                        }
+                    }
+                }
             }
             4 => {
                 t.first_output[36].0[1] = 9;
+                exact = expected(10, false, 1);
             }
             5 => {
                 t.dispositions[255] = [9, 1, 0, 0, 0];
@@ -352,15 +495,41 @@ async fn sparse_and_cross_window_wire() {
             6 => {
                 t.http_duration[255].0[3] = 9;
                 t.http_duration[255].0[2] = 1;
+                for ((name, attrs), (_, value, _, _)) in &mut exact {
+                    if name == "possums.http.duration.bucket" {
+                        if attrs.iter().any(|(k, v)| k == "bucket" && v == "b03") {
+                            *value = 9;
+                        } else if attrs.iter().any(|(k, v)| k == "bucket" && v == "b02") {
+                            *value = 1;
+                        }
+                    }
+                }
             }
             7 => {
-                t.rejected[16 * 5 * 14] = 1;
+                t.rejected[1176] = 1;
+                add_exact(
+                    &mut exact,
+                    "possums.admission.rejected",
+                    "{rejection}",
+                    &[
+                        ("possums.endpoint", "not_applicable"),
+                        ("possums.model", "not_applicable"),
+                        ("reason", "connection_capacity"),
+                    ],
+                    1,
+                    W,
+                );
             }
             _ => {
                 t.valid = false;
             }
         }
-        assert!(request(&t, W).is_none(), "sparse variant {change}");
+        if change == 8 {
+            assert!(request(&t, W).is_none());
+        } else {
+            let bytes = wire(request(&t, W).unwrap()).await;
+            assert_eq!(points(&bytes), exact, "low-count variant {change}");
+        }
     }
     assert!(request(
         &cohort(10, false, 0),
@@ -371,7 +540,7 @@ async fn sparse_and_cross_window_wire() {
     )
     .is_none());
     // Vreject, Vreject-rare: no HTTP or invented model/endpoint.
-    for n in [10, 11] {
+    for n in [1, 9, 10, 11] {
         let mut t = RequestTables {
             ticks: 300,
             ..Default::default()
@@ -785,27 +954,28 @@ async fn co_closing_separate_resources_and_boundaries() {
 }
 
 #[test]
-fn all_or_none_sparse_variants_and_invalid_pairs() {
-    for variant in 0..6 {
+fn inconsistent_families_and_invalid_pairs_still_fail_closed() {
+    for variant in 0..7 {
         let mut t = cohort(11, false, 0);
         match variant {
             0 => {
-                t.generation_starts[4] = 1;
-            } // rare authenticated model
+                t.generation_duration[36].0[2] = 10;
+            } // unmatched terminal duration
             1 => {
-                t.http_starts[3] = 1;
-            } // rare endpoint
+                t.http_duration[255].0[3] = 10;
+            } // unmatched HTTP duration
             2 => {
-                t.generation_completed[41] = 1;
-                t.generation_duration[41].0[2] = 1;
-                t.first_output[41].0[1] = 1;
-            }
+                t.first_output[36].0[1] = 12;
+            } // output exceeds terminals
             3 => {
-                t.first_output[36].0[1] = 10;
-            } // missing complement=1
+                t.dispositions[255] = [10, 0, 0, 0, 0];
+            } // dispositions do not sum to terminals
             4 => {
-                t.dispositions[255] = [10, 1, 0, 0, 0];
-            } // duplicate complement
+                t.ticks = 299;
+            } // incomplete window
+            5 => {
+                t.rejected[16 * 5 * 14] = 1;
+            } // pre-router rejection with an invented model
             _ => {
                 t.rejected[(16 * 5 + 4) * 14 + 4] = 10;
             } // invalid pre-router/post-router pair

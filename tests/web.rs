@@ -1283,12 +1283,12 @@ async fn same_session_model_switch_needs_new_chat_and_old_tabs_stay_invalid() {
 }
 
 #[tokio::test]
-async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_prompt() {
-    let path = valid_evidence("reset-account-capacity");
+async fn memory_capacity_rejection_after_reset_commits_no_binding_and_sends_no_prompt() {
+    let path = valid_evidence("reset-memory-capacity");
     let (state, cookie, csrf, _, inference) = fixture_with_budget(path.to_str().unwrap(), 1000);
     two_model_catalog(&inference);
     let mut pending = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let token = state.auth.issue_submission(session_id(&cookie)).unwrap();
         let gate = inference.hold(HoldPoint::Tokenization);
         let task =
@@ -1296,22 +1296,22 @@ async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_
         gate.entered.notified().await;
         pending.push((gate, task));
     }
-    assert_eq!(state.accounting.available("a"), Some(844));
+    assert_eq!(state.accounting.available("a"), Some(792));
     let response = router(state.clone())
         .oneshot(post_form("/chat/new", &cookie, format!("csrf={csrf}")))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     drop(response);
-    assert_eq!(state.accounting.available("a"), Some(844));
+    assert_eq!(state.accounting.available("a"), Some(792));
     let token = state.auth.issue_submission(session_id(&cookie)).unwrap();
-    // Repeated rejection cannot leak the fourth generation permit.
+    // Repeated rejection cannot bind a model or bypass saturated memory admission.
     for _ in 0..6 {
         let response = router(state.clone())
             .oneshot(chat_request(&cookie, &csrf, &token))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             state
                 .auth
@@ -1320,15 +1320,15 @@ async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_
                 .selected_model,
             None
         );
-        assert_eq!(state.accounting.available("a"), Some(844));
-        assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 3);
+        assert_eq!(state.accounting.available("a"), Some(792));
+        assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 4);
     }
     let (gate, task) = pending.pop().unwrap();
     gate.release.notify_one();
     let response = task.await.unwrap().unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     response.into_body().collect().await.unwrap();
-    assert_eq!(state.accounting.available("a"), Some(893));
+    assert_eq!(state.accounting.available("a"), Some(841));
     let response = router(state.clone())
         .oneshot(post_form(
             "/chat",
@@ -1345,7 +1345,7 @@ async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_
         assert_eq!(response.status(), StatusCode::OK);
         response.into_body().collect().await.unwrap();
     }
-    assert_eq!(state.accounting.available("a"), Some(990));
+    assert_eq!(state.accounting.available("a"), Some(987));
     assert_eq!(
         state
             .auth
@@ -1355,7 +1355,7 @@ async fn account_capacity_rejection_after_reset_commits_no_binding_and_sends_no_
             .as_deref(),
         Some("n")
     );
-    assert_eq!(inference.generations.load(Ordering::SeqCst), 4);
+    assert_eq!(inference.generations.load(Ordering::SeqCst), 5);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -1770,7 +1770,7 @@ async fn invalid_catalog_and_unrepresentable_quote_stop_before_prompt_calls() {
 }
 
 #[tokio::test]
-async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_account_limit() {
+async fn four_active_chats_leave_new_chat_and_logout_independent() {
     let path = valid_evidence("partition");
     let (_, _, _, _, inference) = fixture(path.to_str().unwrap());
     two_model_catalog(&inference);
@@ -1813,18 +1813,6 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
         let task = tokio::spawn(app.clone().oneshot(request));
         gate.entered.notified().await;
         held.push((task, gate));
-        if index == 2 {
-            // Three per account still applies while the fourth global lane is free.
-            let token = state.auth.issue_submission(id).unwrap();
-            let rejected = app
-                .clone()
-                .oneshot(chat_request(&session_cookie(id), &session.csrf, &token))
-                .await
-                .unwrap();
-            assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
-            assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 3);
-            drop(rejected);
-        }
     }
     assert_eq!(inference.tokenizations.load(Ordering::SeqCst), 4);
     assert_eq!(state.accounting.available("0"), Some(844));
@@ -1882,7 +1870,7 @@ async fn four_active_chats_leave_new_chat_and_logout_independent_and_keep_accoun
         .unwrap();
     assert_eq!(new_chat.status(), StatusCode::OK);
     assert_ne!(state.auth.session(id).unwrap().conversation, original);
-    // All six lanes are now occupied (four chats, New chat, ordinary controls).
+    // Heavy, New chat and ordinary-control resource admission are all occupied.
     for route in ["/chat/new", "/logout"] {
         let rejected = app
             .clone()

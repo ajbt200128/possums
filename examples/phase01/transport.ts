@@ -1,6 +1,6 @@
 import { Identity, type RequestContext } from 'ehbp';
 import { CatalogFailure } from './client.js';
-import { WEB_APPROVAL, qualifyWeb, qualifyApi, requireApiApproval, validateKeyConfig } from './approval.js';
+import { WEB_APPROVAL, PUBLISHER, qualifyWeb, qualifyApi, qualifyPublished, requireApiApproval, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';
 import { LIMITS, ChannelError, Operation, base64, boundedReport, cleanup, collect, hex, parseJSON, requireThat, serialize } from './limits.js';
 import { admitInvocation, fields, type Chat } from './tools.js';
 export type { Chat, Invocation, Message, Tool, ToolChoice, ToolCall, JSONObject, JSONValue } from './tools.js';
@@ -156,12 +156,14 @@ export class Channel {
   readonly #origin: string;
   readonly #identity: Identity;
   readonly #policyCheck: () => void;
-  private constructor(authority: symbol, origin: string, identity: Identity, policyCheck: () => void = () => {}) {
+  readonly #release: PublishedRelease | undefined;
+  get release(): PublishedRelease | undefined { return this.#release; }
+  private constructor(authority: symbol, origin: string, identity: Identity, policyCheck: () => void = () => {}, release?: PublishedRelease) {
     requireThat(authority === channelAuthority);
     let url: URL;
     try { url = new URL(origin); } catch { throw new ChannelError(); }
     requireThat(url.protocol === 'https:' && url.origin === origin && !url.username && !url.password);
-    this.#origin = origin; this.#identity = identity; this.#policyCheck = policyCheck;
+    this.#origin = origin; this.#identity = identity; this.#policyCheck = policyCheck; this.#release = release;
   }
   static requireVerified(value: unknown): asserts value is Channel {
     requireThat(typeof value === 'object' && value !== null && #identity in value);
@@ -174,7 +176,18 @@ export class Channel {
     await qualifyApi(bundle, manifest, config);
     return new Channel(channelAuthority, approval.origin, await Identity.unmarshalPublicConfig(config), () => {
       requireThat(requireApiApproval() === approval);
-    });
+    }, Object.freeze({ tag: approval.tag, expires: approval.expires }));
+  }
+  static async published(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal): Promise<Channel> {
+    try {
+      requireThat(bundleBytes && manifestBytes && keyConfig && bundleBytes.length <= LIMITS.bundle && manifestBytes.length <= LIMITS.provenance && keyConfig.length === LIMITS.key);
+      const bundle = new Uint8Array(bundleBytes), manifest = new Uint8Array(manifestBytes), config = new Uint8Array(keyConfig);
+      const { release } = await qualifyPublished(bundle, manifest, config, signal);
+      const identity = await Identity.unmarshalPublicConfig(config);
+      const check = () => checkApproval(Date.now(), release.expires, false);
+      check(); requireThat(!signal?.aborted);
+      return new Channel(channelAuthority, PUBLISHER.origin, identity, check, release);
+    } catch { throw new ChannelError(); }
   }
   static async fixture(origin: string, config: Uint8Array, independentKey: string): Promise<Channel> {
     // Build-time elimination, plus loopback restriction: fixture trust cannot

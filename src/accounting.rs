@@ -3,7 +3,6 @@ use std::{collections::HashMap, sync::Mutex, time::Instant};
 use thiserror::Error;
 
 const MAX_SUBMISSIONS: usize = 100_000;
-const MAX_ACCOUNT_IN_FLIGHT: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -127,9 +126,6 @@ impl Accounting {
             .accounts
             .get_mut(account_id)
             .ok_or(AccountingError::UnknownAccount)?;
-        if account.in_flight >= MAX_ACCOUNT_IN_FLIGHT {
-            return Err(AccountingError::Concurrency);
-        }
         if account.available < quote.reserved_microunits {
             return Err(AccountingError::InsufficientCredit);
         }

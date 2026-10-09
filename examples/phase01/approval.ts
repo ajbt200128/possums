@@ -1,6 +1,9 @@
 import { Verifier, type AttestationBundle, type AttestationResponse } from '@tinfoilsh/verifier';
 import { X509Certificate, AllOf, Identity as SignerIdentity, GitHubWorkflowSHA,
-  OIDCBuildConfigURI, OIDCBuildConfigDigest, OIDCRunInvocationURI } from '@freedomofpress/sigstore-browser';
+  OIDCBuildConfigURI, OIDCBuildConfigDigest, OIDCRunInvocationURI,
+  GitHubWorkflowRepository, GitHubWorkflowRef, OIDCSourceRepositoryURI,
+  OIDCSourceRepositoryDigest, OIDCSourceRepositoryRef, OIDCBuildSignerURI,
+  OIDCBuildSignerDigest } from '@freedomofpress/sigstore-browser';
 import { LIMITS, Operation, base64, boundedReport, decode, digest, parseJSON, requireThat, ChannelError } from './limits.js';
 
 // Independent v0.0.8 WEB-only approval, never authorization for changed API code.
@@ -31,6 +34,17 @@ export const API_APPROVALS: readonly Approval[] = Object.freeze([Object.freeze({
   invocation: 'https://github.com/ajbt200128/possums/actions/runs/37891319005/attempts/1',
   expires: Date.parse('2026-10-11T00:00:00Z'),
 })]);
+// Future-release authority is independent of the compiled administrative approvals.
+export const PUBLISHER = Object.freeze({
+  origin: 'https://possum-phase0.possums.containers.tinfoil.dev',
+  repository: 'ajbt200128/possums',
+  workflow: 'https://github.com/ajbt200128/possums/.github/workflows/tinfoil-release-publish.yml',
+});
+export type PublishedRelease = Readonly<{ tag: string; expires: number }>;
+export function requireReleaseTag(value: unknown): asserts value is string {
+  // Stable semantic releases only; discovery never supplies a URL or policy.
+  requireThat(typeof value === 'string' && value.length <= 64 && /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value));
+}
 // Locally distributed denylist; no claim of AMD CRL/OCSP coverage.
 const REVOKED_MANIFESTS: ReadonlySet<string> = new Set();
 const REVOKED_KEYS: ReadonlySet<string> = new Set();
@@ -58,22 +72,43 @@ export type WebQualification = Readonly<{ scope: 'web-observation-only'; hpkeKey
 // Bytes, not caller-supplied verified flags. All library input is locally bounded first.
 export async function qualifyWeb(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array): Promise<WebQualification> {
   const keys = await qualifyApproved(bundleBytes, manifestBytes, keyConfig, WEB_APPROVAL);
-  return Object.freeze({ scope: 'web-observation-only', ...keys });
+  return Object.freeze({ scope: 'web-observation-only', hpkeKey: keys.hpkeKey, tlsFingerprint: keys.tlsFingerprint });
 }
 export async function qualifyApi(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array) {
-  return qualifyApproved(bundleBytes, manifestBytes, keyConfig, requireApiApproval());
+  const keys = await qualifyApproved(bundleBytes, manifestBytes, keyConfig, requireApiApproval());
+  return Object.freeze({ hpkeKey: keys.hpkeKey, tlsFingerprint: keys.tlsFingerprint });
 }
-async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, approval: Approval) {
-  const op = new Operation();
+export async function qualifyPublished(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal) {
+  return qualifyApproved(bundleBytes, manifestBytes, keyConfig, undefined, signal);
+}
+async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, approval?: Approval, signal?: AbortSignal) {
+  const op = new Operation(LIMITS.operationMs, signal);
   try {
-    checkApproval(Date.now(), approval.expires, REVOKED_MANIFESTS.has(approval.manifest));
+    op.check();
+    if (approval) checkApproval(Date.now(), approval.expires, REVOKED_MANIFESTS.has(approval.manifest));
+    const policy = approval ?? PUBLISHER;
     const bundle = parseJSON(bundleBytes, LIMITS.bundle) as AttestationBundle;
-    requireThat(bundle.domain === new URL(approval.origin).hostname && bundle.digest === approval.manifest && bundle.releaseTag === approval.tag);
-    requireThat(manifestBytes.length <= LIMITS.provenance && await digest(manifestBytes) === approval.manifest);
+    const tag = bundle.releaseTag;
+    requireThat(typeof tag === 'string' && bundle.domain === new URL(policy.origin).hostname);
+    if (approval) requireThat(bundle.digest === approval.manifest && bundle.releaseTag === approval.tag);
+    else {
+      requireReleaseTag(bundle.releaseTag);
+      requireThat(/^[0-9a-f]{64}$/.test(bundle.digest) && !REVOKED_MANIFESTS.has(bundle.digest));
+    }
+    requireThat(manifestBytes.length <= LIMITS.provenance && await digest(manifestBytes) === bundle.digest);
     const manifest = parseJSON(manifestBytes, LIMITS.provenance);
     const config = base64(manifest.config, LIMITS.certificate);
-    requireThat(await digest(config) === approval.config);
-    requireThat(decode(config).includes(`    image: ghcr.io/${approval.repository}-gateway@${approval.image}\n`));
+    if (approval) {
+      requireThat(await digest(config) === approval.config);
+      requireThat(decode(config).includes(`    image: ghcr.io/${approval.repository}-gateway@${approval.image}\n`));
+    } else {
+      // The publisher authorizes the WHOLE config (including image), not a YAML
+      // substring interpreted as a second policy. Bind its exact bytes to the
+      // signed command line; canonical predicate equality below binds all fields.
+      requireThat(config.length > 0 && typeof manifest.cmdline === 'string');
+      const hashes = manifest.cmdline.split(/\s+/).filter((part: string) => part.startsWith('tinfoil-config-hash='));
+      requireThat(hashes.length === 1 && hashes[0] === `tinfoil-config-hash=${await digest(config)}`);
+    }
     requireThat(manifest.hashes.version === 'v0.14.12');
     const doc = bundle.enclaveAttestationReport;
     requireThat(doc.format === 'https://tinfoil.sh/predicate/sev-snp-guest/v2');
@@ -92,22 +127,46 @@ async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Arra
     requireThat(canonical(statement.predicate) === canonical(manifest));
     // This is the actual pinned verifier: hardware signature/chain/policy, Sigstore
     // DSSE/Rekor/root/tag, measurement comparison, certificate SAN endorsements.
-    const verifier = new Verifier({ configRepo: approval.repository });
+    const verifier = new Verifier({ configRepo: policy.repository });
     const verified = await op.wait<AttestationResponse>(verifier.verifyBundle(bundle), LIMITS.operationMs);
     const signer = X509Certificate.parse(base64(signatureBundle.verificationMaterial.certificate.rawBytes, LIMITS.certificate));
+    // These candidate values acquire authority ONLY through the library's DSSE,
+    // certificate-chain and Rekor verification above, never from release metadata.
+    const workflow = approval?.workflow ?? `${PUBLISHER.workflow}@refs/tags/${bundle.releaseTag}`;
+    const commit = approval?.commit ?? signer.extSourceRepositoryDigest?.sourceRepositoryDigest;
+    const invocation = approval?.invocation ?? signer.extRunInvocationURI?.runInvocationURI;
+    requireThat(typeof commit === 'string' && /^[0-9a-f]{40}$/.test(commit));
+    requireThat(typeof invocation === 'string');
+    if (!approval) requireThat(new RegExp(`^https://github\\.com/${PUBLISHER.repository}/actions/runs/[1-9][0-9]*/attempts/[1-9][0-9]*$`).test(invocation));
     await new AllOf([
-      new SignerIdentity({ identity: approval.workflow, issuer: 'https://token.actions.githubusercontent.com' }),
-      new GitHubWorkflowSHA(approval.commit),
-      new OIDCBuildConfigURI(approval.workflow),
-      new OIDCBuildConfigDigest(approval.commit),
-      new OIDCRunInvocationURI(approval.invocation),
+      new SignerIdentity({ identity: workflow, issuer: 'https://token.actions.githubusercontent.com' }),
+      new GitHubWorkflowSHA(commit),
+      new OIDCBuildConfigURI(workflow),
+      new OIDCBuildConfigDigest(commit),
+      new OIDCRunInvocationURI(invocation),
+      ...(!approval ? [
+        new GitHubWorkflowRepository(PUBLISHER.repository),
+        new GitHubWorkflowRef(`refs/tags/${bundle.releaseTag}`),
+        new OIDCSourceRepositoryURI(`https://github.com/${PUBLISHER.repository}`),
+        new OIDCSourceRepositoryDigest(commit),
+        new OIDCSourceRepositoryRef(`refs/tags/${bundle.releaseTag}`),
+        new OIDCBuildSignerURI(workflow),
+        new OIDCBuildSignerDigest(commit),
+      ] : []),
     ]).verify(signer);
     const cert = X509Certificate.parse(bundle.enclaveCert);
     requireThat(cert.validForDate(new Date()));
-    requireThat(await digest(new Uint8Array(cert.publicKey)) === verified.tlsPublicKeyFingerprint);
+    const tlsFingerprint = await digest(new Uint8Array(cert.publicKey));
+    requireThat(tlsFingerprint === verified.tlsPublicKeyFingerprint);
     requireThat(verified.hpkePublicKey && !REVOKED_KEYS.has(verified.hpkePublicKey));
     validateKeyConfig(keyConfig, verified.hpkePublicKey);
-    return Object.freeze({ hpkeKey: verified.hpkePublicKey, tlsFingerprint: verified.tlsPublicKeyFingerprint! });
+    // Finite local trust-session lifetime, NOT administrative approval or quote
+    // freshness. Certificate SAN verification is not Node TLS socket pinning.
+    const expires = approval?.expires ?? Math.min(Date.now() + 12 * 60 * 60 * 1000, cert.notAfter.getTime());
+    checkApproval(Date.now(), expires, false);
+    op.check();
+    return Object.freeze({ hpkeKey: verified.hpkePublicKey, tlsFingerprint,
+      release: Object.freeze({ tag, expires }) });
   } catch { throw new ChannelError(); }
   finally { op.close(); }
 }

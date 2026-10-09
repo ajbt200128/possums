@@ -24,10 +24,14 @@ const batch = [{ role: 'user', content: 'hello' }, { role: 'assistant', content:
 const encoded = value => JSON.parse(dec.decode(m.encodeChat(value)));
 check(encoded(chat).tools[0].function.parameters.properties.n.minimum === -1.5);
 for (const choice of ['auto', 'none', 'required', { type: 'function', function: { name: 'lookup' } }]) check(encoded({ ...chat, tool_choice: choice }).tool_choice !== undefined);
+let nestedParameters={type:'object',properties:{value:{type:'string',enum:['synthetic']}}};
+for(let i=0;i<6;i++)nestedParameters={type:'object',properties:{nested:nestedParameters}};
+const nestedTool={...tool,function:{...tool.function,parameters:nestedParameters}};
+assert.deepEqual(encoded({...chat,tools:[nestedTool]}).tools[0].function.parameters,nestedParameters);checks++;
 check(encoded({ ...chat, messages: batch }).messages.length === 3);
 check(encoded({ ...chat, messages: [...batch, { role: 'user', content: 'next' }] }).messages.length === 4);
 for (const mutate of [
-  c => { c.tools = []; }, c => { c.tools = [tool, tool]; }, c => { c.tools = Array(65).fill(tool); },
+  c => { c.tools = []; }, c => { c.tools = [tool, tool]; },
   c => { c.tools[0].function.name = 'n'.repeat(65); }, c => { c.tools[0].function.name = 'bad name'; },
   c => { c.tools[0].function.parameters.type = 'array'; }, c => { c.tools[0].function.parameters.$ref = 'https://invalid.example/schema'; },
   c => { c.tools[0].function.parameters.$ref = 'relative.json#/x'; }, c => { c.tools[0].function.parameters.$id = 'https://invalid.example/schema'; },
@@ -50,11 +54,16 @@ const fullArgs = '{"x":"' + 'a'.repeat(m.LIMITS.toolArguments - 8) + '"}';
 check(enc.encode(fullArgs).length === m.LIMITS.toolArguments);
 const history = calls => [{ role: 'assistant', content: null, tool_calls: calls }, ...calls.map(c => ({ role: 'tool', tool_call_id: c.id, content: '' }))];
 check(encoded({ ...chat, messages: history([call('a', 'lookup', fullArgs)]) }).messages.length === 2);
-bad(() => encoded({ ...chat, messages: history([call('a', 'lookup', fullArgs + ' ')]) }));
+check(encoded({ ...chat, messages: history([call('a', 'lookup', fullArgs + ' ')]) }).messages.length === 2);
 check(encoded({ ...chat, messages: history(Array.from({ length: 4 }, (_, i) => call('c' + i, 'lookup', fullArgs))) }).messages.length === 5);
-bad(() => encoded({ ...chat, messages: history(Array.from({ length: 5 }, (_, i) => call('c' + i, 'lookup', fullArgs))) }));
+check(encoded({ ...chat, messages: history(Array.from({ length: 5 }, (_, i) => call('c' + i, 'lookup', fullArgs))) }).messages.length === 6);
 check(encoded({ ...chat, messages: history(Array.from({ length: 64 }, (_, i) => call('c' + i))) }).messages.length === 65);
-bad(() => encoded({ ...chat, messages: history(Array.from({ length: 65 }, (_, i) => call('c' + i))) }));
+check(encoded({ ...chat, messages: history(Array.from({ length: 66 }, (_, i) => call('c' + i))) }).messages.length === 67);
+const sequentialHistory = Array.from({ length: 66 }, (_, i) => history([call('s' + i)])).flat();
+check(encoded({ ...chat, messages: sequentialHistory }).messages.length === 132);
+check(encoded({ ...chat, messages: Array.from({ length: 4097 }, () => ({ role: 'user', content: 'Synthetic' })) }).messages.length === 4097);
+check(encoded({ ...chat, tools: Array.from({ length: 65 }, (_, i) => ({ ...tool, function: { ...tool.function, name: 'tool_' + i } })) }).tools.length === 65);
+bad(() => encoded({ ...chat, messages: history([call('large', 'lookup', JSON.stringify({ x: 'a'.repeat(m.LIMITS.chat) }))]) }));
 let getters = 0;
 for (const value of [
   { ...chat, tools: [Object.defineProperty({ ...tool }, 'function', { get() { getters++; return tool.function; } })] },
@@ -109,6 +118,25 @@ for (const size of [1, 7, 4096]) {
   check(receipt.finish === 'tool_calls' && receipt.quotedInputMicrounitsPerMillion === '1000000' && receipt.chargedMicrounits === '7');
   check(events === 5);
 }
+const identityOnly=delta({tool_calls:[{index:0,id:'call_1',type:'function',function:{name:'lookup'}}]});
+const argumentsOnly=delta({tool_calls:[{index:0,function:{arguments:'{"n":1}'}}]});
+const separated=role+delta({content:'Synthetic preamble'})+identityOnly+argumentsOnly+end('tool_calls')+usage(rates)+done;
+for(const size of [1,7,4096])check((await m.consumeCompletion(stream(separated,size),model,()=>{},{tools:[tool]})).finish==='tool_calls');
+const lateIdentity=role+delta({tool_calls:[{index:0}]})+argumentsOnly+identityOnly+end('tool_calls')+usage(rates)+done;
+check((await consume(lateIdentity)).finish==='tool_calls');
+check((await consume(role+identityOnly+identityOnly+argumentsOnly+end('stop')+usage(rates)+done)).finish==='stop');
+check((await consume(role+delta({tool_calls:[{index:0}]})+end('length')+usage(rates)+done)).finish==='length');
+for(const text of [
+ role+argumentsOnly+end('tool_calls')+usage(rates)+done,
+ role+identityOnly+end('tool_calls')+usage(rates)+done,
+ role+identityOnly+delta({tool_calls:[{index:0,id:'changed',type:'function'}]})+argumentsOnly+end('tool_calls')+usage(rates)+done,
+ role+identityOnly+delta({tool_calls:[{index:0,function:{name:'changed'}}]})+argumentsOnly+end('tool_calls')+usage(rates)+done,
+ role+identityOnly+delta({tool_calls:[{index:0,function:{arguments:null}}]}),
+ role+delta({tool_calls:[{index:0,id:'bad id',type:'function'}]}),
+ role+delta({tool_calls:[{index:0,type:'custom'}]}),
+ role+delta({tool_calls:[{index:0,unexpected:true}]}),
+ role+delta({tool_calls:[{index:0,function:{unexpected:true}}]}),
+])await rejects(()=>consume(text));
 check((await consume(stopCalls)).finish === 'stop');
 check((await consume(partialLength)).finish === 'length');
 for (const text of [partialLength.slice(0, -done.length), role + delta({ tool_calls: [initial()] }) + end('length') + done,
@@ -259,6 +287,15 @@ try {
   let initial = sent.length;
   await rejects(() => client.models(pre), 'rejected'); check(sent.length === initial);
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { signal: pre }), 'rejected'); check(sent.length === initial);
+  check((await client.chat('fixture',chat.messages,()=>{},false,{tools:[nestedTool]})).finish==='tool_calls');
+  assert.deepEqual(decoded.at(-1).payload.tools[0].function.parameters,nestedParameters);checks++;
+  let tooDeep=nestedParameters;
+  for(let i=0;i<8;i++)tooDeep={type:'object',properties:{nested:tooDeep}};
+  initial=sent.length;
+  await assert.rejects(()=>client.chat('fixture',chat.messages,()=>{},false,{
+    tools:[{...tool,function:{...tool.function,parameters:tooDeep}}],
+  }),error=>error.code==='rejected' && error.message==='possums_request_json_depth');checks++;
+  check(sent.length===initial);
   let payloadHook = false, responseHook = false, eventHook = false;
   const receipt = await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool],
     onPayload(payload) {
@@ -272,6 +309,8 @@ try {
   check(receipt.finish === 'tool_calls' && payloadHook && responseHook && eventHook);
   check(decoded.at(-1).payload.messages[0].content === 'hook replacement');
   check(decoded.at(-1).payload.submission === 's'.repeat(43));
+  chatText = separated;
+  check((await client.chat('fixture',chat.messages,()=>{},false,{tools:[tool]})).finish==='tool_calls');
   chatText = stopCalls;
   check((await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] })).finish === 'stop');
   chatText = partialLength;
@@ -284,7 +323,9 @@ try {
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: { type: 'function', function: { name: 'lookup' } } }));
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: 'none' }));
   chatText = valid;
-  for (const injected of [fabricated, legitimate]) {
+  let depthFailure;try{f.serialize({tools:[{...tool,function:{...tool.function,parameters:tooDeep}}]},f.LIMITS.chat);}catch(error){depthFailure=error;}
+  check(depthFailure?.message==='possums_request_json_depth');
+  for (const injected of [fabricated, legitimate, depthFailure]) {
     initial = sent.length;
     await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false,
       { tools: [tool], onPayload() { throw injected; } }), error => error.code === 'rejected' && error.billing !== 'refunded'); checks++;

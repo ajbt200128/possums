@@ -1,8 +1,10 @@
 # First-pass telemetry: four golden signals, privacy first
 
-**Status:** v0.0.13 deployed; original plan 2026-10-07, MVP decisions updated 2026-10-08. Local qualification, live process CPU/RSS ingestion and all six configured admission capacities are recorded in [`verification.md`](verification.md). Request-family metrics and their golden-signal charts remain unverified in Honeycomb. **Read [`../PRIVACY.md`](../PRIVACY.md) before implementing or changing any part of this plan.**
+**Status:** gateway v0.0.15 deployed; original plan 2026-10-07, MVP decisions updated 2026-10-09. Local qualification, live process CPU/RSS ingestion and all six configured admission capacities are recorded in [`verification.md`](verification.md). Request-family metrics and their golden-signal charts remain unverified in Honeycomb. **Read [`../PRIVACY.md`](../PRIVACY.md) before implementing or changing any part of this plan.**
 
 ## Current MVP decisions
+
+- **Five-minute request aggregates only (2026-10-09 operator approval).** Remove ten-observation and linked-sparse/complement suppression, while retaining complete fixed windows, lifecycle/arithmetic consistency, bounded state and field allowlists. Sparse aggregate counts/bins are explicitly permitted without an anonymity claim. See the [current contract and rollout record](telemetry-mvp-five-minute.md). This policy is not yet a claim of deployed behavior or verified request queries.
 
 - **No Collector sidecar.** Use supported OTel conversion and direct verified OTLP HTTPS to Honeycomb US. Valid allowlisted endpoint/ingestion credentials enable the runtime component without another opt-in; `OTEL_SDK_DISABLED=true` overrides them. Missing/invalid config disables only telemetry. Production source labels remain honest, independent of the telemetry destination. Fixture mode exists only in tests. This does not approve real-traffic release algorithms.
 
@@ -92,9 +94,9 @@ Test instance × endpoint × model combinations on request/generation metrics, w
 
 Proposed starting cadence: **five-minute, non-overlapping request windows**, **one-minute infrastructure windows** sampled locally more frequently as needed. All externally visible timestamps represent fixed bucket boundaries. High-frequency resource correlation and all requested cross-breakdowns must be reviewed before real-traffic use.
 
-Use bounded in-memory window state and delta exports, not lifetime counters. On restart, discard partial request windows; do not emit an immediate partial bucket or persist a spool. Request counts, latency distributions and outcome families must be released consistently, not independently filtered so that a published total exposes a suppressed failure count.
+Use bounded in-memory window state and delta exports, not lifetime counters. On restart, discard partial request windows; do not emit an immediate partial bucket or persist a spool. Request counts, latency distributions and outcome families share complete-window closure and structural validation.
 
-The [reviewed MVP release scope](../PRIVACY.md#reviewed-mvp-release-scope) uses the same linked-family filter for configured production and synthetic tests. Exercise ten-observation thresholds at 0/1/9/10/11, rare bins, all simultaneous partitions and hidden complements; withhold the whole family rather than expose suppressed cells by subtraction. **Ten observations do not prove multiple users or prevent timing correlation**, especially on a quiet gateway. Do not relax this filter to populate a dashboard, or describe it as anonymity. Token/cost totals and throughput-per-token calculations remain deferred.
+The [reviewed MVP release scope](../PRIVACY.md#reviewed-mvp-release-scope) now uses complete five-minute aggregates without a minimum-count or linked-sparsity gate, under the explicit [2026-10-09 operator decision](telemetry-mvp-five-minute.md). Exercise exact 0/1/9/10/11 and rare-bin/partition/duplicate/missing-output vectors under the same production and synthetic contract: valid low-count families release, while inconsistent or incomplete families remain withheld. Sparse cells may describe individual activity; five-minute bucketing is **not anonymity or differential privacy**. Token/cost totals and throughput-per-token calculations remain deferred.
 
 ## Resource instrumentation choice
 

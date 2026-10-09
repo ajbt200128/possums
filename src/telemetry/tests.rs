@@ -181,6 +181,7 @@ fn expected(n: u64, vector: Vector) -> RequestTables {
         out.first_output[cell].0[1] = match vector {
             Vector::MissingAll => 0,
             Vector::MissingRelease => 10,
+            Vector::MissingRare => n - 1,
             _ => n,
         };
     }
@@ -191,6 +192,54 @@ fn expected(n: u64, vector: Vector) -> RequestTables {
         out.occupancy[lane].0 = [300 - n, n, 0, 0, 0, 0, 0, 0, 0, 0];
     }
     out.contributors = [n, n, n, n, 0, 0];
+    match vector {
+        Vector::RareError | Vector::RareModel | Vector::RareEndpoint => {
+            let cell = match vector {
+                Vector::RareError => 41, // transport failure
+                Vector::RareModel => 48, // chat_api/glm-5-3/success
+                _ => 0,                  // chat_web/kimi-k3/success
+            };
+            out.generation_completed[36] = 10;
+            out.generation_duration[36].0[2] = 10;
+            out.first_output[36].0[1] = 10;
+            out.generation_completed[cell] = 1;
+            out.generation_duration[cell].0[2] = 1;
+            out.first_output[cell].0[1] = 1;
+            if vector != Vector::RareError {
+                let (start, delivery) = if vector == Vector::RareModel {
+                    (4, 12)
+                } else {
+                    (0, 0)
+                };
+                out.generation_starts[3] = 10;
+                out.generation_starts[start] = 1;
+                out.delivery[9] = 10;
+                out.delivery[delivery] = 1;
+            }
+            if vector == Vector::RareEndpoint {
+                out.http_starts[14] = 10;
+                out.http_starts[3] = 1;
+                out.http_completed[255] = 10;
+                out.http_duration[255].0[3] = 10;
+                out.http_completed[57] = 1;
+                out.http_duration[57].0[3] = 1;
+            }
+        }
+        Vector::RareBin => {
+            out.first_output[36].0[1] = 10;
+            out.first_output[36].0[2] = 1;
+        }
+        Vector::Duplicate => {
+            out.generation_starts[3] = 9;
+            out.generation_completed[36] = 9;
+            out.generation_duration[36].0[2] = 9;
+            out.first_output[36].0[1] = 9;
+            out.delivery[9] = 9;
+            out.contributors[1] = 9;
+            out.occupancy[1].0 = [291, 9, 0, 0, 0, 0, 0, 0, 0, 0];
+        }
+        _ => {}
+    }
     out
 }
 fn assert_export(actual: &RequestTables, expected: &RequestTables) {
@@ -218,27 +267,27 @@ fn frozen_cohort_vectors() {
 }
 
 #[test]
-fn production_keeps_all_sparse_and_complement_checks() {
+fn production_releases_the_same_complete_low_count_families() {
     cohort_vectors(Deployment::Production);
 }
 
 fn cohort_vectors(mode: Deployment) {
     for (n, vector, release, series) in [
         (0, Vector::Plain, false, 0),
-        (1, Vector::Plain, false, 0),
-        (9, Vector::Plain, false, 0),
+        (1, Vector::Plain, true, 12),
+        (9, Vector::Plain, true, 12),
         (10, Vector::Plain, true, 12),
         (11, Vector::Plain, true, 12),
-        (11, Vector::RareError, false, 0),
-        (11, Vector::RareModel, false, 0),
-        (11, Vector::RareEndpoint, false, 0),
-        (11, Vector::RareBin, false, 0),
+        (11, Vector::RareError, true, 15),
+        (11, Vector::RareModel, true, 17),
+        (11, Vector::RareEndpoint, true, 20),
+        (11, Vector::RareBin, true, 12),
         (20, Vector::Mixed, true, 15),
-        (11, Vector::MissingRare, false, 0),
+        (11, Vector::MissingRare, true, 12),
         (20, Vector::MissingRelease, true, 12),
         (10, Vector::MissingAll, true, 11),
         (10, Vector::OutputFailure, true, 12),
-        (10, Vector::Duplicate, false, 0),
+        (10, Vector::Duplicate, true, 12),
     ] {
         let metrics = new();
         assert!(metrics.enable(mode));
@@ -263,7 +312,7 @@ fn cohort_vectors(mode: Deployment) {
 }
 #[test]
 fn frozen_rejection_and_unknown_vectors() {
-    for n in [10, 11] {
+    for n in [1, 9, 10, 11] {
         let metrics = new();
         ready(&metrics);
         for _ in 0..n {
@@ -391,18 +440,26 @@ fn prompt_quantization_and_invalid_lifecycle_updates() {
     g.finish_generation(GenerationTerminal::Unknown);
 }
 #[test]
-fn release_predicate_checks_every_atom_and_complement() {
+fn release_predicate_keeps_consistency_and_completeness_without_minimum_counts() {
     let mut table = expected(10, Vector::Plain);
     table.ticks = 300;
     table.dispositions[255][0] = 10;
     assert!(table.releasable());
     table.dispositions[255] = [9, 1, 0, 0, 0];
-    assert!(!table.releasable());
+    assert!(table.releasable());
+    table.dispositions[255] = [9, 0, 0, 0, 0];
+    assert!(!table.releasable()); // Partition sum must still match terminals.
+    table.dispositions[255] = [u64::MAX, 11, 0, 0, 0];
+    assert!(!table.releasable()); // Overflow must not wrap to ten.
     table.dispositions[255] = [10, 0, 0, 0, 0];
     table.first_output[36].0[1] = 9;
-    assert!(!table.releasable());
+    assert!(table.releasable());
     table.first_output[36].0[1] = 11;
     assert!(!table.releasable());
+    table.first_output[36].0[1] = u64::MAX;
+    table.first_output[36].0[2] = 11;
+    assert!(!table.releasable());
+    table.first_output[36].0[2] = 0;
     table.first_output[36].0[1] = 10;
     table.http_duration[255].0[3] = 11;
     assert!(!table.releasable());
@@ -411,19 +468,25 @@ fn release_predicate_checks_every_atom_and_complement() {
     assert!(!table.releasable());
     table.generation_duration[36].0[2] = 10;
     table.contributors[0] = 1;
-    assert!(!table.releasable());
+    assert!(table.releasable());
     table.contributors[0] = 10;
     table.occupancy[0].0[0] -= 1;
+    assert!(!table.releasable()); // A touched lane still needs all 300 samples.
     table.occupancy[0].0[2] = 1;
-    assert!(!table.releasable());
+    assert!(table.releasable());
     table.occupancy[0].0[0] += 1;
     table.occupancy[0].0[2] = 0;
     assert!(table.releasable());
     for index in 0..1190 {
         table.rejected[index] = 1;
-        assert!(!table.releasable());
+        assert!(table.releasable()); // Label pairs are checked at the wire boundary.
         table.rejected[index] = 0;
     }
+    for ticks in [0, 299, 301] {
+        table.ticks = ticks;
+        assert!(!table.releasable());
+    }
+    table.ticks = 300;
     table.rejected[0] = u64::MAX;
     increment(&mut table.rejected[0], &mut table.valid);
     assert!(!table.releasable());
@@ -484,14 +547,12 @@ fn old_epoch_contexts_cannot_resurrect_but_old_leases_measure_actual_occupancy()
         finish_http(&mut http);
         drop((child, generation, http));
         drive(&metrics, 900 * SECOND);
-        let view = metrics.request();
-        assert_eq!(view.is_some(), n == 10);
-        if let Some(view) = view {
-            let mut expected = RequestTables::default();
-            expected.contributors[0] = 10;
-            expected.occupancy[0].0 = [290, 0, 0, 0, 0, 0, 10, 0, 0, 0];
-            assert_export(view.tables().unwrap(), &expected);
-        }
+        let view = metrics.request().unwrap();
+        let mut expected = RequestTables::default();
+        expected.contributors[0] = n as u64;
+        expected.occupancy[0].0[0] = 290;
+        expected.occupancy[0].0[if n == 1 { 1 } else { 6 }] = 10;
+        assert_export(view.tables().unwrap(), &expected);
     }
 }
 #[test]
