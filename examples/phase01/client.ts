@@ -1,5 +1,5 @@
 import { Channel, type ResponseOptions } from './transport.js';
-import { ChannelError, LIMITS, Operation, cleanup, parseJSON, requireThat, serialize, utf8 } from './limits.js';
+import { ChannelError, JSONDepthError, LIMITS, Operation, cleanup, parseJSON, requireThat, serialize, utf8 } from './limits.js';
 import { admitTools, fields, freezeJSON, objectArguments, snapshotInvocation, toolID, toolName,
   type Chat, type Invocation, type Tool, type ToolChoice } from './tools.js';
 
@@ -362,6 +362,7 @@ export class ReferenceClient {
       return await consumeCompletion(body, entry, onDelta, { signal: op.controller.signal, tools, onEvent: opts.onEvent });
     } catch (error) {
       if (consuming && error instanceof GatewayError) throw error;
+      if (!issued && error instanceof JSONDepthError) throw error;
       throw new ChannelError(issued || (error instanceof ChannelError && error.code === 'uncertain') ? 'uncertain' : 'rejected');
     } finally { op.close(); }
   }

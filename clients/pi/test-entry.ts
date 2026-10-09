@@ -8,4 +8,5 @@ export { ReplayGuard } from './replay.js';
 export { invocation } from './wire.js';
 export { Channel } from '../../examples/phase01/transport.js';
 export { ReferenceClient, CatalogFailure, GatewayError, consumeCompletion, validateModels } from '../../examples/phase01/client.js';
-export { ChannelError } from '../../examples/phase01/limits.js';
+export { ChannelError, JSONDepthError } from '../../examples/phase01/limits.js';
+export { snapshotInvocation } from '../../examples/phase01/tools.js';

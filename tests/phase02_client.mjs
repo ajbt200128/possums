@@ -24,6 +24,10 @@ const batch = [{ role: 'user', content: 'hello' }, { role: 'assistant', content:
 const encoded = value => JSON.parse(dec.decode(m.encodeChat(value)));
 check(encoded(chat).tools[0].function.parameters.properties.n.minimum === -1.5);
 for (const choice of ['auto', 'none', 'required', { type: 'function', function: { name: 'lookup' } }]) check(encoded({ ...chat, tool_choice: choice }).tool_choice !== undefined);
+let nestedParameters={type:'object',properties:{value:{type:'string',enum:['synthetic']}}};
+for(let i=0;i<6;i++)nestedParameters={type:'object',properties:{nested:nestedParameters}};
+const nestedTool={...tool,function:{...tool.function,parameters:nestedParameters}};
+assert.deepEqual(encoded({...chat,tools:[nestedTool]}).tools[0].function.parameters,nestedParameters);checks++;
 check(encoded({ ...chat, messages: batch }).messages.length === 3);
 check(encoded({ ...chat, messages: [...batch, { role: 'user', content: 'next' }] }).messages.length === 4);
 for (const mutate of [
@@ -259,6 +263,15 @@ try {
   let initial = sent.length;
   await rejects(() => client.models(pre), 'rejected'); check(sent.length === initial);
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { signal: pre }), 'rejected'); check(sent.length === initial);
+  check((await client.chat('fixture',chat.messages,()=>{},false,{tools:[nestedTool]})).finish==='tool_calls');
+  assert.deepEqual(decoded.at(-1).payload.tools[0].function.parameters,nestedParameters);checks++;
+  let tooDeep=nestedParameters;
+  for(let i=0;i<8;i++)tooDeep={type:'object',properties:{nested:tooDeep}};
+  initial=sent.length;
+  await assert.rejects(()=>client.chat('fixture',chat.messages,()=>{},false,{
+    tools:[{...tool,function:{...tool.function,parameters:tooDeep}}],
+  }),error=>error.code==='rejected' && error.message==='possums_request_json_depth');checks++;
+  check(sent.length===initial);
   let payloadHook = false, responseHook = false, eventHook = false;
   const receipt = await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool],
     onPayload(payload) {
@@ -284,7 +297,9 @@ try {
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: { type: 'function', function: { name: 'lookup' } } }));
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: 'none' }));
   chatText = valid;
-  for (const injected of [fabricated, legitimate]) {
+  let depthFailure;try{f.serialize({tools:[{...tool,function:{...tool.function,parameters:tooDeep}}]},f.LIMITS.chat);}catch(error){depthFailure=error;}
+  check(depthFailure?.message==='possums_request_json_depth');
+  for (const injected of [fabricated, legitimate, depthFailure]) {
     initial = sent.length;
     await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false,
       { tools: [tool], onPayload() { throw injected; } }), error => error.code === 'rejected' && error.billing !== 'refunded'); checks++;

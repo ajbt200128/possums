@@ -593,6 +593,33 @@ await check('unqualified tools and image history rejected before invocation',asy
  s.provider.beginRun();const image=ai.normalizeContext({messages:[{role:'user',timestamp:1,content:[{type:'image',data:'synthetic',mimeType:'image/png'}]}]});
  assert.match((await drain(s.provider.streamSimple(s.selected,image))).message.errorMessage,/\[possums_images_unsupported\].*remove images/);assert.equal(s.sends(),0);
 });
+await check('nested tool schema survives Pi conversion and the complete request snapshot',async()=>{
+ let parameters={type:'object',properties:{value:{type:'string',enum:['synthetic']}}};
+ for(let i=0;i<6;i++)parameters={type:'object',properties:{nested:parameters}};
+ const s=await setup(['stop']);
+ const transcript=ai.normalizeContext({messages:[user],tools:[{...tool,parameters}]});
+ const payload=m.snapshotInvocation(m.invocation(s.selected,transcript));
+ assert.deepEqual(payload.tools[0].function.parameters,parameters);
+ assert(Object.isFrozen(payload.tools[0].function.parameters));
+});
+await check('over-deep request encoding keeps a private actionable error and cannot replay',async()=>{
+ let parameters={type:'object',properties:{value:{type:'string',enum:['PRIVATE_SCHEMA_SENTINEL']}}};
+ for(let i=0;i<14;i++)parameters={type:'object',properties:{nested:parameters}};
+ const s=await setup(['stop']);const chat=s.client.chat;
+ s.client.chat=async(model,messages,onDelta,newConversation,options)=>{
+  m.snapshotInvocation({model,messages,stream:true,tools:options.tools});
+  return chat(model,messages,onDelta,newConversation,options);
+ };
+ s.provider.beginRun();
+ const transcript=ai.normalizeContext({messages:[user],tools:[{...tool,parameters}]});
+ const first=await drain(s.provider.streamSimple(s.selected,transcript));
+ assert.equal(first.message.stopReason,'error');assert.equal(s.sends(),0);
+ assert.match(first.message.errorMessage,/\[possums_request_json_depth\].*Request encoding.*Simplify tool schemas or history.*No inference request sent.*Not replayed/);
+ assert(!JSON.stringify(first).includes('PRIVATE_SCHEMA_SENTINEL'));
+ assert.equal(first.message.diagnostics,undefined);
+ const second=await drain(s.provider.streamSimple(s.selected,transcript));
+ assert.match(second.message.errorMessage,/\[possums_automatic_replay_blocked\]/);assert.equal(s.sends(),0);
+});
 await check('failed catalog refresh removes prior usable list',async()=>{
  const s=await setup(['stop']);assert.equal(s.provider.getModels().length,1);s.failModels();
  await assert.rejects(s.provider.refreshModels({credential:{type:'api_key',key:requestMarker},allowNetwork:true,signal:new AbortController().signal,publish:async value=>{value.update?.();return true;}}),/possums_catalog_unavailable/);

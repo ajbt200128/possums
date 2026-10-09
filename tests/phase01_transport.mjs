@@ -66,7 +66,7 @@ assert.throws(() => prod.encodeChat({...chat, tools:[]})); passed++;
 assert.throws(() => prod.serialize(new Array(2**30),prod.LIMITS.chat)); passed++;
 assert.throws(() => prod.encodeChat({...chat,model:true})); passed++;
 assert.throws(() => prod.parseJSON(bytes('x'.repeat(5000)),4096)); passed++;
-assert.throws(() => prod.parseJSON(new TextEncoder().encode('['.repeat(17)+'0'+']'.repeat(17)),4096)); passed++;
+assert.throws(() => prod.parseJSON(new TextEncoder().encode('['.repeat(prod.LIMITS.depth+1)+'0'+']'.repeat(prod.LIMITS.depth+1)),4096)); passed++;
 assert.throws(() => prod.parseJSON(new Uint8Array([0xff]),4096)); passed++;
 assert.equal(prod.serialize({x:'\ud800😀\n"'},4096).length, bytes({x:'\ud800😀\n"'}).length); passed++;
 
@@ -156,6 +156,10 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
   const nested = depth => {let v=null;while(depth--)v=[v];return v;};
   check(m.serialize(nested(m.LIMITS.depth),m.LIMITS.control).length>0,'depth inclusive'); checks++;
   await beforeWork('depth exceeded',()=>m.serialize(nested(m.LIMITS.depth+1),m.LIMITS.control));
+  const jsonAtDepth=new TextEncoder().encode('['.repeat(m.LIMITS.depth)+'0'+']'.repeat(m.LIMITS.depth));
+  const jsonOverDepth=new TextEncoder().encode('['.repeat(m.LIMITS.depth+1)+'0'+']'.repeat(m.LIMITS.depth+1));
+  check(m.parseJSON(jsonAtDepth,m.LIMITS.control)!==undefined,'parser depth inclusive'); checks++;
+  await beforeWork('parser depth exceeded',()=>m.parseJSON(jsonOverDepth,m.LIMITS.control));
   const nodes = Array(m.LIMITS.nodes-1).fill(null);
   check(m.serialize(nodes,m.LIMITS.chat).length>0,'nodes inclusive'); checks++;
   await beforeWork('nodes exceeded',()=>m.serialize([...nodes,null],m.LIMITS.chat));

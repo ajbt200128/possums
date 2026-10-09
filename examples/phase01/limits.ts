@@ -3,7 +3,8 @@ export const LIMITS = Object.freeze({
   chat: 8 * 1024 * 1024, control: 4096, evidence: 64 * 1024,
   bundle: 1024 * 1024, provenance: 512 * 1024, certificate: 16 * 1024,
   key: 41, report: 1184, catalog: 256 * 1024, error: 4096,
-  depth: 16, nodes: 32768, messages: 4096, models: 256,
+  // Nested tool schemas need headroom for the surrounding request envelope.
+  depth: 32, nodes: 32768, messages: 4096, models: 256,
   tools: 64, toolArguments: 64 * 1024, totalToolArguments: 256 * 1024,
   chunk: 64 * 1024, frame: 256 * 1024, frames: 65536,
   stream: 64 * 1024 * 1024, sseEvent: 64 * 1024, sseEvents: 65536,
@@ -11,6 +12,9 @@ export const LIMITS = Object.freeze({
 });
 export class ChannelError extends Error {
   constructor(public readonly code: 'rejected' | 'uncertain' = 'rejected') { super(code); }
+}
+export class JSONDepthError extends ChannelError {
+  constructor() { super(); this.message = 'possums_request_json_depth'; }
 }
 export function requireThat(value: unknown): asserts value {
   if (!value) throw new ChannelError();
@@ -128,7 +132,8 @@ export function serialize(value: unknown, cap: number): Uint8Array<ArrayBuffer> 
   let nodes = 0, bytesUsed = 0;
   function add(bytes: number): void { bytesUsed += bytes; requireThat(bytesUsed <= cap); }
   function snapshot(v: unknown, depth: number): AdmittedJSON {
-    requireThat(depth <= LIMITS.depth && ++nodes <= LIMITS.nodes);
+    if (depth > LIMITS.depth) throw new JSONDepthError();
+    requireThat(++nodes <= LIMITS.nodes);
     if (typeof v === 'string') { add(stringSize(v, cap - bytesUsed)); return v; }
     if (typeof v === 'boolean') { add(v ? 4 : 5); return v; }
     if (typeof v === 'number') { requireThat(Number.isFinite(v)); add(String(v).length); return v; }

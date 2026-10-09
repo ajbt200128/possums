@@ -9,7 +9,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
 import { ReferenceClient, CatalogFailure, GatewayError, gatewayDetailLabel, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
-import { ChannelError } from '../../examples/phase01/limits.js';
+import { ChannelError, JSONDepthError } from '../../examples/phase01/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure } from './diagnostics.js';
 import { ReplayGuard } from './replay.js';
 import { invocation } from './wire.js';
@@ -77,6 +77,7 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_unresolved_tool_calls: 'Tool calls lack results; complete the history.',
 });
 function safeFailure(error: unknown): string {
+  if (error instanceof JSONDepthError) return '[possums_request_json_depth] Request encoding exceeds the JSON nesting limit. Simplify tool schemas or history. No inference request sent. Not replayed.';
   if (error instanceof ConnectionFailure) return error.message;
   if (error instanceof GatewayError) {
     const reason: Readonly<Record<string, string>> = {
