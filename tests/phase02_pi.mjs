@@ -209,7 +209,7 @@ await check('connection categories survive restoration and login without exposin
  await assert.rejects(provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey})),error=>error.code==='verification_failed' && !error.message.includes(hostile));
  assert(!m.connectionFailure(new Error('possums_approval_expired')).message.includes('[possums_approval_expired]'));
 });
-await check('native refresh shows one actionable notice and offline status; successful verification clears it',async()=>{
+await check('native refresh shows one actionable notice and offline status; full authentication clears it',async()=>{
  const fixture=await authFixture();
  const extension=fixtureExtension(async()=>{throw new m.ConnectionFailure('verification_failed');});
  const credentials=new ai.InMemoryCredentialStore();
@@ -228,6 +228,238 @@ await check('native refresh shows one actionable notice and offline status; succ
  await extension.commands.get('possums-status').handler('',ctx);
  assert.equal(notices.at(-1),m.approvalSummary());assert.equal(fixture.s.sends(),0);
  assert(!notices.join('\n').includes(recoveryKey));
+});
+const hostileConnection = 'PRIVATE_URL_CREDENTIAL_PROMPT\u001b[31m';
+function assertConnectionFailure(error, code) {
+ assert(error instanceof m.ConnectionFailure);assert.equal(error.code,code);
+ assert.match(error.message,new RegExp('\\[possums_'+code+'\\]'));
+ assert.match(error.message,/No inference request was sent by this connection attempt/);
+ assert.match(error.message,/Cached models do not authorize inference/);
+ assert(!error.message.includes(hostileConnection));assert.equal(error.cause,undefined);
+ return true;
+}
+await check('native session and initial catalog failures reach status, deduplicate and clear only on full recovery',async()=>{
+ for(const phase of ['login','load','validation','conversion']) {
+  const fixture=await authFixture(),originalModels=fixture.s.client.models;let failing=true;
+  const injectedModels=async()=>{
+   if(failing && phase==='load')throw new Error(hostileConnection);
+   if(failing && phase==='validation')return m.validateModels({object:'list',data:[{id:hostileConnection}]});
+   if(failing && phase==='conversion')return [{...entry(true),id:hostileConnection,context_tokens:'9007199254740992'}];
+   return originalModels();
+  };
+  fixture.s.client.models=injectedModels;
+  const extension=fixtureExtension(async()=>{
+   const candidate=await fixture.establish(),login=candidate.login;
+   candidate.login=async(...args)=>{if(failing && phase==='login')throw new Error(hostileConnection);await login(...args);};
+   return candidate;
+  });
+  const credentials=new ai.InMemoryCredentialStore();
+  await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+  const runtime=await nativeRuntime(extension.provider,credentials),registry=new coding.ModelRegistry(runtime),notices=[];
+  const ctx={hasUI:true,ui:{notify:text=>notices.push(text)},modelRegistry:registry};
+  const code=phase==='login'?'session_unavailable':phase==='conversion'?'catalog_conversion_failed':'catalog_unavailable';
+  await extension.handlers.get('session_start')({},ctx);
+  await registry.refresh({providers:['possums'],allowNetwork:true});
+  assert.equal(notices.length,1);assert.match(notices[0],new RegExp('possums_'+code));
+  assert.match(notices[0],/Check connectivity/);assert.deepEqual(extension.provider.getModels(),[]);
+  await assert.rejects(extension.provider.auth.apiKey.login(interaction()),error=>assertConnectionFailure(error,code));
+  assert.equal(notices.length,1,'interactive failure also preserves warning deduplication');
+  const before=structuredClone(fixture.trace);
+  await extension.commands.get('possums-status').handler('',ctx);
+  assert.equal(notices.at(-1),notices[0]);assert.deepEqual(fixture.trace,before,'status stays offline');
+  failing=false;
+  const held=deferred(),entered=deferred();
+  fixture.s.client.models=async()=>{entered.resolve();await held.promise;return originalModels();};
+  const pending=registry.refresh({providers:['possums'],allowNetwork:true});await entered.promise;
+  await extension.commands.get('possums-status').handler('',ctx);
+  assert.equal(notices.at(-1),notices[0],'verified channel and login alone do not clear the failure');
+  held.resolve();await pending;
+  await extension.commands.get('possums-status').handler('',ctx);
+  assert.equal(notices.at(-1),m.approvalSummary());assert.equal(extension.provider.getModels().length,1);
+  // A full recovery permits a new warning of the same category.
+  failing=true;fixture.s.client.models=injectedModels;
+  const count=notices.length;
+  await assert.rejects(extension.provider.auth.apiKey.login(interaction()),error=>assertConnectionFailure(error,code));
+  assert.equal(notices.length,count+1);assert.equal(notices.at(-1),notices[0]);
+  assert.equal(fixture.s.sends(),0);
+  assert(!notices.join('').includes(hostileConnection));assert(!notices.join('').includes(recoveryKey));
+ }
+});
+async function catalogFixture() {
+ const key=new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
+ const channel=await m.Channel.fixture('https://localhost:18443',key,'07'.repeat(32));
+ // Only catalog GETs exercise fetch; session setup is synthetic and never sends a key.
+ channel.challenge=async()=>({challenge:'c'.repeat(43),expires_in:600});
+ channel.control=async()=>({token:'b'.repeat(43),token_type:'Bearer',expires_in:43200});
+ return new m.ReferenceClient(channel);
+}
+await check('catalog diagnostics preserve bounded HTTP rejection details without hostile text or billing claims',async()=>{
+ const originalFetch=globalThis.fetch,client=await catalogFixture();let calls=0;
+ await client.login(recoveryKey);
+ try {
+  for(const [status,body,reason,detail] of [
+   [401,JSON.stringify({error:{code:'unauthorized',message:hostileConnection,billing:'refunded'}}),'unauthorized',undefined],
+   [429,JSON.stringify({error:{code:'account_limit',message:hostileConnection}}),'account_limit',undefined],
+   [503,JSON.stringify({error:{code:'unavailable',detail:'catalog_failed',message:hostileConnection,billing:'unknown'}}),'unavailable','catalog_failed'],
+   [503,JSON.stringify({error:{code:'unavailable',detail:'verification_failed',message:hostileConnection}}),'unavailable','verification_failed'],
+   [503,JSON.stringify({error:{code:'unavailable',detail:hostileConnection}}),undefined,undefined],
+   [503,'not JSON '+hostileConnection,undefined,undefined],
+   [503,'x'.repeat(4097),undefined,undefined],
+   [503,new ReadableStream({start(controller){controller.error(new Error(hostileConnection));}}),undefined,undefined],
+   [302,hostileConnection,undefined,undefined],
+  ]) {
+   globalThis.fetch=async request=>{
+    assert.equal(request.url,'https://localhost:18443/v1/models');assert.equal(request.method,'GET');
+    assert.equal(request.headers.get('authorization'),'Bearer '+'b'.repeat(43));calls++;
+    return new Response(body,{status,headers:{'content-type':'application/json'}});
+   };
+   await assert.rejects(client.models(),error=>{
+    assert(error instanceof m.CatalogFailure);assert(Object.isFrozen(error));assert.equal(error.stage,'http');
+    assert.equal(error.status,status);assert.equal(error.reason,reason);assert.equal(error.detail,detail);
+    assert.equal(error.cause,undefined);assert.equal(error.billing,undefined);assert(!error.message.includes(hostileConnection));
+    const failure=m.catalogConnectionFailure(error);assertConnectionFailure(failure,'catalog_http_rejected');
+    assert.match(failure.message,new RegExp('Observed HTTP status: '+status));
+    if(reason)assert(failure.message.includes('Gateway code: '+reason));
+    if(detail)assert(failure.message.includes('['+detail+']'));
+    assert(!failure.message.includes('refunded'));assert(!failure.message.includes('Charge unknown'));
+    return true;
+   });
+  }
+  assert.equal(calls,9,'one GET per deliberate catalog request; no replay');
+ } finally {globalThis.fetch=originalFetch;}
+});
+await check('catalog request, body and validation stages remain distinct and challenge behavior is unchanged',async()=>{
+ const originalFetch=globalThis.fetch,client=await catalogFixture();await client.login(recoveryKey);let calls=0;
+ try {
+  for(const [stage,response] of [
+   ['request',()=>{throw new Error(hostileConnection);}],
+   ['body',()=>new Response('not JSON '+hostileConnection)],
+   ['body',()=>new Response('x'.repeat(256*1024+1))],
+   ['body',()=>new Response(new ReadableStream({start(controller){controller.error(new Error(hostileConnection));}}))],
+   ['validation',()=>Response.json({object:'list',data:[]})],
+   ['validation',()=>Response.json({object:'list',data:[{...entry(true),maximum_reservation_microunits:'1'}]})],
+  ]) {
+   globalThis.fetch=async()=>{calls++;return response();};
+   await assert.rejects(client.models(),error=>{
+    assert(error instanceof m.CatalogFailure);assert.equal(error.stage,stage);assert.equal(error.status,undefined);
+    assertConnectionFailure(m.catalogConnectionFailure(error),stage==='request'?'catalog_request_failed':stage==='body'?'catalog_body_invalid':'catalog_validation_failed');
+    return true;
+   });
+  }
+  const key=new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
+  const channel=await m.Channel.fixture('https://localhost:18443',key,'07'.repeat(32));
+  globalThis.fetch=async()=>{calls++;return Response.json({error:{code:'unavailable',message:hostileConnection}},{status:503});};
+  await assert.rejects(channel.challenge(),error=>error instanceof m.ChannelError && !(error instanceof m.CatalogFailure));
+  assert.equal(calls,7);
+  assert.equal(m.catalogConnectionFailure(new Error('catalog_http_rejected '+hostileConnection)).code,'catalog_unavailable');
+ } finally {globalThis.fetch=originalFetch;}
+});
+await check('native catalog HTTP rejection reaches transient status with observed safe gateway detail and no inference',async()=>{
+ const originalFetch=globalThis.fetch,client=await catalogFixture();let calls=0;
+ const extension=fixtureExtension(async()=>client),credentials=new ai.InMemoryCredentialStore();
+ await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+ const runtime=await nativeRuntime(extension.provider,credentials),registry=new coding.ModelRegistry(runtime),notices=[];
+ const ctx={hasUI:true,ui:{notify:text=>notices.push(text)},modelRegistry:registry};
+ try {
+  globalThis.fetch=async request=>{
+   assert.equal(request.method,'GET');assert.equal(request.url,'https://localhost:18443/v1/models');calls++;
+   return Response.json({error:{code:'unavailable',detail:'catalog_failed',message:hostileConnection,billing:'refunded'}},{status:503});
+  };
+  await extension.handlers.get('session_start')({},ctx);await registry.refresh({providers:['possums'],allowNetwork:true});
+  assert.equal(calls,2);assert.equal(notices.length,1,'same-category failures remain deduplicated');
+  assert.match(notices[0],/possums_catalog_http_rejected/);assert.match(notices[0],/Observed HTTP status: 503/);
+  assert.match(notices[0],/Gateway code: unavailable/);assert.match(notices[0],/\[catalog_failed\]/);
+  assert(!notices[0].includes(hostileConnection));assert(!notices[0].includes('refunded'));assert.deepEqual(extension.provider.getModels(),[]);
+  await extension.commands.get('possums-status').handler('',ctx);assert.equal(notices.at(-1),notices[0]);assert.equal(calls,2);
+  globalThis.fetch=async request=>{assert.equal(request.method,'GET');calls++;return Response.json({object:'list',data:[entry(true)]});};
+  await registry.refresh({providers:['possums'],allowNetwork:true});await extension.commands.get('possums-status').handler('',ctx);
+  assert.equal(notices.at(-1),m.approvalSummary());assert.equal(extension.provider.getModels().length,1);
+ } finally {globalThis.fetch=originalFetch;}
+});
+await check('native later catalog failures clear usable models, deduplicate, and clear status on accepted recovery',async()=>{
+ const fixture=await authFixture(),extension=fixtureExtension(fixture.establish);
+ const credentials=new ai.InMemoryCredentialStore();
+ await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+ const runtime=await nativeRuntime(extension.provider,credentials),registry=new coding.ModelRegistry(runtime),notices=[];
+ const ctx={hasUI:true,ui:{notify:text=>notices.push(text)},modelRegistry:registry};
+ await extension.handlers.get('session_start')({},ctx);
+ assert.equal(extension.provider.getModels().length,1);assert.deepEqual(notices,[]);
+ const original=fixture.s.client.models;
+ fixture.s.client.models=async()=>{throw new Error(hostileConnection);};
+ for(let i=0;i<2;i++)await registry.refresh({providers:['possums'],allowNetwork:true});
+ assert.deepEqual(extension.provider.getModels(),[]);assert.equal(notices.length,1);
+ assert.match(notices[0],/possums_catalog_unavailable/);
+ await extension.commands.get('possums-status').handler('',ctx);assert.equal(notices.at(-1),notices[0]);
+ fixture.s.client.models=original;
+ await registry.refresh({providers:['possums'],allowNetwork:true});
+ await extension.commands.get('possums-status').handler('',ctx);assert.equal(notices.at(-1),m.approvalSummary());
+ assert.equal(extension.provider.getModels().length,1);
+ fixture.s.client.models=async()=>{throw new Error(hostileConnection);};
+ const count=notices.length;
+ await registry.refresh({providers:['possums'],allowNetwork:true});assert.equal(notices.length,count+1);
+ assert(!notices.join('').includes(hostileConnection));assert.equal(fixture.s.sends(),0);
+});
+await check('cancelled, logged-out or replaced session/catalog failures never publish stale authentication diagnostics',async()=>{
+ for(const phase of ['login','models'])for(const action of ['cancel','logout','replace']) {
+  const fixture=await authFixture(),held=deferred(),entered=deferred(),notices=[],controller=new AbortController();let calls=0;
+  const provider=new m.PossumsProvider(async()=>{
+   const candidate=await fixture.establish();
+   if(calls++===0)candidate[phase]=async()=>{entered.resolve();await held.promise;throw new Error(hostileConnection);};
+   return candidate;
+  },failure=>notices.push(failure));
+  const pending=assert.rejects(provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey},undefined,controller.signal)));
+  await entered.promise;
+  if(action==='cancel')controller.abort();else if(action==='logout')provider.logout();
+  else await provider.auth.apiKey.resolve(authInput({type:'api_key',key:envKey}));
+  const before=[...notices];held.resolve();await pending;
+  assert.deepEqual(notices,before);assert.deepEqual(notices,action==='replace'?[undefined]:[]);
+  assert.equal(provider.getModels().length,action==='replace'?1:0);assert.equal(fixture.s.sends(),0);
+ }
+});
+await check('catalog diagnostics publish only with accepted current updates, including late success',async()=>{
+ for(const fails of [false,true])for(const action of ['reject','cancel','logout','replace']) {
+  const fixture=await authFixture(),notices=[],provider=new m.PossumsProvider(fixture.establish,failure=>notices.push(failure));
+  await provider.auth.apiKey.login(interaction());notices.length=0;
+  const held=deferred(),entered=deferred(),controller=new AbortController(),original=fixture.s.client.models;
+  fixture.s.client.models=async()=>{entered.resolve();await held.promise;if(fails)throw new Error(hostileConnection);return [];};
+  const pending=provider.refreshModels({credential:{type:'api_key',key:requestMarker},allowNetwork:true,signal:controller.signal,
+   publish:async value=>{if(action==='reject')return false;value.update?.();return true;}});
+  const settled=fails?assert.rejects(pending,error=>assertConnectionFailure(error,'catalog_unavailable')):pending;
+  await entered.promise;
+  if(action==='cancel')controller.abort();else if(action==='logout')provider.logout();
+  else if(action==='replace'){fixture.s.client.models=original;await provider.auth.apiKey.login(interaction(envKey));}
+  const before=[...notices];held.resolve();await settled;
+  assert.deepEqual(notices,before);assert.equal(provider.getModels().length,action==='logout'?0:1);
+  assert.equal(fixture.s.sends(),0);
+ }
+});
+await check('throwing connection callbacks and native extension UI never change authentication or catalog outcomes',async()=>{
+ for(const phase of ['login','models']) {
+  const fixture=await authFixture();let failing=true;
+  const establish=async()=>{const candidate=await fixture.establish(),original=candidate[phase];
+   candidate[phase]=async(...args)=>{if(failing)throw new Error(hostileConnection);return original(...args);};return candidate;
+  };
+  const provider=new m.PossumsProvider(establish,()=>{throw new Error(hostileConnection);});
+  const code=phase==='login'?'session_unavailable':'catalog_unavailable';
+  await assert.rejects(provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey})),error=>assertConnectionFailure(error,code));
+  assert.deepEqual(provider.getModels(),[]);failing=false;
+  await provider.auth.apiKey.login(interaction());assert.equal(provider.getModels().length,1);
+  const refresh=()=>provider.refreshModels({credential:{type:'api_key',key:requestMarker},allowNetwork:true,signal:new AbortController().signal,publish:async value=>{value.update?.();return true;}});
+  const original=fixture.s.client.models;fixture.s.client.models=async()=>{throw new Error(hostileConnection);};
+  await assert.rejects(refresh(),error=>assertConnectionFailure(error,'catalog_unavailable'));assert.deepEqual(provider.getModels(),[]);
+  fixture.s.client.models=original;await refresh();assert.equal(provider.getModels().length,1);
+  const extension=fixtureExtension(establish),credentials=new ai.InMemoryCredentialStore();
+  await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+  const runtime=await nativeRuntime(extension.provider,credentials),registry=new coding.ModelRegistry(runtime);
+  const ctx={hasUI:true,ui:{notify:()=>{throw new Error(hostileConnection);}},modelRegistry:registry};
+  failing=true;await extension.handlers.get('session_start')({},ctx);assert.deepEqual(extension.provider.getModels(),[]);
+  failing=false;await registry.refresh({providers:['possums'],allowNetwork:true});assert.equal(extension.provider.getModels().length,1);
+  fixture.s.client.models=async()=>{throw new Error(hostileConnection);};
+  await registry.refresh({providers:['possums'],allowNetwork:true});assert.deepEqual(extension.provider.getModels(),[]);
+  await extension.commands.get('possums-status').handler('',ctx);
+  fixture.s.client.models=original;await registry.refresh({providers:['possums'],allowNetwork:true});assert.equal(extension.provider.getModels().length,1);
+  assert.equal(fixture.s.sends(),0);
+ }
 });
 await check('cancelled or obsolete verification failures never publish a stale diagnostic',async()=>{
  for(const action of ['cancel','logout']) {
@@ -315,15 +547,16 @@ await check('native logout/replacement revoke pending tools but retain settled r
 });
 await check('late catalog success/failure cannot replace a newer authenticated account',async()=>{
  for(const fails of [false,true]) {
-  const fixture=await authFixture();const provider=new m.PossumsProvider(fixture.establish);
+  const fixture=await authFixture(),notices=[];const provider=new m.PossumsProvider(fixture.establish,failure=>notices.push(failure));
   const runtime=await nativeRuntime(provider,new ai.InMemoryCredentialStore());
   await runtime.login('possums','api_key',interaction());
   const held=deferred(),entered=deferred();const original=fixture.s.client.models;
   fixture.s.client.models=async()=>{entered.resolve();await held.promise;if(fails)throw new Error('synthetic failure');return [];};
   const pending=runtime.refresh({providers:['possums'],allowNetwork:true});await entered.promise;
   fixture.s.client.models=original;
-  await runtime.login('possums','api_key',interaction(envKey));held.resolve();await pending;
+  await runtime.login('possums','api_key',interaction(envKey));const before=[...notices];held.resolve();await pending;
   await new Promise(setImmediate); // Let the aborted provider operation reach its late publication.
+  assert.deepEqual(notices,before,'native rejected publication cannot report or clear a diagnostic');
   assert.equal(provider.getModels().length,1);assert.equal((await runtime.getAuth('possums')).auth.apiKey,requestMarker);
  }
 });

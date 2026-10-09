@@ -8,9 +8,9 @@ import {
   type TranscriptContext, type ToolCall,
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
-import { ReferenceClient, GatewayError, gatewayDetailLabel, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
+import { ReferenceClient, CatalogFailure, GatewayError, gatewayDetailLabel, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
 import { ChannelError } from '../../examples/phase01/limits.js';
-import { ConnectionFailure, connectionFailure } from './diagnostics.js';
+import { ConnectionFailure, connectionFailure, catalogConnectionFailure } from './diagnostics.js';
 import { ReplayGuard } from './replay.js';
 import { invocation } from './wire.js';
 
@@ -41,6 +41,10 @@ function model(entry: LiveModel): Model<typeof API> {
     cost: { input: safeNumber(entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000,
       output: safeNumber(entry.output_microunits_per_million_tokens) * 1.3 / 1_000_000, cacheRead: 0, cacheWrite: 0 },
   };
+}
+function catalogModels(entries: readonly LiveModel[]): readonly Model<typeof API>[] {
+  try { return entries.map(model); }
+  catch { throw new CatalogFailure('conversion'); }
 }
 function blank(selected: Model<typeof API>): AssistantMessage {
   return { role: 'assistant', provider: PROVIDER_ID, api: API, model: selected.id,
@@ -116,7 +120,6 @@ export class PossumsProvider implements Provider {
       const candidate = await this.establish(signal);
       Channel.requireVerified(candidate.channel);
       this.requireCurrent(epoch, signal);
-      try { this.reportConnection(undefined); } catch { /* UI reporting cannot change authentication. */ }
       return candidate;
     } catch (error) {
       this.requireCurrent(epoch, signal);
@@ -183,13 +186,24 @@ export class PossumsProvider implements Provider {
   }
 
   private async authenticate(candidate: ReferenceClient, key: string, epoch: number, signal: AbortSignal): Promise<void> {
-    await candidate.login(key, signal);
-    this.requireCurrent(epoch, signal);
-    const entries = await candidate.models(signal);
-    const listed = entries.map(model);
-    this.requireCurrent(epoch, signal);
-    this.recoveryKey = key;
-    this.client = candidate; this.catalog = entries; this.listed = listed;
+    let stage: ConnectionFailure['code'] = 'session_unavailable';
+    try {
+      await candidate.login(key, signal);
+      this.requireCurrent(epoch, signal);
+      stage = 'catalog_unavailable';
+      const entries = await candidate.models(signal);
+      const listed = catalogModels(entries);
+      this.requireCurrent(epoch, signal);
+      this.recoveryKey = key;
+      this.client = candidate; this.catalog = entries; this.listed = listed;
+      // Public verification alone must not reset failed-session warning deduplication.
+      try { this.reportConnection(undefined); } catch { /* UI reporting cannot change authentication. */ }
+    } catch (error) {
+      this.requireCurrent(epoch, signal);
+      const failure = stage === 'catalog_unavailable' ? catalogConnectionFailure(error) : new ConnectionFailure(stage);
+      try { this.reportConnection(failure); } catch { /* UI reporting cannot change authentication. */ }
+      throw failure;
+    }
   }
 
   getModels(): readonly Model<typeof API>[] { return this.listed; }
@@ -220,16 +234,23 @@ export class PossumsProvider implements Provider {
     const current = () => epoch === this.authEpoch && !context.signal.aborted;
     try {
       const entries = await client.models(context.signal);
-      const listed = entries.map(model);
+      const listed = catalogModels(entries);
       await context.publish({ update: () => {
-        if (current()) { this.catalog = entries; this.listed = listed; }
+        if (current()) {
+          this.catalog = entries; this.listed = listed;
+          try { this.reportConnection(undefined); } catch { /* UI reporting cannot change catalog state. */ }
+        }
       } });
-    } catch {
+    } catch (error) {
+      const failure = catalogConnectionFailure(error);
       // Neither a stale success nor a stale failure may mutate a newer account.
       await context.publish({ update: () => {
-        if (current()) { this.catalog = []; this.listed = []; }
+        if (current()) {
+          this.catalog = []; this.listed = [];
+          try { this.reportConnection(failure); } catch { /* UI reporting cannot change catalog state. */ }
+        }
       } });
-      throw new Error('possums_catalog_unavailable');
+      throw failure;
     }
   }
 
