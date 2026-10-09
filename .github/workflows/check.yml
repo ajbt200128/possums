@@ -27,8 +27,8 @@ jobs:
           source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
       - run: python3 -m unittest discover -s tests -p 'test_release_cache.py'
       - run: nix flake check --print-build-logs
-      - name: Seed browser, image and release dependency outputs
-        run: nix build .#browser-fixture .#gateway-image .#gateway-smoke-image .#release-build-deps --no-link --print-build-logs
+      - name: Seed browser and image outputs
+        run: nix build .#browser-fixture .#gateway-image .#gateway-smoke-image --no-link --print-build-logs
 
   browser:
     # Seed shared dependencies before more daemons query a cold GitHub cache.

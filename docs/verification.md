@@ -1487,3 +1487,17 @@ passes; re-evaluated actual graphs still classify nine fresh stages and 31 selec
 external outputs, with simulated validity. All 11 Python guard tests, actionlint
 and diff checks pass. This correction still requires hosted execution; the failed
 seed is not claimed as release-prewarm or performance acceptance.
+
+The corrected wrapper at `2b9f664` passed hosted run `37973358540` attempt 1,
+including actual Linux construction of `release-build-deps` and all four checks.
+Startup restored its seeded image and finished in **42s**. A tracked clean archive
+of pre-wrapper `dc12314` and the correction produce the same real gateway-image
+`.drvPath`; only the input-only wrappers changed. This establishes construction
+of the dependency package, not fresh two-runner release reproduction. The latter
+remains unrun; neither an image nor a release was published.
+
+The identical-source rerun exposed expensive retained toolchain/vendor closure
+transfer and cache upload in the ordinary seed job. The final adjustment keeps
+ordinary CI seeding limited to its fixture and image outputs; `release-build-deps`
+is prewarmed only by the release workflow. Its hosted timing must be qualified
+without conflating it with the earlier all-roots trial.
