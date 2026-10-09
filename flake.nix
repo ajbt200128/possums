@@ -17,7 +17,15 @@
           overlays = [ rust-overlay.overlays.default ];
         };
         unstablePkgs = import nixpkgs-unstable { inherit system; };
-        buildGoModule = unstablePkgs.buildGoModule.override { go = unstablePkgs.go_1_27; };
+        # The pinned attestation SDK requires 1.27.2; retain the locked package sets.
+        attestationGo = unstablePkgs.go_1_27.overrideAttrs (finalAttrs: _: {
+          version = "1.27.2";
+          src = unstablePkgs.fetchurl {
+            url = "https://go.dev/dl/go${finalAttrs.version}.src.tar.gz";
+            hash = "sha256-A0ldorpkiU1A9cSZLklFT6eLUGkGBP+Stq//UIG3bmI=";
+          };
+        });
+        buildGoModule = unstablePkgs.buildGoModule.override { go = attestationGo; };
         craneLib = (crane.mkLib pkgs).overrideToolchain
           (p: p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
         src = pkgs.lib.cleanSourceWith {
@@ -46,7 +54,7 @@
           pname = "possums-attestation";
           version = "0.1.0";
           src = ./attestation-helper;
-          vendorHash = "sha256-GNfWp9U27DIiKkdKehXcLFwEyHv4OeFiEhfQAB7WgXs=";
+          vendorHash = "sha256-n2X/SxW2bmHG27bSiRVC2S55Pct3fQWwneZGIAozk9g=";
           postInstall = ''
             mv $out/bin/attestation-helper $out/bin/possums-attestation
           '';
