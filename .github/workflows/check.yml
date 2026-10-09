@@ -1,8 +1,12 @@
 name: check
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+concurrency:
+  group: check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -10,35 +14,87 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+        with:
+          diagnostic-endpoint: ""
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          diagnostic-endpoint: ""
+          use-flakehub: false
+          use-gha-cache: true
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - run: python3 -m unittest discover -s tests -p 'test_release_cache.py'
       - run: nix flake check --print-build-logs
 
   browser:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+        with:
+          diagnostic-endpoint: ""
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          diagnostic-endpoint: ""
+          use-flakehub: false
+          use-gha-cache: true
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: nix develop -c cargo build --example browser_fixture
-      - run: nix develop -c bash -lc 'npm run test:browser'
+      - run: node --test tests/browser_support_test.mjs
+      - name: Build cacheable browser fixture
+        run: nix build .#browser-fixture --out-link result-browser-fixture --print-build-logs
+      - name: Run synthetic browser acceptance in pinned Playwright image
+        env:
+          # Match package.json; the image includes Chromium and its system dependencies.
+          PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
+        run: |
+          fixture=$(readlink -f result-browser-fixture)
+          docker run --rm --init --network none --ipc=host \
+            --mount "type=bind,src=/nix/store,dst=/nix/store,readonly" \
+            --mount "type=bind,src=$PWD,dst=/work,readonly" \
+            --workdir /work --env "POSSUMS_BROWSER_FIXTURE=$fixture/bin/browser_fixture" \
+            "$PLAYWRIGHT_IMAGE" node tests/browser.mjs
 
   image:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+        with:
+          diagnostic-endpoint: ""
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          diagnostic-endpoint: ""
+          use-flakehub: false
+          use-gha-cache: true
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
       - run: nix build .#gateway-image --print-build-logs
 
   image-startup:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+        with:
+          diagnostic-endpoint: ""
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          diagnostic-endpoint: ""
+          use-flakehub: false
+          use-gha-cache: true
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
       - name: Build isolated test-verifier image
         run: nix build .#gateway-smoke-image --print-build-logs
       - name: Smoke test read-only startup with a runtime account secret
