@@ -1,0 +1,12 @@
+# Match the existing flake's nixpkgs, nixpkgs-unstable and rust-overlay revisions.
+# Keep these in sync with flake.lock when intentionally updating toolchains.
+inputs:
+  nixpkgs:
+    url: github:NixOS/nixpkgs/ac62194c3917d5f474c1a844b6fd6da2db95077d
+  nixpkgs-unstable:
+    url: github:NixOS/nixpkgs/e158d9ed9b51c98974c5e66e1ba1c9e0255fecaa
+  rust-overlay:
+    url: github:oxalica/rust-overlay/fb058ecf6d14837ea152a3d5225ce7f88ee5cde1
+    inputs:
+      nixpkgs:
+        follows: nixpkgs

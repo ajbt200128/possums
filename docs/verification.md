@@ -975,6 +975,53 @@ Secret-safe local inspection confirmed configured `OTEL_EXPORTER_OTLP_ENDPOINT`,
 
 Read-only Honeycomb `get_workspace_context` reports `dev`, `prod` and `fun`, each with zero datasets, and no telemetry ingested. Use the operator-provided `dev` configuration; do not infer that the workload is development/synthetic or switch to `prod` merely because it exists. No dataset/event query, ingest, resource creation, paid inference or deployment occurred in this policy/configuration check. Exact account retention/deletion/backups, credentials' scope and environment binding remain unverified; default-retention acceptance is explicit, not a claim those checks passed. Existing local privacy-test evidence above remains unchanged; document-link and whitespace checks cover this documentation-only update. Runtime/Collector, real-traffic release review and scoped deployment verification remain work to complete before applicable export.
 
+## 2026-10-08 — local devenv development shell
+
+Added a native devenv CLI environment and optional direnv activation; usage is in
+[`development.md`](development.md). Existing build flake, lockfile, CI, gateway
+and deployment configuration are unchanged. All three shared input revisions
+and hashes match `flake.lock`. Rust uses its stable package set, Go/Node the
+existing unstable set; observed versions are Rust 1.88.0, Go 1.27.1 and Node
+24.20.0 with devenv 2.0.4 on aarch64-darwin.
+
+Policy references: [data handling](../PRIVACY.md#data-handling-boundaries),
+[forbidden telemetry](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data)
+and [synthetic testing](../PRIVACY.md#synthetic-testing-exception). Evaluated
+configuration confirms dotenv and automatic npm installation disabled, with no
+managed processes. Shell-entry presence checks confirmed no Tinfoil/account
+credentials were loaded; no values or `.env` contents were inspected. No new
+exporter, tracing, support upload or production process is configured.
+
+Final `devenv test` passed formatting, strict Clippy, locked Rust tests and Go
+helper tests. A subsequent `possums-test` run passed **344 Rust tests, three
+funded tests ignored**, plus Go tests. `possums-test-browser` passed with existing
+local Chromium/dependencies. The privacy integration suite's four tests are
+included in the Rust pass; these are local regressions, not deployment evidence.
+`bash -n .envrc`, Nix parsing, shared-input equality and `git diff --check` passed.
+Active LSP probes found no Nix/YAML diagnostics; `.envrc` has no configured LSP.
+
+An initial all-unstable shell configuration failed twice in the existing
+`co_closing_sequential_handoff_and_upload_cancel` synthetic qualification test;
+its isolated invocation passed in both shells, and the unchanged old shell's
+full library suite passed. The final stable/unstable split above then passed
+both complete runs without skipping tests or modifying Rust. The initial
+failure's root cause was not established. Linux, fresh browser dependency
+installation, interactive direnv approval, images and live/provider/privacy
+properties were not verified by this local environment task.
+
+**2026-10-09 completion against v0.0.15:** the unfinished shell's Go 1.27.1
+no longer met the updated helper module's Go 1.27.2 minimum. `devenv.nix` now
+uses exactly the release flake's existing Go source/version override, without
+changing the build flake, its lockfile or deployment. Shell `gopls` provisioning
+is disabled: its rebuilt optional package failed its version-check phase
+because an existing `/tmp/gopls` directory belonged to another Nix build user;
+editor language servers remain separately managed. No test assertion or helper
+minimum was weakened. Actual `go version` reports **1.27.2 darwin/arm64**.
+Fresh `devenv test` passed formatting, strict Clippy, the complete locked Rust
+suite (funded tests remain ignored) and Go helper tests. Shared-input revision/
+hash equality, `bash -n .envrc` and `git diff --check` passed. The earlier browser
+pass remains historical; no live inference or exporter was started.
+
 ## 2026-10-08 — compiled direct telemetry runtime, release still closed
 
 Baseline `3899b26`; separate policy commit `6b08a78` implements the operator's no-Collector/configured-default-on decision. Applied [local release/allowlisting](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [forbidden fields](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [processor/shutdown](../PRIVACY.md#processors-retention-access-and-shutdown) and [evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change). This is **safe local runtime implementation, not operational telemetry or rollout acceptance**. No provider query, Honeycomb send, real secret inspection, funded inference, secret upload, image build or deployment occurred.
