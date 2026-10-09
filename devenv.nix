@@ -81,6 +81,12 @@ in
   };
 
   enterShell = ''
+    # Worktrees share incremental artifacts, but not across compiler/host changes.
+    if [ -z "''${CARGO_TARGET_DIR:-}" ]; then
+      rust_version=$(rustc --version | cut -d ' ' -f 2)
+      rust_host=$(rustc -vV | awk '/^host:/ { print $2 }')
+      export CARGO_TARGET_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/possums/target/$rust_host/$rust_version"
+    fi
     echo "Possums: Rust 1.88 / Go 1.27 / Node 24"
     echo "  possums-check          formatting + Clippy"
     echo "  possums-test           local Rust + Go tests"
