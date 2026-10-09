@@ -380,14 +380,14 @@ export class PossumsProvider implements Provider {
               endText();
               let pending = args.get(call.index);
               if (!pending) {
-                const block: ToolCall = { type: 'toolCall', id: call.id ?? '', name: call.function.name ?? '', arguments: {} };
+                const block: ToolCall = { type: 'toolCall', id: call.id ?? '', name: call.function?.name ?? '', arguments: {} };
                 pending = { block, contentIndex: output.content.length, json: '' };
                 args.set(call.index, pending); output.content.push(block);
                 if (!summary) events.push({ type: 'toolcall_start', contentIndex: pending.contentIndex, partial: output });
               }
               if (call.id !== undefined) pending.block.id = call.id;
-              if (call.function.name !== undefined) pending.block.name = call.function.name;
-              const fragment = call.function.arguments;
+              if (call.function?.name !== undefined) pending.block.name = call.function.name;
+              const fragment = call.function?.arguments ?? '';
               pending.json += fragment;
               pending.block.arguments = parseStreamingJson(pending.json);
               if (fragment && !summary) events.push({ type: 'toolcall_delta', contentIndex: pending.contentIndex, delta: fragment, partial: output });

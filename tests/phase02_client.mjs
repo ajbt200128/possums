@@ -113,6 +113,25 @@ for (const size of [1, 7, 4096]) {
   check(receipt.finish === 'tool_calls' && receipt.quotedInputMicrounitsPerMillion === '1000000' && receipt.chargedMicrounits === '7');
   check(events === 5);
 }
+const identityOnly=delta({tool_calls:[{index:0,id:'call_1',type:'function',function:{name:'lookup'}}]});
+const argumentsOnly=delta({tool_calls:[{index:0,function:{arguments:'{"n":1}'}}]});
+const separated=role+delta({content:'Synthetic preamble'})+identityOnly+argumentsOnly+end('tool_calls')+usage(rates)+done;
+for(const size of [1,7,4096])check((await m.consumeCompletion(stream(separated,size),model,()=>{},{tools:[tool]})).finish==='tool_calls');
+const lateIdentity=role+delta({tool_calls:[{index:0}]})+argumentsOnly+identityOnly+end('tool_calls')+usage(rates)+done;
+check((await consume(lateIdentity)).finish==='tool_calls');
+check((await consume(role+identityOnly+identityOnly+argumentsOnly+end('stop')+usage(rates)+done)).finish==='stop');
+check((await consume(role+delta({tool_calls:[{index:0}]})+end('length')+usage(rates)+done)).finish==='length');
+for(const text of [
+ role+argumentsOnly+end('tool_calls')+usage(rates)+done,
+ role+identityOnly+end('tool_calls')+usage(rates)+done,
+ role+identityOnly+delta({tool_calls:[{index:0,id:'changed',type:'function'}]})+argumentsOnly+end('tool_calls')+usage(rates)+done,
+ role+identityOnly+delta({tool_calls:[{index:0,function:{name:'changed'}}]})+argumentsOnly+end('tool_calls')+usage(rates)+done,
+ role+identityOnly+delta({tool_calls:[{index:0,function:{arguments:null}}]}),
+ role+delta({tool_calls:[{index:0,id:'bad id',type:'function'}]}),
+ role+delta({tool_calls:[{index:0,type:'custom'}]}),
+ role+delta({tool_calls:[{index:0,unexpected:true}]}),
+ role+delta({tool_calls:[{index:0,function:{unexpected:true}}]}),
+])await rejects(()=>consume(text));
 check((await consume(stopCalls)).finish === 'stop');
 check((await consume(partialLength)).finish === 'length');
 for (const text of [partialLength.slice(0, -done.length), role + delta({ tool_calls: [initial()] }) + end('length') + done,
@@ -285,6 +304,8 @@ try {
   check(receipt.finish === 'tool_calls' && payloadHook && responseHook && eventHook);
   check(decoded.at(-1).payload.messages[0].content === 'hook replacement');
   check(decoded.at(-1).payload.submission === 's'.repeat(43));
+  chatText = separated;
+  check((await client.chat('fixture',chat.messages,()=>{},false,{tools:[tool]})).finish==='tool_calls');
   chatText = stopCalls;
   check((await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] })).finish === 'stop');
   chatText = partialLength;

@@ -9,7 +9,7 @@ export type CompletionEvent = Readonly<{
   object: 'chat.completion.chunk'; model: string;
   choices: readonly Readonly<{ index: 0; delta: Readonly<{ role?: 'assistant'; content?: string;
     tool_calls?: readonly Readonly<{ index: number; id?: string; type?: 'function';
-      function: Readonly<{ name?: string; arguments: string }> }>[] }>;
+      function?: Readonly<{ name?: string; arguments?: string }> }>[] }>;
     finish_reason: Receipt['finish'] | null }>[];
   usage?: Readonly<{ prompt_tokens: number; completion_tokens: number; total_tokens: number }>;
   possums?: Readonly<{ outcome: 'settled'; charged_microunits: string; refunded_microunits: string;
@@ -186,7 +186,9 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
         if (choice.finish_reason === 'tool_calls') requireThat(names && calls.length > 0);
         if (calls.length && choice.finish_reason !== 'length') {
           requireThat(names);
-          for (const call of calls) objectArguments(call.arguments);
+          for (const call of calls) {
+            toolID(call.id); toolName(call.name); objectArguments(call.arguments);
+          }
         }
         finish = choice.finish_reason; state = 'usage';
       } else if (Object.hasOwn(choice.delta, 'tool_calls')) {
@@ -196,16 +198,29 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
         for (const delta of choice.delta.tool_calls) {
           requireThat(delta && Number.isInteger(delta.index) && delta.index >= 0 && delta.index < LIMITS.tools && !indexes.has(delta.index));
           indexes.add(delta.index);
+          fields(delta, ['index'], ['id', 'type', 'function']);
           let call = calls[delta.index];
-          const initial = !call;
-          if (initial) {
-            keys(delta, ['index', 'id', 'type', 'function']); keys(delta.function, ['name', 'arguments']);
-            requireThat(delta.index === calls.length && delta.type === 'function');
-            toolID(delta.id); toolName(delta.function.name);
-            requireThat(!ids.has(delta.id) && names.has(delta.function.name)); ids.add(delta.id);
-            call = { id: delta.id, name: delta.function.name, arguments: '', bytes: 0 }; calls.push(call);
-          } else { keys(delta, ['index', 'function']); keys(delta.function, ['arguments']); }
-          const fragment = delta.function.arguments;
+          if (!call) {
+            requireThat(delta.index === calls.length);
+            call = { id: '', name: '', arguments: '', bytes: 0 }; calls.push(call);
+          }
+          // The gateway preserves SDK fragments: identity and arguments can
+          // arrive separately. Completeness is checked at the terminal finish.
+          if (Object.hasOwn(delta, 'type')) requireThat(delta.type === 'function');
+          if (Object.hasOwn(delta, 'id')) {
+            toolID(delta.id);
+            requireThat((!call.id || call.id === delta.id) && (!ids.has(delta.id) || call.id === delta.id));
+            call.id = delta.id; ids.add(delta.id);
+          }
+          if (Object.hasOwn(delta, 'function')) {
+            fields(delta.function, [], ['name', 'arguments']);
+            if (Object.hasOwn(delta.function, 'name')) {
+              toolName(delta.function.name);
+              requireThat(names.has(delta.function.name) && (!call.name || call.name === delta.function.name));
+              call.name = delta.function.name;
+            }
+          }
+          const fragment = delta.function && Object.hasOwn(delta.function, 'arguments') ? delta.function.arguments : '';
           requireThat(typeof fragment === 'string' && fragment.length <= LIMITS.toolArguments && call.arguments.length + fragment.length <= LIMITS.toolArguments);
           call.arguments += fragment;
           const size = utf8.encode(call.arguments).length;

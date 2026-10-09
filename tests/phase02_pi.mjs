@@ -58,6 +58,19 @@ async function setup(plan, tools = true) {
     if (mode === 'held' || mode === 'held_tools') release=deferred();
     if (options.onPayload) await options.onPayload({model:'synthetic',stream:true,messages,...(options.tools?{tools:options.tools}:{})});
     await options.onResponse?.({status:200,contentType:'text/event-stream'});
+    if(['fragmented_tools','late_fragmented_tools','fragmented_tools_uncertain'].includes(mode)){
+      const frame=value=>'data: '+JSON.stringify(value)+'\n\n';
+      const identity=event({tool_calls:[{index:0,id:'call_one',type:'function',function:{name:'echo'}}]});
+      const argumentsEvent=event({tool_calls:[{index:0,function:{arguments:'{"value":"ok"}'}}]});
+      const fragments=mode==='late_fragmented_tools'?[event({tool_calls:[{index:0}]}),argumentsEvent,identity]:[identity,argumentsEvent];
+      const finish={object:'chat.completion.chunk',model:'synthetic',choices:[{index:0,delta:{},finish_reason:'tool_calls'}]};
+      const usage={object:'chat.completion.chunk',model:'synthetic',choices:[],usage:{prompt_tokens:2,completion_tokens:3,total_tokens:5},
+        possums:{outcome:'settled',charged_microunits:'7',refunded_microunits:'45',quoted_input_microunits_per_million_tokens:'1000000',quoted_output_microunits_per_million_tokens:'1000000'}};
+      const text=[event({role:'assistant'}),event({content:'Synthetic preamble'}),...fragments,finish].map(frame).join('')+
+        (mode==='fragmented_tools_uncertain'?'':frame(usage)+'data: [DONE]\n\n');
+      const body=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(text));controller.close();}});
+      return m.consumeCompletion(body,entry(true),onDelta,{tools:options.tools,onEvent:options.onEvent,signal:options.signal});
+    }
     await options.onEvent(event({role:'assistant'}));
     if (['tool_calls','stop_tools','tool_length','length_partial','late_tools','held_tools'].includes(mode)) {
       await options.onEvent(event({tool_calls:[{index:0,...(mode==='late_tools'?{}:{id:'call_one',type:'function'}),function:{...(mode==='late_tools'?{}:{name:'echo'}),arguments:'{"value":'}}]}));
@@ -676,6 +689,25 @@ await check('actual Pi SDK and shipped extension hooks run one receipted invocat
  const {session,s,toolRuns}=await sdkSetup('sdk-tools',['tool_calls','stop'],true);
  try{await session.prompt('Synthetic tool task');assert.equal(toolRuns(),1,session.messages.filter(value=>value.role==='assistant').at(-1)?.errorMessage);assert.equal(s.sends(),2);assert.equal(session.messages.filter(value=>value.role==='assistant').at(-1).content.find(value=>value.type==='text').text,'progressive');assert.equal(session.sessionManager.getSessionFile(),undefined);}
  finally{session.dispose();}
+});
+await check('actual Pi SDK completes split identity/arguments and late identity through the real client decoder',async()=>{
+ for(const mode of ['fragmented_tools','late_fragmented_tools']){
+  const {session,s,toolRuns}=await sdkSetup('sdk-'+mode,[mode,'stop'],true);
+  try{await session.prompt('Synthetic fragmented tool test');assert.equal(toolRuns(),1);assert.equal(s.sends(),2);
+   const messages=session.messages.filter(value=>value.role==='assistant');
+   assert.equal(messages[0].stopReason,'toolUse');assert(messages[0].diagnostics.some(d=>d.type==='possums_settled_receipt'));
+   assert.deepEqual(messages[0].content.find(value=>value.type==='toolCall').arguments,{value:'ok'});
+   assert.equal(messages.at(-1).stopReason,'stop');
+  }finally{session.dispose();}
+ }
+});
+await check('actual Pi SDK cannot execute or replay split tool fragments without a terminal receipt',async()=>{
+ const {session,s,toolRuns}=await sdkSetup('sdk-fragmented-uncertain',['fragmented_tools_uncertain'],true);
+ try{await session.prompt('Synthetic incomplete fragmented tool test');assert.equal(toolRuns(),0);assert.equal(s.sends(),1);
+  const last=session.messages.filter(value=>value.role==='assistant').at(-1);
+  assert.equal(last.stopReason,'error');assert(last.diagnostics.some(d=>d.type==='possums_billing_unknown'));
+  assert(!last.diagnostics.some(d=>d.type==='possums_settled_receipt'));
+ }finally{session.dispose();}
 });
 await check('actual Pi SDK native logout prevents a pending tool from executing and preserves its charge',async()=>{
  const {session,s,runtime,toolRuns}=await sdkSetup('sdk-native-logout',['held_tools'],true);
