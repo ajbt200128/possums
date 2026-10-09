@@ -1433,3 +1433,25 @@ not an all-systems pass. Hosted Linux cache hits, the pinned container invocatio
 actual dependency prewarming/fresh release reconstruction and cold/warm/source-edit
 CI timings remain **UNVERIFIED** until new CI/release evidence is added. Do not
 promote local Mac timings or disabled-diagnostics intent into those claims.
+
+### First hosted run and cache-throttling follow-up
+
+PR [#39](https://github.com/ajbt200128/possums/pull/39), source `ae62505`, ran
+[check attempt 1](https://github.com/ajbt200128/possums/actions/runs/37965610684/attempts/1):
+**all four Linux jobs passed**, including the pinned Playwright container,
+prebuilt fixture/IPC tests, full flake checks and read-only synthetic startup.
+The flake job took **8m46s including setup/teardown**, not directly comparable to
+the earlier 12m27s build-only step. The public pinned cache-daemon binary endpoint
+was reachable; action diagnostics remain configuration intent, not on-wire proof.
+An explicit local `CARGO_TARGET_DIR` override was also observed to survive shell entry.
+
+However, the hosted cache emitted the closed category **GitHub Actions Cache
+throttled Magic Nix Cache** and fell back to rebuilding. The initial four-daemon
+layout did not establish useful warm-cache acceleration. An identical-source rerun
+was started to measure this, not a source-change or release reproduction run.
+The follow-up makes downstream browser/image/startup jobs wait for the flake job's
+cache-seeding/upload completion, preserving their names and assertions while
+avoiding simultaneous cold-cache queries. This is a minimal mitigation to qualify,
+not proof that GitHub rate limits are solved. No release publishing or production
+deployment is authorized by these CI passes; fresh release-stage runtime evidence
+and actual warm-cache timings remain separate.

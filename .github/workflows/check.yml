@@ -29,6 +29,8 @@ jobs:
       - run: nix flake check --print-build-logs
 
   browser:
+    # Seed shared dependencies before more daemons query a cold GitHub cache.
+    needs: flake
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -64,6 +66,7 @@ jobs:
             "$PLAYWRIGHT_IMAGE" node tests/browser.mjs
 
   image:
+    needs: flake
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -81,6 +84,7 @@ jobs:
       - run: nix build .#gateway-image --print-build-logs
 
   image-startup:
+    needs: flake
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
