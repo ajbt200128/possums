@@ -6,7 +6,8 @@ use crate::{
     accounting::{Accounting, AccountingError, Outcome},
     attestation::{EvidenceVerifier, GatewayEvidence},
     auth::{
-        clear_session_cookie, login_challenge_cookie, session_cookie, AdmissionError, Auth, Session,
+        clear_session_cookie, login_challenge_cookie, session_cookie, AdmissionError, Auth,
+        AuthError, Session,
     },
     generation::{now_unix, Generation, GenerationInput, Rejection, Submission},
     inference::{authenticated_catalog, Message, SharedInference},
@@ -15,7 +16,7 @@ use crate::{
 };
 use axum::{
     body::{Body, Bytes, HttpBody},
-    extract::{DefaultBodyLimit, Extension, Form, State},
+    extract::{rejection::FormRejection, DefaultBodyLimit, Extension, Form, State},
     http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
@@ -167,6 +168,7 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
         .route("/recovery/download", get(recovery_download))
         .route("/claims", get(claims))
         .route("/attestation", get(attestation))
+        .method_not_allowed_fallback(wrong_method)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -244,6 +246,11 @@ pub async fn serve_with_header_deadline(
             drop(permit);
         });
     }
+}
+
+async fn wrong_method(Extension(observation): Extension<RequestContext>) -> StatusCode {
+    observation.reject(AdmissionModel::NotApplicable, MetricRejection::Input);
+    StatusCode::METHOD_NOT_ALLOWED
 }
 
 async fn request_admission(
@@ -510,11 +517,15 @@ fn session_from_headers(state: &AppState, headers: &HeaderMap) -> Option<(String
     state.auth.session(&id).map(|session| (id, session))
 }
 
-async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn home(
+    State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
+    headers: HeaderMap,
+) -> Response {
     let Some((session_id, session)) = session_from_headers(&state, &headers) else {
-        return login_page_response(&state, None);
+        return login_page_response(&state, None, &observation);
     };
-    let catalog = match current_catalog(&state).await {
+    let catalog = match current_catalog(&state, &observation).await {
         Ok(catalog) => catalog,
         Err(response) => return response,
     };
@@ -527,9 +538,13 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(quotes) => quotes,
-        Err(_) => return unavailable(),
+        Err(_) => {
+            observation.reject(AdmissionModel::NotApplicable, MetricRejection::Catalog);
+            return unavailable();
+        }
     };
     let Some(available_microunits) = state.accounting.available(&session.account_id) else {
+        observation.reject(AdmissionModel::NotApplicable, MetricRejection::Internal);
         return unavailable();
     };
     match state.auth.issue_submission_for(
@@ -552,8 +567,17 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
             // before allocation without excluding any supported model.
             MAX_CONTROL_RENDERED_RESPONSE_BYTES,
         )
-        .map_or_else(unavailable, |html| Html(html).into_response()),
-        Err(_) => unavailable(),
+        .map_or_else(
+            || {
+                observation.reject(AdmissionModel::NotApplicable, MetricRejection::Internal);
+                unavailable()
+            },
+            |html| Html(html).into_response(),
+        ),
+        Err(error) => {
+            observe_auth_rejection(&observation, error);
+            unavailable()
+        }
     }
 }
 
@@ -565,13 +589,20 @@ struct LoginForm {
 
 async fn login(
     State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
     headers: HeaderMap,
-    Form(form): Form<LoginForm>,
+    form: Result<Form<LoginForm>, FormRejection>,
 ) -> Response {
+    let form = match control_form(form, &observation) {
+        Ok(form) => form,
+        Err(rejection) => return rejection.into_response(),
+    };
     let Some(cookie_challenge) = cookie_value(&headers, "possums_login_csrf") else {
+        observation.reject(AdmissionModel::NotApplicable, MetricRejection::Auth);
         return unauthorized();
     };
     if !constant_time_equal(cookie_challenge.as_bytes(), form.csrf.as_bytes()) {
+        observation.reject(AdmissionModel::NotApplicable, MetricRejection::Auth);
         return unauthorized();
     }
     match state.auth.authenticate(&form.credential, &form.csrf) {
@@ -581,10 +612,14 @@ async fn login(
                 response.headers_mut().insert(header::SET_COOKIE, value);
                 response
             } else {
+                observation.reject(AdmissionModel::NotApplicable, MetricRejection::Internal);
                 internal_error()
             }
         }
-        Err(_) => (StatusCode::UNAUTHORIZED, "invalid credential").into_response(),
+        Err(error) => {
+            observe_auth_rejection(&observation, error);
+            (StatusCode::UNAUTHORIZED, "invalid credential").into_response()
+        }
     }
 }
 
@@ -595,13 +630,20 @@ struct CsrfForm {
 
 async fn logout(
     State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
     headers: HeaderMap,
-    Form(form): Form<CsrfForm>,
+    form: Result<Form<CsrfForm>, FormRejection>,
 ) -> Response {
+    let form = match control_form(form, &observation) {
+        Ok(form) => form,
+        Err(rejection) => return rejection.into_response(),
+    };
     let Some((id, _)) = session_from_headers(&state, &headers) else {
+        observation.reject(AdmissionModel::NotApplicable, MetricRejection::Auth);
         return unauthorized();
     };
-    if state.auth.logout(&id, &form.csrf).is_err() {
+    if let Err(error) = state.auth.logout(&id, &form.csrf) {
+        observe_auth_rejection(&observation, error);
         return unauthorized();
     }
     let mut response = Redirect::to("/").into_response();
@@ -616,20 +658,51 @@ async fn logout(
 // No availability promise applies while the New chat lane itself is retained.
 async fn new_chat(
     State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
     headers: HeaderMap,
-    Form(form): Form<CsrfForm>,
+    form: Result<Form<CsrfForm>, FormRejection>,
 ) -> Response {
+    let form = match control_form(form, &observation) {
+        Ok(form) => form,
+        Err(rejection) => return rejection.into_response(),
+    };
     let Some(id) = cookie_value(&headers, "possums_session") else {
+        observation.reject(AdmissionModel::NotApplicable, MetricRejection::Auth);
         return unauthorized();
     };
-    if state.auth.new_chat(&id, &form.csrf).is_err() {
+    if let Err(error) = state.auth.new_chat(&id, &form.csrf) {
+        observe_auth_rejection(&observation, error);
         return unauthorized();
     }
-    home(State(state), headers).await
+    home(State(state), Extension(observation), headers).await
 }
 
-async fn recovery(State(state): State<AppState>, headers: HeaderMap) -> Response {
+fn control_form<T>(
+    form: Result<Form<T>, FormRejection>,
+    observation: &RequestContext,
+) -> Result<T, FormRejection> {
+    form.map(|Form(form)| form).inspect_err(|_| {
+        observation.reject(AdmissionModel::NotApplicable, MetricRejection::Input);
+    })
+}
+
+fn observe_auth_rejection(observation: &RequestContext, error: AuthError) {
+    observation.reject(
+        AdmissionModel::NotApplicable,
+        match error {
+            AuthError::Invalid => MetricRejection::Auth,
+            _ => MetricRejection::Internal,
+        },
+    );
+}
+
+async fn recovery(
+    State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
+    headers: HeaderMap,
+) -> Response {
     let Some((_, session)) = session_from_headers(&state, &headers) else {
+        observation.reject(AdmissionModel::NotApplicable, MetricRejection::Auth);
         return unauthorized();
     };
     Html(render::page(&format!(
@@ -639,8 +712,13 @@ async fn recovery(State(state): State<AppState>, headers: HeaderMap) -> Response
     .into_response()
 }
 
-async fn recovery_download(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn recovery_download(
+    State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
+    headers: HeaderMap,
+) -> Response {
     let Some((_, session)) = session_from_headers(&state, &headers) else {
+        observation.reject(AdmissionModel::NotApplicable, MetricRejection::Auth);
         return unauthorized();
     };
     let mut response = session.recovery_credential.into_response();
@@ -667,14 +745,23 @@ struct AttestationDocuments<'a> {
     upstream: &'a serde_json::Value,
 }
 
-async fn attestation(State(state): State<AppState>) -> Response {
+async fn attestation(
+    State(state): State<AppState>,
+    Extension(observation): Extension<RequestContext>,
+) -> Response {
     let gateway = match verified_gateway_evidence(&state).await {
         Ok(value) => value,
-        Err(_) => return unavailable(),
+        Err(_) => {
+            observation.reject(AdmissionModel::NotApplicable, MetricRejection::Verification);
+            return unavailable();
+        }
     };
     let upstream = match state.inference.verification_document() {
         Ok(value) => value,
-        Err(_) => return unavailable(),
+        Err(_) => {
+            observation.reject(AdmissionModel::NotApplicable, MetricRejection::Internal);
+            return unavailable();
+        }
     };
     let bytes = match crate::bounded_json::to_vec(
         &AttestationDocuments {
@@ -684,7 +771,10 @@ async fn attestation(State(state): State<AppState>) -> Response {
         MAX_ATTESTATION_RESPONSE_BYTES,
     ) {
         Ok(value) => value,
-        Err(_) => return unavailable(),
+        Err(_) => {
+            observation.reject(AdmissionModel::NotApplicable, MetricRejection::Internal);
+            return unavailable();
+        }
     };
     let mut response = Body::from(bytes).into_response();
     response.headers_mut().insert(
@@ -1045,20 +1135,45 @@ async fn verified_gateway_evidence(
     state.generation().evidence().await
 }
 
-async fn current_catalog(state: &AppState) -> Result<crate::catalog::Catalog, Response> {
+async fn current_catalog(
+    state: &AppState,
+    observation: &RequestContext,
+) -> Result<crate::catalog::Catalog, Response> {
     authenticated_catalog(state.inference.as_ref(), now_unix())
         .await
-        .map_err(|_| unavailable())
+        .map_err(|error| {
+            use crate::inference::InferenceFailure;
+            observation.reject(
+                AdmissionModel::NotApplicable,
+                match error.failure() {
+                    InferenceFailure::VerificationFailed
+                    | InferenceFailure::EndpointBindingFailed => MetricRejection::Verification,
+                    InferenceFailure::CatalogFailed => MetricRejection::Catalog,
+                    _ => MetricRejection::Internal,
+                },
+            );
+            unavailable()
+        })
 }
 
-fn login_page_response(state: &AppState, error: Option<&str>) -> Response {
+fn login_page_response(
+    state: &AppState,
+    error: Option<&str>,
+    observation: &RequestContext,
+) -> Response {
     let challenge = match state.auth.issue_login_challenge() {
         Ok(value) => value,
-        Err(_) => return unavailable(),
+        Err(error) => {
+            observe_auth_rejection(observation, error);
+            return unavailable();
+        }
     };
     let cookie = match HeaderValue::from_str(&login_challenge_cookie(&challenge)) {
         Ok(value) => value,
-        Err(_) => return internal_error(),
+        Err(_) => {
+            observation.reject(AdmissionModel::NotApplicable, MetricRejection::Internal);
+            return internal_error();
+        }
     };
     let mut response = Html(render::login_page(&challenge, error)).into_response();
     response.headers_mut().insert(header::SET_COOKIE, cookie);

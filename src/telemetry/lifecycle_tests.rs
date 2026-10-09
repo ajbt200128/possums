@@ -42,6 +42,8 @@ enum Failure {
     Preflight,
     Stream,
     Usage,
+    Catalog,
+    Verification,
 }
 struct Provider {
     failure: Failure,
@@ -53,6 +55,9 @@ struct Provider {
 #[async_trait]
 impl EvidenceVerifier for Provider {
     async fn verify(&self, _: &str, now: u64) -> Result<GatewayEvidence, EvidenceError> {
+        if matches!(self.failure, Failure::Verification) {
+            return Err(EvidenceError::Invalid);
+        }
         Ok(GatewayEvidence {
             quote: serde_json::json!({}),
             issued_at_unix: now,
@@ -65,6 +70,9 @@ impl EvidenceVerifier for Provider {
 #[async_trait]
 impl Inference for Provider {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
+        if matches!(self.failure, Failure::Catalog) {
+            return Err(InferenceFailure::CatalogFailed.into());
+        }
         Ok(br#"{"object":"list","data":[{"id":"kimi-k3","type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":1,"outputTokenPricePer1M":1,"requestPrice":0}}]}"#.to_vec())
     }
     async fn count_tokens(
@@ -733,3 +741,6 @@ async fn production_router_window_reaches_local_tls_only_when_releasable() {
         assert!(metrics.take_window().is_none());
     }
 }
+
+#[path = "control_tests.rs"]
+mod control_tests;
