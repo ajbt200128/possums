@@ -22,13 +22,13 @@ export type Approval = { origin: string; repository: string; tag: string; manife
 // Administrative expiry is NOT v2 quote freshness or Phase 0.2 acceptance.
 export const API_APPROVALS: readonly Approval[] = Object.freeze([Object.freeze({
   origin: 'https://possum-phase0.possums.containers.tinfoil.dev',
-  repository: 'ajbt200128/possums', tag: 'v0.0.13',
-  manifest: 'd92ef5447f894f395c6b9b8dbfcfa97764d82a408cc88d604815446fc70d23f9',
-  image: 'sha256:d3d6bbbc5f856fd525792deeec1dfdcf3f717daba6004bf1d7a57cd198a8222e',
-  commit: 'ca4de91aeca61d1b7ac8501db27b8fed357ba444',
-  config: 'def47fe4df15aebb4f48b8caa5af8882a6bd4a3f96efc52a472cb4efc7dd1134',
-  workflow: 'https://github.com/ajbt200128/possums/.github/workflows/tinfoil-release-publish.yml@refs/tags/v0.0.13',
-  invocation: 'https://github.com/ajbt200128/possums/actions/runs/37834605451/attempts/1',
+  repository: 'ajbt200128/possums', tag: 'v0.0.14',
+  manifest: 'c6b418a1ce23d19882ae3ad3b2ac2f2d49189900dca824fa27c2548a90542202',
+  image: 'sha256:11f9505c55ae5eb5b9c77bd2a4fc27f1a392782e28c96cf28b76846c78aa48d5',
+  commit: '6e58d4be7e36afcf9372737ec7d235fe9d9dd423',
+  config: '9c7959ab4be5a6aedf2cac8a8688fe8da96bc4a2ee97ee53d4bc58d2a6310e23',
+  workflow: 'https://github.com/ajbt200128/possums/.github/workflows/tinfoil-release-publish.yml@refs/tags/v0.0.14',
+  invocation: 'https://github.com/ajbt200128/possums/actions/runs/37877498948/attempts/1',
   expires: Date.parse('2026-10-11T00:00:00Z'),
 })]);
 // Locally distributed denylist; no claim of AMD CRL/OCSP coverage.
