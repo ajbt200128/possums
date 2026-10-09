@@ -606,6 +606,20 @@ await check('unqualified tools and image history rejected before invocation',asy
  s.provider.beginRun();const image=ai.normalizeContext({messages:[{role:'user',timestamp:1,content:[{type:'image',data:'synthetic',mimeType:'image/png'}]}]});
  assert.match((await drain(s.provider.streamSimple(s.selected,image))).message.errorMessage,/\[possums_images_unsupported\].*remove images/);assert.equal(s.sends(),0);
 });
+await check('tool-only parallel history uses empty text without altering calls or results',async()=>{
+ const s=await setup([]);
+ const calls=['one','two'].map(value=>({type:'toolCall',id:'call_'+value,name:'echo',arguments:{value}}));
+ const assistant={role:'assistant',provider:'possums',api:'openai-completions',model:s.selected.id,timestamp:2,stopReason:'toolUse',content:calls,
+  usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+ const results=calls.map(call=>({role:'toolResult',toolCallId:call.id,toolName:'echo',content:[{type:'text',text:'Synthetic result'}],isError:false,timestamp:3}));
+ const transcript=ai.normalizeContext({messages:[user,assistant,...results],tools:[tool]});
+ const payload=m.snapshotInvocation(m.invocation(s.selected,transcript));
+ assert.equal(payload.messages.length,4);assert.equal(payload.messages[1].role,'assistant');assert.equal(payload.messages[1].content,'');
+ assert.deepEqual(payload.messages[1].tool_calls.map(call=>({id:call.id,name:call.function.name,arguments:JSON.parse(call.function.arguments)})),calls.map(call=>({id:call.id,name:call.name,arguments:call.arguments})));
+ assert.deepEqual(payload.messages.slice(2).map(message=>({id:message.tool_call_id,content:message.content})),calls.map(call=>({id:call.id,content:'Synthetic result'})));
+ assistant.content=[{type:'text',text:'Synthetic preamble'},...calls];
+ const withText=m.snapshotInvocation(m.invocation(s.selected,transcript));assert.equal(withText.messages[1].content,'Synthetic preamble');
+});
 await check('nested tool schema survives Pi conversion and the complete request snapshot',async()=>{
  let parameters={type:'object',properties:{value:{type:'string',enum:['synthetic']}}};
  for(let i=0;i<6;i++)parameters={type:'object',properties:{nested:parameters}};
@@ -687,7 +701,7 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
 }
 await check('actual Pi SDK and shipped extension hooks run one receipted invocation per model turn',async()=>{
  const {session,s,toolRuns}=await sdkSetup('sdk-tools',['tool_calls','stop'],true);
- try{await session.prompt('Synthetic tool task');assert.equal(toolRuns(),1,session.messages.filter(value=>value.role==='assistant').at(-1)?.errorMessage);assert.equal(s.sends(),2);assert.equal(session.messages.filter(value=>value.role==='assistant').at(-1).content.find(value=>value.type==='text').text,'progressive');assert.equal(session.sessionManager.getSessionFile(),undefined);}
+ try{await session.prompt('Synthetic tool task');assert.equal(toolRuns(),1,session.messages.filter(value=>value.role==='assistant').at(-1)?.errorMessage);assert.equal(s.sends(),2);assert.equal(s.requests[1].messages.find(message=>message.role==='assistant').content,'');assert.equal(session.messages.filter(value=>value.role==='assistant').at(-1).content.find(value=>value.type==='text').text,'progressive');assert.equal(session.sessionManager.getSessionFile(),undefined);}
  finally{session.dispose();}
 });
 await check('actual Pi SDK completes split identity/arguments and late identity through the real client decoder',async()=>{
