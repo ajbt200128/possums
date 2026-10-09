@@ -1501,3 +1501,18 @@ transfer and cache upload in the ordinary seed job. The final adjustment keeps
 ordinary CI seeding limited to its fixture and image outputs; `release-build-deps`
 is prewarmed only by the release workflow. Its hosted timing must be qualified
 without conflating it with the earlier all-roots trial.
+
+### Final ordinary-CI cache checkpoint
+
+Source `57f5762` passed all four jobs in
+[run 37976402800](https://github.com/ajbt200128/possums/actions/runs/37976402800).
+With previously populated cache entries, workflow creation-to-completion was
+**2m21s**: flake **59s**, gateway image **54s**, read-only startup **43s**, browser
+**1m15s**. The downstream jobs ran in parallel after the seed job. This qualifies
+the pinned container, fixture launch/IPC, output restoration and the final ordinary
+CI wiring on hosted Linux. Earlier uncached checks were typically around thirteen
+minutes; this is an observed warm-cache improvement, not a cold-build guarantee,
+a statistically controlled comparison or a Rust-source-edit benchmark. Initial
+seeding and outages/eviction can still be much slower. Release dependency roots
+remain release-only, and fresh two-runner reconstruction/publication is still
+unrun. No gateway deployment, inference or Honeycomb export was performed.
