@@ -194,13 +194,7 @@ impl ToolInvocation {
         let mut names = BTreeSet::new();
         for tool in self.tools() {
             let Tool::Function { function } = tool;
-            if !valid_name(&function.name)
-                || !names.insert(function.name.as_str())
-                || function
-                    .description
-                    .as_ref()
-                    .is_some_and(|d| d.len() > 16 * 1024)
-            {
+            if !valid_name(&function.name) || !names.insert(function.name.as_str()) {
                 return Err(invalid());
             }
         }
@@ -349,7 +343,7 @@ mod tests {
                 {"role":"assistant","content":null,"tool_calls":[{"id":"prior","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
                 {"role":"tool","content":"fixture result","tool_call_id":"prior"}
             ])).unwrap(),
-            Some(serde_json::from_value(json!([{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}])).unwrap()),
+            Some(serde_json::from_value(json!([{"type":"function","function":{"name":"lookup","description":"🐾".repeat(16 * 1024 + 1),"parameters":{"type":"object"}}}])).unwrap()),
             Some(serde_json::from_value(choice).unwrap()),
         ).unwrap()
     }
@@ -423,6 +417,10 @@ mod tests {
             for key in ["model", "messages", "tools", "tool_choice"] {
                 assert_eq!(token_value[key], generation_value[key]);
             }
+            assert_eq!(
+                token_value["tools"][0]["function"]["description"],
+                "🐾".repeat(16 * 1024 + 1)
+            );
             assert_eq!(token_value.as_object().unwrap().len(), 4);
             assert_eq!(generation_value["max_tokens"], 123);
             assert_eq!(generation_value["stream_options"]["include_usage"], true);
