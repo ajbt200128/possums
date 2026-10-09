@@ -7,6 +7,7 @@
 .pi/
 .devenv/
 .direnv/
+__pycache__/
 devenv.local.nix
 /examples/phase01/node_modules/
 /node_modules/

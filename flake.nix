@@ -49,7 +49,11 @@
           SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         };
         cargoArtifacts = craneLib.buildDepsOnly common;
-        gateway = craneLib.buildPackage (common // { inherit cargoArtifacts; });
+        # Tests have their own check; image builds should not compile/run them again.
+        gateway = craneLib.buildPackage (common // {
+          inherit cargoArtifacts;
+          doCheck = false;
+        });
         attestationHelper = buildGoModule {
           pname = "possums-attestation";
           version = "0.1.0";
@@ -83,6 +87,26 @@
             WorkingDir = "/tmp";
           };
         };
+        # Cache external inputs, never the application-specific image assembly.
+        imageStages = image: [
+          image
+          image.stream
+          image.stream.conf
+          image.stream.conf.layersJsonFile
+        ] ++ image.stream.conf.layersJsonFile.exclude_paths;
+        dependencyImage = gatewayImage.override {
+          name = "possums-dependency-probe";
+          contents = [ pkgs.cacert ];
+          config = { };
+        };
+        releaseBuildDeps = (pkgs.linkFarm "release-build-deps"
+          (pkgs.lib.imap0 (n: drv: {
+            name = toString n;
+            path = drv.inputDerivation;
+          }) ([ gateway attestationHelper ] ++ imageStages dependencyImage))).overrideAttrs (_: {
+            passthru.rebuildDerivations = map (drv: drv.drvPath)
+              ([ gateway attestationHelper gatewayEntrypoint ] ++ imageStages gatewayImage);
+          });
         smokeImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway-smoke";
           tag = "phase0";
@@ -95,9 +119,14 @@
           };
         };
       in {
-        packages = { default = gateway; attestation-helper = attestationHelper; } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        packages = {
+          default = gateway;
+          attestation-helper = attestationHelper;
+          browser-fixture = browserFixture;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;
           gateway-smoke-image = smokeImage;
+          release-build-deps = releaseBuildDeps;
         };
         checks = {
           inherit gateway;
