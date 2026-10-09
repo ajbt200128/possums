@@ -22,11 +22,8 @@ use axum::{
     Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use serde::{
-    de::{DeserializeOwned, SeqAccess, Visitor},
-    Deserialize, Serialize,
-};
-use std::{fmt, sync::Arc, time::Duration};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{sync::Arc, time::Duration};
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
@@ -437,9 +434,8 @@ struct ChatRequest {
     submission: String,
     stream_options: Option<StreamOptions>,
     n: Option<u8>,
-    #[serde(deserialize_with = "chat_messages")]
     messages: Vec<ToolMessage>,
-    #[serde(default, deserialize_with = "crate::inference::tools::bounded_list")]
+    #[serde(default, deserialize_with = "present")]
     tools: Option<Vec<Tool>>,
     #[serde(default, deserialize_with = "present")]
     tool_choice: Option<ToolChoice>,
@@ -456,29 +452,6 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     decoder: D,
 ) -> Result<Option<T>, D::Error> {
     T::deserialize(decoder).map(Some)
-}
-
-fn chat_messages<'de, D: serde::Deserializer<'de>>(
-    decoder: D,
-) -> Result<Vec<ToolMessage>, D::Error> {
-    struct Messages;
-    impl<'de> Visitor<'de> for Messages {
-        type Value = Vec<ToolMessage>;
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("bounded text messages")
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
-            let mut messages = Vec::new();
-            while let Some(message) = sequence.next_element()? {
-                if messages.len() == 4096 {
-                    return Err(serde::de::Error::custom("message limit"));
-                }
-                messages.push(message);
-            }
-            Ok(messages)
-        }
-    }
-    decoder.deserialize_seq(Messages)
 }
 
 async fn chat(

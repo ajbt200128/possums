@@ -638,6 +638,42 @@ await check('tool-only parallel history uses empty text without altering calls o
  assistant.content=[{type:'text',text:'Synthetic preamble'},...calls];
  const withText=m.snapshotInvocation(m.invocation(s.selected,transcript));assert.equal(withText.messages[1].content,'Synthetic preamble');
 });
+await check('actual pinned Pi SDK continues beyond 64 historical calls',async()=>{
+ const {session,s,toolRuns}=await sdkSetup('sdk-long-history',[...Array(66).fill('tool_calls'),'stop'],true);
+ const chat=s.client.chat;
+ s.client.chat=async(model,messages,onDelta,newConversation,options)=>{
+  m.snapshotInvocation({model,stream:true,messages,tools:options.tools});
+  const id='prior_'+s.sends();
+  return chat(model,messages,onDelta,newConversation,{...options,onEvent:async value=>{
+   const copy=structuredClone(value);
+   for(const choice of copy.choices??[])for(const call of choice.delta?.tool_calls??[])if(call.id)call.id=id;
+   await options.onEvent(copy);
+  }});
+ };
+ try{await session.prompt('Synthetic long tool task');assert.equal(toolRuns(),66);assert.equal(s.sends(),67);
+  assert.equal(s.requests.at(-1).messages.filter(message=>message.role==='tool').length,66);
+  assert.equal(session.messages.filter(message=>message.role==='assistant').at(-1).stopReason,'stop');}
+ finally{session.dispose();}
+});
+await check('large synthetic Pi history and tool catalog use whole-request bounds',async()=>{
+ const s=await setup([]);
+ const calls=Array.from({length:66},(_,i)=>({type:'toolCall',id:'prior_'+i,name:'echo',arguments:{value:'a'.repeat(65*1024)}}));
+ const assistant={role:'assistant',provider:'possums',api:'openai-completions',model:s.selected.id,timestamp:2,stopReason:'toolUse',content:calls,
+  usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+ const results=calls.map(call=>({role:'toolResult',toolCallId:call.id,toolName:'echo',content:[{type:'text',text:'Synthetic'}],timestamp:3}));
+ const tools=Array.from({length:65},(_,i)=>({...tool,name:i===0?'echo':'tool_'+i}));
+ const transcript=ai.normalizeContext({messages:[user,assistant,...results,...Array.from({length:4097},()=>structuredClone(user))],tools});
+ const invocation=m.invocation(s.selected,transcript);
+ assert.equal(invocation.messages.length,4165);
+ // Request admission accepts this history; the full snapshot's existing
+ // 32,768-node lexical parser bound still rejects its larger wire structure.
+ assert.throws(()=>m.snapshotInvocation(invocation));
+ const payload=m.snapshotInvocation({...invocation,messages:Array.from(invocation.messages).slice(0,68)});
+ assert.equal(payload.messages.length,68);assert.equal(payload.tools.length,65);
+ assert.equal(payload.messages[1].tool_calls.length,66);
+ assert.equal(JSON.parse(payload.messages[1].tool_calls[0].function.arguments).value.length,65*1024);
+ assert(Object.isFrozen(payload.messages[1].tool_calls[0]));
+});
 await check('nested tool schema survives Pi conversion and the complete request snapshot',async()=>{
  let parameters={type:'object',properties:{value:{type:'string',enum:['synthetic']}}};
  for(let i=0;i<6;i++)parameters={type:'object',properties:{nested:parameters}};

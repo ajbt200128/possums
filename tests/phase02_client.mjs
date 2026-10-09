@@ -31,7 +31,7 @@ assert.deepEqual(encoded({...chat,tools:[nestedTool]}).tools[0].function.paramet
 check(encoded({ ...chat, messages: batch }).messages.length === 3);
 check(encoded({ ...chat, messages: [...batch, { role: 'user', content: 'next' }] }).messages.length === 4);
 for (const mutate of [
-  c => { c.tools = []; }, c => { c.tools = [tool, tool]; }, c => { c.tools = Array(65).fill(tool); },
+  c => { c.tools = []; }, c => { c.tools = [tool, tool]; },
   c => { c.tools[0].function.name = 'n'.repeat(65); }, c => { c.tools[0].function.name = 'bad name'; },
   c => { c.tools[0].function.parameters.type = 'array'; }, c => { c.tools[0].function.parameters.$ref = 'https://invalid.example/schema'; },
   c => { c.tools[0].function.parameters.$ref = 'relative.json#/x'; }, c => { c.tools[0].function.parameters.$id = 'https://invalid.example/schema'; },
@@ -54,11 +54,16 @@ const fullArgs = '{"x":"' + 'a'.repeat(m.LIMITS.toolArguments - 8) + '"}';
 check(enc.encode(fullArgs).length === m.LIMITS.toolArguments);
 const history = calls => [{ role: 'assistant', content: null, tool_calls: calls }, ...calls.map(c => ({ role: 'tool', tool_call_id: c.id, content: '' }))];
 check(encoded({ ...chat, messages: history([call('a', 'lookup', fullArgs)]) }).messages.length === 2);
-bad(() => encoded({ ...chat, messages: history([call('a', 'lookup', fullArgs + ' ')]) }));
+check(encoded({ ...chat, messages: history([call('a', 'lookup', fullArgs + ' ')]) }).messages.length === 2);
 check(encoded({ ...chat, messages: history(Array.from({ length: 4 }, (_, i) => call('c' + i, 'lookup', fullArgs))) }).messages.length === 5);
-bad(() => encoded({ ...chat, messages: history(Array.from({ length: 5 }, (_, i) => call('c' + i, 'lookup', fullArgs))) }));
+check(encoded({ ...chat, messages: history(Array.from({ length: 5 }, (_, i) => call('c' + i, 'lookup', fullArgs))) }).messages.length === 6);
 check(encoded({ ...chat, messages: history(Array.from({ length: 64 }, (_, i) => call('c' + i))) }).messages.length === 65);
-bad(() => encoded({ ...chat, messages: history(Array.from({ length: 65 }, (_, i) => call('c' + i))) }));
+check(encoded({ ...chat, messages: history(Array.from({ length: 66 }, (_, i) => call('c' + i))) }).messages.length === 67);
+const sequentialHistory = Array.from({ length: 66 }, (_, i) => history([call('s' + i)])).flat();
+check(encoded({ ...chat, messages: sequentialHistory }).messages.length === 132);
+check(encoded({ ...chat, messages: Array.from({ length: 4097 }, () => ({ role: 'user', content: 'Synthetic' })) }).messages.length === 4097);
+check(encoded({ ...chat, tools: Array.from({ length: 65 }, (_, i) => ({ ...tool, function: { ...tool.function, name: 'tool_' + i } })) }).tools.length === 65);
+bad(() => encoded({ ...chat, messages: history([call('large', 'lookup', JSON.stringify({ x: 'a'.repeat(m.LIMITS.chat) }))]) }));
 let getters = 0;
 for (const value of [
   { ...chat, tools: [Object.defineProperty({ ...tool }, 'function', { get() { getters++; return tool.function; } })] },

@@ -515,7 +515,8 @@ async fn reject_buffered_mode_tools_malformed_history_oversize_and_old_restart_a
         json!({"model":"m","stream":true,"submission":submission,"messages":[{"role":"assistant","content":"synthetic"}]}),
         json!({"model":"m","stream":true,"submission":submission,"messages":[{"role":"user","content":"synthetic","tool_calls":[]}]}),
         json!({"model":"m","stream":true,"submission":submission,"messages":[{"role":"user","content":"synthetic"}],"tools":[]}),
-        json!({"model":"m","stream":true,"submission":submission,"messages":vec![json!({"role":"user","content":"synthetic"});4097]}),
+        json!({"model":"m","stream":true,"submission":submission,"messages":null}),
+        json!({"model":"m","stream":true,"submission":submission,"messages":[{"role":"user","content":"synthetic"}],"tools":null}),
     ] {
         let response = router(state.clone())
             .oneshot(json_request(&bearer, input))
@@ -582,6 +583,39 @@ async fn long_tool_descriptions_reach_tokenization_and_generation_unchanged() {
         assert!(bytes.ends_with(b"data: [DONE]\n\n"));
         terminal(&state, 5_000_000 - 7).await;
     }
+}
+
+#[tokio::test]
+async fn large_synthetic_history_and_catalog_reach_upstream_within_body_bound() {
+    let (state, provider, bearer, submission) = fixture(5_000_000);
+    provider.qualified.store(true, Ordering::SeqCst);
+    let mut input = structured_input(&submission);
+    let calls: Vec<_> = (0..66).map(|i| json!({"id":format!("prior_{i}"),"type":"function","function":{"name":"lookup","arguments":serde_json::to_string(&json!({"x":"a".repeat(65 * 1024)})).unwrap()}})).collect();
+    let mut messages = vec![json!({"role":"assistant","content":null,"tool_calls":calls})];
+    messages.extend(
+        (0..66).map(
+            |i| json!({"role":"tool","tool_call_id":format!("prior_{i}"),"content":"synthetic"}),
+        ),
+    );
+    messages.extend((0..4097).map(|_| json!({"role":"user","content":"synthetic"})));
+    input["messages"] = json!(messages);
+    input["tools"] = json!((0..65).map(|i| json!({"type":"function","function":{"name":format!("tool_{i}"),"parameters":{"type":"object"}}})).collect::<Vec<_>>());
+    assert!(serde_json::to_vec(&input).unwrap().len() < BODY_LIMIT);
+    let response = router(state.clone())
+        .oneshot(json_request(&bearer, input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    wait(&provider.started).await;
+    {
+        let observed = provider.invocation.lock().unwrap();
+        assert_eq!(observed.as_ref().unwrap()["messages"], input["messages"]);
+        assert_eq!(observed.as_ref().unwrap()["tools"], input["tools"]);
+    }
+    provider.finish.notify_one();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(bytes.ends_with(b"data: [DONE]\n\n"));
+    terminal(&state, 5_000_000 - 7).await;
 }
 
 #[tokio::test]
