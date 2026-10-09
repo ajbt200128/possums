@@ -1369,3 +1369,67 @@ The small correction polls/samples on the existing tick while racing the same pi
 The new loopback-only TLS regression withholds the peer response and checks two actual sender-driven midpoint polls while the same I/O remains alive. Five infrastructure intervals are fixture-seeded; the sender must supply the missing configured-capacity interval while that send waits. An intentional synthetic clock jump misses occupancy periods and still invalidates the request window. Stop then proves zero live I/O, one connection and no further window/retry. This is focused interaction evidence, not a new full production-minute or cadence guarantee. Reverting only the runtime correction makes the test fail at its first bounded polling wait; restoring it passes. All six runtime unit tests passed together, the regression passed 30 additional runs, full `devenv test` passed formatting/strict Clippy/Rust/Go (funded tests remain opt-in), and active LSP probes of both changed Rust paths reported zero diagnostics. The existing vendored dead-code warning is unchanged. Independent read-only fix review found no concrete defect, privacy regression or cancellation/ownership issue.
 
 Policy: [complete-window/missing semantics](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [permitted/forbidden exports](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [shutdown/processor boundaries](../PRIVACY.md#processors-retention-access-and-shutdown), [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change). The full local privacy/export suites remain green; no production credentials or inference are used by this loopback regression. Exact-head CI, image reproduction, signed publication, explicit rollout and fresh live ingestion are still required. No privacy threshold was relaxed and no retrospective deployment fix is claimed.
+
+## 2026-10-09 — CI/release build acceleration candidate
+
+**Build-system candidate, not a gateway deployment or measured CI speedup.** The
+operator approved Magic Nix Cache for CI, no Cachix, with CI/releases prioritized
+and native Mac incremental builds retained. [Build documentation](ci-builds.md)
+records cache provenance, the explicit dependency-only release boundary, matching
+Playwright image pin and local compiler/host target namespace.
+
+Policy reviewed: [data handling boundaries](../PRIVACY.md#data-handling-boundaries),
+[permitted/forbidden telemetry](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data),
+[synthetic testing](../PRIVACY.md#synthetic-testing-exception) and
+[required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).
+Installer/cache diagnostic endpoints are explicitly disabled and FlakeHub is
+explicitly disabled. GitHub cache contains build outputs, not a new runtime-data
+or support-artifact export path. No cache-write secret or OIDC permission is
+introduced; ordinary checks do not persist checkout credentials. This is
+configuration/source evidence, not on-wire diagnostic qualification or a claim
+of no platform telemetry. No production credential read, inference, Honeycomb
+query/export, image publication or deployment occurred in this local packet.
+
+Local aarch64-darwin qualification:
+
+- Full `nix flake check --print-build-logs`: **PASS**, including formatting,
+  strict Clippy, Go helper and **380 Rust tests passed, zero failed, three funded
+  tests ignored**. The unchanged suite still runs in `checks.tests`; package
+  construction no longer runs it a second time. Final-source rerun reused these
+  checked derivations. The four privacy integration tests remain included.
+- `python3 -m unittest discover -s tests -p 'test_release_cache.py'`: **11 passed**.
+  Negative cases reject cached application graph inclusion, locally realized
+  gateway/helper outputs, missing selected dependency outputs, unclassified image
+  stages, dynamic/unresolved outputs and hostile parser/process diagnostics.
+- `node --test tests/browser_support_test.mjs`: **three passed**. Direct executable
+  launch preserves progressive IPC, hostile startup text is rejected with a
+  closed category, and launch failure cannot silently fall back to Cargo. An
+  initial hostile-startup test exposed repeated termination during failure
+  cleanup; idempotent termination corrected it without relaxing the kill deadline.
+- Native Nix `browser-fixture` build plus full prebuilt-browser acceptance:
+  **PASS**. `devenv shell possums-test-browser` also passed the default Cargo path.
+  Tests use only the existing synthetic loopback fixture, not production traffic.
+  The shell's default aarch64-apple-darwin/1.88.0 target namespace was observed.
+- `actionlint` for both modified workflows, JavaScript syntax checks, active LSP
+  probes on all eight changed Nix/YAML/Python/JavaScript paths and
+  `git diff --check`: **PASS**, no active errors/warnings.
+
+An independent lead inspected the pinned nixpkgs/Crane implementation and
+recommended supported `inputDerivation` roots instead of custom graph rewriting.
+Actual x86_64-linux graph evaluation confirms **nine fresh application/image
+stages and 31 external selected dependency outputs**. Parent integration caught
+Nix v4's omitted fixed-output Go-module path; the resolver now uses its retained
+environment binding and has two focused regressions. Integration of the actual
+graphs with **simulated store realization** passed; this is not evidence of a
+real Linux prewarm or fresh image build. Independent read-only review and its
+follow-up found no concrete defect; the follow-up reran all 11 Python tests and
+explicitly retained the hosted-Linux qualification gap.
+
+`nix flake check --all-systems --no-build` remains **FAIL** for x86_64-darwin:
+the existing pinned unstable nixpkgs has dropped that platform. A clean
+`git archive` of the pre-change HEAD reproduced the same helper-evaluation
+failure. Platform pins/support are unchanged; this is an inherited limitation,
+not an all-systems pass. Hosted Linux cache hits, the pinned container invocation,
+actual dependency prewarming/fresh release reconstruction and cold/warm/source-edit
+CI timings remain **UNVERIFIED** until new CI/release evidence is added. Do not
+promote local Mac timings or disabled-diagnostics intent into those claims.
