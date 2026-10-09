@@ -975,6 +975,53 @@ Secret-safe local inspection confirmed configured `OTEL_EXPORTER_OTLP_ENDPOINT`,
 
 Read-only Honeycomb `get_workspace_context` reports `dev`, `prod` and `fun`, each with zero datasets, and no telemetry ingested. Use the operator-provided `dev` configuration; do not infer that the workload is development/synthetic or switch to `prod` merely because it exists. No dataset/event query, ingest, resource creation, paid inference or deployment occurred in this policy/configuration check. Exact account retention/deletion/backups, credentials' scope and environment binding remain unverified; default-retention acceptance is explicit, not a claim those checks passed. Existing local privacy-test evidence above remains unchanged; document-link and whitespace checks cover this documentation-only update. Runtime/Collector, real-traffic release review and scoped deployment verification remain work to complete before applicable export.
 
+## 2026-10-08 — local devenv development shell
+
+Added a native devenv CLI environment and optional direnv activation; usage is in
+[`development.md`](development.md). Existing build flake, lockfile, CI, gateway
+and deployment configuration are unchanged. All three shared input revisions
+and hashes match `flake.lock`. Rust uses its stable package set, Go/Node the
+existing unstable set; observed versions are Rust 1.88.0, Go 1.27.1 and Node
+24.20.0 with devenv 2.0.4 on aarch64-darwin.
+
+Policy references: [data handling](../PRIVACY.md#data-handling-boundaries),
+[forbidden telemetry](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data)
+and [synthetic testing](../PRIVACY.md#synthetic-testing-exception). Evaluated
+configuration confirms dotenv and automatic npm installation disabled, with no
+managed processes. Shell-entry presence checks confirmed no Tinfoil/account
+credentials were loaded; no values or `.env` contents were inspected. No new
+exporter, tracing, support upload or production process is configured.
+
+Final `devenv test` passed formatting, strict Clippy, locked Rust tests and Go
+helper tests. A subsequent `possums-test` run passed **344 Rust tests, three
+funded tests ignored**, plus Go tests. `possums-test-browser` passed with existing
+local Chromium/dependencies. The privacy integration suite's four tests are
+included in the Rust pass; these are local regressions, not deployment evidence.
+`bash -n .envrc`, Nix parsing, shared-input equality and `git diff --check` passed.
+Active LSP probes found no Nix/YAML diagnostics; `.envrc` has no configured LSP.
+
+An initial all-unstable shell configuration failed twice in the existing
+`co_closing_sequential_handoff_and_upload_cancel` synthetic qualification test;
+its isolated invocation passed in both shells, and the unchanged old shell's
+full library suite passed. The final stable/unstable split above then passed
+both complete runs without skipping tests or modifying Rust. The initial
+failure's root cause was not established. Linux, fresh browser dependency
+installation, interactive direnv approval, images and live/provider/privacy
+properties were not verified by this local environment task.
+
+**2026-10-09 completion against v0.0.15:** the unfinished shell's Go 1.27.1
+no longer met the updated helper module's Go 1.27.2 minimum. `devenv.nix` now
+uses exactly the release flake's existing Go source/version override, without
+changing the build flake, its lockfile or deployment. Shell `gopls` provisioning
+is disabled: its rebuilt optional package failed its version-check phase
+because an existing `/tmp/gopls` directory belonged to another Nix build user;
+editor language servers remain separately managed. No test assertion or helper
+minimum was weakened. Actual `go version` reports **1.27.2 darwin/arm64**.
+Fresh `devenv test` passed formatting, strict Clippy, the complete locked Rust
+suite (funded tests remain ignored) and Go helper tests. Shared-input revision/
+hash equality, `bash -n .envrc` and `git diff --check` passed. The earlier browser
+pass remains historical; no live inference or exporter was started.
+
 ## 2026-10-08 — compiled direct telemetry runtime, release still closed
 
 Baseline `3899b26`; separate policy commit `6b08a78` implements the operator's no-Collector/configured-default-on decision. Applied [local release/allowlisting](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [forbidden fields](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [processor/shutdown](../PRIVACY.md#processors-retention-access-and-shutdown) and [evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change). This is **safe local runtime implementation, not operational telemetry or rollout acceptance**. No provider query, Honeycomb send, real secret inspection, funded inference, secret upload, image build or deployment occurred.
@@ -1217,3 +1264,25 @@ The API-only Pi update preserves independent WEB approval, pinned verifier depen
 Extension SHA-256 **`a0acbfbfc9c6c64981693d105bc1d0cd8bbfa4ceb5b01090915705c710239234`**, paired with the v15 manifest, was installed by atomic symlink replacement at the existing configured package path. The preceding v14 directory is retained; settings, credentials and Pi runtime are untouched. Actual candidate and installed paths passed public GET-only legacy-v2 bootstrap under `env -i`, stopping before credentials; actual installed offline status showed v15 and unchanged October 11 expiry with zero network. Fully quit/restart Pi to load this pair. These calls sent no login, authenticated catalog, inference or compaction and establish no billing outcome.
 
 The operator subsequently reported that the paired update is working. This is user-reported functional confirmation; the specific catalog/chat/tool/compaction interaction and authenticated billing receipts were not independently inspected. Original-request billing, exact live settlement, per-model compatibility, request-family telemetry, broader runtime privacy, legacy-v2 freshness and the intermittent historical Linux helper-test failure remain unverified. No assistant-generated paid/filler inference, Honeycomb query/dashboard, credential inspection, privacy-threshold change or retrospective qualification occurred during this rollout.
+
+## 2026-10-09 — v0.0.15 telemetry continuation: request metrics unavailable
+
+Policy: [reviewed release scope](../PRIVACY.md#reviewed-mvp-release-scope), [missing-data and linked suppression semantics](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [processor and retention limits](../PRIVACY.md#processors-retention-access-and-shutdown), and [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).
+
+PR [#32](https://github.com/ajbt200128/possums/pull/32) merged as `68e8d16c35a748571b51a0526d360c60211a7c85` after exact-head runs **37893464250** and **37893459809** passed all eight jobs on their first attempts. The complete diff was inspected; merge required the reviewed head `2d7e8c98431c4da7ffec37c48cc9a297db6aa2d3`. This completed the paired-client approval/documentation PR, not a new gateway deployment.
+
+Post-merge read-only `get_dataset_columns` inspection of **`prod/metrics`** confirmed native metrics semantics and all four schema entries: Honeycomb `meta.signal_type` plus the gauge metrics `possums.resource.cpu.used`, `possums.resource.memory.used` and `possums.admission.capacity`, each last written at **2026-10-09T06:30:00Z**. No HTTP, generation, delivery, admission-rejection or occupancy metric, including the deployed latency/occupancy `.bucket` encoding, was listed. Earlier CPU/RSS and six-capacity value verification remains scoped historical evidence; this schema inspection does not independently reverify their values, cadence or source accuracy.
+
+Request metrics and their traffic/error/latency/saturation queries therefore remain **unverified/unavailable**, not zero or healthy. Schema absence alone cannot distinguish sparse-family suppression, lost/incomplete windows, collection or export failure. No query against nonexistent request columns was fabricated. No paid/filler traffic, threshold change, credential inspection, raw-row download, metric-value archive, runtime change, board or alert was performed. Dashboard work remains deferred until request queries are verified and the operator approves it. Existing local privacy/wire-test evidence remains unchanged; this documentation-only continuation does not establish new runtime/privacy, retention, access, billing or native CLI v3 evidence.
+
+## 2026-10-09 — local production-mode router-to-wire request qualification
+
+Policy: [reviewed release scope](../PRIVACY.md#reviewed-mvp-release-scope), [linked suppression and unavailable-data semantics](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [synthetic testing](../PRIVACY.md#synthetic-testing-exception), and [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).
+
+A fresh read-only `prod/metrics` metadata/schema inspection still listed only process CPU/RSS, configured capacity and Honeycomb signal metadata. Source inspection confirmed that `main.rs` attaches the configured production aggregator to `AppState`, router/owner hooks update it, and the sender polls occupancy and hands eligible request windows to the same bounded allowlisted exporter used for infrastructure. Complete five-minute windows require all 300 occupancy polls; any sparse populated cell/bin/complement or invalid/lost observation withholds the entire request family. Infrastructure release is independent. No concrete production-path defect or live suppression/failure cause was established; these facts do not prove why the backend lacks request metrics.
+
+Added `telemetry::lifecycle_tests::production_router_window_reaches_local_tls_only_when_releasable`: real router `/claims` lifetimes and control leases, `Deployment::Production`, normal warmup from second 125, all fixed-window sampling polls, and the existing owned materialization/export path to a loopback-only authenticated TLS fixture. Nine routed lifetimes yield no send permit; ten yield HTTP starts/completions/duration buckets and control-occupancy buckets. Decoded OTLP checks exact metric names, integer totals, five-minute boundary timestamps and absence of query/account/transport-key sentinels; a consumed window cannot be claimed again. No inference or external destination is used. The initial fixture incorrectly jumped over warmup and was correctly invalidated; advancing every poll fixed the fixture, without bypassing or weakening a runtime gate.
+
+This is **local HTTP/control router-to-wire evidence**, not a whole-listener, generation/delivery, automatic sender-scheduling or live Honeycomb round trip. The fake-clock control lifetimes are instantaneous, producing genuinely fixture-zero duration bins and idle sampled occupancy with ten distinct permit lifetimes; they do not represent production latency, users or anonymity. Existing generation/delivery ownership, production sparse/complement and TLS sender tests remain separately scoped evidence. No runtime code, privacy threshold, production traffic, deployed configuration, dashboard or alert changed.
+
+Fresh `devenv test` passed formatting, strict all-target/all-feature Clippy, the complete locked Rust suite with funded tests ignored, and Go helper tests; the new focused test passed. Before this addition, all **81** telemetry unit tests plus **four** privacy and **three** ordinary-library runtime tests also passed. Active LSP probes of the touched Rust/Nix/YAML paths found only one pre-existing informational Rust let-chain suggestion on unchanged code; no errors/warnings. `git diff --check` passed. The development-shell completion is committed separately. Independent read-only review found no concrete defect or unintended production/secret path; its attempted standalone test rerun lacked `cargo`, so executed-test evidence remains the parent’s devenv runs. Request metrics/queries in Honeycomb remain **unverified/unavailable** and the dashboard remains deferred until those queries are verified and the operator approves it.

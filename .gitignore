@@ -5,6 +5,9 @@
 .env.*
 !.env.example
 .pi/
+.devenv/
+.direnv/
+devenv.local.nix
 /examples/phase01/node_modules/
 /node_modules/
 /vendor/tinfoil/target/
