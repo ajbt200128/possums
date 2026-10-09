@@ -34,7 +34,10 @@ nixpkgs' supported `inputDerivation` to retain gateway/helper build inputs,
 including Cargo artifacts, the custom Go compiler and Go modules. An
 application-free dependency image supplies input roots for each image assembly
 stage, including build-only tools that an already-substituted wrapper could
-otherwise omit.
+otherwise omit. The pinned nixpkgs 25.05 input wrapper emits null structured
+output checks that Nix 2.34 rejects. We recreate that input-only derivation from
+its original `drvAttrs` with `outputChecks` removed. Actual application/image
+output constraints are unchanged; this is not a relaxation of release checks.
 
 `scripts/check-release-cache.py` compares the image and prewarm derivation graphs
 against the flake's explicit `rebuildDerivations` list. It rejects:

@@ -1475,3 +1475,15 @@ dependency roots in the flake job's existing store, before downstream consumers.
 This reuses already-built inputs and avoids duplicate cold fixture/dependency
 builds across runners. Its final hosted outcome must be recorded separately;
 the earlier partial-cache timing is not promoted to its verified performance.
+
+Hosted run `37972585657` at `dc12314` failed the newly exercised dependency-root
+seed before downstream jobs: pinned nixpkgs 25.05's structured input-only wrapper
+emitted `outputChecks.out.allowedReferences=null`, which Nix 2.34 rejects while
+parsing that derivation. The correction recreates only input wrappers from their
+original `drvAttrs` with `outputChecks` removed, retaining the library's input
+retention behavior. Actual image/application checks and rebuild identities are
+unchanged. `nix build .#packages.x86_64-linux.release-build-deps --dry-run` now
+passes; re-evaluated actual graphs still classify nine fresh stages and 31 selected
+external outputs, with simulated validity. All 11 Python guard tests, actionlint
+and diff checks pass. This correction still requires hosted execution; the failed
+seed is not claimed as release-prewarm or performance acceptance.
