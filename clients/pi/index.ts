@@ -4,7 +4,7 @@ import { open, type FileHandle } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { LIMITS } from '../../examples/phase01/limits.js';
-import { connect } from './bootstrap.js';
+import { connect, connectPublished } from './bootstrap.js';
 import { ConnectionFailure, approvalSummary } from './diagnostics.js';
 import { PossumsProvider, PROVIDER_ID } from './provider.js';
 
@@ -40,9 +40,12 @@ export default function possums(pi: ExtensionAPI): void {
   let ui: ExtensionContext['ui'] | undefined;
   let lastFailure: ConnectionFailure | undefined;
   const notifiedCodes = new Set<ConnectionFailure['code']>();
-  const provider = new PossumsProvider(async signal => connect(await manifest(
-    pi.getFlag('possums-manifest') ?? fileURLToPath(new URL('./tinfoil-deployment.json', import.meta.url)),
-  ), signal), failure => {
+  const provider = new PossumsProvider(async signal => {
+    const pinnedManifest = pi.getFlag('possums-manifest');
+    return pinnedManifest === undefined
+      ? connectPublished(signal)
+      : connect(await manifest(pinnedManifest), signal);
+  }, failure => {
     lastFailure = failure;
     if (!failure) { notifiedCodes.clear(); return; }
     if (!ui || notifiedCodes.has(failure.code)) return;
@@ -53,14 +56,16 @@ export default function possums(pi: ExtensionAPI): void {
   pi.on('session_start', async (_event, ctx) => {
     ui = ctx.hasUI ? ctx.ui : undefined;
     provider.newSession();
+    try { await provider.verifySession(); }
+    catch { return; } // Already reported as a closed, transient connection diagnostic.
     await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], allowNetwork: true });
   });
-  pi.on('session_shutdown', () => { ui = undefined; provider.logout(); });
+  pi.on('session_shutdown', () => { ui = undefined; provider.shutdown(); });
   pi.registerCommand('possums-status', {
-    description: 'Show the last safe connection failure or compiled approval status (offline)',
+    description: 'Show the last safe connection failure or session-pinned release (offline)',
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return;
-      try { ctx.ui.notify(lastFailure?.message ?? approvalSummary(), lastFailure ? 'warning' : 'info'); }
+      try { ctx.ui.notify(lastFailure?.message ?? approvalSummary(provider.release), lastFailure ? 'warning' : 'info'); }
       catch { /* Transient UI only. */ }
     },
   });

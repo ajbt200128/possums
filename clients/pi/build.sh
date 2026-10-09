@@ -13,7 +13,7 @@ S=$(mktemp -d "${TMPDIR:-/tmp}/possums-pi-build-XXXXXX")
 mkdir -p "$S/source/clients/pi" "$S/source/examples/phase01" "$S/home" "$S/tmp" "$S/cache" "$S/checks/source"
 cp "$SOURCE"/*.ts "$SOURCE"/*.mjs "$SOURCE"/*.json "$S/source/clients/pi/"
 cp "$REPO/examples/phase01"/*.ts "$S/source/examples/phase01/"
-for TEST in phase01_client phase01_transport phase02_client phase02_pi; do
+for TEST in phase01_client phase01_transport phase02_client phase02_pi phase02_release; do
   cp "$REPO/tests/$TEST.mjs" "$S/checks/source/"
 done
 : > "$S/user.npmrc"
@@ -32,4 +32,4 @@ env -i HOME="$S/home" TMPDIR="$S/tmp" PATH="$(dirname "$NODE"):/usr/bin:/bin" PH
 # build.mjs already links the runtime peers into the scratch package.
 printf '\nBuilt package: %s\n' "$S/package"
 printf 'Local checks: POSSUMS_PI_ROOT=%s %s %s/source/clients/pi/check.mjs\n' "$PI_ROOT" "$NODE" "$S"
-printf 'Load with pinned Pi: pi --no-session --no-extensions --no-tools -e %s/extension.mjs --possums-manifest /absolute/path/to/approved/tinfoil-deployment.json\n' "$S/package"
+printf 'Load with pinned Pi: pi --no-session --no-extensions --no-tools -e %s/extension.mjs\n' "$S/package"

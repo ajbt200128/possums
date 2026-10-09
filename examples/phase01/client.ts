@@ -307,6 +307,11 @@ export class ReferenceClient {
   static async verified(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array): Promise<ReferenceClient> {
     return new ReferenceClient(await Channel.api(bundle, manifest, keyConfig));
   }
+  static async published(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal): Promise<ReferenceClient> {
+    return new ReferenceClient(await Channel.published(bundle, manifest, keyConfig, signal));
+  }
+  get release() { return this.channel.release; }
+  freshSession(): ReferenceClient { return new ReferenceClient(this.channel); }
   async login(credential: string, signal?: AbortSignal): Promise<void> {
     this.#bearer = undefined;
     const op = new Operation(LIMITS.operationMs, signal);

@@ -8,7 +8,12 @@ const file = process.env.PHASE02_TEST_BUILD;
 const root = process.env.PHASE02_SCRATCH;
 const piRoot = process.env.POSSUMS_PI_ROOT;
 assert(file && root && piRoot, 'explicit scratch bundle, scratch state and pinned Pi paths required');
-const m = await import(pathToFileURL(file).href);
+const bundle = await import(pathToFileURL(file).href);
+// Direct provider unit fixtures model an already started trust session. The
+// extension/native lifecycle fixtures below use the real startup handler.
+const m = { ...bundle, PossumsProvider: class extends bundle.PossumsProvider {
+ constructor(...args) { super(...args); this.newSession(); }
+} };
 const ai = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-ai/dist/index.js')).href);
 const coding = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js')).href);
 const { prepareCompaction } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js')).href);
@@ -16,7 +21,6 @@ const { AuthStorage: NativeAuthStorage } = await import(pathToFileURL(path.join(
 fs.mkdirSync(root, { recursive: true });
 const passed = [];
 async function check(name, body) { await body(); passed.push(name); console.log('PASS '+name); }
-const origin = 'https://possum-phase0.possums.containers.tinfoil.dev';
 const entry = tools => ({ object: 'model', id: 'synthetic', context_tokens: '20', max_output_tokens: '20',
   input_microunits_per_million_tokens: '1000000', output_microunits_per_million_tokens: '1000000', maximum_reservation_microunits: '52',
   ...(tools ? { tool_protocol: 'openai-functions-v1' } : {}) });
@@ -40,6 +44,11 @@ async function terminalGatewayError(code, detail, billing) {
  } });
  try { await m.consumeCompletion(body,'synthetic',()=>{}); assert.fail('expected gateway error'); }
  catch (error) { assert(error instanceof m.GatewayError); return error; }
+}
+function freshFixture(candidate) {
+ const fresh=new m.ReferenceClient(candidate.channel);
+ for(const name of ['login','models','chat'])if(Object.hasOwn(candidate,name))fresh[name]=(...args)=>candidate[name](...args);
+ return fresh;
 }
 async function setup(plan, tools = true) {
   const key = new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
@@ -89,6 +98,7 @@ async function setup(plan, tools = true) {
     if (mode === 'abort') await new Promise((_resolve,reject)=>{ options.signal.addEventListener('abort',()=>{abortSeen=true;reject(new m.ChannelError('uncertain'));},{once:true}); });
     return receipt(['tool_calls','late_tools','held_tools'].includes(mode) ? 'tool_calls' : ['tool_length','length_partial','length'].includes(mode) ? 'length' : 'stop');
   };
+  client.freshSession=()=>freshFixture(client);
   const provider = new m.PossumsProvider(async()=>client);
   const credential = await provider.auth.apiKey.login({signal:new AbortController().signal,prompt:async()=> 'synthetic_not_a_usable_credential'});
   const selected = provider.getModels()[0];
@@ -114,6 +124,7 @@ async function authFixture(plan = []) {
   candidate.chat=(model,messages,onDelta,newConversation,options)=>{
    trace.conversations.push(newConversation);return s.client.chat(model,messages,onDelta,newConversation,options);
   };
+  candidate.freshSession=()=>freshFixture(candidate);
   return candidate;
  };
  return {s,trace,establish};
@@ -131,7 +142,7 @@ await check('native AuthStorage persists recovery key; cold extension start rest
  const provider=new m.PossumsProvider(fixture.establish);
  const modelsStore=new ai.InMemoryModelsStore();
  const runtime=await nativeRuntime(provider,storage,modelsStore);
- assert.equal(await runtime.checkAuth('possums'),undefined);assert.equal(fixture.trace.establish,0);
+ assert.equal(await runtime.checkAuth('possums'),undefined);assert.equal(fixture.trace.establish,1,'public trust starts at session startup, not auth checks');
  const credential=await runtime.login('possums','api_key',interaction());
  assert.deepEqual(credential,{type:'api_key',key:recoveryKey});
  assert.deepEqual(JSON.parse(fs.readFileSync(authPath,'utf8')),{possums:credential});
@@ -155,7 +166,7 @@ await check('native AuthStorage persists recovery key; cold extension start rest
  await extension.handlers.get('session_start')({}, {modelRegistry:registry});
  extension.provider.beginRun();await drain(restored.streamSimple(selected,context(false)));
  assert.deepEqual(fixture.trace.conversations,[true,true],'/new resets conversation, not saved authentication');
- assert.equal(fixture.trace.establish,2);
+ assert.equal(fixture.trace.establish,3,'each new session verifies again without a Pi restart');
  await restored.logout('possums');
  assert.equal(await NativeAuthStorage.create(authPath).read('possums'),undefined);
  assert.deepEqual(JSON.parse(fs.readFileSync(authPath,'utf8')),{});
@@ -167,9 +178,9 @@ await check('pinned SDK checks stay offline; saved key wins over env; legacy mar
  const models=ai.createModels({credentials,modelsStore:new ai.InMemoryModelsStore(),authContext:authInput(undefined,envKey).ctx});
  models.setProvider(provider);
  assert.equal((await models.checkAuth('possums')).source,'POSSUMS_RECOVERY_CREDENTIAL');
- assert.deepEqual(await models.getAvailable('possums'),[]);assert.equal(fixture.trace.establish,0);
+ assert.deepEqual(await models.getAvailable('possums'),[]);assert.equal(fixture.trace.establish,1);
  await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
- assert.equal((await models.checkAuth('possums')).source,'stored credential');assert.equal(fixture.trace.establish,0);
+ assert.equal((await models.checkAuth('possums')).source,'stored credential');assert.equal(fixture.trace.establish,1);
  assert.equal((await models.refresh({providers:['possums'],allowNetwork:true})).errors.size,0);
  assert.deepEqual(fixture.trace.keys,[recoveryKey]);
  await models.logout('possums');await models.refresh({providers:['possums'],allowNetwork:false});
@@ -202,6 +213,7 @@ await check('extension reports missing or invalid manifest paths without reveali
  for(const manifest of ['PRIVATE_PATH',path.join(root,'PRIVATE_PATH_missing.json')]) {
   let provider,prompts=0;
   m.extension({registerFlag:()=>{},getFlag:()=>manifest,registerProvider:value=>{provider=value;},on:()=>{},registerCommand:()=>{}});
+  provider.newSession();
   await assert.rejects(provider.auth.apiKey.login({...interaction(),prompt:async()=>{prompts++;return recoveryKey;}}),
    error=>error.code==='manifest_unavailable' && !error.message.includes('PRIVATE_PATH'));
   assert.equal(prompts,0);
@@ -231,12 +243,14 @@ await check('native refresh shows one actionable notice and offline status; full
  const ctx={hasUI:true,ui:{notify:text=>notices.push(text)},modelRegistry:registry};
  await extension.handlers.get('session_start')({},ctx);
  await registry.refresh({providers:['possums'],allowNetwork:true});
- assert.equal(notices.length,1);assert.match(notices[0],/possums_verification_failed/);assert.match(notices[0],/\/reload/);
+ assert.equal(notices.length,1);assert.match(notices[0],/possums_verification_failed/);assert.match(notices[0],/new Pi session/);
  assert.match(notices[0],/Cached models do not authorize inference/);assert.deepEqual(extension.provider.getModels(),[]);
  await extension.commands.get('possums-status').handler('',ctx);
  assert.equal(notices.length,2);assert.equal(notices[1],notices[0]);
  assert.equal(fixture.trace.establish,0,'status does not connect');
  extension.provider.establish=fixture.establish;
+ extension.provider.newSession();
+ await extension.provider.verifySession();
  await registry.refresh({providers:['possums'],allowNetwork:true});
  await extension.commands.get('possums-status').handler('',ctx);
  assert.equal(notices.at(-1),m.approvalSummary());assert.equal(fixture.s.sends(),0);
@@ -274,7 +288,7 @@ await check('native session and initial catalog failures reach status, deduplica
   await extension.handlers.get('session_start')({},ctx);
   await registry.refresh({providers:['possums'],allowNetwork:true});
   assert.equal(notices.length,1);assert.match(notices[0],new RegExp('possums_'+code));
-  assert.match(notices[0],/Check connectivity/);assert.deepEqual(extension.provider.getModels(),[]);
+  assert.match(notices[0],/check connectivity/i);assert.deepEqual(extension.provider.getModels(),[]);
   await assert.rejects(extension.provider.auth.apiKey.login(interaction()),error=>assertConnectionFailure(error,code));
   assert.equal(notices.length,1,'interactive failure also preserves warning deduplication');
   const before=structuredClone(fixture.trace);
@@ -417,7 +431,8 @@ await check('cancelled, logged-out or replaced session/catalog failures never pu
   const fixture=await authFixture(),held=deferred(),entered=deferred(),notices=[],controller=new AbortController();let calls=0;
   const provider=new m.PossumsProvider(async()=>{
    const candidate=await fixture.establish();
-   if(calls++===0)candidate[phase]=async()=>{entered.resolve();await held.promise;throw new Error(hostileConnection);};
+   const original=candidate[phase];
+   candidate[phase]=async(...args)=>{if(calls++===0){entered.resolve();await held.promise;throw new Error(hostileConnection);}return original(...args);};
    return candidate;
   },failure=>notices.push(failure));
   const pending=assert.rejects(provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey},undefined,controller.signal)));
@@ -502,7 +517,10 @@ await check('cancelled and replaced authentication cannot send late secrets or r
   const rejected=assert.rejects(pending);await entered.promise;
   if(action==='cancel')controller.abort();
   else if(action==='logout')provider.logout();
-  else await provider.auth.apiKey.resolve(authInput({type:'api_key',key:envKey}));
+  else {
+   const replacement=provider.auth.apiKey.resolve(authInput({type:'api_key',key:envKey}));
+   held.resolve();await replacement;
+  }
   held.resolve();await rejected;
   assert.deepEqual(fixture.trace.keys,action==='replace'?[envKey]:[]);
   assert.equal(provider.getModels().length,action==='replace'?1:0);
@@ -682,23 +700,108 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  // Keep native physical-model lookup and the selected host model consistent.
  const models=s.client.models;s.client.models=async()=> (await models()).map(model=>({...model,context_tokens:'64000'}));
  const settings=coding.SettingsManager.inMemory({compaction:{enabled:compaction,keepRecentTokens:4},retry:{baseDelayMs:1,maxAgentDelayMs:2},defaultTools:[],cacheWarming:'off',enableInstallTelemetry:false});
- const runtime=await coding.ModelRuntime.create({credentials:new ai.InMemoryCredentialStore(),modelsStore:new ai.InMemoryModelsStore(),modelsPath:null,allowModelNetwork:false,refreshOnCreate:false});
+ const credentials=new ai.InMemoryCredentialStore();
+ await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+ const runtime=await coding.ModelRuntime.create({credentials,modelsStore:new ai.InMemoryModelsStore(),modelsPath:null,allowModelNetwork:false,refreshOnCreate:false});
  const cwd=path.join(root,name);fs.mkdirSync(cwd,{recursive:true});
  const loader=new coding.DefaultResourceLoader({cwd,agentDir:cwd,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,systemPrompt:'Synthetic test',
   extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[])]});
  await loader.reload();assert.deepEqual(loader.getExtensions().errors,[]);
  runtime.registerNativeProvider(provider);
  await runtime.refresh({providers:['possums'],allowNetwork:false});
- await runtime.login('possums','api_key',interaction());
+ // Public verification and saved-auth restoration happen in actual session_start.
  // Large synthetic host window isolates Pi recovery behavior from the separately
  // tested gateway context budget; the fake ReferenceClient has no tokenizer.
- const selected={...provider.getModels()[0],contextWindow:64000};
+ const selected={...s.selected,contextWindow:64000};
  const {session}=await coding.createAgentSession({cwd,agentDir:cwd,modelRuntime:runtime,model:selected,resourceLoader:loader,settingsManager:settings,
   thinkingLevel:'off',sessionManager:coding.SessionManager.inMemory(cwd),tools:tools?['echo']:[],customTools:[{...tool,label:'Echo',execute:async()=>{toolRuns++;return {content:[{type:'text',text:'ok'}],details:undefined};}}]});
  await session.bindExtensions({mode:'print'});
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
  return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
 }
+await check('trust starts closed, caches failed verification and never refreshes on login/logout/catalog within a session',async()=>{
+ const fixture=await authFixture([]);let fail=true,checks=0,prompts=0;
+ const provider=new bundle.PossumsProvider(async()=>{checks++;if(fail)throw new m.ConnectionFailure('verification_failed');return fixture.establish();});
+ const input={...interaction(),prompt:async()=>{prompts++;return recoveryKey;}};
+ await assert.rejects(()=>provider.auth.apiKey.login(input),error=>error instanceof m.ConnectionFailure&&error.code==='session_unavailable');
+ assert.equal(checks,0);assert.equal(prompts,0);
+ provider.newSession();
+ await assert.rejects(()=>provider.verifySession(),error=>error instanceof m.ConnectionFailure&&error.code==='verification_failed');
+ fail=false;
+ for(let i=0;i<2;i++){
+  provider.logout();
+  await assert.rejects(()=>provider.auth.apiKey.login(input),error=>error instanceof m.ConnectionFailure&&error.code==='verification_failed');
+  assert.deepEqual(provider.getModels(),[]);
+ }
+ assert.equal(checks,1);assert.equal(prompts,0);assert.equal(fixture.trace.keys.length,0);
+ provider.newSession();await provider.verifySession();
+ await provider.auth.apiKey.login(input);provider.logout();await provider.auth.apiKey.login(input);
+ assert.equal(checks,2);assert.equal(prompts,2);assert.equal(fixture.trace.keys.length,2);
+ provider.shutdown();
+ await assert.rejects(()=>provider.verifySession(),error=>error instanceof Error&&error.message==='possums_run_replaced');
+ assert.equal(checks,2);
+});
+await check('actual Pi runtime new/resume verifies once; stopped A never refreshes or replays and new session selects B',async()=>{
+ const sources={A:await setup(['stop'],false),B:await setup(['stop'],false)};
+ for(const [tag,source] of Object.entries(sources))Object.defineProperty(source.client.channel,'release',
+  {value:Object.freeze({tag,expires:Date.now()+12*60*60*1000})});
+ let active='A',available=true,provider;
+ const verifications=[],attempts=[],starts=[];
+ const credentials=new ai.InMemoryCredentialStore();
+ await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+ const cwd=path.join(root,'sdk-release-lifecycle'),agentDir=path.join(cwd,'agent');
+ fs.mkdirSync(cwd,{recursive:true});
+ const createRuntime=async({sessionManager,sessionStartEvent})=>{
+  const modelRuntime=await coding.ModelRuntime.create({credentials,modelsStore:new ai.InMemoryModelsStore(),modelsPath:null,allowModelNetwork:false,refreshOnCreate:false});
+  const services=await coding.createAgentSessionServices({cwd,agentDir,modelRuntime,
+   settingsManager:coding.SettingsManager.inMemory({defaultTools:[],compaction:{enabled:false},retry:{enabled:true,maxRetries:2,baseDelayMs:1}}),
+   resourceLoaderOptions:{noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,
+    skillsOverride:()=>({skills:[],diagnostics:[]}),
+    promptsOverride:()=>({prompts:[],diagnostics:[]}),themesOverride:()=>({themes:[],diagnostics:[]}),agentsFilesOverride:()=>({agentsFiles:[]}),
+    extensionFactories:[pi=>{
+     const register=pi.registerProvider.bind(pi);
+     pi.registerProvider=value=>{provider=value;value.establish=async()=>{
+      const tag=active;verifications.push(tag);
+      if(!available)throw new m.ConnectionFailure('evidence_unavailable');
+      const source=sources[tag],candidate=new m.ReferenceClient(source.client.channel);
+      candidate.login=async()=>{};
+      candidate.models=async()=>(await source.client.models()).map(item=>({...item,context_tokens:'64000'}));
+      candidate.chat=(...args)=>{attempts.push(tag);if(tag!==active||!available)throw new m.ChannelError('uncertain');return source.client.chat(...args);};
+      candidate.freshSession=()=>freshFixture(candidate);return candidate;
+     };register(value);};
+     m.extension(pi);pi.on('session_start',event=>{starts.push(event.reason);});
+    }]}});
+  const result=await coding.createAgentSessionFromServices({services,sessionManager,sessionStartEvent,
+   model:{...sources.A.selected,contextWindow:64000},thinkingLevel:'off',tools:[]});
+  return {...result,services,diagnostics:services.diagnostics};
+ };
+ const host=await coding.createAgentSessionRuntime(createRuntime,{cwd,agentDir,
+  sessionManager:coding.SessionManager.create(cwd,path.join(cwd,'sessions'))});
+ host.setRebindSession(session=>session.bindExtensions({mode:'print'}));
+ try{
+  await host.session.bindExtensions({mode:'print'});
+  assert.deepEqual(verifications,['A']);assert.equal(provider.release.tag,'A');
+  await host.session.prompt('Synthetic A request');assert.deepEqual(attempts,['A']);
+  const original=host.session.sessionFile,oldSession=host.session;
+  assert(original);
+  await host.services.modelRuntime.logout('possums');
+  await host.services.modelRuntime.login('possums','api_key',interaction(envKey));
+  assert.deepEqual(verifications,['A'],'account replacement reuses fixed public trust');
+  active='B';available=false;
+  await host.session.prompt('Synthetic stopped A request');
+  assert.deepEqual(attempts,['A','A']);assert.deepEqual(verifications,['A']);
+  assert.match(host.session.messages.at(-1).errorMessage,/charge unknown.*Not replayed/);
+  available=true;
+  assert.deepEqual(await host.newSession(),{cancelled:false});
+  assert.notEqual(host.session,oldSession);assert.deepEqual(verifications,['A','B']);
+  assert.equal(provider.release.tag,'B');
+  await host.session.prompt('Synthetic B request');assert.deepEqual(attempts,['A','A','B']);
+  assert.deepEqual(await host.switchSession(original),{cancelled:false});
+  assert.deepEqual(verifications,['A','B','B']);assert.equal(provider.release.tag,'B');
+  assert(starts.includes('new')&&starts.includes('resume'));
+  assert.deepEqual(attempts,['A','A','B'],'resume never replays interrupted A generation');
+ }finally{await host.dispose();}
+});
 await check('actual Pi SDK and shipped extension hooks run one receipted invocation per model turn',async()=>{
  const {session,s,toolRuns}=await sdkSetup('sdk-tools',['tool_calls','stop'],true);
  try{await session.prompt('Synthetic tool task');assert.equal(toolRuns(),1,session.messages.filter(value=>value.role==='assistant').at(-1)?.errorMessage);assert.equal(s.sends(),2);assert.equal(s.requests[1].messages.find(message=>message.role==='assistant').content,'');assert.equal(session.messages.filter(value=>value.role==='assistant').at(-1).content.find(value=>value.type==='text').text,'progressive');assert.equal(session.sessionManager.getSessionFile(),undefined);}
@@ -799,6 +902,7 @@ function seedCompaction(manager, split = false, previous = false) {
 async function compactionFixture(plan, split = false, previous = false) {
  const fixture=await authFixture(plan), extension=fixtureExtension(fixture.establish);
  const runtime=await nativeRuntime(extension.provider,new ai.InMemoryCredentialStore());
+ await extension.handlers.get('session_start')({}, {modelRegistry:new coding.ModelRegistry(runtime)});
  await runtime.login('possums','api_key',interaction());
  const manager=coding.SessionManager.inMemory(root), preparation=seedCompaction(manager,split,previous),controller=new AbortController(),notices=[];
  assert(preparation);assert.equal(preparation.isSplitTurn,split);

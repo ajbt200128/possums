@@ -9,7 +9,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
 import { ReferenceClient, CatalogFailure, GatewayError, gatewayDetailLabel, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
-import { ChannelError, JSONDepthError } from '../../examples/phase01/limits.js';
+import { ChannelError, JSONDepthError, LIMITS, Operation } from '../../examples/phase01/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure } from './diagnostics.js';
 import { ReplayGuard } from './replay.js';
 import { invocation } from './wire.js';
@@ -110,24 +110,65 @@ export class PossumsProvider implements Provider {
   private authEpoch = 0;
   private recoveryKey: string | undefined;
   private restoring: Promise<void> | undefined;
+  private trust: Promise<ReferenceClient> | undefined;
+  private verifiedTemplate: ReferenceClient | undefined;
+  private trustController = new AbortController();
+  private trustEpoch = 0;
+  private sessionClosed = true;
 
   constructor(
     private readonly establish: (signal: AbortSignal) => Promise<ReferenceClient>,
     private readonly reportConnection: (failure: ConnectionFailure | undefined) => void = () => {},
   ) {}
 
+  private trustedTemplate(): Promise<ReferenceClient> {
+    if (this.sessionClosed) return Promise.reject(new ConnectionFailure('session_unavailable'));
+    if (!this.trust) {
+      const epoch = this.trustEpoch;
+      const signal = this.trustController.signal;
+      this.trust = (async () => {
+        try {
+          const candidate = await this.establish(signal);
+          Channel.requireVerified(candidate.channel);
+          if (epoch !== this.trustEpoch || signal.aborted) throw new Error('possums_run_replaced');
+          this.verifiedTemplate = candidate;
+          return candidate;
+        } catch (error) { throw connectionFailure(error); }
+      })();
+      // Cache failures too: login/model refresh cannot silently select another release.
+      void this.trust.catch(() => {});
+    }
+    return this.trust;
+  }
+
+  async verifySession(): Promise<void> {
+    const epoch = this.trustEpoch;
+    try { await this.trustedTemplate(); }
+    catch (error) {
+      if (epoch !== this.trustEpoch || this.sessionClosed) throw new Error('possums_run_replaced');
+      const failure = connectionFailure(error);
+      try { this.reportConnection(failure); } catch { /* Transient UI only. */ }
+      throw failure;
+    }
+  }
+
+  get release(): Readonly<{ tag: string; expires: number }> | undefined {
+    return this.verifiedTemplate?.channel.release;
+  }
+
   private async establishVerified(signal: AbortSignal, epoch: number): Promise<ReferenceClient> {
+    const op = new Operation(LIMITS.operationMs, signal);
     try {
-      const candidate = await this.establish(signal);
-      Channel.requireVerified(candidate.channel);
+      const template = await op.wait(this.trustedTemplate(), LIMITS.operationMs);
       this.requireCurrent(epoch, signal);
-      return candidate;
+      // Public trust is shared; mutable bearer state is never shared between accounts.
+      return template.freshSession();
     } catch (error) {
       this.requireCurrent(epoch, signal);
       const failure = connectionFailure(error);
       try { this.reportConnection(failure); } catch { /* UI reporting cannot change authentication. */ }
       throw failure;
-    }
+    } finally { op.close(); }
   }
 
   readonly auth: { apiKey: ApiKeyAuth } = { apiKey: {
@@ -210,7 +251,20 @@ export class PossumsProvider implements Provider {
   getModels(): readonly Model<typeof API>[] { return this.listed; }
   beginRun(): void { this.epoch++; this.guard.beginRun(); }
   endRun(): void { this.guard.close(); }
-  newSession(): void { this.epoch++; this.guard.close(); this.newConversation = true; }
+  newSession(): void {
+    this.shutdown();
+    this.sessionClosed = false;
+    this.trustController = new AbortController();
+    void this.trustedTemplate().catch(() => {});
+  }
+  shutdown(): void {
+    this.sessionClosed = true;
+    this.trustController.abort();
+    this.trustEpoch++;
+    this.trust = undefined;
+    this.verifiedTemplate = undefined;
+    this.logout();
+  }
   logout(): void {
     this.epoch++; this.authEpoch++; this.guard.close();
     this.client = undefined; this.catalog = []; this.listed = [];

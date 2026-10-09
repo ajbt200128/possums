@@ -1,6 +1,6 @@
 # MVP: routine gateway updates without restarting Pi
 
-Status: selected plan, not implemented. Rollout remains held. This supersedes the earlier TUF, separate approval-signing, overlap and seamless-migration proposals.
+Status: selected plan implemented as a source candidate; independent review and combined quota/telemetry integration remain in progress. Rollout remains held. Scoped evidence: [session-update verification](pi-session-update-verification.md). This supersedes the earlier TUF, separate approval-signing, overlap and seamless-migration proposals.
 
 ## Contract
 
@@ -20,7 +20,7 @@ Using existing pinned verifier libraries, authenticate the artifact's signature,
 
 Retain Pi's accepted JavaScript legacy-v2 hardware verification and its freshness limitations; gateway v3 helper and unresolved native CLI v3 mismatch remain separate. Call the artifact what its verified predicate establishes: do not claim a SLSA level or add SLSA infrastructure just for the label. Existing HTTPS/header/bodyless-GET and EHBP body/reply boundaries remain accurately documented.
 
-No persistent update/version database means no new anti-rollback or immediate revocation guarantee. Older legitimately signed releases may remain valid under this authority; release discovery and serving checks are not a proof of newestness. Existing sessions do not discover later revocations. Do not silently remove validity checks: inspect verifier/certificate validity output and settle the simple session-expiry rule during implementation, without treating administrative expiry as quote freshness. Preserve independent compiled/reference and WEB approvals.
+No persistent update/version database means no new anti-rollback or immediate revocation guarantee. Older legitimately signed releases may remain valid under this authority; release discovery and serving checks are not a proof of newestness. Existing sessions do not discover later revocations. The implemented published context expires at the earlier of 12 hours after verification and the serving certificate's expiry, checked locally before transport. This is not quote freshness. Compiled/reference administrative expiry is unchanged. Preserve independent compiled/reference and WEB approvals.
 
 ## Three implementation packets
 
@@ -39,4 +39,4 @@ No TUF, extra signing keys, approval service, cache database, automatic code upd
 
 Keep this mechanism independent of telemetry and the other thread's ongoing limits/history changes. Do not alter their files or absorb unreviewed changes. Policy: [data handling](../PRIVACY.md#data-handling-boundaries), [forbidden exports](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [evidence requirements](../PRIVACY.md#required-evidence-for-every-telemetry-change).
 
-No implementation, publication, deployment, installation or paid request is established by this planning document.
+Implementation evidence belongs to the linked verification record. No publication, deployment, installation or paid request is established by this planning document.
