@@ -360,9 +360,9 @@ async fn caller_cancel_body_and_observer_drop_cannot_cancel_handed_off_generatio
     assert_eq!(f.generations.available_permits(), 3);
     assert_eq!(f.resources.available_permits(), 3);
     finish_tx.send(()).unwrap();
-    // Slot return is a deterministic task-destruction barrier, even without an
-    // observer/receipt. No sleep or client-lifetime cancellation token is used.
-    let all = bounded(f.generations.clone().acquire_many_owned(4))
+    // Memory admission returns after generation tracking retires. Its return is
+    // the cleanup barrier; the earlier marker return alone is not sufficient.
+    let all = bounded(f.resources.clone().acquire_many_owned(4))
         .await
         .unwrap();
     f.outcome(1, Outcome::Settled { charged: 29 }, 971);
@@ -994,7 +994,8 @@ async fn settling_observer_and_body_loss_while_held_never_abort_work() {
     // Wait for the probe before reserving permits for this barrier: a queued
     // acquire_many itself reduces available_permits and would distort the probe.
     bounded(dropped).await.unwrap();
-    let all = bounded(f.generations.clone().acquire_many_owned(4))
+    // Generation tracking retires before memory admission returns.
+    let all = bounded(f.resources.clone().acquire_many_owned(4))
         .await
         .unwrap();
     f.outcome(1, Outcome::Settled { charged: 29 }, 971);
