@@ -1,7 +1,7 @@
 //! Detached ownership for accepted `/chat` reservations.
 //!
-//! Admission supplies the existing global-four generation permit and a separate
-//! heavy resource lease shared with delivery. Delivery owns no generation slot.
+//! Admission supplies a generation lifetime marker and the existing defensive
+//! heavy resource lease shared with delivery. No separate generation quota exists.
 //! This is staged lifetime plumbing, not an aggregate memory bound. The process
 //! must install a content-suppressing panic hook (as `main` does): Tokio catches
 //! unwinds only AFTER the hook runs.
@@ -61,7 +61,7 @@ impl Drop for Terminal {
 
 /// Linear, synchronous access to the original reservation's terminal guard.
 /// Dropping without `finish` refunds, including pre-poll cancellation and unwind.
-/// This owns no resource/generation leases: those stay with the worker until ALL
+/// This owns no resource leases/lifetime markers: those stay with the worker until ALL
 /// captured input and rendering state is destroyed, even after settlement.
 pub(crate) struct Settlement {
     terminal: Terminal,
@@ -120,7 +120,7 @@ impl SettledReceipt {
 /// with another guard. No second reservation is created here.
 ///
 /// Before spawn, dropping this value refunds. At successful `tokio::spawn`, this
-/// SAME guard and both leases belong to the worker. There is no disarm/ack gap in
+/// SAME guard, resource lease and generation marker belong to the worker. There is no disarm/ack gap in
 /// which cancellation can refund an already-running generation.
 ///
 /// The route's first spawn is DETACHED PREFLIGHT,
@@ -130,11 +130,12 @@ impl SettledReceipt {
 /// synchronously into streaming_chat::compose, even if observation was dropped.
 /// Neither a closed result channel nor reset/logout can veto accepted work.
 ///
-/// Field order keeps the resource and generation leases until terminal cleanup.
+/// Retire generation tracking after terminal cleanup but before returning memory
+/// admission, so a replacement cannot overlap the old generation observation.
 pub(crate) struct ReservedGeneration {
     terminal: Terminal,
-    _resources: Arc<crate::telemetry::hooks::Lease>,
     _generation: Lease,
+    _resources: Arc<crate::telemetry::hooks::Lease>,
 }
 
 /// Fixed, content-free supervision result. Never carry a JoinError/panic payload
@@ -285,8 +286,8 @@ impl ReservedGeneration {
 // Do not rely on the unspecified field order of an async block's captures.
 struct Worker<Fut> {
     work: Pin<Box<Fut>>,
-    _resources: Arc<crate::telemetry::hooks::Lease>,
     _generation: Lease,
+    _resources: Arc<crate::telemetry::hooks::Lease>,
 }
 
 impl<Fut> Future for Worker<Fut>

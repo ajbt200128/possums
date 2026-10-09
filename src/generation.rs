@@ -22,11 +22,11 @@ use crate::{
 use std::{
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{atomic::AtomicUsize, Arc},
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{oneshot, Semaphore};
+use tokio::sync::oneshot;
 
 const PREFLIGHT_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -39,7 +39,7 @@ pub(crate) struct Generation<'a> {
     pub evidence_verifier: &'a Arc<dyn EvidenceVerifier>,
     pub metrics: Option<&'a Arc<telemetry::AggregateMetrics>>,
     pub observation: RequestContext,
-    pub slots: &'a Arc<Semaphore>,
+    pub activity: &'a Arc<AtomicUsize>,
     #[cfg(test)]
     pub hooks: &'a Arc<crate::web::resource_streaming_tests::PreflightHooks>,
 }
@@ -115,7 +115,6 @@ pub(crate) enum Rejection {
     Unavailable,
     Upstream(InferenceFailure),
     InvalidModel,
-    Busy,
     Admission(AdmissionError),
     Duplicate(Outcome),
     Context,
@@ -129,7 +128,6 @@ impl Generation<'_> {
     fn reject(&self, rejection: Rejection, model: AdmissionModel) -> Rejection {
         use telemetry::Rejection as R;
         let reason = match &rejection {
-            Rejection::Busy => R::GenerationCapacity,
             Rejection::InvalidModel => R::Input,
             Rejection::Admission(AdmissionError::Auth(_)) => R::Auth,
             Rejection::Admission(AdmissionError::Accounting(
@@ -240,12 +238,13 @@ impl Generation<'_> {
             .map_err(|_| self.reject(Rejection::InvalidModel, AdmissionModel::Unknown))?;
         let model = QualifiedModel::from_authenticated_quote(&quote);
         let admission_model = AdmissionModel::Qualified(model);
-        let permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| self.reject(Rejection::Busy, admission_model))?;
-        let permit = Lease::observed(permit, self.metrics, telemetry::Lane::Generation);
+        // The caller already owns the defensive heavy-memory lease. Generation
+        // observation adds no independent request-count quota.
+        let permit = Lease::tracking(
+            self.activity.clone(),
+            self.metrics,
+            telemetry::Lane::Generation,
+        );
         let reserved_microunits = quote.reserved_microunits;
         // Qualification is independent of catalog data and must still match before
         // reservation. There are no prompt-bearing calls before this point.

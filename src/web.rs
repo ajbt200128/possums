@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     future::poll_fn,
     pin::Pin,
-    sync::Arc,
+    sync::{atomic::AtomicUsize, Arc},
     task::{Context, Poll},
     time::Duration,
 };
@@ -64,7 +64,8 @@ const CONTROL_BODY_LIMIT: usize = 4 * 1024;
 const MAX_CONTROL_RENDERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ATTESTATION_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
-/// Fixed configured admission limits, not currently available permits.
+/// Fixed configured resource bounds, not currently available permits.
+/// Generation inherits the heavy-memory bound; it has no separate count quota.
 pub fn admission_capacities() -> [(Lane, u64); 6] {
     [
         (Lane::Connection, MAX_CONNECTIONS as u64),
@@ -87,7 +88,7 @@ pub struct AppState {
     chat_ingress: Arc<Semaphore>,
     new_chat_memory: Arc<Semaphore>,
     control_memory: Arc<Semaphore>,
-    generation_slots: Arc<Semaphore>,
+    generation_activity: Arc<AtomicUsize>,
     telemetry: Option<Arc<crate::telemetry::AggregateMetrics>>,
     #[cfg(test)]
     preflight_hooks: Arc<resource_streaming_tests::PreflightHooks>,
@@ -101,10 +102,18 @@ impl AppState {
         self.telemetry = metrics;
         self
     }
+    // Test-only observation of lifetime headroom, not an admission semaphore.
+    #[cfg(test)]
+    pub(crate) fn generation_headroom(&self) -> usize {
+        CHAT_LANES.saturating_sub(
+            self.generation_activity
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
     #[cfg(test)]
     pub(crate) fn available_lanes(&self) -> [usize; 5] {
         [
-            self.generation_slots.available_permits(),
+            self.generation_headroom(),
             self.chat_memory.available_permits(),
             self.chat_ingress.available_permits(),
             self.new_chat_memory.available_permits(),
@@ -118,9 +127,9 @@ impl AppState {
             inference: &self.inference,
             evidence_path: &self.gateway_evidence_path,
             evidence_verifier: &self.gateway_evidence_verifier,
-            slots: &self.generation_slots,
             metrics: self.telemetry.as_ref(),
             observation: Default::default(),
+            activity: &self.generation_activity,
             #[cfg(test)]
             hooks: &self.preflight_hooks,
         }
@@ -143,7 +152,7 @@ impl AppState {
             chat_ingress: Arc::new(Semaphore::new(CHAT_LANES)),
             new_chat_memory: Arc::new(Semaphore::new(NEW_CHAT_LANES)),
             control_memory: Arc::new(Semaphore::new(CONTROL_LANES)),
-            generation_slots: Arc::new(Semaphore::new(CHAT_LANES)),
+            generation_activity: Arc::default(),
             telemetry: None,
             #[cfg(test)]
             preflight_hooks: Arc::default(),
@@ -908,7 +917,6 @@ async fn chat(
         Err(Rejection::InvalidModel | Rejection::Admission(AdmissionError::Auth(_))) => {
             bad_request()
         }
-        Err(Rejection::Busy) => (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response(),
         Err(Rejection::Admission(AdmissionError::Accounting(
             AccountingError::InsufficientCredit,
         ))) => (
@@ -1322,7 +1330,6 @@ mod tests {
             .unwrap();
         assert_eq!(state.chat_memory.available_permits(), 0);
         assert_eq!(state.chat_ingress.available_permits(), 4);
-        assert_eq!(state.generation_slots.available_permits(), 4);
         assert_eq!(
             app.clone()
                 .oneshot(request(Method::POST, "/chat"))
@@ -1394,7 +1401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn four_global_permits_gate_reservation_and_are_held_during_tokenization() {
+    async fn heavy_memory_admission_gates_reservation_and_is_held_during_tokenization() {
         let credential = crate::auth::random_token();
         let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes()));
         let auth = Auth::from_json(&format!(
@@ -1419,7 +1426,6 @@ mod tests {
                 )))
                 .unwrap()
         };
-        assert_eq!(state.generation_slots.available_permits(), 4);
         // Failed ingress acquisition never polls/decodes a body or reserves.
         // The heavy lease remains on the small error response until dropped.
         let ingress = state
@@ -1453,11 +1459,7 @@ mod tests {
         assert_eq!(state.chat_memory.available_permits(), 4);
         assert_eq!(state.chat_ingress.available_permits(), 4);
         assert_eq!(state.accounting.available("a"), Some(100));
-        let all = state
-            .generation_slots
-            .clone()
-            .try_acquire_many_owned(4)
-            .unwrap();
+        let all = state.chat_memory.clone().try_acquire_many_owned(4).unwrap();
         let response = router(state.clone()).oneshot(request()).await.unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(probe.prompts.load(Ordering::SeqCst), 0);
@@ -1467,7 +1469,6 @@ mod tests {
         drop(all);
         let task = tokio::spawn(router(state.clone()).oneshot(request()));
         probe.entered.notified().await;
-        assert_eq!(state.generation_slots.available_permits(), 3);
         assert_eq!(state.chat_memory.available_permits(), 3);
         // Raw bytes/form parsing ended before prompt-bearing tokenizer work.
         assert_eq!(state.chat_ingress.available_permits(), 4);
@@ -1483,7 +1484,6 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(state.generation_slots.available_permits(), 4);
         assert_eq!(state.chat_memory.available_permits(), 4);
         assert_eq!(state.chat_ingress.available_permits(), 4);
         assert_eq!(state.accounting.available("a"), Some(97));

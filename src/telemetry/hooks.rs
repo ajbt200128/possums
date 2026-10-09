@@ -1,15 +1,19 @@
 //! Application-only typed hooks. No content, identifiers, or raw errors enter here.
 use super::*;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::sync::OwnedSemaphorePermit;
 
-/// A marker on the SAME shared permit owner used by uploads and retained frames.
-/// No additional acquisition, and no dependence of permit release on telemetry.
+/// A lifetime marker, optionally owning the shared resource permit used by uploads
+/// and retained frames. Observation never controls admission or permit release.
 pub struct Lease {
     // Retire the marker before returning the slot to a possible new owner.
     _observation: Option<OwnedObservation>,
+    _activity: Option<GenerationActivity>,
     generation: std::sync::OnceLock<(Arc<AggregateMetrics>, u64)>,
-    _permit: OwnedSemaphorePermit,
+    _permit: Option<OwnedSemaphorePermit>,
 }
 impl Lease {
     // Non-owning signal to the ORIGINAL terminal observation. It cannot finish,
@@ -33,17 +37,40 @@ impl Lease {
         lane: Lane,
     ) -> Self {
         Self {
-            _permit: permit,
+            _permit: Some(permit),
             _observation: metrics.map(|m| m.lease(lane).into_owned(m)),
+            _activity: None,
             generation: Default::default(),
         }
+    }
+
+    pub(crate) fn tracking(
+        activity: Arc<AtomicUsize>,
+        metrics: Option<&Arc<AggregateMetrics>>,
+        lane: Lane,
+    ) -> Self {
+        activity.fetch_add(1, Ordering::Relaxed);
+        Self {
+            _permit: None,
+            _observation: metrics.map(|m| m.lease(lane).into_owned(m)),
+            _activity: Some(GenerationActivity(activity)),
+            generation: Default::default(),
+        }
+    }
+}
+
+struct GenerationActivity(Arc<AtomicUsize>);
+impl Drop for GenerationActivity {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 impl From<OwnedSemaphorePermit> for Lease {
     fn from(permit: OwnedSemaphorePermit) -> Self {
         Self {
-            _permit: permit,
+            _permit: Some(permit),
             _observation: None,
+            _activity: None,
             generation: Default::default(),
         }
     }
@@ -157,5 +184,22 @@ impl HttpObservation {
 impl Drop for HttpObservation {
     fn drop(&mut self) {
         self.finish(HttpTerminal::Unknown);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generation_tracking_has_no_admission_quota_with_telemetry_disabled() {
+        let activity = Arc::new(AtomicUsize::new(0));
+        let markers: Vec<_> = (0..9)
+            .map(|_| Lease::tracking(activity.clone(), None, Lane::Generation))
+            .collect();
+        assert_eq!(activity.load(Ordering::Relaxed), 9);
+        assert!(markers.iter().all(|marker| marker._permit.is_none()));
+        drop(markers);
+        assert_eq!(activity.load(Ordering::Relaxed), 0);
     }
 }
