@@ -1,6 +1,6 @@
 # Possums production aggregate board proposal
 
-**Status: verified queries; exact proposal approved by operator; creation blocked.** Scope: Honeycomb `prod/metrics`, service `possums-gateway`, production slot `gateway-01`. No existing production board or trigger was returned during discovery. No SLO is included or created.
+**Status: created; operator approved authenticated-team visibility after restricted-board MCP failures.** [Completed board](https://ui.honeycomb.io/possums/environments/prod/board/a963jc5zN5s). Scope: Honeycomb `prod/metrics`, service `possums-gateway`, production slot `gateway-01`. No existing production board or trigger was returned during discovery. No SLO is included or created.
 
 Policy: [permitted/forbidden signals](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [complete-window and missing-data semantics](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [access/retention](../PRIVACY.md#processors-retention-access-and-shutdown), [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change). Source/wire negative tests, deployed artifact identity, live checks and remaining limitations are linked in [rollout verification](combined-rollout-verification.md#v0017-sampler-rollout-and-dashboard-qualification--2026-10-09).
 
@@ -20,11 +20,21 @@ Production MCP board listings remained empty, but the [REST list documentation](
 
 An isolated preview reached Honeycomb login, without an inherited signed-in UI session. The operator chose to sign into that preview and took human control. Next gate: operator completes login and hands back control; inspect existing private boards and role/creation diagnostics, finish the approved contents without widening the audience, then verify the board. No gateway deployment, inference replay, credential mutation, metrics-policy change or T3 restart occurred.
 
+### Resolution — authenticated-team board
+
+The signed-in UI created restricted shell `my36awg6G1b`, with only the approved introductory text. UI metadata confirmed `isPrivate=true`, ownership and edit permission, while the initial native MCP detail read failed. The operator pointed to the working Scraptable board in `fun`; MCP listed it with `Private=false`. The operator then explicitly approved widening this board to **all authenticated possums team members**, not anonymous Internet access, keeping the reviewed panels/text unchanged.
+
+The official SDK called the same hosted MCP tool with the complete approved twelve-panel payload, changing only the private flag to false (and specifying the confirmed team). Creation succeeded: `a963jc5zN5s`. MCP readback returned all eleven query names/descriptions, intended chart/display settings and full introductory text; list readback confirmed `Private=false`, eleven queries, one text panel, zero SLOs and both approved tags. Occupancy is normalized to chart type `default` with display `table`, preserving table-only presentation. This establishes that the restricted/private path was the practical blocker for these calls; it does not identify the underlying server implementation or prove that private-board MCP access always fails. A later list included the restricted shell, but its attempted rename still failed. Do not treat broad listing visibility as edit authorization.
+
+An independent anonymous request to the completed board URL redirected to `/login`. No anonymous sharing link was created. This is an explicit operator-approved audience expansion from the original restricted proposal, not a general authorization for public Internet boards, new telemetry or broader metric collection. Effective team membership/access remains an operator responsibility under the linked privacy policy. No data series archive, gateway deployment, inference replay, credential mutation or T3 restart occurred.
+
+Use the completed-board URL above; the earlier restricted one-text-panel shell is incomplete and remains a separate cleanup item. Current MCP metadata resolves to the original query execution bounds, not proof of a new board-view execution. Interactive live-range/render verification is still unconfirmed: preview automation lost access to the prior agent/human-owned browser tab after the handoff, and no browser-ownership bypass was attempted. The intended range remains rolling two hours; missing recent points must not be treated as healthy zero.
+
 ## Creation settings
 
 - Name: **Possums gateway — aggregate operations**.
 - Description: Approved aggregate request, generation, delivery, admission and process metrics; unavailable data is not zero traffic or health.
-- Private: **true**, no public sharing.
+- Private: **false**, operator-approved authenticated-team visibility. No anonymous sharing link.
 - Tags: `service:possums`, `scope:production`.
 - Intended board range: relative two-hour lookback. Queries were submitted with `from=-2h`; request-family resolution is 300 seconds and infrastructure 60 seconds, both verified without server granularity adjustment. Persisted execution results resolve those inputs to absolute timestamps; verify the created board's range/query readback before accepting live rerun behavior.
 - No preset filters: endpoint/model/lane filters applied globally would misleadingly remove unrelated infrastructure/request series.
@@ -66,4 +76,4 @@ Each panel has one calculation (RSS adds only a unit-conversion formula). Every 
 
 12-column grid: full-width introductory text (height 7); rows of panels 1/2, 3/4, 5/6 and 7/8 (each width 6, height 5); full-width occupancy table 9 (height 7); panels 10/11 side by side (width 6, height 5). Read health/outcomes first, latency next, process resources next, admission detail last.
 
-The exact creation arguments are also preserved in [`telemetry-board.json`](telemetry-board.json), without metric row/series archives. The query/group bounds cover the closed schema without silently discarding categories: endpoints 16; HTTP terminal categories 18; generation model/outcome-stage pairs 36; delivery model/outcome pairs 9; duration bins 11; occupancy cells 60; capacity lanes 6; rejection reasons 14. Additional generation-start/duration queries qualified lifecycle populations but are not added as redundant panels. No successful board ID/readback is established at this checkpoint; no secondary metric archive was created.
+The exact creation arguments are also preserved in [`telemetry-board.json`](telemetry-board.json), without metric row/series archives. The query/group bounds cover the closed schema without silently discarding categories: endpoints 16; HTTP terminal categories 18; generation model/outcome-stage pairs 36; delivery model/outcome pairs 9; duration bins 11; occupancy cells 60; capacity lanes 6; rejection reasons 14. Additional generation-start/duration queries qualified lifecycle populations but are not added as redundant panels. Completed-board ID and configuration readback are established above; no secondary metric archive was created.

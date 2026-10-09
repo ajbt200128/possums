@@ -2,7 +2,7 @@
   "environment_slug": "prod",
   "name": "Possums gateway — aggregate operations",
   "description": "Approved aggregate request, generation, delivery, admission and process metrics; unavailable data is not zero traffic or health.",
-  "private": true,
+  "private": false,
   "tags": ["service:possums", "scope:production"],
   "panels": [
     {
