@@ -232,7 +232,7 @@ this release does not retrospectively qualify them.
 
 ## 2026-10-08 configured-capacity release and paired client refresh
 
-The serving gateway is now **v0.0.13**, adding only the six approved fixed
+The serving gateway at this checkpoint was **v0.0.13**, adding only the six approved fixed
 application admission-capacity gauges; the tool/API profile and linked request
 suppression are unchanged. See [privacy scope](../PRIVACY.md#reviewed-mvp-release-scope)
 and [scoped evidence](verification.md#2026-10-08--v0013-measured-capacity-release).
@@ -263,3 +263,46 @@ and [scoped evidence](verification.md#2026-10-08--v0013-measured-capacity-releas
 Only API identity pins change. The independent WEB approval and API administrative
 expiry **2026-10-11** remain unchanged. Earlier funded tool/billing observations
 and unresolved model, retention and privacy properties are not requalified.
+
+## 2026-10-09 description-cap release and accepted v2 paired refresh
+
+The deployed gateway is **v0.0.14**. It removes only the separate 16-KiB
+input tool-description cap. Aggregate body/parser, context, accounting, tool
+history and generated-completion bounds remain unchanged. This does not prove
+that the cap caused the operator's earlier rejected request or establish its
+billing outcome. See the [scoped release evidence](verification.md#2026-10-09--v0014-description-cap-release-and-accepted-v2-pi-refresh).
+
+- Independent builds matched image
+  `sha256:11f9505c55ae5eb5b9c77bd2a4fc27f1a392782e28c96cf28b76846c78aa48d5`.
+  Release source is `6e58d4be7e36afcf9372737ec7d235fe9d9dd423`; exact signed
+  provenance, manifest/config equality and publication invocation
+  `37877498948/attempts/1` passed independent checks.
+- Manifest SHA-256 is
+  `c6b418a1ce23d19882ae3ad3b2ac2f2d49189900dca824fa27c2548a90542202`;
+  config SHA-256 is
+  `9c7959ab4be5a6aedf2cac8a8688fe8da96bc4a2ee97ee53d4bc58d2a6310e23`.
+- One supported blue/green update reached v0.0.14 running with no pending
+  update, preserving variables, every secret reference, SSH and resources.
+  No claim of independently measured uninterrupted availability is made.
+- Native CLI v3 verification failed at its platform-endorsement signer check:
+  the publisher moved to `cvmimage/platform-release.yml`, while CLI 0.19.0's
+  SDK expects `platform-endorsements/build.yml`. This remains unresolved;
+  native v3 quote/key verification and explicit freshness did not pass.
+- The operator reaffirmed the already accepted **pinned JavaScript legacy-v2**
+  path used by Pi. Treating the additional native v3 check as a prerequisite
+  was an assistant-added scope error, not a newly agreed security requirement.
+  No verifier dependency, signer policy, pin check or expiry was weakened.
+- Fresh strict TypeScript/build, **42 Pi and 436 reference/admission checks**
+  passed. Actual candidate, versioned and installed extension paths accepted
+  the v2 public bootstrap and stopped before credentials. No login, catalog,
+  inference or compaction was sent by these verification attempts.
+- The installed extension hash is
+  `cc76615c4467ec4837244db3132794d3235ee32b39fdf618b737702a16974d10`, paired
+  with the v0.0.14 manifest. Atomic replacement retained the previous v0.0.13
+  directory; credentials, settings and Pi runtime were untouched. Offline
+  status reported v0.0.14 and the unchanged **2026-10-11** expiry.
+
+Fully restart Pi after replacement. WEB approval remains independent and
+unchanged. Legacy-v2 freshness/revocation limitations, earlier funded evidence,
+live billing/model compatibility and telemetry/privacy unknowns remain as
+recorded; passing v2 is not a retrospective v3 verification pass.
