@@ -131,7 +131,7 @@ unchanged. These source tests are not renewed live privacy, billing, retention,
 attestation or platform-limit evidence. Existing legacy-v2 freshness and native
 v3 CLI platform-signer limitations remain unresolved.
 
-Trust/auth renewal is a separate **blocked** packet, not a side effect of these
-timers. See the [actual Pi 1.0.4 cancellation-boundary evidence](pi-renewal-boundary-blocker.md).
-No conversation lifetime is intentionally added; indefinite continuity through
-expiry is still unimplemented and must not be claimed from these checks.
+Trust/auth renewal was blocked at this timeout checkpoint, not implemented by
+these timers. A later, separately qualified [explicit-submit renewal candidate](pi-expiry-renewal-verification.md)
+uses native auth cancellation rather than awaiting the idle pre-run hook. The
+[original hook-boundary finding](pi-renewal-boundary-blocker.md) remains valid.

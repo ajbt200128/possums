@@ -14,7 +14,7 @@ The build links the qualified installed Pi peers into its package. After separat
 
 `pi install /absolute/path/to/package`
 
-One initial **full Pi restart** activates this mechanism. Normal loading needs no manifest file or flag: every new trust session discovers the release from the fixed Possums repository and authenticates its exact artifact, approved publishing workflow and serving hardware/key before authentication. Future compatible gateway updates require a new session, not a client rebuild/restart. Installation changes no providers, defaults, model filters, credentials or history settings. Use `pi --no-session` when you do not want Pi to save the conversation.
+One initial **full Pi restart** activates this mechanism. Normal loading needs no manifest file or flag: every new trust session discovers the release from the fixed Possums repository and authenticates its exact artifact, approved publishing workflow and serving hardware/key before authentication. A new trust session discovers compatible gateway updates without a client rebuild/restart; the expiry-renewal source candidate below additionally supports renewal without resetting the conversation. Installation changes no providers, defaults, model filters, credentials or history settings. Use `pi --no-session` when you do not want Pi to save the conversation.
 
 For an isolated one-session load, use the **package path printed by the build command**:
 
@@ -43,16 +43,44 @@ Startup and model refresh show a transient, content-free warning when public ver
 - `possums_catalog_body_invalid` / `possums_catalog_validation_failed` / `possums_catalog_conversion_failed`: response reading/JSON decoding, catalog schema/quote validation, or conversion to Pi metadata failed, respectively. Refresh models and share only the closed diagnostic if it persists.
 - `possums_catalog_unavailable`: fallback for an unexpected catalog-stage failure. A previously authenticated session is not proof that it remains valid now. None of these catalog errors establishes an inference charge or refund.
 
-**Renewal status:** the approved goal is indefinite conversation continuity with
-fresh verification/authentication at an explicit submission boundary—not a
-12-hour conversation lifetime. Automatic expiry renewal is **not implemented**:
-actual Pi 1.0.4 testing found that Stop does not cancel an awaited
-`before_agent_start` hook. The current fail-closed trust behavior below remains;
-expiry does not erase the transcript. See the [renewal blocker and required
-boundary decision](../../docs/pi-renewal-boundary-blocker.md). No expired
-certificate or administrative approval is extended.
+## Explicit-submit expiry renewal candidate
 
-After the initial installed extension replacement, fully restart Pi: `/reload` alone did not activate an earlier replacement in the operator's session. Subsequent compatible gateway updates use `/new` in the running Pi process. Public trust is fixed within each session, including failures; login/logout/account changes and catalog refresh never silently select a new release. Local checks reject requests after the published trust deadline: at most **12 hours**, capped by the serving certificate expiry. This is a local validity bound, not quote freshness, immediate revocation, anti-rollback or newestness. Explicit compiled approvals keep their administrative expiry; incompatible verifier/CVM changes still require a client update.
+A fresh idle **interactive or RPC submission** can now renew expired published
+trust and known bearer expiry without `/new`, transcript loss or a conversation
+lifetime cap. This source candidate is **not installed or deployed**. Valid
+trust/auth remain cached: no unconditional per-turn public verification or login.
+
+Input/before-start hooks only mark intent. Renewal waits for the first native
+API-key auth resolution with the active run's abort signal, before inference.
+Stop during verification/login cancels that attempt; late results cannot restore
+its bearer/catalog or send its prompt. Credentials are sent only after fresh
+verification. Auth-only expiry can reuse valid trust. A renewed trust/auth context
+invalidates any open reconciliation window; start a new window deliberately.
+
+Trust stays fixed during a tool loop, native retry, queued steering/follow-up,
+compaction and extension-originated work. Those paths cannot trigger expiry
+renewal. Ambiguous overlapping/handled input or nested extension runs fail closed;
+a later unambiguous explicit submission can renew. Failed expiry renewal is not
+replayed: check the diagnostic and submit a **fresh explicit turn** to retry it.
+Initial startup verification failures still follow the existing cached-failure
+behavior; this is not a general startup/login/reconnect redesign.
+
+Published validity remains **at most 12 hours, capped by certificate expiry**.
+Expiry is a verified-context bound, not transcript deletion, quote freshness,
+immediate revocation, anti-rollback or newestness. Explicit compiled approvals
+remain terminal at administrative expiry; no pins or expired certificates are
+extended. Server restart/revocation before known bearer expiry can still produce
+a terminal unauthorized response; it does not trigger automatic refresh/replay.
+
+The original Stop-in-an-awaited-`before_agent_start` finding remains true for that
+placement. Renewal uses a different, qualified signal-bearing path—not a host
+patch. See [placement, limits and offline checks](../../docs/pi-expiry-renewal-verification.md)
+and the [historical blocker](../../docs/pi-renewal-boundary-blocker.md).
+
+Historical installation note: `/reload` alone did not activate an earlier
+replacement in the operator's session; a full Pi restart was needed. No new
+installation is claimed here. Incompatible verifier/CVM changes still require a
+client update.
 
 Version wording comes from the verified context, not a hard-coded latest-version message or remote advertisement. Discovery uses public GitHub metadata and an exact artifact download with one bounded GitHub-to-asset-CDN redirect; authenticity comes from the existing Sigstore and hardware checks, not HTTPS/download metadata alone. Ordinary HTTPS still protects headers/bodyless GETs; EHBP binds encrypted bodies/replies to the endorsed HPKE key, without Node TLS socket pinning. These connection attempts send no inference and verify the channel before prompting for or transmitting a recovery credential. They do not establish earlier billing. Notifications/status do not log, export telemetry or append session entries; native Pi error handling and persistence remain separate. No automatic code installer or updater is introduced.
 

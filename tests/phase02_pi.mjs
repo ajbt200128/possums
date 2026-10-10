@@ -791,6 +791,292 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
  return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
 }
+await check('deferred renewal qualification: explicit source and active signal reach auth before stream; background signal differs',async()=>{
+ const trace=[],signals=[];let runSignal;
+ const f=await sdkSetup('sdk-renewal-signal',['stop','stop','stop'],false,false,true,false,{enabled:false},[pi=>{
+  pi.on('input',(event,ctx)=>trace.push(['input',event.source,event.streamingBehavior,ctx.isIdle(),ctx.signal]));
+  pi.on('before_agent_start',(_event,ctx)=>trace.push(['before',ctx.signal]));
+  pi.on('agent_start',(_event,ctx)=>{runSignal=ctx.signal;signals.push(runSignal);trace.push(['start']);});
+ }]);
+ const resolve=f.provider.auth.apiKey.resolve,entered=deferred(),release=deferred();let hold=true;
+ f.provider.auth.apiKey.resolve=async input=>{
+  trace.push(['auth',input.signal===runSignal]);
+  if(hold && input.signal===runSignal){entered.resolve();await release.promise;}
+  return resolve(input);
+ };
+ try {
+  const pending=f.session.prompt('Synthetic deferred renewal');await entered.promise;
+  assert(runSignal instanceof AbortSignal);assert.equal(f.session.isIdle,false);assert.equal(f.s.sends(),0);
+  await f.runtime.refresh({providers:['possums'],allowNetwork:true});
+  assert(trace.some(event=>event[0]==='auth'&&!event[1]));assert.equal(f.s.sends(),0);
+  const stopped=f.session.abort();await stopped;assert(runSignal.aborted);assert.equal(f.s.sends(),0);
+  release.resolve();await pending;hold=false;
+  await f.session.prompt('Synthetic RPC',{source:'rpc'});
+  await f.session.sendUserMessage('Synthetic extension');
+  assert.deepEqual(trace.filter(e=>e[0]==='input').map(e=>e.slice(1,4)),[
+   ['interactive',undefined,true],['rpc',undefined,true],['extension',undefined,true],
+  ]);
+  assert(trace.filter(e=>e[0]==='before').every(e=>e[1]===undefined));
+  assert.equal(new Set(signals).size,3);assert.equal(f.s.sends(),2);
+ } finally {release.resolve();f.session.dispose();}
+});
+// Genuine Channel/ReferenceClient login with synthetic session endpoints; public
+// verification is injectable, while the native event/auth/abort path is real.
+async function renewalFixture(name, plan=['stop','stop'], extra=[], tools=false) {
+ const f=await sdkSetup('sdk-renew-'+name,plan,tools,false,true,false,{baseDelayMs:1,maxAgentDelayMs:8},extra);
+ const trace={verified:[],credentials:[],attempts:[],signals:[]},policies=new Map();
+ let next='A',verifyHook=async()=>{},loginHook=async()=>{};
+ const make=async tag=>{
+  const config=new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
+  const channel=await m.Channel.fixture('https://localhost:18443',config,'07'.repeat(32));
+  const policy={tag,expires:Date.now()+60*60*1000};policies.set(tag,policy);
+  Object.defineProperty(channel,'release',{get:()=>policy});
+  const valid=()=>{if(Date.now()>=policy.expires)throw new m.ChannelError();};
+  channel.challenge=async()=>{valid();return {challenge:'c'.repeat(43),expires_in:600};};
+  channel.control=async(_path,payload,_bearer,signal)=>{
+   valid();trace.credentials.push({tag,key:payload.credential});
+   await loginHook(tag,payload.credential,signal);
+   return {token:'b'.repeat(43),token_type:'Bearer',expires_in:43200};
+  };
+  const create=()=>{
+   const client=new m.ReferenceClient(channel);
+   client.models=async()=>{valid();return f.s.client.models();};
+   client.chat=(...args)=>{valid();trace.attempts.push(tag);return f.s.client.chat(...args);};
+   client.freshSession=create;return client;
+  };
+  return create();
+ };
+ f.provider.establish=async signal=>{
+  const tag=next;trace.verified.push(tag);trace.signals.push(signal);
+  await verifyHook(tag,signal);return make(tag);
+ };
+ f.provider.newSession();await f.provider.verifySession();
+ await f.runtime.refresh({providers:['possums'],allowNetwork:true});
+ assert.deepEqual(trace.verified,['A']);assert.equal(trace.credentials.length,1);
+ return {...f,trace,expire:()=>{policies.get(f.provider.release.tag).expires=0;next='B';},
+  authExpire:()=>Object.defineProperty(f.provider.client,'authExpiresAt',{value:0}),
+  verifyHook:fn=>{verifyHook=fn;},loginHook:fn=>{loginHook=fn;},next:tag=>{next=tag;}};
+}
+await check('explicit interactive/RPC expiry renewal keeps transcript and conversation; valid turns do not verify',async()=>{
+ for(const source of ['interactive','rpc']) {
+  const f=await renewalFixture(source,['stop','stop','stop']);
+  try {
+   await f.session.prompt('Synthetic prior history',{source});
+   const before=structuredClone(f.session.messages);assert.deepEqual(f.trace.verified,['A']);
+   f.expire();await f.session.prompt('Synthetic fresh turn',{source});
+   assert.deepEqual(f.trace.verified,['A','B']);assert.deepEqual(f.trace.attempts,['A','B']);
+   assert.equal(f.provider.release.tag,'B');assert.equal(f.trace.credentials.length,2);
+   assert.deepEqual(f.session.messages.slice(0,before.length),before);
+   assert(f.s.requests[1].messages.some(message=>message.content==='Synthetic prior history'));
+   assert.equal(f.s.requests[1].newConversation,false);
+   await f.session.prompt('Synthetic still valid',{source});assert.deepEqual(f.trace.verified,['A','B']);
+   assert.equal(f.trace.credentials.length,2);
+  } finally {f.session.dispose();}
+ }
+});
+await check('known auth-only expiry reauthenticates with the same verified trust and invalidates reconciliation',async()=>{
+ const f=await renewalFixture('auth');
+ try {
+  f.provider.reconciliation={before:{availableMicrounits:'1',completedRequests:'0',inFlight:0},charged:0n,completed:0n,unknown:false};
+  f.authExpire();await f.session.prompt('Synthetic auth renewal');
+  assert.deepEqual(f.trace.verified,['A']);assert.deepEqual(f.trace.attempts,['A']);
+  assert.equal(f.trace.credentials.length,2);assert.equal(f.provider.reconciliation,undefined);
+  assert(f.provider.client.authExpiresAt>Date.now());
+ } finally {f.session.dispose();}
+});
+await check('Stop during deferred verification/login aborts the real run and late results cannot publish or infer',async()=>{
+ for(const stage of ['verify','login']) {
+  const f=await renewalFixture('stop-'+stage),entered=deferred(),release=deferred();let signal;
+  f.expire();
+  const hold=async(_tag,...args)=>{signal=args.at(-1);entered.resolve();await release.promise;};
+  if(stage==='verify')f.verifyHook(hold);else f.loginHook(hold);
+  try {
+   const pending=f.session.prompt('Synthetic stopped renewal');await entered.promise;
+   assert(signal instanceof AbortSignal);assert.equal(f.session.isIdle,false);assert.equal(f.s.sends(),0);
+   if(stage==='verify')assert.equal(f.trace.credentials.length,1,'no credential before new verification');
+   // A separate refresh has a signal, but not this submission's permission.
+   await f.runtime.refresh({providers:['possums'],allowNetwork:true});
+   assert.deepEqual(f.trace.verified,['A','B']);
+   await f.session.abort();await pending;assert(signal.aborted);assert.equal(f.s.sends(),0);
+   release.resolve();await new Promise(setImmediate);
+   assert.equal(f.provider.release.tag,'A');assert.deepEqual(f.provider.getModels(),[]);
+   assert.equal(f.s.sends(),0);
+   f.verifyHook(async()=>{});f.loginHook(async()=>{});
+   await f.session.prompt('Synthetic deliberate next turn');
+   assert.equal(f.provider.release.tag,'B');assert.equal(f.s.sends(),1);
+  } finally {release.resolve();f.session.dispose();}
+ }
+});
+await check('failed renewal preserves closed stage, sends no credential/prompt and cannot renew on background or extension work',async()=>{
+ for(const code of ['verification_failed','evidence_unavailable','approval_expired']) {
+  const f=await renewalFixture('failure-'+code);f.expire();
+  f.verifyHook(async()=>{throw new m.ConnectionFailure(code);});
+  try {
+   await f.session.prompt('Synthetic failed renewal');
+   assert.equal(f.s.sends(),0);assert.equal(f.trace.credentials.length,1);
+   assert.equal(f.trace.verified.length,2);assert.match(f.session.messages.at(-1).errorMessage,new RegExp('possums_'+code));
+   await f.runtime.refresh({providers:['possums'],allowNetwork:true});
+   await f.session.sendUserMessage('Synthetic extension cannot retry renewal');
+   assert.equal(f.trace.verified.length,2);assert.equal(f.s.sends(),0);
+   f.verifyHook(async()=>{});await f.session.prompt('Synthetic explicit retry');
+   assert.equal(f.trace.verified.length,3);assert.equal(f.s.sends(),1);
+  } finally {f.session.dispose();}
+ }
+});
+await check('extension-origin prompts cannot initiate expiry renewal',async()=>{
+ const f=await renewalFixture('extension');f.expire();
+ try {
+  await f.session.sendUserMessage('Synthetic extension prompt');
+  assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),0);
+  await f.session.prompt('Synthetic explicit prompt');assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
+ } finally {f.session.dispose();}
+});
+await check('expiry within native retries and tool continuation never swaps trust',async()=>{
+ for(const mode of ['unknown_bill','tool_calls']) {
+  const f=await renewalFixture('continuation-'+mode,[mode,'stop'],[],mode==='tool_calls');
+  if(mode==='tool_calls')f.session.setActiveToolsByName(['echo']);
+  const chat=f.s.client.chat;
+  f.s.client.chat=async(...args)=>{try{return await chat(...args);}finally{f.expire();}};
+  try {
+   await f.session.prompt('Synthetic continuation');
+   assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),1);
+   assert.equal(f.toolRuns(),mode==='tool_calls'?1:0);
+   assert.equal(f.session.messages.at(-1).stopReason,'error');
+  } finally {f.session.dispose();}
+ }
+});
+await check('queued steering/follow-up do not grant renewal; the later idle explicit submission can',async()=>{
+ for(const behavior of ['steer','followUp']) {
+  const f=await renewalFixture('queued-'+behavior,['held','stop']),entered=deferred();
+  const chat=f.s.client.chat;
+  f.s.client.chat=async(...args)=>{const pending=chat(...args);entered.resolve();const value=await pending;f.expire();return value;};
+  try {
+   const pending=f.session.prompt('Synthetic original run');await entered.promise;
+   await f.session[behavior]('Synthetic queued input');f.s.release();await pending;
+   assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),1);
+   f.s.client.chat=chat;await f.session.prompt('Synthetic later explicit input');
+   assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),2);
+  } finally {f.s.release();f.session.dispose();}
+ }
+});
+await check('logout/session/account replacement invalidates pending renewal and rejects stale publication',async()=>{
+ for(const action of ['logout','session','account']) {
+  const f=await renewalFixture('race-'+action),entered=deferred(),release=deferred();let heldSignal;
+  // Use valid public trust + expired auth, so a deliberate account replacement
+  // can authenticate immediately without borrowing the old run's permission.
+  f.authExpire();f.loginHook(async(_tag,key,signal)=>{if(key===recoveryKey){heldSignal=signal;entered.resolve();await release.promise;}});
+  try {
+   const pending=f.session.prompt('Synthetic obsolete renewal');await entered.promise;
+   if(action==='logout')await f.runtime.logout('possums');
+   if(action==='session')f.provider.newSession();
+   if(action==='account')await f.runtime.login('possums','api_key',interaction(envKey));
+   assert(heldSignal.aborted);release.resolve();await pending;await new Promise(setImmediate);
+   assert.equal(f.s.sends(),0);
+   if(action==='account'){assert.equal(f.provider.recoveryKey,envKey);assert.equal(f.provider.getModels().length,1);}
+   else assert.deepEqual(f.provider.getModels(),[]);
+  } finally {release.resolve();f.session.dispose();}
+ }
+});
+await check('background refresh during input and pre-prompt/manual compaction cannot borrow renewal permission',async()=>{
+ let f;
+ f=await renewalFixture('preflight',['stop','stop','stop'],[pi=>pi.on('input',async(_event,ctx)=>{
+  if(!f)return;
+  await ctx.modelRegistry.refresh({providers:['possums'],allowNetwork:true});
+  assert.deepEqual(f.trace.verified,['A']);
+ })]);
+ const chat=f.s.client.chat;
+ try {
+  f.s.client.chat=async(...args)=>({...await chat(...args),inputTokens:50000,totalTokens:50003});
+  await f.session.prompt('Synthetic prior context '.repeat(100));
+  await f.session.prompt('Synthetic high context '.repeat(100));f.s.client.chat=chat;
+  f.expire();
+  await assert.rejects(()=>f.session.compact(),/Compaction cancelled/);
+  assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),2);
+  f.settings.setCompactionEnabled(true);
+  await f.session.prompt('Synthetic explicit after expired compaction');
+  assert(f.compactions.some(event=>event.reason==='threshold'));
+  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),3);
+ } finally {f.session.dispose();}
+});
+await check('nested extension custom run cannot steal a marked explicit submission',async()=>{
+ let f,injected=false;
+ f=await renewalFixture('nested-custom',['stop'],[pi=>pi.on('before_agent_start',async()=>{
+  if(!f||injected)return;injected=true;
+  await f.session.sendCustomMessage({customType:'synthetic',content:'Synthetic extension work',display:false},{triggerTurn:true});
+ })]);
+ f.expire();
+ try {
+  await f.session.prompt('Synthetic explicit pending input');
+  assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),0);
+ } finally {f.session.dispose();}
+});
+await check('overlapping idle input origins fail closed instead of transferring explicit permission',async()=>{
+ for(const heldSource of ['interactive','extension']) {
+  const entered=deferred(),release=deferred();let held=false;
+  const f=await renewalFixture('overlap-'+heldSource,['stop'],[pi=>pi.on('input',async event=>{
+   if(!held&&event.source===heldSource){held=true;entered.resolve();await release.promise;}
+  })]);
+  f.expire();
+  try {
+   const first=f.session.prompt('Synthetic first overlapping input',{source:heldSource});await entered.promise;
+   await f.session.prompt('Synthetic other overlapping input',{source:heldSource==='interactive'?'extension':'interactive'});
+   release.resolve();await first;
+   assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),0);
+   await f.session.prompt('Synthetic unambiguous submission');
+   assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
+  } finally {release.resolve();f.session.dispose();}
+ }
+});
+await check('expired returned verification context cannot authorize a credential or prompt',async()=>{
+ const f=await renewalFixture('expired-candidate'),old=f.provider.verifiedTemplate;
+ f.expire();f.provider.establish=async()=>old;
+ try {
+  await f.session.prompt('Synthetic invalid renewal');
+  assert.equal(f.trace.credentials.length,1);assert.equal(f.s.sends(),0);
+  assert.match(f.session.messages.at(-1).errorMessage,/possums_verification_failed/);
+ } finally {f.session.dispose();}
+});
+await check('an earlier nested auth request on the active signal consumes the candidate without renewing',async()=>{
+ let f,injected=false;
+ f=await renewalFixture('nested-auth',['stop'],[pi=>pi.on('agent_start',async(_event,ctx)=>{
+  if(!f||injected)return;injected=true;
+  await ctx.modelRegistry.streamSimple(ctx.model,context(false),{signal:ctx.signal}).result();
+ })]);
+ f.expire();
+ try {
+  await f.session.prompt('Synthetic explicit after nested auth');
+  assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),0);
+  await f.session.prompt('Synthetic next explicit');
+  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
+ } finally {f.session.dispose();}
+});
+await check('late public verification after logout or session replacement cannot publish or send a credential',async()=>{
+ for(const action of ['logout','session']) {
+  const f=await renewalFixture('public-race-'+action),entered=deferred(),release=deferred();let oldSignal;
+  f.expire();f.verifyHook(async(tag,signal)=>{if(tag==='B'){oldSignal=signal;entered.resolve();await release.promise;}});
+  try {
+   const pending=f.session.prompt('Synthetic obsolete public verification');await entered.promise;
+   if(action==='logout')await f.runtime.logout('possums');
+   else {f.next('C');f.provider.newSession();await f.provider.verifySession();}
+   assert(oldSignal.aborted);release.resolve();await pending;await new Promise(setImmediate);
+   assert.equal(f.provider.release.tag,action==='logout'?'A':'C');
+   assert.equal(f.trace.credentials.length,1);assert.equal(f.s.sends(),0);
+   assert.deepEqual(f.provider.getModels(),[]);
+  } finally {release.resolve();f.session.dispose();}
+ }
+});
+await check('auth resolution retains its renewal epoch across the completion handoff',async()=>{
+ const f=await renewalFixture('handoff'),entered=deferred(),release=deferred();
+ const renew=f.provider.renewForSubmission.bind(f.provider);
+ f.provider.renewForSubmission=async(...args)=>{const epoch=await renew(...args);entered.resolve();await release.promise;return epoch;};
+ f.authExpire();
+ try {
+  const pending=f.session.prompt('Synthetic old account renewal');await entered.promise;
+  await f.runtime.login('possums','api_key',interaction(envKey));release.resolve();await pending;
+  assert.equal(f.s.sends(),0);assert.equal(f.provider.recoveryKey,envKey);
+  assert.equal(f.provider.getModels().length,1);
+ } finally {release.resolve();f.session.dispose();}
+});
 await check('renewal blocker: Pi 1.0.4 Stop does not cancel an awaited before_agent_start hook',async()=>{
  const entered=deferred(),release=deferred();let signal,idle;
  const f=await sdkSetup('sdk-renewal-boundary-probe',['stop'],false,false,true,false,

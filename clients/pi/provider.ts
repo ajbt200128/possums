@@ -136,6 +136,13 @@ export class PossumsProvider implements Provider {
   private sessionClosed = true;
   private reconciliation: { before: BalanceSnapshot; charged: bigint; completed: bigint; unknown: boolean } | undefined;
   private reconciliationEpoch = 0;
+  private pendingInput: boolean | undefined;
+  private renewalArmed = false;
+  private renewalSignal: AbortSignal | undefined;
+  private renewalCandidateSignal: AbortSignal | undefined;
+  private renewalController: AbortController | undefined;
+  private renewalRequired = false;
+  private renewalFailure: ConnectionFailure | undefined;
 
   constructor(
     private readonly establish: (signal: AbortSignal) => Promise<ReferenceClient>,
@@ -200,6 +207,11 @@ export class PossumsProvider implements Provider {
       return isRecoveryKey(result?.auth.apiKey) ? { type: 'api_key', source: result.source } : undefined;
     },
     resolve: async input => {
+      // Consume once, before any await or expiry decision. Refresh/compaction
+      // signals cannot borrow an explicit run's permission; retries get none.
+      const mayRenew = this.renewalSignal !== undefined && this.renewalSignal === input.signal;
+      if (mayRenew) this.renewalSignal = undefined;
+      if (this.renewalCandidateSignal === input.signal) this.renewalCandidateSignal = undefined;
       const epoch = this.authEpoch;
       const result = await recoveryAuth.resolve(input);
       this.requireCurrent(epoch, input.signal);
@@ -209,7 +221,17 @@ export class PossumsProvider implements Provider {
         this.logout();
         this.recoveryKey = key;
       }
-      const current = this.authEpoch;
+      let current = this.authEpoch;
+      if (mayRenew && (this.renewalRequired ||
+        (this.release !== undefined && Date.now() >= this.release.expires) ||
+        (this.client?.authExpiresAt !== undefined && Date.now() >= this.client.authExpiresAt))) {
+        current = await this.renewForSubmission(key, input.signal);
+      } else if (this.renewalRequired) {
+        // A failed/unfinished renewal cannot fall through to ordinary restore
+        // on background discovery, an automatic retry or a tool continuation.
+        throw this.renewalFailure ?? new ConnectionFailure('session_unavailable');
+      }
+      this.requireCurrent(current, input.signal);
       if (!this.client) {
         if (!this.restoring) {
           const pending = (async () => {
@@ -248,7 +270,8 @@ export class PossumsProvider implements Provider {
     if (epoch !== this.authEpoch || signal.aborted) throw new Error('possums_login_cancelled');
   }
 
-  private async authenticate(candidate: ReferenceClient, key: string, epoch: number, signal: AbortSignal): Promise<void> {
+  private async authenticate(candidate: ReferenceClient, key: string, epoch: number, signal: AbortSignal,
+    renewedTemplate?: ReferenceClient): Promise<void> {
     let stage: ConnectionFailure['code'] = 'session_unavailable';
     try {
       await candidate.login(key, signal);
@@ -257,6 +280,14 @@ export class PossumsProvider implements Provider {
       const entries = await candidate.models(signal);
       const listed = catalogModels(entries);
       this.requireCurrent(epoch, signal);
+      // Publish public trust, account bearer and catalog in one synchronous
+      // current-epoch step, never while verification/login is still pending.
+      if (renewedTemplate) {
+        this.trust = Promise.resolve(renewedTemplate);
+        this.verifiedTemplate = renewedTemplate;
+        this.renewalRequired = false;
+        this.renewalFailure = undefined;
+      }
       this.recoveryKey = key;
       this.client = candidate; this.catalog = entries; this.listed = listed;
       // Public verification alone must not reset failed-session warning deduplication.
@@ -269,8 +300,77 @@ export class PossumsProvider implements Provider {
     }
   }
 
+  private async renewForSubmission(key: string, signal: AbortSignal): Promise<number> {
+    this.renewalController?.abort();
+    const controller = new AbortController();
+    this.renewalController = controller;
+    const op = new Operation(null, AbortSignal.any([signal, controller.signal]));
+    const epoch = ++this.authEpoch;
+    this.epoch++;
+    this.client = undefined; this.catalog = []; this.listed = []; this.restoring = undefined;
+    this.renewalRequired = true; this.renewalFailure = undefined;
+    // A changed verified instance or bearer cannot certify the old balance window.
+    this.reconciliationEpoch++; this.reconciliation = undefined;
+    try {
+      let template = this.verifiedTemplate;
+      if (!template || (template.release && Date.now() >= template.release.expires)) {
+        this.trustController.abort();
+        this.trustEpoch++;
+        this.trustController = new AbortController();
+        try {
+          template = await op.wait(this.establish(op.controller.signal), LIMITS.bootstrapMs);
+          this.requireCurrent(epoch, op.controller.signal);
+          Channel.requireVerified(template.channel);
+          // Existing compiled-manifest establishment still enforces its own
+          // administrative expiry. Never change pins or extend certificates.
+          if (template.release && Date.now() >= template.release.expires) throw new ConnectionFailure('verification_failed');
+        } catch (error) {
+          this.requireCurrent(epoch, op.controller.signal);
+          const failure = connectionFailure(error);
+          try { this.reportConnection(failure); } catch { /* Transient UI only. */ }
+          throw failure;
+        }
+      }
+      this.requireCurrent(epoch, op.controller.signal);
+      await op.wait(this.authenticate(template.freshSession(), key, epoch, op.controller.signal, template), 3 * LIMITS.operationMs);
+      return epoch;
+    } catch (error) {
+      if (epoch === this.authEpoch) this.renewalFailure = error instanceof ConnectionFailure ? error : new ConnectionFailure('session_unavailable');
+      throw error;
+    } finally {
+      op.close();
+      if (this.renewalController === controller) this.renewalController = undefined;
+    }
+  }
+
   getModels(): readonly Model<typeof API>[] { return this.listed; }
-  beginRun(): void { this.epoch++; }
+  markInput(explicit: boolean, activeSignal?: AbortSignal): void {
+    // Overlapping/handled idle inputs have no durable Pi submission ID. Deny
+    // ambiguous correlation rather than lend human permission to another input.
+    this.pendingInput = this.pendingInput === undefined ? explicit : false;
+    if (!activeSignal) this.renewalArmed = false;
+  }
+  beginRun(): void {
+    this.epoch++;
+    this.renewalArmed = this.pendingInput === true;
+    this.pendingInput = undefined;
+  }
+  bindRun(signal?: AbortSignal): void {
+    this.renewalSignal = undefined;
+    this.renewalCandidateSignal = this.renewalArmed && signal && !signal.aborted ? signal : undefined;
+    this.renewalArmed = false;
+  }
+  confirmRunInput(user: boolean, signal?: AbortSignal): void {
+    // Native prompt runs emit an initial user message before request auth;
+    // sendCustomMessage can start a nested run without input/before_agent_start.
+    // Only the first non-system message can confirm the marked candidate.
+    if (this.renewalCandidateSignal && this.renewalCandidateSignal === signal) {
+      this.renewalSignal = user ? signal : undefined;
+      this.renewalCandidateSignal = undefined;
+    }
+  }
+  endRun(): void { this.renewalSignal = undefined; this.renewalCandidateSignal = undefined; this.renewalArmed = false; }
+  settleRun(): void { this.endRun(); this.pendingInput = undefined; }
   newSession(): void {
     this.shutdown();
     this.sessionClosed = false;
@@ -286,6 +386,10 @@ export class PossumsProvider implements Provider {
     this.logout();
   }
   logout(): void {
+    this.renewalController?.abort();
+    this.renewalController = undefined;
+    this.renewalRequired = false; this.renewalFailure = undefined;
+    this.settleRun();
     this.epoch++; this.authEpoch++;
     this.client = undefined; this.catalog = []; this.listed = [];
     this.recoveryKey = undefined; this.restoring = undefined;
@@ -475,6 +579,10 @@ export class PossumsProvider implements Provider {
   }
 
   private perform(selected: Model<typeof API>, context: TranscriptContext, options: RequestOptions = {}, summary?: () => void): AssistantMessageEventStream {
+    // A direct/nested stream that bypasses native auth must not leave renewal
+    // permission available after generation has already been attempted.
+    if (options.signal === this.renewalSignal) this.renewalSignal = undefined;
+    if (options.signal === this.renewalCandidateSignal) this.renewalCandidateSignal = undefined;
     const events = createAssistantMessageEventStream();
     const output = blank(selected);
     const epoch = this.epoch;

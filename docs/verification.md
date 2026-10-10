@@ -1581,3 +1581,29 @@ prompt. All 71 offline Pi cases pass, including that blocker probe. Automatic
 renewal, known-auth-expiry tracking and their new race tests remain unimplemented;
 existing trust/certificate/compiled-approval checks are unchanged. A cancellable
 explicit-submission boundary or deliberately reconnect-only UX needs agreement.
+
+## Explicit-submit expiry renewal — local follow-up candidate
+
+The operator selected synchronous explicit-input/run marking followed by the first
+native signal-bearing API-key auth resolution. [Scoped evidence and limitations](pi-expiry-renewal-verification.md):
+Pi 1.0.4 source plus actual SDK fixtures establish active-run cancellation, input
+origin/ordering and distinct background signals. An added first-user-message check
+prevents a nested extension custom run from borrowing an explicit marker. Ambiguous
+input correlation fails closed. No network work awaits in idle pre-run hooks.
+
+Fresh eligible submissions renew expired verified contexts/auth before inference,
+retain transcript/conversation state, and invalidate old reconciliation windows.
+Valid contexts stay cached; retries/tools/queued work/compaction cannot renew.
+Certificate and compiled approval checks remain finite and fail closed. The
+historical awaited-before-start blocker remains reproduced, but that placement is
+not used. Server-restart invalidation before known expiry is not auto-refreshed.
+
+Node 24.13.0 / Pi 1.0.4 scratch compiler/build and all checks passed: reference 35,
+encrypted client 523, release policy 97, SDK/provider 87, shared admission 71.
+Synthetic public-verification/session/model fixtures are not new live attestation,
+billing or platform evidence. No install, deploy, push, host edit or runtime upgrade.
+The six pre-existing dirty Rust/transport files were unchanged and unstaged.
+Applicable [data handling](../PRIVACY.md#data-handling-boundaries),
+[forbidden telemetry](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data)
+and [synthetic testing](../PRIVACY.md#synthetic-testing-exception) policies remain;
+no new telemetry, logging, request traces or credential persistence.

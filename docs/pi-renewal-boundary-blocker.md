@@ -1,6 +1,13 @@
-# Pi trust/auth renewal — blocked before lifecycle changes
+# Historical Pi pre-run renewal blocker
 
-This is new **offline source/SDK evidence**, not a revision of the historical
+**Follow-up:** the operator selected synchronous marking plus the first native
+signal-bearing API-key auth resolution. That different placement is now locally
+implemented and qualified in [expiry-renewal verification](pi-expiry-renewal-verification.md).
+The awaited-before-start reproducer below still passes: the host limitation was
+not patched or disproved. Statements of unimplemented work below describe this
+original checkpoint, not the current follow-up candidate.
+
+This is **historical offline source/SDK evidence**, not a revision of the historical
 [session-update record](pi-session-update-verification.md). Timeout alignment is
 implemented separately; automatic expiry renewal and auth-expiry tracking are
 **not implemented** in this packet. No certificate, approval pin, validity check,
