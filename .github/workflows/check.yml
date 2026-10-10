@@ -80,5 +80,7 @@ jobs:
           done
           test "$(docker inspect -f '{{.State.Running}}' "$container")" = true
           docker logs "$container" 2>&1 | grep -q '^http://127.0.0.1:'
-          ! docker logs "$container" 2>&1 | grep -q 'startup-canary'
+          if docker logs "$container" 2>&1 | grep -q 'startup-canary'; then
+            exit 1
+          fi
           test "$(docker logs "$container" 2>&1 | wc -l)" -eq 1
