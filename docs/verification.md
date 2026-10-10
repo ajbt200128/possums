@@ -1619,3 +1619,21 @@ Applicable [data handling](../PRIVACY.md#data-handling-boundaries),
 [forbidden telemetry](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data)
 and [synthetic testing](../PRIVACY.md#synthetic-testing-exception) policies remain;
 no new telemetry, logging, request traces or credential persistence.
+
+## Timeout/renewal/diagnostics integration — awaiting conflict review
+
+Local merge `e622af1` combines reviewed timeout/renewal source `75744a7` with
+main `6149e42`, preserving detailed diagnostics and the latest paid image pin.
+[Fresh integrated evidence and exact candidate hashes](pi-timeout-renewal-integration.md):
+Node 24.13.0 / Pi 1.0.4 compiler/build and 35 reference, 537 encrypted/client,
+128 release-policy, 100 Pi/provider and 71 admission checks passed; Rust 302
+passed with three live tests ignored, vendor TLS 10 passed, and strict Clippy
+passed. Formatting checks still report inherited committed Rust/vendor drift.
+
+Meaningful transport/diagnostic conflict composition awaits independent review;
+**not installed or pushed**. The existing `pi-diagnostics-70cc73c01165` stable
+link is unchanged. Root dirty Rust files remain untouched/unstaged. No real
+credentials, live inference/public evidence, runtime upgrade, session interruption
+or gateway deployment was involved. This new checkpoint does not revise the
+historical source/installation evidence above; privacy sections, synthetic-test
+scope and unresolved platform/runtime limits are linked in its record.
