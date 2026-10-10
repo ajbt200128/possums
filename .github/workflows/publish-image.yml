@@ -1,7 +1,12 @@
 name: Publish reproducible gateway image
+run-name: Image source ${{ github.event.workflow_run.head_sha || github.sha }}
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: [check]
+    types: [completed]
+    branches: [main]
 
 concurrency:
   group: publish-gateway-image
@@ -12,27 +17,29 @@ permissions:
 
 jobs:
   source-checks:
+    if: github.repository == 'ajbt200128/possums' && vars.RELEASE_AUTOMATION_ENABLED == 'true' && (github.event_name == 'workflow_run' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
+    outputs:
+      source: ${{ steps.source.outputs.source }}
     steps:
-      - name: Require successful checks on the exact source commit
+      # Trusted workflow implementation, NOT workflow_run.head_sha or PR artifacts.
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: source
+        name: Validate originating event, exact checks and current main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          run_id=$(gh run list --workflow check.yml --commit "$GITHUB_SHA" \
-            --branch "$GITHUB_REF_NAME" --limit 20 --json databaseId \
-            --jq '.[0].databaseId // empty')
-          if test -z "$run_id"; then
-            echo "::error::Run check.yml on this exact commit before publishing an image"
-            exit 1
-          fi
-          gh run watch "$run_id" --exit-status
+          RELEASE_AUTOMATION_ENABLED: ${{ vars.RELEASE_AUTOMATION_ENABLED }}
+        run: python3 scripts/release.py source
 
   build:
+    needs: source-checks
     strategy:
       matrix:
         build: [a, b]
@@ -40,6 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
+          ref: ${{ needs.source-checks.outputs.source }}
           persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
         with:
@@ -63,88 +71,79 @@ jobs:
             'skopeo inspect docker-archive:gateway-image.tar.gz | jq -r .Digest > digest'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: image-digest-${{ matrix.build }}
+          name: image-digest-${{ github.run_id }}-${{ github.run_attempt }}-${{ needs.source-checks.outputs.source }}-${{ matrix.build }}
           path: digest
           retention-days: 1
       - if: matrix.build == 'a'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: gateway-image
+          name: gateway-image-${{ github.run_id }}-${{ github.run_attempt }}-${{ needs.source-checks.outputs.source }}
           path: gateway-image.tar.gz
           compression-level: 0
           retention-days: 1
 
   publish:
+    timeout-minutes: 180
     needs: [source-checks, build]
     runs-on: ubuntu-latest
+    env:
+      SOURCE: ${{ needs.source-checks.outputs.source }}
+      RELEASE_AUTOMATION_ENABLED: ${{ vars.RELEASE_AUTOMATION_ENABLED }}
     permissions:
       actions: write
       contents: write
       packages: write
-      pull-requests: write
+      attestations: read
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
+          ref: ${{ needs.source-checks.outputs.source }}
+          fetch-depth: 0
           persist-credentials: true
       - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
         with:
           diagnostic-endpoint: ""
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: image-digest-*
+          pattern: image-digest-${{ github.run_id }}-${{ github.run_attempt }}-${{ needs.source-checks.outputs.source }}-*
           path: artifacts
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: gateway-image
+          name: gateway-image-${{ github.run_id }}-${{ github.run_attempt }}-${{ needs.source-checks.outputs.source }}
           path: artifacts/gateway-image
-      - name: Require independent builds to agree
+      - id: digest
+        name: Require independent builds to agree
         run: |
-          digest_a=$(cat artifacts/image-digest-a/digest)
-          digest_b=$(cat artifacts/image-digest-b/digest)
+          digest_a=$(cat "artifacts/image-digest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SOURCE}-a/digest")
+          digest_b=$(cat "artifacts/image-digest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SOURCE}-b/digest")
           test "$digest_a" = "$digest_b"
-          echo "IMAGE_DIGEST=$digest_a" >> "$GITHUB_ENV"
+          [[ "$digest_a" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=$digest_a" >> "$GITHUB_OUTPUT"
       - name: Publish the exact verified archive
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ steps.digest.outputs.image }}
           IMAGE: ghcr.io/ajbt200128/possums-gateway
         run: |
           printf '%s' "$GHCR_TOKEN" | nix shell --inputs-from . nixpkgs#skopeo --command \
             skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           nix shell --inputs-from . nixpkgs#skopeo --command skopeo copy --preserve-digests \
             docker-archive:artifacts/gateway-image/gateway-image.tar.gz \
-            "docker://$IMAGE:${GITHUB_SHA}"
+            "docker://$IMAGE:${SOURCE}"
           registry_digest=$(nix shell --inputs-from . nixpkgs#skopeo nixpkgs#jq --command sh -c \
-            "skopeo inspect 'docker://$IMAGE:$GITHUB_SHA' | jq -r .Digest")
+            "skopeo inspect 'docker://$IMAGE:$SOURCE' | jq -r .Digest")
           test "$registry_digest" = "$IMAGE_DIGEST"
-          echo "IMAGE_REFERENCE=$IMAGE@$registry_digest" >> "$GITHUB_ENV"
-      - name: Open digest update pull request
+      - id: release
+        name: Bind release-only commit, check exact tag, publish and verify
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          path = Path("tinfoil-config.yml")
-          text = path.read_text()
-          pattern = r"(?m)^    image: .*possums-gateway@sha256:[0-9a-f]{64}$"
-          replacement = f"    image: {os.environ['IMAGE_REFERENCE']}"
-          updated, count = re.subn(pattern, replacement, text)
-          if count != 1:
-              raise SystemExit(f"expected one gateway image reference, found {count}")
-          path.write_text(updated)
-          PY
-          branch="automation/image-${GITHUB_RUN_ID}"
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git checkout -b "$branch"
-          git add tinfoil-config.yml
-          git commit -m "release: pin gateway image ${IMAGE_DIGEST}"
-          git push origin "$branch"
-          gh pr create \
-            --base main \
-            --head "$branch" \
-            --title "release: pin gateway image ${IMAGE_DIGEST}" \
-            --body "Pins the independently reproduced and published gateway image to \`${IMAGE_REFERENCE}\`."
-          gh workflow run check.yml --ref "$branch"
+          IMAGE_DIGEST: ${{ steps.digest.outputs.image }}
+        run: python3 scripts/release.py prepare "$SOURCE" "$IMAGE_DIGEST"
+      - name: Dispatch protected production candidate only when separately enabled
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRODUCTION_DEPLOYMENT_ENABLED: ${{ vars.PRODUCTION_DEPLOYMENT_ENABLED }}
+          IMAGE_DIGEST: ${{ steps.digest.outputs.image }}
+          RELEASE: ${{ steps.release.outputs.release }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: python3 scripts/release.py dispatch-deploy "$SOURCE" "$RELEASE" "$TAG" "$IMAGE_DIGEST"
