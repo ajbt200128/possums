@@ -26,9 +26,11 @@ The flake already separates Cargo dependencies with Crane `buildDepsOnly`.
 Ordinary checks may reuse these artifacts and unchanged application/check/image
 outputs. `checks.tests` retains the existing release-profile Cargo suite;
 `gateway` no longer compiles/runs that suite a second time during packaging.
-Go helper checks remain intact. Image publication now additionally waits for a
-successful `check.yml` run on the exact commit and branch, in parallel with its
-two image builds. Missing, failed or cancelled checks block publication.
+Go helper checks remain intact. Image builds now start only after successful
+`check.yml` on the exact admitted main source and originating-event validation.
+Missing, failed or cancelled checks block both builders. The standalone serving
+verifier has synthetic/offline tests using the existing pinned Go compiler; it
+is not added to the gateway image.
 
 ## Independent release builds
 
@@ -64,6 +66,38 @@ The claim is **independent application/image builds with shared cached build
 dependencies**, not independent toolchain/dependency reproduction. A cached final
 image is permissible in ordinary checks but cannot satisfy the two release builds.
 
+## Automatic release candidates (disabled until setup)
+
+`RELEASE_AUTOMATION_ENABLED=true` enables the paid release pipeline after a
+successful main-push check. Missing variables leave it off, including manual
+entry points. Older source runs are rejected when main has advanced; not every
+intermediate merge is guaranteed a release. Independent builds and publication
+are serialized without canceling an active publication. Artifact names bind the
+run, attempt, source and builder. A `workflow_run`'s workflow implementation SHA
+can differ from the admitted source SHA; successful source admission plus the
+immutable source-bearing run title establish the binding.
+
+For source S and agreeing image digest D, the pipeline creates deterministic
+release-only commit R with sole parent S. Only the gateway image line changes.
+R is never merged into main: root `tinfoil-config.yml` becomes a release template,
+not deployed inventory. The pipeline compares complete trees/config bytes and
+exact S/R gateway-image derivation paths before allocating an immutable paid
+semantic tag V. It explicitly dispatches exact-R checks and the tagged official
+measurement/publisher workflow, then verifies the signed manifest, embedded
+configuration, source, predicate and actual successful invocation/attempt.
+Tag/release collisions and partial publishers require manual reconciliation;
+existing tags/assets are never rewritten or blindly replayed. Free tags are
+excluded from paid version allocation.
+
+`PRODUCTION_DEPLOYMENT_ENABLED` is a separate, absent-by-default switch.
+Publication can operate without production credentials or deployment. When
+separately configured, an existing protected GitHub Environment gates production;
+only latest main can pass the postapproval admission check. Older approval
+requests may remain visible. See [approved deployment](approved-main-releases.md)
+for setup, exact candidate approval and verification limits. Hosted orchestration,
+policy API access and live serving verification remain activation qualifications,
+not consequences of local tests passing.
+
 ## API-only and local builds
 
 The browser-fixture Nix package and Playwright job are removed. The replacement
@@ -88,7 +122,10 @@ Applicable policy: [data handling boundaries](../PRIVACY.md#data-handling-bounda
 [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).
 Only build inputs and synthetic fixtures belong in these caches. Never add runtime
 credentials, live conversation state, environment dumps or support artifacts.
-No production exporter, inference request or deployment is part of this change.
+No production exporter change or inference request is part of this change.
+Production automation remains disabled until separately authorized setup and
+qualification. The dormant-by-default update path does not replay uncertain
+mutations or export raw control-plane values/diagnostics.
 Disabling action diagnostics is configuration intent, not on-wire qualification
 or a claim of no platform telemetry. Scoped tests and remaining CI/Linux evidence
 are recorded in [verification](verification.md).
