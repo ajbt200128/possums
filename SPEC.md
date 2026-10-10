@@ -1,32 +1,9 @@
-# Possums Phase 0 specification
+# Possums API-only gateway specification
 
-**Scope:** preserved Phase 0 transition contract. The `v0.0.5` deployment/planning status below is historical, not the current deployment. Current API `v0.0.11` and the implemented Pi client are recorded in [release scope](docs/phase02-pi-release.md); broader verification unknowns remain explicit.
+**API-only source contract; deployment pending.** The existing v0.0.15 deployment and previous Phase 0 browser behavior are historical; see [phase evidence](docs/phase0.md) and [verification](docs/verification.md). This document does not certify an API-only deployment. `AGENTS.md` is authoritative where historical plans disagree.
 
-Possums Phase 0 is a single attested clearnet gateway for manually provisioned demo accounts. It serves a plain HTML, no-JavaScript chat UI and sends prompts only to an attested Tinfoil inference endpoint after all security gates pass.
+The measured clearnet gateway serves JSON `GET /attestation` and the authenticated `/v1` API (challenge, sessions, submissions, model discovery, streaming chat completions). No gateway HTML, `/app`, browser session cookies, CSRF forms, recovery/download or claims pages, web streaming, or browser UI is offered or planned. The Pi client remains supported. Obsidian is an independently proposed API client running outside the gateway, not a deferred gateway UI.
 
-`AGENTS.md` is authoritative where older designs disagree. **Transition status:** the deployed `v0.0.5` Phase 0 implementation buffers the complete inference response, renders sanitized Markdown, and refunds if delivery ends before HTTP-body completion. The streaming-only contract below is a planned replacement. It requires code changes, negative tests, and fresh deployed verification; the existing release is not evidence that it works.
+Manually provisioned high-entropy credentials and demo balances remain memory-only; no public signup, payments, Tor, durable paid accounting or automatic inference replay is introduced by this cutover. Authenticate the live Tinfoil catalog and measured endpoint-bound transport before prompt transmission. Enforce context limits and a checked maximum-cost reservation at the submitted catalog price; keep supported models visible and reject unaffordable requests before upstream prompt bytes, without substitution or an artificial output cap. Stream bounded inference without collecting a complete response. Valid authenticated final usage after successful stream termination settles once and refunds unused reservation even if downstream delivery fails; upstream failure or missing/invalid final usage refunds once and leaves provider cost with the operator. A new client retry can incur another charge after an uncertain outcome. Keep short-lived prompt-free idempotency and accounting state, defensive transport/parser limits, and aggregate-only privacy controls under [PRIVACY.md](PRIVACY.md).
 
-## In scope
-
-- HTTPS clearnet gateway deployed as one measured image
-- out-of-band verification through `GET /attestation`
-- manually provisioned high-entropy recovery credentials and demo balances
-- live, authenticated Tinfoil model catalog and model selector
-- streaming-only chat with model-specific context validation and no complete-response buffer; bounded request and transport buffers remain
-- no-JavaScript HTML that streams escaped plain text in a `<pre>` and emits the next-turn form on completion; optional safe JavaScript Markdown rendering is deferred
-- in-memory maximum-cost reservation before inference; a selected model whose maximum quote exceeds available credit stays visible but returns an explicit insufficient-credit error without upstream prompt transmission, model substitution, or an artificial output cap
-- authenticated-usage settlement and unused-credit refund even when the client disconnects; upstream error or missing/invalid final usage refunds the reservation and leaves upstream cost with the operator
-- concurrency, quota, and idempotency state; no gateway automatic replay of an uncertain generation. The operator-approved Pi client exception permits native bounded transient retries and steering/follow-up; retries are new submissions and may incur additional charges when earlier billing is unknown
-- aggregate, locally sanitized operational metrics, disabled by default
-
-## Not in Phase 0
-
-Tor/onion services, payments, Stripe, Monero, a store/database service, `/app`, a public OpenAI-compatible API, CLI/SDK clients, replicas, and an external audit are future work. They must not be shipped in the Phase 0 image.
-
-## Security boundary
-
-The gateway and Tinfoil inference service see prompt and response plaintext in memory. Prompt content is not intentionally persisted or exported. Attestation identifies measured code and configuration; it does not prove that retention is impossible after runtime compromise. The operator, cloud host, dependencies, TLS termination, open egress, timing, account reuse, inference caches, and platform logging remain residual risks.
-
-Before transmitting prompt bytes, production must verify gateway release provenance and serving-endpoint key binding, Tinfoil attestation and release provenance, an authenticated fresh catalog, model/context limits, and a successful credit reservation. Any missing or unknown mandatory evidence fails closed.
-
-Detailed behavior and unresolved platform claims are in [`docs/phase0.md`](docs/phase0.md) and [`docs/verification.md`](docs/verification.md). The original long-term vision is preserved in [`OVERALL_PLAN.md`](OVERALL_PLAN.md) as non-authoritative historical context.
+Attestation authenticates measured code/configuration and endpoint binding, not impossibility of retention after compromise. Platform signer/native-v3 CLI, legacy-v2 freshness, provider invoice/maximum billable cost and deployed runtime/privacy limitations remain open at their recorded scope. Local API-only source and fixture checks are recorded in [verification](docs/verification.md#api-only-cutover--local-source-verification-2026-10-09). Existing browser/streaming release tests do not demonstrate the API-only image or deployment; historical results remain unchanged.

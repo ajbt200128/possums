@@ -12,13 +12,14 @@ cache diagnostic endpoints are explicitly disabled. No Cachix account, external
 cache-write secret or new OIDC permission is added. Check jobs do not persist
 checkout credentials. Cache availability is an optimization, not a release gate:
 a miss must build from the pinned source. GitHub cache scope/eviction and upload
-cost still apply. The flake job seeds common dependencies before the remaining
-three jobs start in parallel. It also builds the fixture and both image archives
-once in that same store, so consumers can restore their final outputs without
-querying/building an entire cold dependency graph. Large retained toolchain/vendor
+cost still apply. The `flake` job runs reproducible checks and seeds the
+`api-smoke-fixture`, `gateway-image` and `gateway-smoke-image` outputs before the
+`image` and `image-startup` jobs. Consumers can restore those outputs without
+querying/building an entire cold dependency graph. Hosted execution still needs
+fresh CI evidence. Large retained toolchain/vendor
 closures in `release-build-deps` are prewarmed only for release builds, not for every
 ordinary CI run. This
-avoids four daemons simultaneously querying an empty cache; it is not a guarantee
+avoids concurrent downstream daemons querying an empty cache; it is not a guarantee
 against GitHub throttling or eviction.
 
 The flake already separates Cargo dependencies with Crane `buildDepsOnly`.
@@ -63,21 +64,16 @@ The claim is **independent application/image builds with shared cached build
 dependencies**, not independent toolchain/dependency reproduction. A cached final
 image is permissible in ordinary checks but cannot satisfy the two release builds.
 
-## Browser and local builds
+## API-only and local builds
 
-CI builds `browser-fixture` as a Nix package, so its compilation is in the binary
-cache rather than an uncached checkout `target/` directory. The browser helper
-accepts a test-only `POSSUMS_BROWSER_FIXTURE` executable; absent that override,
-local tests retain `cargo run`. Launch failures do not fall back silently. Cleanup
-is idempotent, with the existing process-group termination and kill deadline.
-
-The browser suite runs in Playwright **1.61.1 noble**, matching `package.json`,
-pinned to manifest digest
-`sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48`.
-This avoids per-run apt/font installation. The container has no network; source
-and the Nix store are mounted read-only. Chromium still exercises the synthetic
-loopback fixture and unchanged no-JavaScript, progressive IPC and hostile-rendering
-assertions. Update the package and image version/digest together.
+The browser-fixture Nix package and Playwright job are removed. The replacement
+`api-smoke-fixture` builds `examples/api_smoke_fixture.rs`; the Linux
+`gateway-smoke-image` uses that synthetic API server. The `image-startup` job
+checks read-only startup with a runtime-injected synthetic account and exactly
+one content-free listener line. It does not qualify production attestation or
+live inference. API, transport, accounting and telemetry behavior is covered by
+the Rust suite in `flake`; Go helper checks remain. Historical browser/Playwright
+results remain in [verification](verification.md), not active release gates.
 
 See [development](development.md#incremental-builds-and-worktrees) for the local
 compiler/host-separated Cargo cache. It is not used by reproducible Nix builds.

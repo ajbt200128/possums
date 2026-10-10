@@ -12,7 +12,7 @@ The operator requested removal of arbitrary agent, conversation and tool quotas,
 
 ## Retained defensive and protocol boundaries
 
-This is **not unlimited gateway parallelism or unlimited input**. The existing heavy-memory and ingress admission bounds remain four each; connection/control/new-chat resource guards remain. Consequently, one funded account can use all four heavy lanes, but removing the account and independent generation quotas does not permit a fifth simultaneous heavy request.
+This is **not unlimited gateway parallelism or unlimited input**. The existing heavy-memory and ingress admission bounds remain four each; connection/control guards remain in the API-only target. The former New chat guard is historical and removed with the browser route. Consequently, one funded account can use all four heavy lanes, but removing the account and independent generation quotas does not permit a fifth simultaneous heavy request.
 
 Existing HTTP/body, JSON byte/node/depth, transport, stream-buffer and timeout defenses remain. In particular, live completion state still has its existing 64-call, 64-KiB-per-argument and 256-KiB-total-argument bounds. Those live-state bounds no longer reject historical calls or constrain the advertised tool catalog. Protocol name/ID checks, unique identities, call/result completeness and ordering, schema validation, model context, full maximum-cost reservation, endpoint attestation/key binding, authenticated final usage/DONE/EOF, exact-once settlement/refund, and no automatic replay remain.
 

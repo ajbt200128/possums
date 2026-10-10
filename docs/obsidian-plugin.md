@@ -1,6 +1,6 @@
 # Obsidian client plan
 
-**Status: planned, not implemented or verified.** This is the Phase 0.3 follow-on to the verified streaming inference API and [Phase 0.2 Pi integration](pi-client.md) in [the roadmap](../OVERALL_PLAN.md#phases). These client phases are outside Phase 0: [SPEC.md](../SPEC.md) and the [Phase 0 contract](phase0.md) still exclude a public inference API and additional clients. This plan does not add JavaScript, a vault service, or client assets to the Phase 0 gateway image.
+**Status: planned, not implemented or verified.** This is the Phase 0.3 follow-on to the verified streaming inference API and [Phase 0.2 Pi integration](pi-client.md) in [the API-only roadmap](../OVERALL_PLAN.md#milestones). The earlier [Phase 0 contract](phase0.md) excluded an API at that historical stage; [SPEC.md](../SPEC.md) now targets an API-only gateway. This independent plugin has a local UI, not a gateway Web UI, and adds no client assets or vault service to the gateway image.
 
 ## Goal and scope
 

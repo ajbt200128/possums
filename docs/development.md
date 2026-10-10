@@ -18,7 +18,7 @@ and approve it:
 No global shell configuration is changed by this repository.
 
 The shell includes Rust from `rust-toolchain.toml` (currently 1.88.0, including
-Clippy and rustfmt), Go 1.27.2, Node 24/npm, Git and ripgrep. Go cannot silently
+Clippy and rustfmt), Go 1.27.2, Node 24/npm for independent clients, Git and ripgrep. Go cannot silently
 download a different compiler (`GOTOOLCHAIN=local`). `devenv.lock` pins the shell
 inputs; `devenv.yaml` uses the existing `flake.lock` revisions for `nixpkgs`,
 `nixpkgs-unstable` and `rust-overlay`. Rust uses the same stable package set as
@@ -37,15 +37,8 @@ Inside the shell:
 - `possums-test` — locked Rust tests followed by Go helper tests. Funded Rust
   tests remain ignored; this command does not opt into paid inference.
 - `possums-test-go` — only the Go helper tests, with read-only module resolution.
-- `possums-browser-setup` — explicitly install locked root npm dependencies and
-  Playwright Chromium. On Linux, install Playwright's host system dependencies
-  separately; this command does not run sudo or mutate the host. CI instead uses
-  a version-matched, digest-pinned Playwright image with those dependencies.
-- `possums-test-browser` — build the synthetic fixture and run the progressive
-  no-JavaScript browser acceptance suite. Run browser setup first.
 
-`devenv test` runs `possums-check` and `possums-test`. Browser tests are separate
-because their Chromium installation is an explicit prerequisite. Commands
+`devenv test` runs `possums-check` and `possums-test`. Commands
 anchor themselves to the repository root even when invoked from a subdirectory.
 For a one-shot command outside the shell:
 
@@ -82,16 +75,11 @@ Run full reproducible checks/images at checkpoints, rather than after every edit
 Images require Linux. Linux binary-cache outputs do not accelerate native macOS
 builds; Magic Nix Cache is CI-only. We do not add Cachix or linker/profile changes.
 
-For browser acceptance using an already-built Nix fixture:
-
-`nix build .#browser-fixture --out-link result-browser-fixture`
-
-`POSSUMS_BROWSER_FIXTURE="$PWD/result-browser-fixture/bin/browser_fixture" devenv shell npm run test:browser`
-
-Run browser setup first. Without that override, `possums-test-browser` retains
-its normal incremental Cargo build/run path. The direct-fixture path preserves
-the same synthetic IPC, process-group cleanup and no-JavaScript acceptance suite.
-See [CI and release builds](ci-builds.md) for cache and reproduction boundaries.
+Build the isolated API startup fixture with `nix build .#api-smoke-fixture`.
+On Linux, `nix build .#gateway-smoke-image` packages it for the read-only-root,
+runtime-secret startup check. These synthetic fixtures do not verify production
+attestation or inference. See [CI and release builds](ci-builds.md); historical
+browser passes are not API-only qualification.
 
 ## Secrets and local state
 

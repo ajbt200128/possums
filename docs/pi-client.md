@@ -4,7 +4,7 @@
 
 **Operator-approved steering/retry update:** the source candidate now follows native Pi steering/follow-up and bounded transient retries, accepting possible additional charges for earlier unknown outcomes. This supersedes the historical client's blanket no-resubmission requirement below, not the gateway's no-replay/idempotency rules. See [candidate scope and limitations](../clients/pi/README.md#native-steering-and-retry-source-candidate). No installed or live qualification follows from this approval.
 
-**Status: planned, not implemented or verified.** This small integration follows the [verified streaming-only inference API](../OVERALL_PLAN.md#phases) in Phase 0.1 and precedes the [Obsidian client](obsidian-plugin.md) in Phase 0.3. It does not add a Pi runtime to the gateway image or change the Phase 0 no-JavaScript web interface. The deployed `v0.0.5` gateway still buffers responses; see the [Phase 0 transition contract](phase0.md#planned-streaming-only-replacement).
+**Historical proposal:** the Pi integration is implemented; see [release scope](phase02-pi-release.md) and [usage](../clients/pi/README.md). This original design followed the streaming inference API and preceded the independent proposed [Obsidian client](obsidian-plugin.md). It does not add a Pi runtime or a Web UI to the gateway image. The old `v0.0.5` browser behavior is historical [Phase 0 evidence](phase0.md); the API-only target retains Pi.
 
 ## Deliverable
 

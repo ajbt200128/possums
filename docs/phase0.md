@@ -1,5 +1,7 @@
 # Phase 0 contract
 
+> **API-only cutover notice (pending runtime/infrastructure verification):** Browser routes, browser fixtures and six-lane/New chat observations below are historical evidence for earlier artifacts, not current product scope or evidence of an API-only release. The target retains JSON `/attestation`, `/v1` and Pi; it removes gateway Web UI and New chat admission. New five-lane API-only fixture/build, negative-route, telemetry-wire and deployed checks must be recorded separately. Historical passes and deployment observations are not retroactive API-only passes.
+
 **Historical contract and staging record:** retain the `v0.0.5`/packet-era statements below as their original evidence scope. The current deployed API is `v0.0.11`; see [current release scope](phase02-pi-release.md) and [verified API contract](phase01.md). The later local/release entries below supersede earlier staging statements without retroactively accepting failed or unknown gates.
 
 **Transition status:** the routes, limits, accounting lifecycle, and rendering below describe the implemented `v0.0.5` **previous buffered regime**. The [planned streaming-only replacement](#planned-streaming-only-replacement) is not implemented or verified. Do not apply its charging or rendering claims to the deployed release; migrate the code, tests, limits, and release evidence before calling it live.
