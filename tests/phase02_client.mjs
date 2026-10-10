@@ -272,7 +272,7 @@ globalThis.fetch = async req => {
   const recipient = await server.suite.SetupRecipient(server.getPrivateKey(), encapsulated, { info: enc.encode(ehbp.HPKE_REQUEST_INFO) });
   const body = new Uint8Array(await req.arrayBuffer());
   const payload = JSON.parse(dec.decode(await recipient.Open(body.slice(4)))); decoded.push({ route, payload });
-  const response = route === encryptedFailureRoute ? JSON.stringify(encryptedFailureWire) :
+  const response = route === encryptedFailureRoute ? (typeof encryptedFailureWire === 'string' ? encryptedFailureWire : JSON.stringify(encryptedFailureWire)) :
     route === '/v1/sessions' ? JSON.stringify({ token: 'b'.repeat(43), token_type: 'Bearer', expires_in: 43200 }) :
     route === '/v1/submissions' ? JSON.stringify({ submission: 's'.repeat(43) }) : route === '/v1/balance' ? balanceText : chatText;
   const nonce = crypto.getRandomValues(new Uint8Array(32));
@@ -348,7 +348,8 @@ try {
   check(sent.length === initial);
   for (const status of [401, 404, 429, 503]) {
     balanceStatus = status; initial = sent.length;
-    await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'request'); checks++;
+    await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'request' &&
+      e.observation?.constraint === 'http' && e.observation.status === status); checks++;
     check(sent.slice(initial).join(',') === '/v1/balance');
   }
   balanceStatus = 200;
@@ -370,6 +371,27 @@ try {
     encryptedFailureRoute = undefined;
     if (route === '/v1/sessions') await client.login('c'.repeat(43));
   }
+  encryptedFailureRoute = '/v1/balance';
+  for (const [wire, interrupted, constraint] of [
+    ['{"error":"PRIVATE_PROMPT_CREDENTIAL"', false, 'json'],
+    [quiesce, true, 'fetch'],
+  ]) {
+    encryptedFailureWire = wire; interruptClose = interrupted; initial = sent.length;
+    await assert.rejects(() => client.balance(), error => {
+      assert(error instanceof f.BalanceFailure && error.stage === 'request' && error.code === 'uncertain');
+      assert.equal(error.observation?.message, `possums_${interrupted ? 'transport_fetch' : 'balance_json'}`);
+      assert.equal(error.observation.status, 503);
+      assert.equal(error.observation.constraint, constraint);
+      assert.equal(error.observation.billing, undefined);
+      assert.equal(error.reason, undefined);
+      assert.equal(error.cause, undefined);
+      const shown = JSON.stringify(error);
+      assert(!shown.includes('PRIVATE_PROMPT_CREDENTIAL') && !shown.includes('refunded') && !shown.includes('service_quiescing'));
+      return true;
+    }); checks++;
+    check(sent.slice(initial).join(',') === '/v1/balance');
+  }
+  interruptClose = false; encryptedFailureWire = quiesce;
   encryptedFailureRoute = '/v1/chat/completions';
   let releaseEOF;
   delayedClose = new Promise(resolve => { releaseEOF = resolve; });

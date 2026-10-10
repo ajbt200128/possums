@@ -1348,6 +1348,57 @@ await check('actual SDK retry backoff abort drops errorMessage at retryAssistant
  assert.match(observed,/\[unavailable\].*Stage: gateway_admission.*Charge unknown.*another charge/);
  assert.equal(s.sends(),1);
 });
+await check('encrypted balance HTTP 503 body and EOF failures reach actual Pi reconciliation presentation',async()=>{
+ const ehbp=await import(pathToFileURL(path.resolve(path.dirname(file),'../../source/clients/pi/node_modules/ehbp/dist/esm/index.js')).href);
+ const server=await ehbp.Identity.generate(),encoder=new TextEncoder();
+ const channel=await m.Channel.fixture('https://localhost:18443',await server.marshalConfig(),await server.getPublicKeyHex());
+ channel.challenge=async()=>({challenge:'c'.repeat(43),expires_in:600});
+ channel.control=async()=>({token:'b'.repeat(43),token_type:'Bearer',expires_in:43200});
+ const client=new m.ReferenceClient(channel),provider=new m.PossumsProvider(async()=>client);
+ await client.login(recoveryKey);
+ const originalFetch=globalThis.fetch,paths=[];
+ const wire={error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}};
+ try {
+  for(const [body,interrupted,stage,constraint] of [
+   ['{"error":"'+hostileConnection+'"',false,'balance','json'],
+   [JSON.stringify(wire),true,'transport','fetch'],
+  ]) {
+   globalThis.fetch=async request=>{
+    paths.push(new URL(request.url).pathname);
+    assert.equal(request.method,'POST');assert.equal(request.headers.get('authorization'),'Bearer '+'b'.repeat(43));
+    const encapsulated=ehbp.hexToBytes(request.headers.get('Ehbp-Encapsulated-Key'));
+    const recipient=await server.suite.SetupRecipient(server.getPrivateKey(),encapsulated,{info:encoder.encode(ehbp.HPKE_REQUEST_INFO)});
+    const sent=new Uint8Array(await request.arrayBuffer());
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(await recipient.Open(sent.slice(4)))),{});
+    const nonce=crypto.getRandomValues(new Uint8Array(32));
+    const secret=new Uint8Array(await recipient.Export(encoder.encode(ehbp.EXPORT_LABEL),ehbp.EXPORT_LENGTH));
+    const keys=await ehbp.deriveResponseKeys(secret,encapsulated,nonce);
+    const cipher=await ehbp.encryptChunk(keys,0,encoder.encode(body));
+    const frame=new Uint8Array(4+cipher.length);new DataView(frame.buffer).setUint32(0,cipher.length,false);frame.set(cipher,4);
+    let sentFrame=false;
+    return new Response(new ReadableStream({pull(controller){
+     if(!sentFrame){sentFrame=true;controller.enqueue(frame);}
+     else if(interrupted)controller.error(new Error(hostileConnection));else controller.close();
+    }},{highWaterMark:0}),{status:503,headers:{'Ehbp-Response-Nonce':ehbp.bytesToHex(nonce)}});
+   };
+   await assert.rejects(client.balance(),error=>{
+    assert(error instanceof m.BalanceFailure);assert.equal(error.code,'uncertain');
+    assert(error.observation instanceof m.DiagnosticFailure);
+    assert.equal(error.observation.stage,stage);assert.equal(error.observation.constraint,constraint);
+    assert.equal(error.observation.status,503);assert.equal(error.reason,undefined);
+    assert.equal(error.billing,undefined);assert.equal(error.cause,undefined);
+    const shown=provider.reconciliationFailure(error);
+    assert.match(shown,new RegExp(`possums_${stage}_${constraint}.*Stage: ${stage}; constraint: ${constraint}.*Observed HTTP status: 503`));
+    assert.match(shown,/prior billing is unchanged or unknown/);
+    assert.doesNotMatch(shown,/PRIVATE_URL_CREDENTIAL_PROMPT|synthetic_not_a_usable|service_quiescing|Reservation refunded|not_submitted|\x1b|stack/i);
+    assert(!JSON.stringify(error).includes(hostileConnection));
+    return true;
+   });
+   assert.equal(paths.length,interrupted?2:1,'presentation cannot issue additional requests');
+  }
+  assert.deepEqual(paths,['/v1/balance','/v1/balance']);
+ }finally{globalThis.fetch=originalFetch;}
+});
 await check('actual Pi reconciliation commands compare exact receipts and balance without inference or persistent reports',async()=>{
  for(const [name,plan,tools,completed] of [['tools',['tool_calls','stop'],true,'2'],['refund-retry',['refund','stop'],false,'2']]) {
   const f=await sdkSetup('sdk-reconcile-'+name,plan,tools);const charged=tools?'14':'7';

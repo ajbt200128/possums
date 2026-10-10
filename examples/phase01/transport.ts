@@ -245,8 +245,11 @@ export class Channel {
     const body = await this.#encrypted('/v1/balance', serialize({}, LIMITS.control), bearer,
       { signal, onResponse: response => { status = response.status; } });
     const op = new Operation(LIMITS.operationMs, signal);
+    let constraint: FailureConstraint = 'body';
     try {
-      const value = parseJSON(await collect(body, LIMITS.control, op), LIMITS.control);
+      const bytes = await collect(body, LIMITS.control, op);
+      constraint = 'json';
+      const value = parseJSON(bytes, LIMITS.control);
       if (status === 503 && value?.error?.code === 'service_quiescing') {
         let failure: GatewayError | undefined;
         try { failure = gatewayError(value, status); } catch { /* Malformed envelope remains an HTTP rejection. */ }
@@ -255,8 +258,9 @@ export class Channel {
       if (status !== 200) throw new DiagnosticFailure('balance', 'http', 'uncertain', status);
       return value;
     } catch (error) {
-      if (error instanceof GatewayError || error instanceof DiagnosticFailure) throw error;
-      throw new ChannelError('uncertain');
+      if (error instanceof GatewayError) throw error;
+      if (error instanceof DiagnosticFailure) throw new DiagnosticFailure(error.stage, error.constraint, error.code, error.status ?? status);
+      throw new DiagnosticFailure('balance', error instanceof OperationFailure ? error.constraint : constraint, 'uncertain', status);
     } finally { op.close(); }
   }
   async chat(chat: Chat, bearer: string, options: ResponseOptions = {}): Promise<ReadableStream<Uint8Array>> {
