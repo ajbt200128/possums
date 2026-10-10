@@ -1,5 +1,9 @@
 # Timeout, renewal and diagnostics — local integration checkpoint
 
+> Subsequent status: scoped formatting and independent review were accepted;
+> [authorized local installation](pi-timeout-renewal-installation.md) then completed.
+> The paused/no-install statements below describe the initial checkpoint.
+
 ## Status and source
 
 **Ready for independent conflict review; not installed or pushed.** The operator

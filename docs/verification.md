@@ -1647,3 +1647,15 @@ timeout lines introduce none. [Detailed comparison and review scope](pi-timeout-
 Independent source-only review found no semantic blocker, without rerunning
 tests; the parent accepted it and authorized installation after the formatting
 gate. Client inputs and qualified JS artifact are unchanged from `e622af1`.
+
+### Authorized integrated client installation
+
+Following parent acceptance of independent source-only review and the passing
+first-party formatting gate, the qualified Pi 1.0.4 package was copied to
+`pi-timeout-renewal-569e4cd5ce0a` and the existing stable installed link atomically
+replaced. [Installation/source hashes, readback and rollback](pi-timeout-renewal-installation.md)
+record the unchanged JS build source `e622af1`, formatting source `3b30b01`,
+retained diagnostic predecessor, all source/runtime hash checks and offline
+versioned/stable-path checks with zero fetch attempts. No settings, credentials,
+runtime, current session or gateway deployment changed; no push or live inference
+occurred. Full user-controlled restart/activation remains separate and unverified.
