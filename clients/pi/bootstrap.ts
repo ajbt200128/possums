@@ -1,10 +1,11 @@
 import { API_APPROVALS, PUBLISHER, requireApiApproval, requireReleaseTag } from '../../examples/phase01/approval.js';
 import { ConnectionFailure, EvidenceObservation, connectionFailure, type EvidenceConstraint, type EvidenceStage } from './diagnostics.js';
 import { ReferenceClient } from '../../examples/phase01/client.js';
+import { publicEvidence, type PublicEvidence } from './evidence-cache.js';
 import { LIMITS, DiagnosticFailure, OperationFailure, Operation, base64, boundedReport, cleanup, collect, digest, hex, parseJSON, requireThat } from '../../examples/phase01/limits.js';
 
 // Public acquisition only: callers below construct every destination locally.
-// No SDK acquisition retries, credentials, cache or metadata URLs. Only the
+// No SDK acquisition retries, credentials, HTTP cache or metadata URLs. Only the
 // public manifest download permits one explicit GitHub-to-asset-CDN redirect.
 function rateLimited(response: Response): boolean {
   return response.status === 429 || (response.status === 403 && response.headers.get('x-ratelimit-remaining') === '0');
@@ -76,25 +77,29 @@ export async function connect(manifest: Uint8Array<ArrayBuffer>, signal?: AbortS
 export async function connectPublished(signal?: AbortSignal): Promise<ReferenceClient> {
   const op = new Operation(LIMITS.bootstrapMs, signal);
   try {
-    const bytes = await acquire(`https://api.github.com/repos/${PUBLISHER.repository}/releases/latest`, LIMITS.provenance, op, 'release_discovery');
-    let latest;
-    try { latest = parseJSON(bytes, LIMITS.provenance); requireReleaseTag(latest.tag_name); }
-    catch { throw new ConnectionFailure('verification_failed', new EvidenceObservation('release_discovery', 'schema')); }
-    const tag = latest.tag_name;
-    requireReleaseTag(tag);
-    const manifest = await downloadManifest(tag, op);
-    // Exact downloaded bytes must be the signed subject, not reserialized JSON.
-    const hash = await digest(manifest);
-    return await serving({ ...PUBLISHER, tag, manifest: hash }, manifest, op, true);
+    // Unauthenticated response bytes select evidence only; never trust/freshness.
+    const report = await acquire(PUBLISHER.origin + '/.well-known/tinfoil-attestation', LIMITS.evidence, op, 'gateway_attestation');
+    return await publicEvidence(await digest(report), op, async () => {
+      const bytes = await acquire(`https://api.github.com/repos/${PUBLISHER.repository}/releases/latest`, LIMITS.provenance, op, 'release_discovery');
+      let latest;
+      try { latest = parseJSON(bytes, LIMITS.provenance); requireReleaseTag(latest.tag_name); }
+      catch { throw new ConnectionFailure('verification_failed', new EvidenceObservation('release_discovery', 'schema')); }
+      const tag = latest.tag_name;
+      requireReleaseTag(tag);
+      const manifest = await downloadManifest(tag, op);
+      const provenance = await acquire(`https://api.github.com/repos/${PUBLISHER.repository}/attestations/sha256:${await digest(manifest)}`, LIMITS.provenance, op, 'release_provenance');
+      return { tag, manifest, provenance };
+    }, async (entry: PublicEvidence) => serving({ ...PUBLISHER, tag: entry.tag, manifest: await digest(entry.manifest) }, entry.manifest, op, true, report, entry.provenance));
   } catch (error) { throw connectionFailure(error); }
   finally { op.close(); }
 }
 
 type Candidate = { origin: string; repository: string; tag: string; manifest: string };
-async function serving(candidate: Candidate, manifest: Uint8Array<ArrayBuffer>, op: Operation, published: boolean): Promise<ReferenceClient> {
+async function serving(candidate: Candidate, manifest: Uint8Array<ArrayBuffer>, op: Operation, published: boolean,
+  report?: Uint8Array<ArrayBuffer>, publicProvenance?: Uint8Array<ArrayBuffer>): Promise<ReferenceClient> {
   let stage: EvidenceStage = 'gateway_attestation';
   try {
-    const doc = parseJSON(await acquire(candidate.origin + '/.well-known/tinfoil-attestation', LIMITS.evidence, op, stage), LIMITS.evidence);
+    const doc = parseJSON(report ?? await acquire(candidate.origin + '/.well-known/tinfoil-attestation', LIMITS.evidence, op, stage), LIMITS.evidence);
     requireThat(doc.format === 'https://tinfoil.sh/predicate/sev-snp-guest/v2');
     const raw = await boundedReport(base64(doc.body, LIMITS.evidence), op);
     // Untrusted routing fields; hardware verification authenticates Genoa/TCB/chip.
@@ -105,7 +110,7 @@ async function serving(candidate: Candidate, manifest: Uint8Array<ArrayBuffer>, 
     stage = 'gateway_certificate';
     const cert = parseJSON(await acquire(candidate.origin + '/.well-known/tinfoil-certificate', LIMITS.certificate, op, stage), LIMITS.certificate);
     stage = 'release_provenance';
-    const provenance = parseJSON(await acquire(`https://api.github.com/repos/${candidate.repository}/attestations/sha256:${candidate.manifest}`, LIMITS.provenance, op, stage), LIMITS.provenance);
+    const provenance = parseJSON(publicProvenance ?? await acquire(`https://api.github.com/repos/${candidate.repository}/attestations/sha256:${candidate.manifest}`, LIMITS.provenance, op, stage), LIMITS.provenance);
     requireThat(provenance.attestations?.length === 1);
     stage = 'gateway_keys';
     const config = await acquire(candidate.origin + '/.well-known/hpke-keys', LIMITS.key, op, stage);

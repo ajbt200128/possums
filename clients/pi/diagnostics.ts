@@ -56,6 +56,7 @@ const evidenceStages = Object.freeze({
   manifest_download: 'public manifest download', gateway_attestation: 'gateway attestation',
   amd_certificate: 'AMD endorsement certificate', gateway_certificate: 'gateway certificate',
   release_provenance: 'GitHub release provenance', gateway_keys: 'gateway endpoint keys',
+  public_evidence_cache: 'local public evidence cache',
 });
 const evidenceConstraints = Object.freeze({
   request: 'request transport did not complete before a response',
@@ -65,6 +66,7 @@ const evidenceConstraints = Object.freeze({
   redirect: 'manifest redirect status or authority did not match policy',
   body: 'response body could not be read within transport/parser limits',
   schema: 'evidence format did not satisfy the required schema',
+  storage: 'local public cache read, coordination or publication did not complete; check cache directory permissions',
 });
 export type EvidenceStage = keyof typeof evidenceStages;
 export type EvidenceConstraint = keyof typeof evidenceConstraints;

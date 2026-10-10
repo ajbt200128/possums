@@ -6,7 +6,7 @@
 // SAN decoding, Sigstore policy helpers, expiry, SHA-256, gzip bounds and EHBP
 // public-config decoding remain real. The production build has no mock hooks.
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
@@ -19,6 +19,7 @@ const output = path.resolve(source, '../../../checks/release');
 await mkdir(output, { recursive: true });
 const entry = `
 export { connect, connectPublished } from './bootstrap.ts';
+export { evidenceDirectory } from './evidence-cache.ts';
 export { Channel, ReferenceClient, API_APPROVALS } from '../../examples/phase01/transport.ts';
 export { PUBLISHER, qualifyPublished, requireReleaseTag } from '../../examples/phase01/approval.ts';
 export { X509Certificate, SigstoreVerifier } from '@freedomofpress/sigstore-browser';
@@ -265,9 +266,42 @@ try {
   };
   const connected = await test.connectPublished();
   assert.equal(connected.release.tag, tag); assert.equal(seen.length, 8);
+  assert.equal(seen[0], origin + '/.well-known/tinfoil-attestation');
   assert.equal(new Set(seen).size, seen.length); assert(!seen.some(url => url.includes('HOSTILE'))); passed++;
   const attempts = network;
   assert.equal(connected.freshSession().release, connected.release); assert.equal(network, attempts);
+  const cacheFile = path.join(test.evidenceDirectory(), 'entry.json');
+  const record = JSON.parse(await readFile(cacheFile, 'utf8'));
+  assert.deepEqual(Object.keys(record).sort(), ['digest', 'hint', 'manifest', 'origin', 'provenance', 'repository', 'tag', 'version']);
+  assert.equal(Buffer.from(record.manifest, 'base64').toString(), Buffer.from(manifestBody).toString());
+  const verifyBefore = [hardwareCalls, dsseCalls], hitsBefore = seen.length;
+  await test.connectPublished();
+  assert.deepEqual(seen.slice(hitsBefore).map(url => new URL(url).hostname), [host, 'kdsintf.amd.com', host, host]);
+  assert.equal(hardwareCalls, verifyBefore[0] + 1); assert.equal(dsseCalls, verifyBefore[1] + 1); passed++;
+  for (const [name, mutate] of [
+    ['cached hardware signature', s => { s.hardwareSignature = false; }],
+    ['cached certificate expiry', s => { s.notAfter = now - 1; }],
+    ['cached measurement', s => { s.measurement = 'c'.repeat(96); }],
+    ['cached endpoint key', s => { s.hpkeKey = '08'.repeat(32); }],
+    ['cached publisher', s => { s.signer.extBuildSignerDigest.buildSignerDigest = 'c'.repeat(40); }],
+  ]) {
+    reset(); mutate(state);
+    const before = seen.length;
+    await rejects(name, () => test.connectPublished(), 'verification_failed');
+    assert(!seen.slice(before).some(url => url.includes('github.com')), 'no fallback after failed verification');
+  }
+  reset();
+  const wrongAssociation = JSON.parse(Buffer.from(record.provenance, 'base64'));
+  wrongAssociation.attestations[0].bundle.dsseEnvelope.payload = b64(bytes({ _type: 'https://in-toto.io/Statement/v1', subject: [{ name: 'wrong-artifact' }], predicate: manifest }));
+  await writeFile(cacheFile, JSON.stringify({ ...record, provenance: b64(bytes(wrongAssociation)) }));
+  await rejects('cached wrong artifact association', () => test.connectPublished(), 'verification_failed');
+  await writeFile(cacheFile, JSON.stringify(record));
+  payload.enclaveAttestationReport.extra = 'public serialization change';
+  const changedStart = seen.length;
+  await test.connectPublished(); assert.equal(seen.length - changedStart, 8); passed++;
+  payload = structuredClone(base);
+  const cold = async () => { await rm(test.evidenceDirectory(), { recursive: true, force: true }); return test.connectPublished(); };
+  await rm(test.evidenceDirectory(), { recursive: true, force: true });
   latestTag = 'v1.2.3/../../HOSTILE';
   await rejects('discovery path injection', () => test.connectPublished(), 'verification_failed');
   latestTag = tag;
@@ -287,14 +321,14 @@ try {
     'https://release-assets.githubusercontent.com:8443/manifest', cdn + '#fragment', 'relative-manifest', '']) {
     const start = network;
     await rejects('manifest redirect authority', () => test.connectPublished(), 'evidence_unavailable');
-    assert.equal(network, start + 2, 'unapproved redirect is never followed');
+    assert.equal(network, start + 3, 'unapproved redirect is never followed');
   }
   assetLocation = cdn;
   for (assetStatus of [200, 301, 303, 307, 308]) await rejects('manifest redirect status', () => test.connectPublished(), 'evidence_unavailable');
   assetStatus = 302; mode = 'cdn-redirect';
   const beforeLoop = network;
   await rejects('no second asset redirect', () => test.connectPublished(), 'evidence_unavailable');
-  assert.equal(network, beforeLoop + 3);
+  assert.equal(network, beforeLoop + 4);
   mode = 'ok';
   const acquisitionFetch = globalThis.fetch;
   for (const [stage, matches] of [
@@ -312,7 +346,7 @@ try {
           { status: failure === 'body' ? 200 : failure === 'rate_limited' ? 429 : 503 });
         Object.defineProperty(response, 'url', { value: request.url }); return response;
       };
-      await assert.rejects(test.connectPublished(), error => {
+      await assert.rejects(cold(), error => {
         assert(error.message.includes(`Stage: ${stage}`), error.message);
         assert(error.message.includes(`constraint: ${failure}`) || error.message.includes(`constraint: ${failure === 'http' && stage === 'manifest_redirect' ? 'redirect' : failure}`), error.message);
         if (failure === 'http' || failure === 'rate_limited') assert(error.message.includes(`Observed HTTP status: ${failure === 'http' ? 503 : 429}`));
