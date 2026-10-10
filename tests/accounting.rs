@@ -1,5 +1,7 @@
 use possums::{
-    accounting::{Accounting, AccountingError, FinalUsage, Outcome, ReserveResult},
+    accounting::{
+        Accounting, AccountingError, BalanceSnapshot, FinalUsage, Outcome, ReserveResult,
+    },
     catalog::{actual_cost, Catalog, Model, Quote},
 };
 use std::{
@@ -36,6 +38,14 @@ fn reserves_settles_and_refunds_remainder_once() {
     );
     assert_eq!(ledger.available("a"), Some(48));
     assert_eq!(
+        ledger.snapshot("a").unwrap(),
+        BalanceSnapshot {
+            available_microunits: 48,
+            in_flight: 1,
+            completed_requests: 0,
+        }
+    );
+    assert_eq!(
         ledger.finish([1; 32], usage(5, 4)).unwrap(),
         Outcome::Settled { charged: 29 }
     );
@@ -52,6 +62,14 @@ fn reserves_settles_and_refunds_remainder_once() {
             Outcome::Settled { charged: 29 }
         );
         assert_eq!(ledger.available("a"), Some(71));
+        assert_eq!(
+            ledger.snapshot("a").unwrap(),
+            BalanceSnapshot {
+                available_microunits: 71,
+                in_flight: 0,
+                completed_requests: 1,
+            }
+        );
     }
 }
 
@@ -322,6 +340,14 @@ fn conflicting_terminal_calls_return_one_outcome_and_refund_once() {
         );
     }
     assert_eq!(ledger.available("a"), Some(10_000 - charge));
+    assert_eq!(
+        ledger.snapshot("a").unwrap(),
+        BalanceSnapshot {
+            available_microunits: 10_000 - charge,
+            in_flight: 0,
+            completed_requests: 5,
+        }
+    );
 }
 
 #[test]
@@ -378,4 +404,138 @@ fn terminal_cannot_create_a_reservation_and_later_usage_cannot_override_it() {
         Outcome::Settled { charged: 650 }
     );
     assert_eq!(ledger.available("a"), Some(350));
+}
+
+#[test]
+fn snapshots_isolate_accounts_and_count_zero_charge_and_refund_completions_only() {
+    let ledger = Accounting::new([("a".into(), 100), ("b".into(), 51)]);
+    let initial = ledger.snapshot("b").unwrap();
+    assert_eq!(
+        initial,
+        BalanceSnapshot {
+            available_microunits: 51,
+            in_flight: 0,
+            completed_requests: 0,
+        }
+    );
+    assert_eq!(
+        ledger.reserve("b", [2; 32], [2; 32], quote(), token_expiry()),
+        Err(AccountingError::InsufficientCredit)
+    );
+    assert_eq!(
+        ledger.finish([2; 32], None),
+        Err(AccountingError::InvalidTransition)
+    );
+    assert_eq!(
+        ledger.reserve("missing", [2; 32], [2; 32], quote(), token_expiry()),
+        Err(AccountingError::UnknownAccount)
+    );
+    ledger
+        .reserve("a", [1; 32], [2; 32], quote(), token_expiry())
+        .unwrap();
+    assert_eq!(
+        ledger.reserve("a", [1; 32], [2; 32], quote(), token_expiry()),
+        Ok(ReserveResult::Duplicate(Outcome::InFlight))
+    );
+    assert_eq!(
+        ledger.reserve("a", [1; 32], [3; 32], quote(), token_expiry()),
+        Err(AccountingError::AlteredDuplicate)
+    );
+    assert_eq!(
+        ledger.reserve("b", [1; 32], [2; 32], quote(), token_expiry()),
+        Err(AccountingError::AlteredDuplicate)
+    );
+    assert_eq!(
+        ledger.reserve(
+            "a",
+            [2; 32],
+            [2; 32],
+            quote(),
+            Instant::now() - Duration::from_secs(1)
+        ),
+        Err(AccountingError::InvalidTransition)
+    );
+    assert_eq!(
+        ledger.snapshot("a").unwrap(),
+        BalanceSnapshot {
+            available_microunits: 48,
+            in_flight: 1,
+            completed_requests: 0,
+        }
+    );
+    assert_eq!(
+        ledger.finish([1; 32], usage(0, 0)).unwrap(),
+        Outcome::Settled { charged: 0 }
+    );
+    assert_eq!(
+        ledger.finish([1; 32], None).unwrap(),
+        Outcome::Settled { charged: 0 }
+    );
+    assert_eq!(
+        ledger.snapshot("a").unwrap(),
+        BalanceSnapshot {
+            available_microunits: 100,
+            in_flight: 0,
+            completed_requests: 1,
+        }
+    );
+    ledger
+        .reserve("a", [2; 32], [2; 32], quote(), token_expiry())
+        .unwrap();
+    assert_eq!(
+        ledger.snapshot("a").unwrap(),
+        BalanceSnapshot {
+            available_microunits: 48,
+            in_flight: 1,
+            completed_requests: 1,
+        }
+    );
+    assert_eq!(ledger.finish([2; 32], None).unwrap(), Outcome::Refunded);
+    assert_eq!(
+        ledger.finish([2; 32], usage(5, 4)).unwrap(),
+        Outcome::Refunded
+    );
+    assert_eq!(
+        ledger.snapshot("a").unwrap(),
+        BalanceSnapshot {
+            available_microunits: 100,
+            in_flight: 0,
+            completed_requests: 2,
+        }
+    );
+    assert_eq!(ledger.snapshot("b").unwrap(), initial);
+}
+
+#[test]
+fn snapshot_racing_finish_never_mixes_balance_in_flight_and_completions() {
+    for terminal in [None, usage(5, 4)] {
+        for _ in 0..32 {
+            let ledger = Arc::new(Accounting::new([("a".into(), 100)]));
+            ledger
+                .reserve("a", [1; 32], [2; 32], quote(), token_expiry())
+                .unwrap();
+            let before = ledger.snapshot("a").unwrap();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let finishing = Arc::clone(&ledger);
+            let ready = Arc::clone(&barrier);
+            let worker = std::thread::spawn(move || {
+                ready.wait();
+                finishing.finish([1; 32], terminal).unwrap()
+            });
+            barrier.wait();
+            let during = ledger.snapshot("a").unwrap();
+            let charged = match worker.join().unwrap() {
+                Outcome::Settled { charged } => charged,
+                Outcome::Refunded => 0,
+                _ => panic!("unexpected outcome"),
+            };
+            let after = BalanceSnapshot {
+                available_microunits: 100 - charged,
+                in_flight: 0,
+                completed_requests: 1,
+            };
+            assert!(during == before || during == after);
+            assert_eq!(ledger.snapshot("a").unwrap(), after);
+        }
+    }
 }

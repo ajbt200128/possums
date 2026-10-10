@@ -32,6 +32,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/v1/submissions", post(submission))
         .route("/v1/sessions/current", delete(logout))
         .route("/v1/models", get(models))
+        .route("/v1/balance", post(balance))
         .route("/v1/chat/completions", post(chat))
 }
 
@@ -344,6 +345,32 @@ async fn logout(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => auth_error(&observation, error),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BalanceRequest {}
+
+async fn balance(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes) -> Response {
+    let (_, session) = match authenticated(&state, &headers) {
+        Ok(auth) => auth,
+        Err((status, _)) => return error(status),
+    };
+    if let Err(status) = parse::<BalanceRequest>(&headers, &bytes) {
+        return error(status);
+    }
+    let snapshot = match state.accounting.snapshot(&session.account_id) {
+        Ok(snapshot) => snapshot,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    // Fixed-size, account-local control response. No identifiers, inference,
+    // catalog lookup or telemetry observations are needed for reconciliation.
+    axum::Json(serde_json::json!({
+        "available_microunits": snapshot.available_microunits.to_string(),
+        "in_flight": snapshot.in_flight,
+        "completed_requests": snapshot.completed_requests.to_string(),
+    }))
+    .into_response()
 }
 
 #[derive(Serialize)]
