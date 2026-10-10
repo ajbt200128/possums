@@ -11,7 +11,7 @@ use possums::{
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::Auth,
     inference::{Inference, InferenceError, Message},
-    web::{router, router_with_body_deadline, AppState},
+    server::{router, router_with_body_deadline, AppState},
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -153,7 +153,6 @@ async fn cookie_free_login_single_use_model_binding_reset_and_logout() {
     )
     .await;
     let bearer = first["token"].as_str().unwrap();
-    assert!(state.auth.session(bearer).is_none());
     let original = state.auth.api_session(bearer).unwrap();
     let first = response(&app, submit(bearer, "org/model:v1", false), StatusCode::OK).await;
     assert_eq!(first.as_object().unwrap().len(), 1);
@@ -201,12 +200,8 @@ async fn cookie_free_login_single_use_model_binding_reset_and_logout() {
 }
 
 #[tokio::test]
-async fn rejects_missing_duplicate_malformed_cookie_and_cross_kind_authentication() {
+async fn rejects_missing_duplicate_malformed_and_cookie_authentication() {
     let (state, credential) = fixture(10);
-    let (web_id, _) = state
-        .auth
-        .authenticate(&credential, &state.auth.issue_login_challenge().unwrap())
-        .unwrap();
     let app = router(state.clone());
     let api_id = login(&app, &credential).await;
     let valid = format!("Bearer {api_id}");
@@ -234,7 +229,7 @@ async fn rejects_missing_duplicate_malformed_cookie_and_cross_kind_authenticatio
         )
         .await;
     }
-    for id in [&web_id, &credential] {
+    for id in [&credential] {
         response(
             &app,
             Request::get("/v1/models")
@@ -257,7 +252,7 @@ async fn rejects_missing_duplicate_malformed_cookie_and_cross_kind_authenticatio
     .await;
     for with_bearer in [false, true] {
         let mut builder =
-            Request::get("/v1/models").header(header::COOKIE, format!("possums_session={web_id}"));
+            Request::get("/v1/models").header(header::COOKIE, format!("possums_session={api_id}"));
         if with_bearer {
             builder = builder.header(header::AUTHORIZATION, &valid);
         }
@@ -267,41 +262,6 @@ async fn rejects_missing_duplicate_malformed_cookie_and_cross_kind_authenticatio
             StatusCode::BAD_REQUEST,
         )
         .await;
-    }
-    // API bearer placed in a browser cookie cannot access recovery export.
-    let res = app
-        .clone()
-        .oneshot(
-            Request::get("/recovery")
-                .header(header::COOKIE, format!("possums_session={api_id}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert!(!res.status().is_success());
-    drop(res);
-    for api in [false, true] {
-        let challenge = if api {
-            state.auth.issue_api_challenge().unwrap()
-        } else {
-            state.auth.issue_login_challenge().unwrap()
-        };
-        if api {
-            assert!(state.auth.authenticate(&credential, &challenge).is_err());
-        } else {
-            response(
-                &app,
-                Request::post("/v1/sessions")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({"challenge":challenge,"credential":credential}).to_string(),
-                    ))
-                    .unwrap(),
-                StatusCode::UNAUTHORIZED,
-            )
-            .await;
-        }
     }
 }
 
@@ -613,10 +573,6 @@ async fn balance_exact_schema_precise_credit_and_account_isolation_without_upstr
 async fn balance_requires_exact_api_bearer_and_rejects_cookies_encoding_and_logged_out_sessions() {
     let (state, credentials) = balance_fixture();
     let credential = &credentials[0];
-    let (web, _) = state
-        .auth
-        .authenticate(credential, &state.auth.issue_login_challenge().unwrap())
-        .unwrap();
     let app = router(state);
     let bearer = login(&app, credential).await;
     for auth in [
@@ -631,7 +587,6 @@ async fn balance_requires_exact_api_bearer_and_rejects_cookies_encoding_and_logg
         Some(format!("Bearer {bearer},{bearer}")),
         Some("Bearer bad".into()),
         Some(format!("Bearer {credential}")),
-        Some(format!("Bearer {web}")),
         Some(credential.clone()),
     ] {
         let mut req = balance_request(&bearer, "{}");
@@ -653,7 +608,7 @@ async fn balance_requires_exact_api_bearer_and_rejects_cookies_encoding_and_logg
     response(&app, duplicate, StatusCode::UNAUTHORIZED).await;
     for cookie in [
         String::new(),
-        format!("possums_session={web}"),
+        format!("possums_session={bearer}"),
         format!("possums_session={bearer}"),
     ] {
         for with_bearer in [false, true] {

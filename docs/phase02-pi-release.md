@@ -1,5 +1,7 @@
 # Minimal Pi integration release
 
+> **API-only cutover notice (pending runtime/infrastructure verification):** Browser routes, browser fixtures and six-lane/New chat observations below are historical evidence for earlier artifacts, not current product scope or evidence of an API-only release. The target retains JSON `/attestation`, `/v1` and Pi; it removes gateway Web UI and New chat admission. New five-lane API-only fixture/build, negative-route, telemetry-wire and deployed checks must be recorded separately. Historical passes and deployment observations are not retroactive API-only passes.
+
 ## Initial v0.0.10 scope
 
 The initial Pi 0.99.2 client used the verified Possums provider: memory-only login/catalog,

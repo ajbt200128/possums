@@ -7,13 +7,12 @@
 //! authenticated upstream draining and exactly-once finalization remain unwired.
 
 use crate::stream_owner::{delivery, DeliveryBody, DeliveryTx, Limits};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub struct Admission {
     work: Arc<Semaphore>,
     delivery: Arc<Semaphore>,
-    new_chat: Arc<Semaphore>,
     controls: Arc<Semaphore>,
 }
 
@@ -39,7 +38,6 @@ impl Admission {
         Self {
             work: Arc::new(Semaphore::new(generations)),
             delivery: Arc::new(Semaphore::new(generations)),
-            new_chat: Arc::new(Semaphore::new(1)),
             controls: Arc::new(Semaphore::new(1)),
         }
     }
@@ -50,14 +48,6 @@ impl Admission {
         let work = self.work.clone().try_acquire_owned().ok()?;
         let delivery = self.delivery.clone().try_acquire_owned().ok()?;
         Some(Admitted { work, delivery })
-    }
-
-    pub fn try_new_chat(&self) -> Option<ResponseAdmission> {
-        self.new_chat
-            .clone()
-            .try_acquire_owned()
-            .ok()
-            .map(ResponseAdmission)
     }
 
     pub fn try_control(&self) -> Option<ResponseAdmission> {
@@ -96,11 +86,6 @@ impl Admitted {
 
 impl ResponseAdmission {
     pub fn into_delivery(self, limits: Limits) -> (DeliveryTx, DeliveryBody) {
-        let (startup, body) = delivery(
-            possums::telemetry::hooks::Lease::from(self.0),
-            limits,
-            Duration::from_secs(1),
-        );
-        (startup.into_streaming(), body)
+        delivery(possums::telemetry::hooks::Lease::from(self.0), limits)
     }
 }

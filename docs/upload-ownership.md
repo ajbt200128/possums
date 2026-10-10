@@ -1,5 +1,7 @@
 # Phase 0 serialized upload ownership repair
 
+> **Historical Web upload evidence:** `/chat`, Web rendering and browser acceptance below describe the earlier browser artifact. The API-only target uses its own bounded ingress and needs new exact fixture/allocation evidence; this record is not that proof.
+
 Scope: local changes following `b38e3f9` (which includes `ba41dd5`). This is a
 synthetic ownership regression record, not a release or a 512-MiB proof. Existing
 user-edited policy/verification documents are intentionally unchanged.

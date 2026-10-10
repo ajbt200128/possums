@@ -1,15 +1,16 @@
-# Phase 0.1 pinned reference client
+# Phase 0.1 reference client (historical acceptance)
 
-Pinned reference client for the independently verified **`v0.0.9` API release**.
-`API_APPROVALS` in `approval.ts` pins its source, measured config, reproduced image
-and publication identity, with administrative expiry on 2026-10-11 (not quote
-freshness). The historical `v0.0.8` pin authorizes web observation only.
-No credentials or conversation content leave `ReferenceClient.verified(...)`
-when verification or release approval fails. Pi integration has not started.
+This is a historical API-client qualification record, **not current deployment
+instructions**. The compiled `v0.0.15` API approval expires on 2026-10-11;
+`ReferenceClient.verified(...)` must reject it after that date until separately
+reviewed and renewed. There is no Web UI approval or web-observation acquisition helper.
+Pi integration is documented in [`docs/pi-client.md`](../../docs/pi-client.md);
+current API-only development instructions are in
+[`docs/development.md`](../../docs/development.md).
 
 ## Client flow
 
-Import `ReferenceClient` from a scratch-built `channel-node.mjs` or
+For historical replay only, import `ReferenceClient` from a scratch-built `channel-node.mjs` or
 `channel-browser.mjs`. Supply untrusted v2 bundle, provenance manifest and public
 key-configuration bytes to `ReferenceClient.verified(bundle, manifest, config)`.
 The installed approval, not those supplied documents, selects the identity and
@@ -59,14 +60,16 @@ and a source/dependency/output hash report. Locked installs disable package scri
 The fixture-capable bundles are separate test artifacts: never promote them to
 production or add synthetic trust to production clients.
 
-Tests: `tests/phase01_transport.mjs` (published verifier/actual pinned shim),
+Tests: `tests/phase01_transport.mjs` (API admission/fixture transport in Node and Chromium),
 `tests/phase01_client.mjs` (catalog and ordered streaming parser, Node/Chromium),
 and `tests/phase01_api.mjs` (actual shim → Rust API → synthetic inference,
 Node/Chromium). `examples/phase01_fixture.rs` is the non-production backend for
-the last test. Funded `v0.0.9` checks exercised authenticated catalog discovery,
+the last test. `tests/phase02_release.mjs` covers published-release verification
+with isolated synthetic collateral; it does not establish live attestation.
+Historical funded `v0.0.9` checks exercised authenticated catalog discovery,
 progressive encrypted completion, final settled receipts, terminal duplicates,
 and settlement after disconnect. The actual reference flow also passed in Node
 and Chromium with supplied verified collateral, safe text DOM and no browser
-session storage. Autonomous browser collateral acquisition remains unqualified;
-physical Android is excluded by the user's scope decision. See `docs/phase01.md`
+session storage. Those results are not evidence of current API deployment or approval.
+See `docs/phase01.md`
 for the scoped acceptance record and remaining unknowns.

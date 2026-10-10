@@ -11,7 +11,7 @@ use possums::{
         stream::{FinishReason, StreamCompletion, StreamUsage},
         Inference, InferenceError, Message,
     },
-    web::{router, AppState},
+    server::{router, AppState},
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

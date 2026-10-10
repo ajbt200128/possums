@@ -1,6 +1,6 @@
 //! Numeric aggregation fixtures only, NOT a resource reader or unit normalizer.
 use super::labels::{Lane, CAPACITIES};
-pub const INFRASTRUCTURE_SERIES: usize = 20;
+pub const INFRASTRUCTURE_SERIES: usize = 19;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -29,16 +29,16 @@ fn index(scope: ResourceScope, metric: ResourceMetric) -> Option<usize> {
 }
 #[derive(Debug, PartialEq)]
 pub struct Infrastructure {
-    samples: [[f64; 6]; 20],
-    seen: [u8; 20],
-    invalid: [bool; 20],
+    samples: [[f64; 6]; 19],
+    seen: [u8; 19],
+    invalid: [bool; 19],
 }
 impl Default for Infrastructure {
     fn default() -> Self {
         Self {
-            samples: [[0.; 6]; 20],
-            seen: [0; 20],
-            invalid: [false; 20],
+            samples: [[0.; 6]; 19],
+            seen: [0; 19],
+            invalid: [false; 19],
         }
     }
 }
@@ -91,6 +91,6 @@ impl Infrastructure {
         self.value(14 + lane as usize)
     }
     pub fn series_count(&self) -> usize {
-        (0..20).filter(|i| self.value(*i).is_some()).count()
+        (0..19).filter(|i| self.value(*i).is_some()).count()
     }
 }

@@ -39,11 +39,7 @@ async fn assert_cases(api: bool, failure: Failure, cases: Vec<Case>) {
         let f = Fixture::new(api, failure, Some(metrics.clone()));
         let mut request = case.request;
         if case.authenticated {
-            request = if api {
-                request.header("authorization", format!("Bearer {}", f.credential))
-            } else {
-                request.header("cookie", crate::auth::session_cookie(&f.credential))
-            };
+            request = request.header("authorization", format!("Bearer {}", f.credential));
         }
         let response = router(f.state.clone())
             .oneshot(request.body(Body::from(case.body)).unwrap())
@@ -220,116 +216,4 @@ async fn api_control_rejections_keep_input_auth_and_catalog_boundaries() {
         )
         .await;
     }
-}
-
-#[tokio::test]
-async fn web_control_rejections_do_not_turn_anonymous_or_missing_routes_into_failures() {
-    use Endpoint::*;
-    use Rejection::{Auth, Input};
-    assert_cases(
-        false,
-        Failure::None,
-        vec![
-            Case::new(
-                Request::post("/login").header("content-type", "application/x-www-form-urlencoded"),
-                "hostile-form-canary",
-                422,
-                Login,
-                Some(Input),
-            ),
-            Case::new(Request::post("/login"), "", 415, Login, Some(Input)),
-            Case::new(
-                Request::post("/login").header("content-type", "application/x-www-form-urlencoded"),
-                "csrf=x&credential=hostile-credential-canary",
-                401,
-                Login,
-                Some(Auth),
-            ),
-            Case::new(
-                Request::post("/logout")
-                    .header("content-type", "application/x-www-form-urlencoded"),
-                "csrf=x",
-                401,
-                Logout,
-                Some(Auth),
-            ),
-            Case::new(
-                Request::post("/logout")
-                    .header("content-type", "application/x-www-form-urlencoded"),
-                "csrf=x",
-                401,
-                Logout,
-                Some(Auth),
-            )
-            .authenticated(),
-            Case::new(
-                Request::post("/chat/new")
-                    .header("content-type", "application/x-www-form-urlencoded"),
-                "csrf=x",
-                401,
-                NewChat,
-                Some(Auth),
-            ),
-            Case::new(
-                Request::post("/chat/new")
-                    .header("content-type", "application/x-www-form-urlencoded"),
-                "csrf=x",
-                401,
-                NewChat,
-                Some(Auth),
-            )
-            .authenticated(),
-            Case::new(Request::get("/recovery"), "", 401, Recovery, Some(Auth)),
-            Case::new(
-                Request::get("/recovery/download"),
-                "",
-                401,
-                RecoveryDownload,
-                Some(Auth),
-            ),
-            Case::new(Request::get("/chat"), "", 405, Other, Some(Input)),
-            Case::new(Request::post("/claims"), "", 405, Other, Some(Input)),
-            Case::new(
-                Request::get("/missing?hostile-query-canary"),
-                "",
-                404,
-                Other,
-                None,
-            ),
-            Case::new(Request::get("/"), "", 200, Home, None),
-            Case::new(
-                Request::get("/claims?hostile-query-canary"),
-                "",
-                200,
-                Claims,
-                None,
-            ),
-            Case::new(
-                Request::get("/attestation"),
-                "",
-                503,
-                Attestation,
-                Some(Rejection::Internal),
-            ),
-        ],
-    )
-    .await;
-    assert_cases(
-        false,
-        Failure::Verification,
-        vec![Case::new(
-            Request::get("/attestation"),
-            "",
-            503,
-            Attestation,
-            Some(Rejection::Verification),
-        )],
-    )
-    .await;
-    assert_cases(
-        false,
-        Failure::Catalog,
-        vec![Case::new(Request::get("/"), "", 503, Home, Some(Rejection::Catalog)).authenticated()],
-    )
-    .await;
 }

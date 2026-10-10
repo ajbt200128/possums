@@ -26,22 +26,22 @@ fn cohort(n: u64, mixed: bool, missing: u64) -> RequestTables {
         ticks: 300,
         ..Default::default()
     };
-    t.http_starts[14] = n;
-    t.http_completed[255] = n;
-    t.http_duration[255].0[3] = n;
-    t.dispositions[255][0] = n;
-    t.generation_starts[3] = n;
-    t.delivery[9] = n;
+    t.http_starts[6] = n;
+    t.http_completed[111] = n;
+    t.http_duration[111].0[3] = n;
+    t.dispositions[111][0] = n;
+    t.generation_starts[0] = n;
+    t.delivery[0] = n;
     if mixed {
-        for i in [36, 41] {
+        for i in [0, 5] {
             t.generation_completed[i] = 10;
             t.generation_duration[i].0[2] = 10;
             t.first_output[i].0[1] = 10;
         }
     } else {
-        t.generation_completed[36] = n;
-        t.generation_duration[36].0[2] = n;
-        t.first_output[36].0[1] = n - missing;
+        t.generation_completed[0] = n;
+        t.generation_duration[0].0[2] = n;
+        t.first_output[0].0[1] = n - missing;
     }
     for lane in [0, 2] {
         t.occupancy[lane] = Histogram([300 - 3 * n, 3 * n, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -49,7 +49,7 @@ fn cohort(n: u64, mixed: bool, missing: u64) -> RequestTables {
     for lane in [1, 3] {
         t.occupancy[lane] = Histogram([300 - n, n, 0, 0, 0, 0, 0, 0, 0, 0]);
     }
-    t.contributors = [n, n, n, n, 0, 0];
+    t.contributors = [n, n, n, n, 0];
     t
 }
 pub(in crate::telemetry) fn decode(bytes: &[u8]) -> ExportMetricsServiceRequest {
@@ -284,9 +284,6 @@ pub(in crate::telemetry) fn expected_vector(n: i64, vector: Vector) -> WirePoint
             Vector::RareModel if attrs.iter().any(|(k, _)| k == "possums.model") => {
                 Some(("possums.model", "glm-5-3"))
             }
-            Vector::RareEndpoint if attrs.iter().any(|(k, _)| k == "possums.endpoint") => {
-                Some(("possums.endpoint", "chat_web"))
-            }
             _ => None,
         };
         if let Some((key, replacement)) = split_label {
@@ -398,8 +395,8 @@ async fn linked_wire_vectors() {
         assert_eq!(points(&bytes), expected(n as i64, mixed, missing as i64));
     }
     let mut t = cohort(11, false, 0);
-    t.first_output[36].0[2] = 1;
-    t.first_output[36].0[1] -= 1;
+    t.first_output[0].0[2] = 1;
+    t.first_output[0].0[1] -= 1;
     let bytes = wire(request(&t, W).unwrap()).await;
     assert_eq!(points(&bytes), expected_vector(11, Vector::RareBin));
 }
@@ -416,9 +413,9 @@ async fn sparse_and_cross_window_wire() {
         let model = ("possums.model", "kimi-k3");
         match change {
             0 => {
-                t.generation_completed[41] = 1;
-                t.generation_duration[41].0[2] = 1;
-                t.first_output[41].0[1] = 1;
+                t.generation_completed[5] = 1;
+                t.generation_duration[5].0[2] = 1;
+                t.first_output[5].0[1] = 1;
                 let attrs = [
                     ep,
                     model,
@@ -451,7 +448,7 @@ async fn sparse_and_cross_window_wire() {
                 );
             }
             1 => {
-                t.generation_starts[4] = 1;
+                t.generation_starts[1] = 1;
                 add_exact(
                     &mut exact,
                     "possums.generation.started",
@@ -462,19 +459,19 @@ async fn sparse_and_cross_window_wire() {
                 );
             }
             2 => {
-                t.http_starts[3] = 1;
+                t.http_starts[7] = 1;
                 add_exact(
                     &mut exact,
                     "possums.http.requests",
                     "{request}",
-                    &[("possums.endpoint", "chat_web")],
+                    &[("possums.endpoint", "other")],
                     1,
                     W,
                 );
             }
             3 => {
-                t.first_output[36].0[1] = 9;
-                t.first_output[36].0[2] = 1;
+                t.first_output[0].0[1] = 9;
+                t.first_output[0].0[2] = 1;
                 for ((name, attrs), (_, value, _, _)) in &mut exact {
                     if name == "possums.generation.first_output.bucket" {
                         if attrs.iter().any(|(k, v)| k == "bucket" && v == "b01") {
@@ -486,15 +483,15 @@ async fn sparse_and_cross_window_wire() {
                 }
             }
             4 => {
-                t.first_output[36].0[1] = 9;
+                t.first_output[0].0[1] = 9;
                 exact = expected(10, false, 1);
             }
             5 => {
-                t.dispositions[255] = [9, 1, 0, 0, 0];
+                t.dispositions[111] = [9, 1, 0, 0, 0];
             }
             6 => {
-                t.http_duration[255].0[3] = 9;
-                t.http_duration[255].0[2] = 1;
+                t.http_duration[111].0[3] = 9;
+                t.http_duration[111].0[2] = 1;
                 for ((name, attrs), (_, value, _, _)) in &mut exact {
                     if name == "possums.http.duration.bucket" {
                         if attrs.iter().any(|(k, v)| k == "bucket" && v == "b03") {
@@ -506,7 +503,7 @@ async fn sparse_and_cross_window_wire() {
                 }
             }
             7 => {
-                t.rejected[1176] = 1;
+                t.rejected[616] = 1;
                 add_exact(
                     &mut exact,
                     "possums.admission.rejected",
@@ -545,7 +542,7 @@ async fn sparse_and_cross_window_wire() {
             ticks: 300,
             ..Default::default()
         };
-        t.rejected[16 * 5 * 14 + 4 * 14] = n;
+        t.rejected[8 * 5 * 14 + 4 * 14] = n;
         let bytes = wire(request(&t, W).unwrap()).await;
         let p = points(&bytes);
         assert_eq!(p.len(), 1);
@@ -566,9 +563,9 @@ async fn sparse_and_cross_window_wire() {
         ticks: 300,
         ..Default::default()
     };
-    t.generation_starts[3] = 10;
-    t.generation_completed[47] = 10;
-    t.generation_duration[47].0[2] = 10;
+    t.generation_starts[0] = 10;
+    t.generation_completed[11] = 10;
+    t.generation_duration[11].0[2] = 10;
     let bytes = wire(request(&t, W).unwrap()).await;
     let mut expected_unknown = WirePoints::new();
     let base = [
@@ -611,8 +608,8 @@ async fn sparse_and_cross_window_wire() {
         ticks: 300,
         ..Default::default()
     };
-    early.http_starts[14] = 10;
-    early.generation_starts[3] = 10;
+    early.http_starts[6] = 10;
+    early.generation_starts[0] = 10;
     let mut expected_early = WirePoints::new();
     add_exact(
         &mut expected_early,
@@ -642,13 +639,13 @@ async fn sparse_and_cross_window_wire() {
         ticks: 300,
         ..Default::default()
     };
-    late.http_completed[255] = 10;
-    late.http_duration[255].0[3] = 10;
-    late.dispositions[255][0] = 10;
-    late.generation_completed[36] = 10;
-    late.generation_duration[36].0[3] = 10;
-    late.first_output[36].0[1] = 10;
-    late.delivery[9] = 10;
+    late.http_completed[111] = 10;
+    late.http_duration[111].0[3] = 10;
+    late.dispositions[111][0] = 10;
+    late.generation_completed[0] = 10;
+    late.generation_duration[0].0[3] = 10;
+    late.first_output[0].0[1] = 10;
+    late.delivery[0] = 10;
     let bytes = wire(request(&late, next).unwrap()).await;
     let mut expected_late = WirePoints::new();
     let http = [
@@ -768,7 +765,7 @@ async fn infrastructure_end_only_and_missing() {
     let Some(Data::Gauge(g)) = &metrics[4].data else {
         panic!("capacity gauge")
     };
-    assert_eq!(g.data_points.len(), 6);
+    assert_eq!(g.data_points.len(), 5);
     for (i, p) in g.data_points.iter().enumerate() {
         assert_eq!(
             p.value,
@@ -798,7 +795,7 @@ async fn infrastructure_end_only_and_missing() {
 }
 
 // All reachable cells populated with all fallback bins. HTTP and generation
-// populations are independent cohorts; rejection's documented 1190 product is
+// populations are independent cohorts; rejection's documented 630 product is
 // deliberately conservative: pre-router is only 4, non-chat models restricted.
 fn maximum() -> Box<RequestTables> {
     let mut t = Box::new(RequestTables {
@@ -810,36 +807,36 @@ fn maximum() -> Box<RequestTables> {
 }
 pub(in crate::telemetry) fn fill_maximum(t: &mut RequestTables) {
     t.ticks = 300;
-    for i in 0..16 {
+    for i in 0..8 {
         t.http_starts[i] = 10;
     }
-    for i in 0..288 {
+    for i in 0..144 {
         t.http_completed[i] = 110;
         t.http_duration[i].0 = [10; 11];
         t.dispositions[i] = [70, 10, 10, 10, 10];
     }
-    for i in 0..6 {
+    for i in 0..3 {
         t.generation_starts[i] = 10;
     }
-    for i in 0..72 {
+    for i in 0..36 {
         t.generation_completed[i] = 110;
         t.generation_duration[i].0 = [10; 11];
         t.first_output[i].0 = [10; 11];
     }
-    for i in 0..18 {
+    for i in 0..9 {
         t.delivery[i] = 10;
     }
-    for e in 0..17 {
+    for e in 0..9 {
         for m in 0..5 {
             for r in 0..14 {
                 let pre = r < 4;
-                if (pre && e == 16 && m == 4) || (!pre && e < 16 && (e == 3 || e == 14 || m == 4)) {
+                if (pre && e == 8 && m == 4) || (!pre && e < 8 && (e == 6 || m == 4)) {
                     t.rejected[(e * 5 + m) * 14 + r] = 10;
                 }
             }
         }
     }
-    for i in 0..6 {
+    for i in 0..5 {
         t.contributors[i] = 10;
         t.occupancy[i].0 = [30; 10];
     }
@@ -858,8 +855,8 @@ async fn maximum_reachable_cardinality_actual_wire_and_allocations() {
         eprintln!("materialize max requested_peak={peak}");
         assert!(peak <= LIMIT);
     }
-    let expected_points = 16 + 288 + 288 * 11 + 6 + 72 + 72 * 11 + 72 * 11 + 18 + 244 + 60;
-    assert_eq!(expected_points, 6402 - 1190 + 244);
+    let expected_points = 8 + 144 + 144 * 11 + 3 + 36 + 36 * 11 + 36 * 11 + 9 + 124 + 50;
+    assert_eq!(expected_points, crate::telemetry::REQUEST_CELLS - 630 + 124);
     assert_eq!(
         metrics.scope_metrics[0]
             .metrics
@@ -959,25 +956,25 @@ fn inconsistent_families_and_invalid_pairs_still_fail_closed() {
         let mut t = cohort(11, false, 0);
         match variant {
             0 => {
-                t.generation_duration[36].0[2] = 10;
+                t.generation_duration[0].0[2] = 10;
             } // unmatched terminal duration
             1 => {
-                t.http_duration[255].0[3] = 10;
+                t.http_duration[111].0[3] = 10;
             } // unmatched HTTP duration
             2 => {
-                t.first_output[36].0[1] = 12;
+                t.first_output[0].0[1] = 12;
             } // output exceeds terminals
             3 => {
-                t.dispositions[255] = [10, 0, 0, 0, 0];
+                t.dispositions[111] = [10, 0, 0, 0, 0];
             } // dispositions do not sum to terminals
             4 => {
                 t.ticks = 299;
             } // incomplete window
             5 => {
-                t.rejected[16 * 5 * 14] = 1;
+                t.rejected[8 * 5 * 14] = 1;
             } // pre-router rejection with an invented model
             _ => {
-                t.rejected[(16 * 5 + 4) * 14 + 4] = 10;
+                t.rejected[(8 * 5 + 4) * 14 + 4] = 10;
             } // invalid pre-router/post-router pair
         }
         assert!(request(&t, W).is_none(), "variant {variant}");
@@ -993,7 +990,7 @@ fn inconsistent_families_and_invalid_pairs_still_fail_closed() {
 #[test]
 fn sdk_integer_overflow_cannot_become_zero() {
     let mut t = cohort(10, false, 0);
-    t.http_starts[14] = i64::MAX as u64 + 1;
+    t.http_starts[6] = i64::MAX as u64 + 1;
     assert!(t.releasable());
     assert!(request(&t, W).is_none());
 }
@@ -1019,7 +1016,7 @@ async fn maximum_permitted_infrastructure_pairs_wire() {
             infra.configuration(lane, i, crate::telemetry::CAPACITIES[lane as usize]);
         }
     }
-    assert_eq!(infra.series_count(), 20);
+    assert_eq!(infra.series_count(), 19);
     let bytes = wire(infrastructure(&infra, I).unwrap()).await;
     let decoded = decode(&bytes);
     let metrics = &decoded.resource_metrics[0].scope_metrics[0].metrics;
@@ -1032,7 +1029,7 @@ async fn maximum_permitted_infrastructure_pairs_wire() {
                 _ => panic!("not gauge"),
             })
             .sum::<usize>(),
-        20
+        19
     );
     for (j, m) in metrics.iter().enumerate() {
         let Some(Data::Gauge(g)) = &m.data else {
@@ -1056,7 +1053,7 @@ async fn maximum_permitted_infrastructure_pairs_wire() {
     }
     assert!(bytes.len() <= 6_576_128);
     eprintln!(
-        "materialize max infrastructure actual_wire_bytes={} points=20",
+        "materialize max infrastructure actual_wire_bytes={} points=19",
         bytes.len()
     );
 }

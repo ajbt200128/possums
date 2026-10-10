@@ -14,15 +14,7 @@ use opentelemetry_sdk::{
 };
 use std::time::{Duration, UNIX_EPOCH};
 
-const ENDPOINTS: [(&str, Endpoint); 16] = [
-    ("home", Endpoint::Home),
-    ("login", Endpoint::Login),
-    ("logout", Endpoint::Logout),
-    ("chat_web", Endpoint::ChatWeb),
-    ("new_chat", Endpoint::NewChat),
-    ("recovery", Endpoint::Recovery),
-    ("recovery_download", Endpoint::RecoveryDownload),
-    ("claims", Endpoint::Claims),
+const ENDPOINTS: [(&str, Endpoint); 8] = [
     ("attestation", Endpoint::Attestation),
     ("api_challenge", Endpoint::ApiChallenge),
     ("api_session", Endpoint::ApiSession),
@@ -96,12 +88,11 @@ const REASONS: [(&str, Rejection); 14] = [
     ("catalog", Rejection::Catalog),
     ("internal", Rejection::Internal),
 ];
-const LANES: [(&str, Lane); 6] = [
+const LANES: [(&str, Lane); 5] = [
     ("connection", Lane::Connection),
     ("generation", Lane::Generation),
     ("heavy", Lane::Heavy),
     ("ingress", Lane::Ingress),
-    ("new_chat", Lane::NewChat),
     ("control", Lane::Control),
 ];
 const SCOPES: [(&str, &str, ResourceScope); 4] = [
@@ -342,7 +333,7 @@ pub(super) fn request_paused(
     let mut gen_duration = Vec::new();
     let mut output = Vec::new();
     let mut delivery = Vec::new();
-    for (endpoint, e) in [ENDPOINTS[3], ENDPOINTS[14]] {
+    for (endpoint, e) in [ENDPOINTS[6]] {
         for (model, m) in MODELS {
             let base = [("possums.endpoint", endpoint), ("possums.model", model)];
             point(&mut started, &base, t.generation_started(e, m));

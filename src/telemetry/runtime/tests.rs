@@ -95,7 +95,7 @@ async fn configured_sender_rewarms_after_invalidation_without_replay() {
         metrics.clone(),
         client,
         stopped,
-        crate::web::admission_capacities(),
+        crate::server::admission_capacities(),
     ));
     tokio::time::timeout(Duration::from_secs(2), async {
         while metrics.epoch.load(SeqCst) % 2 == 0 {
@@ -124,7 +124,7 @@ async fn authenticated_tls_owned_sender_payload_stop_and_no_retry() {
             metrics.clone(),
             client,
             stopped,
-            crate::web::admission_capacities(),
+            crate::server::admission_capacities(),
         ));
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = acceptor.accept(stream).await.unwrap();
@@ -180,7 +180,7 @@ async fn pending_export_keeps_sampling_and_polling_until_joined_stop() {
     {
         let mut state = metrics.state.lock().unwrap();
         for interval in 1..6 {
-            for (lane, capacity) in crate::web::admission_capacities() {
+            for (lane, capacity) in crate::server::admission_capacities() {
                 state
                     .infrastructure
                     .active
@@ -193,7 +193,7 @@ async fn pending_export_keeps_sampling_and_polling_until_joined_stop() {
         metrics.clone(),
         client,
         stopped,
-        crate::web::admission_capacities(),
+        crate::server::admission_capacities(),
     ));
     let (stream, _) = listener.accept().await.unwrap();
     let mut stream = acceptor.accept(stream).await.unwrap();
@@ -304,7 +304,7 @@ async fn tls_timeout_stop_and_epoch_invalidation_own_actual_io() {
             metrics.clone(),
             client,
             stopped,
-            crate::web::admission_capacities(),
+            crate::server::admission_capacities(),
         ));
         let (stream, _) = listener.accept().await.unwrap();
         let mut tls_stream = None;

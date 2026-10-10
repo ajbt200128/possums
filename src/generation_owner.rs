@@ -127,7 +127,7 @@ impl SettledReceipt {
 /// before tokenization, not compose. Its explicit owner envelope drops owned
 /// prompt-bearing work BEFORE this guard/leases. Preflight failure/deadline drops
 /// this sole guard (no explicit refund plus guard); success moves this same value
-/// synchronously into streaming_chat::compose, even if observation was dropped.
+/// synchronously into API streaming composition, even if observation was dropped.
 /// Neither a closed result channel nor reset/logout can veto accepted work.
 ///
 /// Retire generation tracking after terminal cleanup but before returning memory

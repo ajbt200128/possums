@@ -57,7 +57,7 @@
     },
     {
       "type": "query", "id": "9WWgEX8jSyk", "name": "Configured application admission capacities",
-      "description": "Configured shared limits: connection 64; generation/heavy/ingress 4; new-chat/control 1. Not current free permits, CPU/memory capacity or a separate generation quota.",
+      "description": "Configured shared limits: connection 64; generation/heavy/ingress 4; control 1. Not current free permits, CPU/memory capacity or a separate generation quota.",
       "chart_type": "categorical_bar", "display_style": "combo", "size": {"width": 6, "height": 5}
     },
     {

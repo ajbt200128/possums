@@ -10,8 +10,8 @@ use crate::{
         tools::{Tool, ToolChoice, ToolInvocation, ToolMessage},
         InferenceFailure,
     },
+    server::AppState,
     telemetry::{hooks::RequestContext, AdmissionModel, Rejection as MetricRejection},
-    web::AppState,
 };
 use axum::{
     body::Bytes,
@@ -147,7 +147,7 @@ fn anonymous(headers: &HeaderMap) -> Result<(), StatusCode> {
 }
 
 // Exact one-header grammar, no comma folding, alternate scheme, whitespace or
-// recovery-credential fallback. Only API-kind sessions are usable here.
+// credential fallback. Only authenticated API sessions are usable here.
 fn authenticated(
     state: &AppState,
     headers: &HeaderMap,
@@ -514,7 +514,7 @@ async fn chat(
     let delivery_heavy = heavy.clone();
     let submission = Submission {
         session_id: &session_id,
-        csrf: &session.csrf,
+        admission_binding: &session.admission_binding,
         token: &input.submission,
     };
     let structured = input.tools.is_some()

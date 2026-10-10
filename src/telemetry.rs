@@ -459,14 +459,14 @@ impl<C: Clock> AggregateMetrics<C> {
         if mapped >= due && mapped < due.saturating_add(SECOND) && state.requests.active.ticks < 300
         {
             state.mark_leases();
-            let mut occupied = [0_u64; 6];
+            let mut occupied = [0_u64; CAPACITIES.len()];
             for record in &state.records {
                 if record.kind == Kind::Lease && !record.terminal {
                     occupied[record.lane as usize] += 1;
                 }
             }
             let table = &mut state.requests.active;
-            for lane in 0..6 {
+            for lane in 0..CAPACITIES.len() {
                 if occupied[lane] > CAPACITIES[lane] {
                     table.valid = false;
                 }
@@ -611,8 +611,10 @@ impl<C: Clock> AggregateMetrics<C> {
             state.requests.active.valid = false;
             return;
         }
-        let index =
-            (endpoint.map_or(16, |e| e as usize) * 5 + model.index()) * 14 + reason as usize;
+        let index = (endpoint.map_or(Endpoint::Other as usize + 1, |e| e as usize) * 5
+            + model.index())
+            * 14
+            + reason as usize;
         let table = &mut state.requests.active;
         increment(&mut table.rejected[index], &mut table.valid);
     }
@@ -807,7 +809,7 @@ impl State {
         if self.requests.start < self.requests.eligible {
             return;
         }
-        let mut occupied = [0_u64; 6];
+        let mut occupied = [0_u64; CAPACITIES.len()];
         for record in &mut self.records {
             if record.kind == Kind::Lease && !record.terminal {
                 occupied[record.lane as usize] += 1;

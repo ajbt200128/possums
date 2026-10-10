@@ -27,45 +27,8 @@ jobs:
           source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
       - run: python3 -m unittest discover -s tests -p 'test_release_cache.py'
       - run: nix flake check --print-build-logs
-      - name: Seed browser and image outputs
-        run: nix build .#browser-fixture .#gateway-image .#gateway-smoke-image --no-link --print-build-logs
-
-  browser:
-    # Seed shared dependencies before more daemons query a cold GitHub cache.
-    needs: flake
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
-        with:
-          diagnostic-endpoint: ""
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
-        with:
-          diagnostic-endpoint: ""
-          use-flakehub: false
-          use-gha-cache: true
-          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: node --test tests/browser_support_test.mjs
-      - name: Build cacheable browser fixture
-        run: nix build .#browser-fixture --out-link result-browser-fixture --print-build-logs
-      - name: Run synthetic browser acceptance in pinned Playwright image
-        env:
-          # Match package.json; the image includes Chromium and its system dependencies.
-          PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
-        run: |
-          fixture=$(readlink -f result-browser-fixture)
-          docker run --rm --init --network none --ipc=host \
-            --mount "type=bind,src=/nix/store,dst=/nix/store,readonly" \
-            --mount "type=bind,src=$PWD,dst=/work,readonly" \
-            --workdir /work --env "POSSUMS_BROWSER_FIXTURE=$fixture/bin/browser_fixture" \
-            "$PLAYWRIGHT_IMAGE" node tests/browser.mjs
+      - name: Seed API smoke and image outputs
+        run: nix build .#api-smoke-fixture .#gateway-image .#gateway-smoke-image --no-link --print-build-logs
 
   image:
     needs: flake
@@ -101,7 +64,7 @@ jobs:
           use-flakehub: false
           use-gha-cache: true
           source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
-      - name: Build isolated test-verifier image
+      - name: Build isolated synthetic API smoke image
         run: nix build .#gateway-smoke-image --print-build-logs
       - name: Smoke test read-only startup with a runtime account secret
         run: |
@@ -118,3 +81,4 @@ jobs:
           test "$(docker inspect -f '{{.State.Running}}' "$container")" = true
           docker logs "$container" 2>&1 | grep -q '^http://127.0.0.1:'
           ! docker logs "$container" 2>&1 | grep -q 'startup-canary'
+          test "$(docker logs "$container" 2>&1 | wc -l)" -eq 1

@@ -1,7 +1,4 @@
-use possums::{
-    render,
-    telemetry::{AggregateMetrics, Deployment, Endpoint, SystemClock},
-};
+use possums::telemetry::{AggregateMetrics, Deployment, Endpoint, SystemClock};
 use std::process::Command;
 
 #[test]
@@ -33,8 +30,8 @@ fn hostile_routes_cannot_create_labels() {
     assert_eq!(Endpoint::route("GET", "/chat"), Endpoint::Other);
     assert_eq!(Endpoint::route("HEAD", "/v1/models"), Endpoint::Other);
     assert_eq!(Endpoint::route("OPTIONS", "/"), Endpoint::Other);
-    assert_eq!(Endpoint::route("POST", "/chat"), Endpoint::ChatWeb);
-    assert_eq!(Endpoint::route("HEAD", "/"), Endpoint::Home);
+    assert_eq!(Endpoint::route("POST", "/chat"), Endpoint::Other);
+    assert_eq!(Endpoint::route("HEAD", "/"), Endpoint::Other);
 }
 
 #[test]
@@ -58,15 +55,4 @@ fn startup_errors_emit_no_sensitive_output_or_writable_artifacts() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains(canary));
     assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
     std::fs::remove_dir(directory).unwrap();
-}
-
-#[test]
-fn hostile_content_is_neither_active_nor_remotely_loaded() {
-    let canary = "sensitive-canary.invalid";
-    let rendered = render::markdown(&format!(
-        "<script>fetch('https://{canary}')</script> ![x](https://{canary}/pixel)"
-    ));
-    assert!(!rendered.contains("<script"));
-    assert!(!rendered.contains("<img"));
-    assert!(!rendered.contains("src="));
 }

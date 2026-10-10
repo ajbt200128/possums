@@ -1,5 +1,5 @@
 //! Shared admission and detached context preflight, independent of HTTP/rendering.
-//! Adapters supply bounded, decoded owned input and a synchronous renderer handoff.
+//! Adapters supply bounded, decoded owned input and a synchronous response handoff.
 //! Acceptance is the locked reservation, not receipt of the handoff result.
 
 use crate::telemetry::{
@@ -10,7 +10,7 @@ use crate::telemetry::{
 use crate::{
     accounting::{Accounting, Outcome, ReserveResult},
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
-    auth::{AdmissionError, Auth, ConversationId},
+    auth::{AdmissionError, Auth},
     catalog::Model,
     generation_owner::ReservedGeneration,
     inference::{
@@ -30,7 +30,7 @@ use tokio::sync::oneshot;
 
 const PREFLIGHT_DEADLINE: Duration = Duration::from_secs(30);
 
-/// Borrowed shared services; no transport, response or renderer state.
+/// Borrowed shared services; no transport or response state.
 pub(crate) struct Generation<'a> {
     pub auth: &'a Arc<Auth>,
     pub accounting: &'a Arc<Accounting>,
@@ -41,7 +41,7 @@ pub(crate) struct Generation<'a> {
     pub observation: RequestContext,
     pub activity: &'a Arc<AtomicUsize>,
     #[cfg(test)]
-    pub hooks: &'a Arc<crate::web::resource_streaming_tests::PreflightHooks>,
+    pub hooks: &'a Arc<crate::server::resource_streaming_tests::PreflightHooks>,
 }
 
 // No Debug: input and admission material must never enter diagnostics.
@@ -55,7 +55,7 @@ pub(crate) struct GenerationInput {
 
 pub(crate) struct Submission<'a> {
     pub session_id: &'a str,
-    pub csrf: &'a str,
+    pub admission_binding: &'a str,
     pub token: &'a str,
 }
 
@@ -63,7 +63,6 @@ pub(crate) struct PreparedGeneration {
     pub model: Model,
     pub history: Vec<Message>,
     pub prompt: String,
-    pub conversation: ConversationId,
     /// Original maximum, not the context-legal allowance or a refreshed price.
     pub reserved_microunits: u64,
 }
@@ -153,7 +152,7 @@ impl Generation<'_> {
 
     /// The result observes accepted work; dropping this future after admission
     /// cannot cancel preflight/inference. `handoff` MUST synchronously transfer
-    /// the same owner to the renderer's detached settling worker, even when
+    /// the same owner to the API detached settling worker, even when
     /// delivery/observation has disappeared. Never spawn a second accounting owner.
     pub(crate) async fn submit<T, F>(
         self,
@@ -265,7 +264,7 @@ impl Generation<'_> {
             .admit_submission(
                 self.accounting,
                 submission.session_id,
-                submission.csrf,
+                submission.admission_binding,
                 submission.token,
                 quote,
             )
@@ -284,7 +283,7 @@ impl Generation<'_> {
         self.observation.disposition(Disposition::NewGeneration);
         let (sender, receiver) = oneshot::channel();
         // Construct BEFORE creating the future: even a pre-poll drop destroys
-        // prompt/renderer captures before the sole refund owner and its leases.
+        // prompt/response captures before the sole refund owner and its leases.
         let mut job = PreflightInput {
             input,
             handoff,
@@ -357,7 +356,6 @@ impl Generation<'_> {
                         model: quote.model,
                         history: input.history,
                         prompt: input.prompt,
-                        conversation: admission.submission.conversation,
                         reserved_microunits,
                     }),
                     RequestInput::Structured(input) => {
@@ -385,7 +383,7 @@ impl Generation<'_> {
     }
 }
 
-// Explicit field order covers captured renderer data as well as inference input.
+// Explicit field order covers captured response data as well as inference input.
 // Close observation AFTER refund on panic/pre-poll drop, not in unspecified
 // async capture order where another worker could observe failure before cleanup.
 struct PreflightInput<F, T> {

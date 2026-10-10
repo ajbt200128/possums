@@ -1,5 +1,7 @@
 # Combined rollout candidate — 2026-10-09
 
+> **API-only cutover notice (pending runtime/infrastructure verification):** Browser routes, browser fixtures and six-lane/New chat observations below are historical evidence for earlier artifacts, not current product scope or evidence of an API-only release. The target retains JSON `/attestation`, `/v1` and Pi; it removes gateway Web UI and New chat admission. New five-lane API-only fixture/build, negative-route, telemetry-wire and deployed checks must be recorded separately. Historical passes and deployment observations are not retroactive API-only passes.
+
 Source PR: [#34](https://github.com/ajbt200128/possums/pull/34). Scope: [five-minute telemetry](telemetry-mvp-five-minute.md), [Pi trust sessions](pi-session-update-verification.md), and [quota simplification](quota-simplification.md). The initial sections are source/local evidence; the separately labelled v0.0.16 record below adds observed deployment and scoped live results, not a full E2E or whole-runtime guarantee.
 
 Policy: [data handling](../PRIVACY.md#data-handling-boundaries), [forbidden exports](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [aggregation contract](../PRIVACY.md#aggregation-is-necessary-not-sufficient), and [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).

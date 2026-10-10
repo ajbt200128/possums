@@ -19,7 +19,7 @@ const output = path.resolve(source, '../../../checks/release');
 await mkdir(output, { recursive: true });
 const entry = `
 export { connect, connectPublished } from './bootstrap.ts';
-export { Channel, ReferenceClient, qualifyWeb, API_APPROVALS, WEB_APPROVAL } from '../../examples/phase01/transport.ts';
+export { Channel, ReferenceClient, API_APPROVALS } from '../../examples/phase01/transport.ts';
 export { PUBLISHER, qualifyPublished, requireReleaseTag } from '../../examples/phase01/approval.ts';
 export { X509Certificate, SigstoreVerifier } from '@freedomofpress/sigstore-browser';
 `;
@@ -144,7 +144,6 @@ const qualify = (b = base, m = bytes(manifest), k = key) => test.Channel.publish
 try {
   assert.equal(prod.API_APPROVALS[0].expires, NativeDate.parse('2026-10-11T00:00:00Z'));
   await rejects('compiled admin expiry unchanged', () => prod.Channel.api(bytes(base), bytes(manifest), key));
-  await rejects('WEB remains independent', () => prod.qualifyWeb(bytes(base), bytes(manifest), key));
   await rejects('real hardware crypto rejects synthetic report', () => prod.Channel.published(bytes(base), bytes(manifest), key));
   await rejects('production fixture disabled', () => prod.Channel.fixture('https://localhost:18443', key, '07'.repeat(32)));
   assert.throws(() => new prod.Channel(Symbol(), origin, {})); passed++;

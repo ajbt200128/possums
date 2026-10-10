@@ -10,7 +10,7 @@ use possums::{
     auth::Auth,
     catalog::{Catalog, Model, MAX_CATALOG_BYTES, MAX_MODELS},
     inference::{stream, Inference, InferenceError, Message},
-    web::{router, AppState},
+    server::{router, AppState},
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

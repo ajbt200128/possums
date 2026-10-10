@@ -8,8 +8,8 @@ use crate::{
         stream::{FinishReason, StreamCompletion, StreamUsage},
         Inference, InferenceError, InferenceFailure, Message,
     },
+    server::{router, AppState},
     telemetry::hooks::Lease,
-    web::{router, AppState},
 };
 use async_trait::async_trait;
 use axum::{body::Body, http::Request};
@@ -140,29 +140,19 @@ struct Fixture {
     state: AppState,
     provider: Arc<Provider>,
     credential: String,
-    csrf: String,
     token: String,
-    api: bool,
 }
 impl Fixture {
-    fn new(api: bool, failure: Failure, metrics: Option<Arc<AggregateMetrics>>) -> Self {
+    fn new(_api: bool, failure: Failure, metrics: Option<Arc<AggregateMetrics>>) -> Self {
         let secret = URL_SAFE_NO_PAD.encode([8; 32]);
         let auth = Auth::from_json(&serde_json::json!([{"id":"private-account-canary","credential_sha256":URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes())),"demo_microunits":100}]).to_string()).unwrap();
-        let (credential, csrf, token) = if api {
-            let (bearer, session) = auth
-                .authenticate_api(&secret, &auth.issue_api_challenge().unwrap())
-                .unwrap();
-            let token = auth
-                .issue_api_submission(&bearer, "kimi-k3", false)
-                .unwrap();
-            (bearer, session.csrf, token)
-        } else {
-            let (id, session) = auth
-                .authenticate(&secret, &auth.issue_login_challenge().unwrap())
-                .unwrap();
-            let token = auth.issue_submission(&id).unwrap();
-            (id, session.csrf, token)
-        };
+        let (credential, _session) = auth
+            .authenticate_api(&secret, &auth.issue_api_challenge().unwrap())
+            .unwrap();
+        let token = auth
+            .issue_api_submission(&credential, "kimi-k3", false)
+            .unwrap();
+
         let provider = Arc::new(Provider {
             failure,
             entered: Notify::new(),
@@ -176,24 +166,19 @@ impl Fixture {
             state,
             provider,
             credential,
-            csrf,
             token,
-            api,
         }
     }
     async fn send(&self) -> axum::response::Response {
-        let request = if self.api {
-            Request::post("/v1/chat/completions").header("authorization", format!("Bearer {}", self.credential)).header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({"model":"kimi-k3","stream":true,"submission":self.token,"messages":[{"role":"user","content":"hostile-prompt-canary"}]}).to_string())).unwrap()
-        } else {
-            Request::post("/chat").header("cookie", crate::auth::session_cookie(&self.credential)).header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!("csrf={}&token={}&model=kimi-k3&h000000=W10&history_manifest=1.000001.00000002&prompt=hostile-prompt-canary", self.csrf, self.token))).unwrap()
-        };
+        let request = Request::post("/v1/chat/completions")
+            .header("authorization", format!("Bearer {}", self.credential))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"model":"kimi-k3","stream":true,"submission":self.token,"messages":[{"role":"user","content":"hostile-prompt-canary"}]}).to_string())).unwrap();
         router(self.state.clone()).oneshot(request).await.unwrap()
     }
     async fn quiescent(&self) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while self.state.available_lanes() != [4, 4, 4, 1, 1] {
+            while self.state.available_lanes() != [4, 4, 4, 1] {
                 tokio::task::yield_now().await;
             }
         })
@@ -218,206 +203,187 @@ fn totals(metrics: &AggregateMetrics) -> (u64, u64, u64, u64) {
 }
 
 #[tokio::test]
-async fn web_and_api_terminal_hooks_preserve_accounting_and_duplicate_disposition() {
-    for api in [false, true] {
-        for (failure, terminal, balance) in [
-            (Failure::None, GenerationTerminal::Success, 97),
-            (Failure::Preflight, GenerationTerminal::Transport, 100),
-            (Failure::Stream, GenerationTerminal::TerminalUsage, 100),
-            (Failure::Usage, GenerationTerminal::Settlement, 100),
-        ] {
-            let metrics = metrics(Deployment::IsolatedSynthetic);
-            let f = Fixture::new(api, failure, Some(metrics.clone()));
-            let gate = (!matches!(failure, Failure::Preflight)).then(|| Arc::new(Notify::new()));
-            *f.provider.startup_drained.lock().unwrap() = gate.clone();
-            let response = f.send().await;
-            if !matches!(failure, Failure::Preflight) {
-                assert_eq!(response.status(), 200);
-            }
-            if gate.is_some() {
-                // Deliberately backlog startup: yielding alone cannot guarantee a drain.
-                f.provider.startup_queued.notified().await;
-            }
-            let consumer = tokio::spawn(async move {
-                let mut body = response.into_body();
-                let marker = if api {
-                    &b"\"role\":\"assistant\""[..]
-                } else {
-                    &b"</pre><pre aria-label=\"Assistant\">"[..]
-                };
-                let mut gate = gate;
-                while let Some(frame) = body.frame().await {
-                    let frame = frame.unwrap();
-                    let at_startup = frame.into_data().ok().is_some_and(|data| {
-                        data.windows(marker.len()).any(|window| window == marker)
-                    });
-                    if at_startup {
-                        if let Some(gate) = gate.take() {
-                            gate.notify_one();
-                        }
+async fn api_terminal_hooks_preserve_accounting_and_duplicate_disposition() {
+    for (failure, terminal, balance) in [
+        (Failure::None, GenerationTerminal::Success, 97),
+        (Failure::Preflight, GenerationTerminal::Transport, 100),
+        (Failure::Stream, GenerationTerminal::TerminalUsage, 100),
+        (Failure::Usage, GenerationTerminal::Settlement, 100),
+    ] {
+        let metrics = metrics(Deployment::IsolatedSynthetic);
+        let f = Fixture::new(true, failure, Some(metrics.clone()));
+        let gate = (!matches!(failure, Failure::Preflight)).then(|| Arc::new(Notify::new()));
+        *f.provider.startup_drained.lock().unwrap() = gate.clone();
+        let response = f.send().await;
+        if !matches!(failure, Failure::Preflight) {
+            assert_eq!(response.status(), 200);
+        }
+        if gate.is_some() {
+            // Deliberately backlog startup: yielding alone cannot guarantee a drain.
+            f.provider.startup_queued.notified().await;
+        }
+        let consumer = tokio::spawn(async move {
+            let mut body = response.into_body();
+            let marker = &b"\"role\":\"assistant\""[..];
+            let mut gate = gate;
+            while let Some(frame) = body.frame().await {
+                let frame = frame.unwrap();
+                let at_startup = frame
+                    .into_data()
+                    .ok()
+                    .is_some_and(|data| data.windows(marker.len()).any(|window| window == marker));
+                if at_startup {
+                    if let Some(gate) = gate.take() {
+                        gate.notify_one();
                     }
                 }
-                assert!(gate.is_none(), "startup marker missing");
-            });
-            if !matches!(failure, Failure::Preflight) {
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    f.provider.entered.notified(),
-                )
-                .await
-                .expect("fixture startup drain and output");
-                assert_eq!(totals(&metrics), (1, 0, 1, 0));
-                assert_eq!(f.state.available_lanes(), [3, 3, 4, 1, 1]);
-                f.provider.finish.notify_one();
             }
-            consumer.await.unwrap();
-            f.quiescent().await;
-            assert_eq!(
-                f.state.accounting.available("private-account-canary"),
-                Some(balance)
-            );
-            assert_eq!(totals(&metrics), (1, 1, 1, 1));
-            let duplicate = f.send().await;
-            duplicate.into_body().collect().await.unwrap();
-            f.quiescent().await;
-            assert_eq!(totals(&metrics), (2, 2, 1, 1));
-            let state = metrics.state.lock().unwrap();
-            let t = &state.requests.active;
-            let e = if api {
-                Endpoint::ChatApi
-            } else {
-                Endpoint::ChatWeb
-            };
-            let g = generation_index(e, QualifiedModel(0)).unwrap();
-            assert_eq!(t.generation_completed[g * 12 + terminal as usize], 1);
-            assert_eq!(
-                t.dispositions
-                    .iter()
-                    .map(|d| d[Disposition::NewGeneration as usize])
-                    .sum::<u64>(),
-                1
-            );
-            assert_eq!(
-                t.dispositions
-                    .iter()
-                    .map(|d| d[Disposition::Duplicate as usize])
-                    .sum::<u64>(),
-                1
-            );
-            assert_eq!(t.rejected.iter().sum::<u64>(), 0); // post-reserve failure is not rejection
-            let output = t
-                .first_output
+            assert!(gate.is_none(), "startup marker missing");
+        });
+        if !matches!(failure, Failure::Preflight) {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                f.provider.entered.notified(),
+            )
+            .await
+            .expect("fixture startup drain and output");
+            assert_eq!(totals(&metrics), (1, 0, 1, 0));
+            assert_eq!(f.state.available_lanes(), [3, 3, 4, 1]);
+            f.provider.finish.notify_one();
+        }
+        consumer.await.unwrap();
+        f.quiescent().await;
+        assert_eq!(
+            f.state.accounting.available("private-account-canary"),
+            Some(balance)
+        );
+        assert_eq!(totals(&metrics), (1, 1, 1, 1));
+        let duplicate = f.send().await;
+        duplicate.into_body().collect().await.unwrap();
+        f.quiescent().await;
+        assert_eq!(totals(&metrics), (2, 2, 1, 1));
+        let state = metrics.state.lock().unwrap();
+        let t = &state.requests.active;
+        let g = generation_index(Endpoint::ChatApi, QualifiedModel(0)).unwrap();
+        assert_eq!(t.generation_completed[g * 12 + terminal as usize], 1);
+        assert_eq!(
+            t.dispositions
                 .iter()
-                .map(|h| h.count().unwrap())
-                .sum::<u64>();
-            assert_eq!(output, u64::from(!matches!(failure, Failure::Preflight)));
-            assert_eq!(
-                t.delivery[g * 3 + DeliveryTerminal::Completed as usize],
-                output,
-                "api={api} terminal={terminal:?} delivery={:?}",
-                t.delivery
-            );
-            assert_eq!(t.contributors[Lane::Heavy as usize], 2);
-            assert_eq!(t.contributors[Lane::Ingress as usize], 2);
-            assert_eq!(t.contributors[Lane::Generation as usize], 2); // duplicate briefly acquires the real slot
-            let formatted = format!("{t:?}");
-            for forbidden in [
-                "hostile-output-canary",
-                "hostile-prompt-canary",
-                "private-account-canary",
-                &f.credential,
-                &f.token,
-            ] {
-                assert!(!formatted.contains(forbidden));
-            }
+                .map(|d| d[Disposition::NewGeneration as usize])
+                .sum::<u64>(),
+            1
+        );
+        assert_eq!(
+            t.dispositions
+                .iter()
+                .map(|d| d[Disposition::Duplicate as usize])
+                .sum::<u64>(),
+            1
+        );
+        assert_eq!(t.rejected.iter().sum::<u64>(), 0); // post-reserve failure is not rejection
+        let output = t
+            .first_output
+            .iter()
+            .map(|h| h.count().unwrap())
+            .sum::<u64>();
+        assert_eq!(output, u64::from(!matches!(failure, Failure::Preflight)));
+        assert_eq!(
+            t.delivery[g * 3 + DeliveryTerminal::Completed as usize],
+            output,
+            "terminal={terminal:?} delivery={:?}",
+            t.delivery
+        );
+        assert_eq!(t.contributors[Lane::Heavy as usize], 2);
+        assert_eq!(t.contributors[Lane::Ingress as usize], 2);
+        assert_eq!(t.contributors[Lane::Generation as usize], 2); // duplicate briefly acquires the real slot
+        let formatted = format!("{t:?}");
+        for forbidden in [
+            "hostile-output-canary",
+            "hostile-prompt-canary",
+            "private-account-canary",
+            &f.credential,
+            &f.token,
+        ] {
+            assert!(!formatted.contains(forbidden));
         }
     }
 }
 
 #[tokio::test]
 async fn body_disconnect_does_not_finish_generation_or_release_its_permits() {
-    for api in [false, true] {
-        let metrics = metrics(Deployment::IsolatedSynthetic);
-        let f = Fixture::new(api, Failure::None, Some(metrics.clone()));
-        let mut body = f.send().await.into_body();
-        f.provider.entered.notified().await;
-        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
-        let retained = frame.slice(..1);
-        drop(frame);
-        drop(body);
-        assert_eq!(totals(&metrics), (1, 1, 1, 0));
-        assert_eq!(f.state.available_lanes(), [3, 3, 4, 1, 1]);
-        f.provider.finish.notify_one();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while f.state.available_lanes()[0] != 4 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(totals(&metrics), (1, 1, 1, 1));
-        assert_eq!(f.state.available_lanes()[1], 3); // dequeued slice is still the real heavy owner
-        assert_eq!(
-            f.state.accounting.available("private-account-canary"),
-            Some(97)
-        );
-        drop(retained);
-        f.quiescent().await;
-        let state = metrics.state.lock().unwrap();
-        let t = &state.requests.active;
-        let e = if api {
-            Endpoint::ChatApi
-        } else {
-            Endpoint::ChatWeb
-        };
-        assert_eq!(
-            t.http_completed[http_index(e, Status::Success, HttpTerminal::Unknown)],
-            1
-        );
-        assert_eq!(
-            t.delivery[generation_index(e, QualifiedModel(0)).unwrap() * 3
-                + DeliveryTerminal::Interrupted as usize],
-            1
-        );
-        assert_eq!(
-            state
-                .records
-                .iter()
-                .filter(|r| r.kind == Kind::Lease && !r.terminal)
-                .count(),
-            0
-        );
-    }
+    let metrics = metrics(Deployment::IsolatedSynthetic);
+    let f = Fixture::new(true, Failure::None, Some(metrics.clone()));
+    let mut body = f.send().await.into_body();
+    f.provider.entered.notified().await;
+    let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    let retained = frame.slice(..1);
+    drop(frame);
+    drop(body);
+    assert_eq!(totals(&metrics), (1, 1, 1, 0));
+    assert_eq!(f.state.available_lanes(), [3, 3, 4, 1]);
+    f.provider.finish.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while f.state.available_lanes()[0] != 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(totals(&metrics), (1, 1, 1, 1));
+    assert_eq!(f.state.available_lanes()[1], 3); // dequeued slice is still the real heavy owner
+    assert_eq!(
+        f.state.accounting.available("private-account-canary"),
+        Some(97)
+    );
+    drop(retained);
+    f.quiescent().await;
+    let state = metrics.state.lock().unwrap();
+    let t = &state.requests.active;
+    assert_eq!(
+        t.http_completed[http_index(Endpoint::ChatApi, Status::Success, HttpTerminal::Unknown)],
+        1
+    );
+    assert_eq!(
+        t.delivery[generation_index(Endpoint::ChatApi, QualifiedModel(0)).unwrap() * 3
+            + DeliveryTerminal::Interrupted as usize],
+        1
+    );
+    assert_eq!(
+        state
+            .records
+            .iter()
+            .filter(|r| r.kind == Kind::Lease && !r.terminal)
+            .count(),
+        0
+    );
 }
 
 #[tokio::test]
 async fn absent_off_and_lost_telemetry_never_gate_generation() {
-    for api in [false, true] {
-        for mode in [
-            None,
-            Some(Deployment::Off),
-            Some(Deployment::NonIsolated),
-            Some(Deployment::IsolatedSynthetic),
-        ] {
-            let metrics = mode.map(metrics);
-            let f = Fixture::new(api, Failure::None, metrics.clone());
-            let response = f.send().await;
-            f.provider.entered.notified().await;
-            // Also simulate telemetry health failure while the actual inference lives.
-            if let Some(m) = &metrics {
-                m.off();
-            }
-            drop(response);
-            f.provider.finish.notify_one();
-            f.quiescent().await;
-            assert_eq!(
-                f.state.accounting.available("private-account-canary"),
-                Some(97)
-            );
-            if let Some(m) = metrics {
-                assert_eq!(totals(&m), (0, 0, 0, 0));
-                assert!(m.request().is_none());
-            }
+    for mode in [
+        None,
+        Some(Deployment::Off),
+        Some(Deployment::NonIsolated),
+        Some(Deployment::IsolatedSynthetic),
+    ] {
+        let metrics = mode.map(metrics);
+        let f = Fixture::new(true, Failure::None, metrics.clone());
+        let response = f.send().await;
+        f.provider.entered.notified().await;
+        // Also simulate telemetry health failure while the actual inference lives.
+        if let Some(m) = &metrics {
+            m.off();
+        }
+        drop(response);
+        f.provider.finish.notify_one();
+        f.quiescent().await;
+        assert_eq!(
+            f.state.accounting.available("private-account-canary"),
+            Some(97)
+        );
+        if let Some(m) = metrics {
+            assert_eq!(totals(&m), (0, 0, 0, 0));
+            assert!(m.request().is_none());
         }
     }
 }
@@ -473,7 +439,7 @@ fn owned_conversion_moves_the_key_and_armed_drop_remains_unknown() {
     assert_eq!(totals(&metrics), (1, 1, 1, 1));
     let state = metrics.state.lock().unwrap();
     assert_eq!(
-        state.requests.active.generation_completed[3 * 12 + GenerationTerminal::Unknown as usize],
+        state.requests.active.generation_completed[GenerationTerminal::Unknown as usize],
         1
     );
 }
@@ -498,7 +464,7 @@ async fn http_empty_error_and_drop_are_distinct_from_handler_return() {
         };
         let mut response = axum::response::Response::new(body);
         *response.status_mut() = axum::http::StatusCode::IM_A_TEAPOT;
-        let response = crate::web::observed_response(response, None, observation);
+        let response = crate::server::observed_response(response, None, observation);
         if terminal != HttpTerminal::Eof {
             assert_eq!(totals(&metrics).1, 0);
         }
@@ -538,15 +504,15 @@ async fn pre_reserve_rejections_and_control_leases_use_closed_labels() {
     assert_eq!(totals(&metrics), (1, 1, 0, 0));
     let control = router(f.state.clone())
         .oneshot(
-            Request::get("/claims?hostile-query-canary")
+            Request::get("/v1/models?hostile-query-canary")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(f.state.available_lanes()[4], 0);
+    assert_eq!(f.state.available_lanes()[3], 0);
     let rejected = router(f.state.clone())
-        .oneshot(Request::get("/claims").body(Body::empty()).unwrap())
+        .oneshot(Request::get("/v1/models").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(rejected.status(), 503);
@@ -555,14 +521,19 @@ async fn pre_reserve_rejections_and_control_leases_use_closed_labels() {
     f.quiescent().await;
     let state = metrics.state.lock().unwrap();
     let t = &state.requests.active;
-    assert_eq!(t.rejected.iter().sum::<u64>(), 2);
+    assert_eq!(t.rejected.iter().sum::<u64>(), 3);
     assert_eq!(
         t.rejected[(Endpoint::ChatApi as usize * 5 + AdmissionModel::Unknown.index()) * 14
             + Rejection::Auth as usize],
         1
     );
     assert_eq!(
-        t.rejected[(Endpoint::Claims as usize * 5 + AdmissionModel::NotApplicable.index()) * 14
+        t.rejected[(Endpoint::Models as usize * 5 + AdmissionModel::NotApplicable.index()) * 14
+            + Rejection::Input as usize],
+        1
+    );
+    assert_eq!(
+        t.rejected[(Endpoint::Models as usize * 5 + AdmissionModel::NotApplicable.index()) * 14
             + Rejection::RequestCapacity as usize],
         1
     );
@@ -572,7 +543,7 @@ async fn pre_reserve_rejections_and_control_leases_use_closed_labels() {
             .iter()
             .map(|d| d[Disposition::PreReservationRejected as usize])
             .sum::<u64>(),
-        2
+        3
     );
 }
 
@@ -580,7 +551,7 @@ async fn pre_reserve_rejections_and_control_leases_use_closed_labels() {
 async fn exhausted_observation_pool_cannot_reject_or_cancel_a_generation() {
     let metrics = metrics(Deployment::IsolatedSynthetic);
     let held: Vec<_> = (0..POOL)
-        .map(|_| metrics.http(Endpoint::Home).into_owned(&metrics))
+        .map(|_| metrics.http(Endpoint::Other).into_owned(&metrics))
         .collect();
     let f = Fixture::new(true, Failure::None, Some(metrics.clone()));
     let response = f.send().await;
@@ -613,22 +584,13 @@ async fn production_router_releases_sparse_complete_windows_to_local_tls() {
         });
     }
 
-    for (endpoint, path, status, terminal_status, rejection) in [
-        (
-            Endpoint::Claims,
-            "/claims?hostile-query-canary",
-            200,
-            Status::Success,
-            None,
-        ),
-        (
-            Endpoint::Models,
-            "/v1/models",
-            401,
-            Status::ClientError,
-            Some(Rejection::Auth),
-        ),
-    ] {
+    for (endpoint, path, status, terminal_status, rejection) in [(
+        Endpoint::Models,
+        "/v1/models",
+        401,
+        Status::ClientError,
+        Some(Rejection::Auth),
+    )] {
         for n in [0, 1, 9, 10] {
             let mut metrics = Arc::new(AggregateMetrics::new(
                 Deployment::Production,
@@ -646,7 +608,7 @@ async fn production_router_releases_sparse_complete_windows_to_local_tls() {
             }
             at(&mut metrics, 301 * SECOND);
             {
-                let f = Fixture::new(false, Failure::None, Some(metrics.clone()));
+                let f = Fixture::new(true, Failure::None, Some(metrics.clone()));
                 for _ in 0..n {
                     let response = router(f.state.clone())
                         .oneshot(Request::get(path).body(Body::empty()).unwrap())

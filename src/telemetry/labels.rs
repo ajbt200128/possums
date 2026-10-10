@@ -4,14 +4,6 @@ use crate::inference::{authenticated_catalog, Inference, TinfoilInference};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Endpoint {
-    Home,
-    Login,
-    Logout,
-    ChatWeb,
-    NewChat,
-    Recovery,
-    RecoveryDownload,
-    Claims,
     Attestation,
     ApiChallenge,
     ApiSession,
@@ -25,14 +17,6 @@ impl Endpoint {
     /// Supply the parsed URI path, not a URL or query. Nothing is retained.
     pub fn route(method: &str, path: &str) -> Self {
         match (method, path) {
-            ("GET" | "HEAD", "/") => Self::Home,
-            ("POST", "/login") => Self::Login,
-            ("POST", "/logout") => Self::Logout,
-            ("POST", "/chat") => Self::ChatWeb,
-            ("POST", "/chat/new") => Self::NewChat,
-            ("GET" | "HEAD", "/recovery") => Self::Recovery,
-            ("GET" | "HEAD", "/recovery/download") => Self::RecoveryDownload,
-            ("GET" | "HEAD", "/claims") => Self::Claims,
             ("GET" | "HEAD", "/attestation") => Self::Attestation,
             ("GET", "/v1/auth/challenge") => Self::ApiChallenge,
             ("POST", "/v1/sessions") => Self::ApiSession,
@@ -45,8 +29,7 @@ impl Endpoint {
     }
     pub(super) fn chat(self) -> Option<usize> {
         match self {
-            Self::ChatWeb => Some(0),
-            Self::ChatApi => Some(1),
+            Self::ChatApi => Some(0),
             _ => None,
         }
     }
@@ -174,10 +157,9 @@ pub enum Lane {
     Generation,
     Heavy,
     Ingress,
-    NewChat,
     Control,
 }
-pub const CAPACITIES: [u64; 6] = [64, 4, 4, 4, 1, 1];
+pub const CAPACITIES: [u64; 5] = [64, 4, 4, 4, 1];
 pub const DURATION_BOUNDS_NS: [u64; 10] = [
     100_000_000,
     500_000_000,

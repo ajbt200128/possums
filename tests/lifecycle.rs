@@ -5,11 +5,7 @@ use possums::{
     catalog::{Model, Quote},
 };
 use sha2::{Digest, Sha256};
-use std::{
-    sync::Barrier,
-    thread,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 fn auth_config() -> String {
     let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
@@ -43,12 +39,18 @@ fn usage() -> FinalUsage {
 fn process_epoch_invalidates_old_submission_tokens() {
     let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
     let first = Auth::from_json(&auth_config()).unwrap();
-    let challenge = first.issue_login_challenge().unwrap();
-    let (session_id, session) = first.authenticate(&credential, &challenge).unwrap();
-    let token = first.issue_submission(&session_id).unwrap();
+    let challenge = first.issue_api_challenge().unwrap();
+    let (session_id, session) = first.authenticate_api(&credential, &challenge).unwrap();
+    let token = first.issue_api_submission(&session_id, "m", false).unwrap();
     let ledger = Accounting::new(first.account_budgets());
     let submission = first
-        .admit_submission(&ledger, &session_id, &session.csrf, &token, quote())
+        .admit_submission(
+            &ledger,
+            &session_id,
+            &session.admission_binding,
+            &token,
+            quote(),
+        )
         .unwrap()
         .submission;
     assert_eq!(ledger.available("a"), Some(74));
@@ -61,13 +63,14 @@ fn process_epoch_invalidates_old_submission_tokens() {
         restarted_ledger.finish(submission.id, None),
         Err(AccountingError::InvalidTransition)
     );
-    let challenge = restarted.issue_login_challenge().unwrap();
-    let (new_session_id, new_session) = restarted.authenticate(&credential, &challenge).unwrap();
+    let challenge = restarted.issue_api_challenge().unwrap();
+    let (new_session_id, new_session) =
+        restarted.authenticate_api(&credential, &challenge).unwrap();
     assert!(restarted
         .admit_submission(
             &restarted_ledger,
             &new_session_id,
-            &new_session.csrf,
+            &new_session.admission_binding,
             &token,
             quote()
         )
@@ -81,45 +84,60 @@ fn four_reservations_survive_reset_and_logout_until_old_work_finishes_once() {
         let ledger = Accounting::new([("a".into(), 130)]);
         let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
         let (mut id, mut session) = auth
-            .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+            .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
             .unwrap();
         let mut accepted = Vec::new();
         for _ in 0..4 {
-            let token = auth.issue_submission(&id).unwrap();
+            let token = auth.issue_api_submission(&id, "m", false).unwrap();
             accepted.push(
-                auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                auth.admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
                     .unwrap()
                     .submission,
             );
             if logout {
-                auth.logout(&id, &session.csrf).unwrap();
+                auth.logout_api(&id).unwrap();
                 (id, session) = auth
-                    .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+                    .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
                     .unwrap();
             } else {
-                auth.new_chat(&id, &session.csrf).unwrap();
-                session = auth.session(&id).unwrap();
+                auth.issue_api_submission(&id, "m", true).unwrap();
+                session = auth.api_session(&id).unwrap();
             }
         }
         assert_eq!(ledger.available("a"), Some(26));
         // A fifth credit-backed reservation is accepted despite old obligations.
-        let fifth_token = auth.issue_submission(&id).unwrap();
+        let fifth_token = auth.issue_api_submission(&id, "m", false).unwrap();
         let fifth = auth
-            .admit_submission(&ledger, &id, &session.csrf, &fifth_token, quote())
+            .admit_submission(
+                &ledger,
+                &id,
+                &session.admission_binding,
+                &fifth_token,
+                quote(),
+            )
             .unwrap()
             .submission;
         accepted.push(fifth);
-        auth.new_chat(&id, &session.csrf).unwrap();
-        session = auth.session(&id).unwrap();
-        let token = auth.issue_submission(&id).unwrap();
+        auth.issue_api_submission(&id, "m", true).unwrap();
+        let token = auth.issue_api_submission(&id, "new", true).unwrap();
+        session = auth.api_session(&id).unwrap();
         let mut new_quote = quote();
         new_quote.model.id = "new".into();
         assert_eq!(
-            auth.admit_submission(&ledger, &id, &session.csrf, &token, new_quote.clone())
-                .unwrap_err(),
+            auth.admit_submission(
+                &ledger,
+                &id,
+                &session.admission_binding,
+                &token,
+                new_quote.clone()
+            )
+            .unwrap_err(),
             AdmissionError::Accounting(AccountingError::InsufficientCredit)
         );
-        assert_eq!(auth.session(&id).unwrap().selected_model, None);
+        assert_eq!(
+            auth.api_session(&id).unwrap().selected_model.as_deref(),
+            Some("new")
+        );
         // An old accepted reservation may settle after reset/logout. Auth state
         // is not needed for either terminal outcome and cannot erase obligations.
         for terminal in [Some(usage()), Some(usage()), None] {
@@ -135,83 +153,24 @@ fn four_reservations_survive_reset_and_logout_until_old_work_finishes_once() {
             ledger.finish(accepted[1].id, None).unwrap(),
             Outcome::Refunded
         );
-        new_quote.model.id = "other".into();
+        new_quote.model.id = "new".into();
         let new = auth
-            .admit_submission(&ledger, &id, &session.csrf, &token, new_quote)
+            .admit_submission(&ledger, &id, &session.admission_binding, &token, new_quote)
             .unwrap();
         assert_eq!(new.result, ReserveResult::Reserved);
         for old in &accepted[1..] {
             assert_eq!(ledger.finish(old.id, None).unwrap(), Outcome::Refunded);
             assert_eq!(ledger.finish(old.id, None).unwrap(), Outcome::Refunded);
-            assert!(auth
-                .issue_submission_for(&id, old.conversation, Some("m"))
-                .is_err());
         }
         assert_eq!(
             ledger.finish(new.submission.id, None).unwrap(),
             Outcome::Refunded
         );
         assert_eq!(ledger.available("a"), Some(127));
-        let current = auth.session(&id).unwrap();
+        let current = auth.api_session(&id).unwrap();
         assert_eq!(current.conversation, session.conversation);
-        assert_eq!(current.selected_model.as_deref(), Some("other"));
+        assert_eq!(current.selected_model.as_deref(), Some("new"));
     }
-}
-
-#[test]
-fn concurrent_completions_issue_only_original_conversation_continuations() {
-    let auth = Auth::from_json(&auth_config()).unwrap();
-    let ledger = Accounting::new(auth.account_budgets());
-    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
-    let (id, session) = auth
-        .authenticate(&credential, &auth.issue_login_challenge().unwrap())
-        .unwrap();
-    let accepted: Vec<_> = (0..3)
-        .map(|_| {
-            let token = auth.issue_submission(&id).unwrap();
-            auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
-                .unwrap()
-                .submission
-        })
-        .collect();
-    let start = Barrier::new(4);
-    let tokens = thread::scope(|scope| {
-        let handles: Vec<_> = accepted
-            .iter()
-            .map(|submission| {
-                scope.spawn(|| {
-                    assert_eq!(
-                        ledger.finish(submission.id, Some(usage())).unwrap(),
-                        Outcome::Settled { charged: 3 }
-                    );
-                    start.wait();
-                    auth.issue_submission_for(&id, submission.conversation, Some("m"))
-                        .unwrap()
-                })
-            })
-            .collect();
-        start.wait();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect::<Vec<_>>()
-    });
-    assert_eq!(
-        tokens
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len(),
-        3
-    );
-    assert_eq!(ledger.available("a"), Some(91));
-    auth.new_chat(&id, &session.csrf).unwrap();
-    for token in tokens {
-        assert!(auth
-            .admit_submission(&ledger, &id, &session.csrf, &token, quote())
-            .is_err());
-    }
-    assert_eq!(ledger.available("a"), Some(91));
-    assert_eq!(auth.session(&id).unwrap().selected_model, None);
 }
 
 #[test]
@@ -230,10 +189,16 @@ fn api_restart_and_reauthentication_never_revive_old_tokens() {
             .authenticate_api(&credential, &current.issue_api_challenge().unwrap())
             .unwrap();
         assert!(current
-            .admit_submission(&ledger, &id, &session.csrf, &token, quote())
+            .admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
             .is_err());
         assert!(current
-            .admit_submission(&ledger, &next_id, &next_session.csrf, &token, quote())
+            .admit_submission(
+                &ledger,
+                &next_id,
+                &next_session.admission_binding,
+                &token,
+                quote()
+            )
             .is_err());
         assert_eq!(ledger.available("a"), Some(100));
     }
@@ -252,7 +217,7 @@ fn api_credit_backed_reservations_survive_reset_logout_and_absorbing_terminal_ou
         for _ in 0..4 {
             let token = auth.issue_api_submission(&id, "m", true).unwrap();
             accepted.push(
-                auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                auth.admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
                     .unwrap()
                     .submission,
             );
@@ -265,7 +230,7 @@ fn api_credit_backed_reservations_survive_reset_logout_and_absorbing_terminal_ou
         }
         let token = auth.issue_api_submission(&id, "m", true).unwrap();
         assert_eq!(
-            auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+            auth.admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
                 .unwrap_err(),
             AdmissionError::Accounting(AccountingError::InsufficientCredit)
         );
@@ -277,9 +242,6 @@ fn api_credit_backed_reservations_survive_reset_logout_and_absorbing_terminal_ou
                 outcome
             );
             assert_eq!(ledger.finish(submission.id, None).unwrap(), outcome);
-            assert!(auth
-                .issue_submission_for(&id, submission.conversation, Some("m"))
-                .is_err());
         }
         assert_eq!(ledger.available("a"), Some(101));
     }

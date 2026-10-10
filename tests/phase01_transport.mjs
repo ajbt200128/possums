@@ -1,18 +1,14 @@
-// Run with scratch build/install/evidence/fixture paths; never reads account secrets.
+// Run with scratch build/install/fixture/browser paths; never reads account secrets.
 import assert from 'node:assert/strict';
 import { readFile, writeFile, realpath } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { createHash, X509Certificate } from 'node:crypto';
-import { gzipSync, gunzipSync } from 'node:zlib';
 import path from 'node:path';
-const { PHASE01_BUILD: build, PHASE01_INSTALL: install, PHASE01_EVIDENCE: evidence, PHASE01_FIXTURE_DIR: fixtureDir, PHASE01_BROWSER: browserPath } = process.env;
-assert.ok(build && install && evidence && fixtureDir && browserPath);
+const { PHASE01_BUILD: build, PHASE01_INSTALL: install, PHASE01_FIXTURE_DIR: fixtureDir, PHASE01_BROWSER: browserPath } = process.env;
+assert.ok(build && install && fixtureDir && browserPath);
 const load = async p => JSON.parse(await readFile(p, 'utf8'));
 const prod = await import(pathToFileURL(path.join(build, 'channel-node.mjs')));
 const fixture = await import(pathToFileURL(path.join(build, 'fixture-node.mjs')));
-const bundle = await load(path.join(evidence, 'bundle.json'));
-const manifest = new Uint8Array(await readFile(path.join(evidence, 'manifest.bin')));
-const key = new Uint8Array(await readFile(path.join(evidence, 'key.bin')));
 const bytes = obj => new TextEncoder().encode(JSON.stringify(obj));
 const originalFetch = globalThis.fetch;
 let credentials = 0, content = 0, acquisitions = 0;
@@ -28,37 +24,23 @@ let passed = 0;
 async function rejects(name, fn, code) {
   await assert.rejects(fn, code ? e => e.code === code : undefined, name); passed++;
 }
-const verified = await prod.qualifyWeb(bytes(bundle), manifest, key);
-assert.equal(verified.scope, 'web-observation-only'); passed++;
-for (const [name, mutate] of [
-  ['malformed', b => { b.enclaveAttestationReport.body = '!!!'; }],
-  ['report-signature', b => { const raw = gunzipSync(Buffer.from(b.enclaveAttestationReport.body, 'base64')); raw[0x2a0] ^= 1; b.enclaveAttestationReport.body = gzipSync(raw).toString('base64'); }],
-  ['provenance-signature', b => { const signature = Buffer.from(b.sigstoreBundle.dsseEnvelope.signatures[0].sig, 'base64'); signature[0] ^= 1; b.sigstoreBundle.dsseEnvelope.signatures[0].sig = signature.toString('base64'); }],
-  ['unapproved-release', b => { b.releaseTag = 'v0.0.7'; }],
-  ['wrong-manifest', b => { b.digest = '0'.repeat(64); }],
-  ['wrong-domain', b => { b.domain = 'phase01.invalid'; }],
-  ['decompression-bomb', b => { b.enclaveAttestationReport.body = gzipSync(Buffer.alloc(1024*1024)).toString('base64'); }],
-]) {
-  const bad = structuredClone(bundle); mutate(bad);
-  await rejects(name, () => prod.qualifyWeb(bytes(bad), manifest, key));
+const meta = await load(path.join(fixtureDir, 'fixture.json'));
+const key = new Uint8Array(Buffer.from(meta.config, 'hex'));
+const origin = prod.API_APPROVALS[0].origin;
+// Approval expiry is deterministic; incomplete API evidence must fail without network access.
+assert.throws(() => prod.checkApproval(prod.API_APPROVALS[0].expires, prod.API_APPROVALS[0].expires, false)); passed++;
+await rejects('incomplete production API evidence', () => prod.Channel.api(bytes({}), bytes({}), key));
+for (const bad of [key.slice(0,40), new Uint8Array(42), Uint8Array.from(key, (v,i) => i===2 ? 0x21 : v), Uint8Array.from(key, (v,i) => i===40 ? 1 : v)]) {
+  assert.throws(() => prod.validateKeyConfig(bad, meta.key)); passed++;
 }
 const wrongKey = key.slice(); wrongKey[3] ^= 1;
-await rejects('endorsed-key', () => prod.qualifyWeb(bytes(bundle), manifest, wrongKey));
-for (const bad of [key.slice(0,40), new Uint8Array(42), Uint8Array.from(key, (v,i) => i===2 ? 0x21 : v), Uint8Array.from(key, (v,i) => i===40 ? 1 : v)]) {
-  assert.throws(() => prod.validateKeyConfig(bad, verified.hpkeKey)); passed++;
-}
+assert.throws(() => prod.validateKeyConfig(wrongKey, meta.key)); passed++;
 assert.throws(() => prod.checkApproval(Date.now(), Date.now()-1, false)); passed++;
 assert.throws(() => prod.checkApproval(Date.now(), Date.now()+1000, true)); passed++;
-// Actual pinned AMD certificate-validity rejection, not a made-up v2 quote-age test.
-const { verifyAttestation } = await import(pathToFileURL(path.join(install, 'node_modules/@tinfoilsh/verifier/dist/index.js')));
-const NativeDate = Date;
-globalThis.Date = class extends NativeDate { constructor(...args) { super(...(args.length ? args : ['2100-01-01T00:00:00Z'])); } };
-try { await rejects('AMD collateral validity', () => verifyAttestation(bundle.enclaveAttestationReport, bundle.vcek)); }
-finally { globalThis.Date = NativeDate; }
 await rejects('incomplete production API attestation input', () => prod.Channel.api());
-assert.throws(()=>new prod.Channel(Symbol(),prod.WEB_APPROVAL.origin,{})); passed++;
-await rejects('fixture disabled in production build', () => prod.Channel.fixture('https://localhost:18443', key, verified.hpkeKey));
-await rejects('fixture cannot select production', () => fixture.Channel.fixture(prod.WEB_APPROVAL.origin, key, verified.hpkeKey));
+assert.throws(()=>new prod.Channel(Symbol(),origin,{})); passed++;
+await rejects('fixture disabled in production build', () => prod.Channel.fixture('https://localhost:18443', key, meta.key));
+await rejects('fixture cannot select production', () => fixture.Channel.fixture(origin, key, meta.key));
 assert.deepEqual([credentials,content,acquisitions],[0,0,0]);
 const chat = { model: 'fixture', stream: true, submission: 's'.repeat(43), messages:[{role:'user',content:'qualification-content\ud800😀\n"\\\u0000'}] };
 assert.throws(() => prod.encodeChat({...chat, messages:[{role:'user',content:'x'.repeat(prod.LIMITS.chat)}]})); passed++;
@@ -70,8 +52,7 @@ assert.throws(() => prod.parseJSON(new TextEncoder().encode('['.repeat(prod.LIMI
 assert.throws(() => prod.parseJSON(new Uint8Array([0xff]),4096)); passed++;
 assert.equal(prod.serialize({x:'\ud800😀\n"'},4096).length, bytes({x:'\ud800😀\n"'}).length); passed++;
 
-const meta = await load(path.join(fixtureDir, 'fixture.json'));
-const config = new Uint8Array(Buffer.from(meta.config,'hex'));
+const config = key;
 const channel = await fixture.Channel.fixture(meta.origin, config, meta.key);
 const bearer = 'a'.repeat(43);
 // The identical admission assertions run inside Node AND Chromium, through public
@@ -119,7 +100,7 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
   }
   await beforeWork('incomplete production API attestation input',()=>m.Channel.api());
   await beforeWork('production fixture disabled',()=>m.Channel.fixture(meta.origin,config,meta.key));
-  await beforeWork('fixture cannot select production',()=>f.Channel.fixture(m.WEB_APPROVAL.origin,config,meta.key));
+  await beforeWork('fixture cannot select production',()=>f.Channel.fixture(m.API_APPROVALS[0].origin,config,meta.key));
   await beforeWork('wide encodeChat',()=>m.encodeChat(wideChat),10);
   await beforeWork('wide public chat',()=>c.chat(wideChat,bearer),10);
   // Structured admission additionally validates both own array-length descriptors.
@@ -264,15 +245,6 @@ let calls=0;
 globalThis.fetch = async () => {calls++; throw new Error('transport');};
 await rejects('post-send network no replay',()=>channel.chat(chat,bearer),'uncertain'); assert.equal(calls,1);
 assert.ok(cancel>=3);
-let acquiredBytes=0,acquisitionCancel=0;
-globalThis.fetch=async req=>{
-  assert.equal(req.url,prod.WEB_APPROVAL.origin+'/.well-known/tinfoil-attestation');
-  assert.equal(req.credentials,'omit');assert.equal(req.redirect,'error');assert.equal(req.cache,'no-store');
-  assert.equal(req.headers.has('Authorization'),false);assert.equal(req.body,null);
-  return new Response(new ReadableStream({pull(c){acquiredBytes+=4096;c.enqueue(new Uint8Array(4096));},cancel(){acquisitionCancel++;}},{highWaterMark:0}),{headers:{'Content-Length':'1'}});
-};
-await rejects('fragmented oversized evidence misleading length',()=>prod.observeWeb(manifest));
-assert.equal(acquisitionCancel,1);assert.equal(acquiredBytes,prod.LIMITS.evidence+4096);
 globalThis.fetch=originalFetch;
 
 // Browser dependency/crypto qualification only, not packet-06 UI/device harness.
@@ -300,19 +272,17 @@ try {
   const page=await context.newPage(); await page.goto('https://phase01.invalid/');
   const admissionBrowser = await page.evaluate(admissionRegressions,{productionURL:'/channel.mjs',fixtureURL:'/fixture.mjs',meta});
   assert.deepEqual(admissionBrowser,admissionNode); passed+=admissionBrowser.checks;
-  const result=await page.evaluate(async({bundle,manifest,key})=>{
+  const result=await page.evaluate(async({key})=>{
     let persistenceCalls=0;
     for(const name of ['getItem','setItem','removeItem','clear']) Storage.prototype[name]=()=>{persistenceCalls++;throw new Error('persistence forbidden');};
     indexedDB.open=()=>{persistenceCalls++;throw new Error('persistence forbidden');};
     caches.open=()=>{persistenceCalls++;throw new Error('persistence forbidden');};
     const m=await import('/channel.mjs');
-    const p=await m.qualifyWeb(new TextEncoder().encode(JSON.stringify(bundle)),new Uint8Array(manifest),new Uint8Array(key));
     let rejected=false;
-    const bad=new Uint8Array(key);bad[3]^=1;
-    try {await m.qualifyWeb(new TextEncoder().encode(JSON.stringify(bundle)),new Uint8Array(manifest),bad);}catch{rejected=true;}
-    return {scope:p.scope,rejected,persistenceCalls,localStorage:localStorage.length,sessionStorage:sessionStorage.length};
-  },{bundle,manifest:Array.from(manifest),key:Array.from(key)});
-  assert.deepEqual(result,{scope:'web-observation-only',rejected:true,persistenceCalls:0,localStorage:0,sessionStorage:0});
+    try {await m.Channel.api(new TextEncoder().encode('{}'),new TextEncoder().encode('{}'),new Uint8Array(key));}catch{rejected=true;}
+    return {rejected,persistenceCalls,localStorage:localStorage.length,sessionStorage:sessionStorage.length};
+  },{key:Array.from(key)});
+  assert.deepEqual(result,{rejected:true,persistenceCalls:0,localStorage:0,sessionStorage:0});
   assert.equal(unexpected,0); passed+=2;
   const releasedBefore=(await fixtureControl('stats')).released;
   const first=await page.evaluate(async({meta,chat,bearer})=>{
@@ -331,4 +301,4 @@ try {
   assert.equal(last,'data: last\n\n');assert.equal(unexpected,0);passed++;
   await writeFile(path.join(build,'browser-identity.json'),JSON.stringify({version:browser.version(),executable:await realpath(browserPath),sha256:createHash('sha256').update(await readFile(browserPath)).digest('hex')}));
 } finally {await browser.close(); await fixtureControl('stop');}
-console.log(JSON.stringify({passed,failedVerificationCredentialSends:credentials,failedVerificationContentSends:content,progressiveAuthenticatedDecryption:true,automaticReplay:false,browserVerifier:true,admissionNode,admissionChromium:true}));
+console.log(JSON.stringify({passed,failedVerificationCredentialSends:credentials,failedVerificationContentSends:content,progressiveAuthenticatedDecryption:true,automaticReplay:false,browserApiApprovalRejection:true,admissionNode,admissionChromium:true}));

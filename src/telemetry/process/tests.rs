@@ -15,7 +15,7 @@ fn reading(base: Instant, seconds: f64, cpu: Option<f64>, rss: Option<usize>) ->
 #[test]
 fn cpu_cores_use_actual_elapsed_time_and_never_a_capacity_divisor() {
     let base = Instant::now();
-    let mut sampler = Sampler::new(crate::web::admission_capacities());
+    let mut sampler = Sampler::new(crate::server::admission_capacities());
     assert_eq!(
         sampler.read(0, || reading(base, 0., Some(3.), Some(4096))),
         Some((0, None, Some(4096.)))
@@ -44,7 +44,7 @@ fn cpu_cores_use_actual_elapsed_time_and_never_a_capacity_divisor() {
 fn missed_failed_regressed_and_zero_elapsed_readings_do_not_backfill() {
     let base = Instant::now();
     for defect in 0..6 {
-        let mut sampler = Sampler::new(crate::web::admission_capacities());
+        let mut sampler = Sampler::new(crate::server::admission_capacities());
         sampler.read(0, || reading(base, 0., Some(10.), Some(1)));
         let point = match defect {
             0 => sampler.read(INTERVAL + SECOND + 1, || panic!("late source read")),
@@ -76,7 +76,7 @@ fn jittered_batch_survives_request_observations_at_minute_close() {
     let metrics = new();
     assert!(metrics.enable(Deployment::Production));
     let base = Instant::now();
-    let mut sampler = Sampler::new(crate::web::admission_capacities());
+    let mut sampler = Sampler::new(crate::server::admission_capacities());
     drive(&metrics, 300 * SECOND);
     // Baseline at the beginning of the first complete minute.
     sampler.sample_with(&metrics, || reading(base, 300., Some(30.), Some(8192)));
@@ -89,7 +89,7 @@ fn jittered_batch_survives_request_observations_at_minute_close() {
         // The HTTP observer wins the ordering race, including at minute end.
         std::thread::scope(|scope| {
             scope
-                .spawn(|| drop(metrics.http(Endpoint::Home)))
+                .spawn(|| drop(metrics.http(Endpoint::Other)))
                 .join()
                 .unwrap();
         });
@@ -102,7 +102,7 @@ fn jittered_batch_survives_request_observations_at_minute_close() {
             .is_none());
         sampler.sample_with(&metrics, || {
             // Also simulate a request while the source reader is outside the lock.
-            drop(metrics.http(Endpoint::Home));
+            drop(metrics.http(Endpoint::Other));
             let elapsed = (end + jitter) as f64 / SECOND as f64;
             reading(base, elapsed, Some(elapsed / 10.), Some(8192))
         });
@@ -130,7 +130,7 @@ fn jittered_batch_survives_request_observations_at_minute_close() {
         table.resource(ResourceScope::Process, ResourceMetric::MemoryUsed),
         Some(8192.)
     );
-    assert_eq!(table.series_count(), 8);
+    assert_eq!(table.series_count(), 7);
     let encoded = crate::telemetry::export::encoded_infrastructure(table, view.window());
     let points = &encoded.resource_metrics[0].scope_metrics[0].metrics;
     assert_eq!(points.len(), 3);
@@ -143,8 +143,8 @@ fn jittered_batch_survives_request_observations_at_minute_close() {
     else {
         panic!("capacity must be a gauge")
     };
-    assert_eq!(gauge.data_points.len(), 6);
-    for ((lane, capacity), point) in crate::web::admission_capacities()
+    assert_eq!(gauge.data_points.len(), 5);
+    for ((lane, capacity), point) in crate::server::admission_capacities()
         .into_iter()
         .zip(&gauge.data_points)
     {
@@ -169,7 +169,6 @@ fn jittered_batch_survives_request_observations_at_minute_close() {
             Lane::Generation => "generation",
             Lane::Heavy => "heavy",
             Lane::Ingress => "ingress",
-            Lane::NewChat => "new_chat",
             Lane::Control => "control",
         };
         assert_eq!(
@@ -190,7 +189,7 @@ fn jittered_batch_survives_request_observations_at_minute_close() {
         assert_eq!(table.resource(scope, ResourceMetric::CpuCapacity), None);
         assert_eq!(table.resource(scope, ResourceMetric::MemoryCapacity), None);
     }
-    for (lane, capacity) in crate::web::admission_capacities() {
+    for (lane, capacity) in crate::server::admission_capacities() {
         assert_eq!(table.capacity(lane), Some(capacity as f64));
     }
     drop(view);
@@ -202,7 +201,7 @@ fn incomplete_or_failed_minute_is_unavailable_and_next_full_minute_recovers() {
     for defect in 0..4 {
         let metrics = new();
         let base = Instant::now();
-        let mut sampler = Sampler::new(crate::web::admission_capacities());
+        let mut sampler = Sampler::new(crate::server::admission_capacities());
         drive(&metrics, 300 * SECOND);
         sampler.sample_with(&metrics, || reading(base, 300., Some(30.), Some(4096)));
         metrics.poll();
@@ -238,7 +237,7 @@ fn incomplete_or_failed_minute_is_unavailable_and_next_full_minute_recovers() {
                 let view = metrics.infrastructure();
                 if defect == 2 {
                     let view = view.unwrap();
-                    assert_eq!(view.tables().unwrap().series_count(), 7);
+                    assert_eq!(view.tables().unwrap().series_count(), 6);
                     assert_eq!(
                         view.tables()
                             .unwrap()
@@ -286,7 +285,7 @@ fn incomplete_or_failed_minute_is_unavailable_and_next_full_minute_recovers() {
                 .tables()
                 .unwrap()
                 .series_count(),
-            8
+            7
         );
     }
 }
@@ -297,7 +296,7 @@ fn configured_capacity_is_independent_of_idle_traffic_and_failed_resource_readin
         let metrics = new();
         assert!(metrics.enable(Deployment::Production));
         let base = Instant::now();
-        let mut sampler = Sampler::new(crate::web::admission_capacities());
+        let mut sampler = Sampler::new(crate::server::admission_capacities());
         drive(&metrics, 300 * SECOND);
         sampler.sample_with(&metrics, || reading(base, 300., Some(30.), Some(4096)));
         metrics.poll();
@@ -312,9 +311,9 @@ fn configured_capacity_is_independent_of_idle_traffic_and_failed_resource_readin
         let table = view.tables().unwrap();
         assert_eq!(
             table.series_count(),
-            6 + usize::from(rss.is_some()) + usize::from(cpu.is_some())
+            5 + usize::from(rss.is_some()) + usize::from(cpu.is_some())
         );
-        for (lane, capacity) in crate::web::admission_capacities() {
+        for (lane, capacity) in crate::server::admission_capacities() {
             assert_eq!(table.capacity(lane), Some(capacity as f64));
         }
         assert!(metrics.request().is_none());
@@ -326,7 +325,7 @@ fn mismatched_source_capacity_is_rejected_without_affecting_other_lanes() {
     let metrics = new();
     assert!(metrics.enable(Deployment::Production));
     let base = Instant::now();
-    let mut capacities = crate::web::admission_capacities();
+    let mut capacities = crate::server::admission_capacities();
     capacities[0].1 += 1;
     let mut sampler = Sampler::new(capacities);
     drive(&metrics, 300 * SECOND);
@@ -344,8 +343,8 @@ fn mismatched_source_capacity_is_rejected_without_affecting_other_lanes() {
     let view = metrics.infrastructure().unwrap();
     let table = view.tables().unwrap();
     assert_eq!(table.capacity(Lane::Connection), None);
-    assert_eq!(table.series_count(), 5);
-    for (lane, capacity) in crate::web::admission_capacities().into_iter().skip(1) {
+    assert_eq!(table.series_count(), 4);
+    for (lane, capacity) in crate::server::admission_capacities().into_iter().skip(1) {
         assert_eq!(table.capacity(lane), Some(capacity as f64));
     }
 }
@@ -356,7 +355,7 @@ fn restart_discards_partial_capacity_minute_and_requires_fresh_full_window() {
     {
         let metrics = new();
         assert!(metrics.enable(Deployment::Production));
-        let mut sampler = Sampler::new(crate::web::admission_capacities());
+        let mut sampler = Sampler::new(crate::server::admission_capacities());
         for seconds in [310, 320, 330] {
             drive(&metrics, seconds * SECOND - SECOND);
             metrics.clock.set(seconds * SECOND);
@@ -368,7 +367,7 @@ fn restart_discards_partial_capacity_minute_and_requires_fresh_full_window() {
     let metrics = new();
     drive(&metrics, 330 * SECOND);
     assert!(metrics.enable(Deployment::Production));
-    let mut sampler = Sampler::new(crate::web::admission_capacities());
+    let mut sampler = Sampler::new(crate::server::admission_capacities());
     for seconds in (340..=420).step_by(10) {
         drive(&metrics, seconds * SECOND - SECOND);
         metrics.clock.set(seconds * SECOND);
@@ -387,8 +386,8 @@ fn restart_discards_partial_capacity_minute_and_requires_fresh_full_window() {
         }
     );
     let table = view.tables().unwrap();
-    assert_eq!(table.series_count(), 6);
-    for (lane, capacity) in crate::web::admission_capacities() {
+    assert_eq!(table.series_count(), 5);
+    for (lane, capacity) in crate::server::admission_capacities() {
         assert_eq!(table.capacity(lane), Some(capacity as f64));
     }
 }
@@ -398,7 +397,7 @@ fn disabled_and_nonisolated_modes_do_not_read_sources() {
     for mode in [Deployment::Off, Deployment::NonIsolated] {
         let metrics = new();
         assert!(metrics.enable(mode));
-        Sampler::new(crate::web::admission_capacities())
+        Sampler::new(crate::server::admission_capacities())
             .sample_with(&metrics, || panic!("closed release gate"));
         assert!(metrics.infrastructure().is_none());
     }

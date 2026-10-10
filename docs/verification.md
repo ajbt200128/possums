@@ -1,5 +1,7 @@
 # Phase 0 verification record
 
+> **API-only cutover notice:** Browser routes, browser fixtures and six-lane/New chat observations below are historical evidence for earlier artifacts, not current product scope or evidence of an API-only deployment. The source retains JSON `/attestation`, `/v1` and Pi; it removes gateway Web UI and New chat admission. Fresh local results are recorded in [API-only cutover](#api-only-cutover--local-source-verification-2026-10-09); deployment remains unverified. Historical passes are not retroactive API-only passes.
+
 **Chronological evidence:** deployment/status statements belong to the release or packet where they were recorded, including the old buffered regime and later streaming entries. Current API `v0.0.11`/Pi acceptance is scoped in [the release record](phase02-pi-release.md). No historical FAILED or UNKNOWN result is upgraded by this checkout reconciliation.
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
@@ -1532,3 +1534,27 @@ a statistically controlled comparison or a Rust-source-edit benchmark. Initial
 seeding and outages/eviction can still be much slower. Release dependency roots
 remain release-only, and fresh two-runner reconstruction/publication is still
 unrun. No gateway deployment, inference or Honeycomb export was performed.
+
+## API-only cutover — local source verification (2026-10-09)
+
+Scope: uncommitted API-only candidate based on `13bc52c`, aarch64-darwin. Removed gateway HTML routes, cookie authentication/recovery, form/history continuation, rendering and blocking HTML startup, Playwright/root browser package, browser CI/Nix targets, and obsolete Web endpoint/New chat telemetry dimensions. Shared transport is now `src/server.rs`; JSON `/attestation`, `/v1`, Pi, fail-closed admission and detached accounting remain. Historical browser and six-lane results remain correct for their dated artifacts, not this candidate.
+
+| Local check | Result |
+|---|---|
+| `nix develop --command cargo fmt --package possums -- --check` | VERIFIED |
+| `nix develop --command cargo clippy --offline --locked --all-targets --all-features -- -D warnings` | VERIFIED; existing vendored Tinfoil dead-code warning remains outside the root package |
+| `nix develop --command cargo test --offline --locked --all-targets --all-features` | VERIFIED: 300 passed; three funded live tests ignored |
+| `nix flake check --print-build-logs` | VERIFIED for aarch64-darwin: formatting, strict Clippy, release-profile tests, gateway and Go helper; incompatible systems omitted |
+| `nix build .#api-smoke-fixture --no-link --print-build-logs` | VERIFIED local synthetic fixture build |
+| `python3 -m unittest discover -s tests -p test_release_cache.py` | VERIFIED: 11 tests |
+| Reference-client `tsc --noEmit` and changed JavaScript test syntax | VERIFIED |
+| `tests/phase02_release.mjs` with `PHASE02_RELEASE_SOURCE` pointing to an isolated scratch source/dependency tree | VERIFIED: 97 synthetic release-policy checks; hardware/DSSE/Rekor/X509/network results mocked, no live attestation claim |
+| Extracted Node `admissionRegressions` from `tests/phase01_transport.mjs`, bundled from current source in scratch | VERIFIED by Sol worker: 71 checks, no encryption/network/getter calls on rejection |
+
+The obsolete `WEB_APPROVAL`, `qualifyWeb` and `observeWeb` executable paths are removed; API approval, published-release verification and browser-compatible **API client** bundles remain. The full historical Node/Chromium transport harness and pinned Pi acceptance were not rerun: they require explicit scratch installs, fixture servers and browser/Pi paths. An initial bare `node --test` invocation failed those harness preconditions and is not an acceptance result; the scoped client checks above are the valid results.
+
+The Rust suite includes removed-route/non-HTML/no-inference checks, cookie rejection, malformed/deep/dense/fragmented API JSON, near-8-MiB accepted history, API trust/catalog/credit/context gates, reset/logout races, disconnects near EOF, panic refunds and once-only settlement. The ported `combined_resource_gate` exercises four heavy/ingress lanes and fifth-request rejection, independent controls, tool history and retained SSE frames. Requested allocations stay within its 512-MiB envelope; this is not RSS or SDK/TLS/helper-process coverage, and its structured mock does not qualify the production structured serializer. Telemetry tests exercise the reduced closed schema, five configured capacities, decoded synthetic OTLP through local TLS, hostile-field exclusions, disabled/outage behavior and complete-window/lifecycle consistency.
+
+Linux OCI/image-startup CI, a newly measured release, deployed route/telemetry checks, external Honeycomb board mutation/readback and a new Pi installation are **not verified** by these local checks. No production pin, deployment, funded inference or live Honeycomb call was made. Native-v3 CLI signer, legacy-v2 freshness, provider invoice and platform privacy unknowns remain unchanged. The checked-in board is a proposal, not an external board update.
+
+Policy for this telemetry change: [permitted signals and forbidden data](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [aggregation is necessary not sufficient](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [reviewed MVP release scope](../PRIVACY.md#reviewed-mvp-release-scope), [required evidence for every telemetry change](../PRIVACY.md#required-evidence-for-every-telemetry-change). No metric, label, retention or release relaxation is authorized beyond removing Web labels and the New chat lane. The current CI graph is `flake` → `image` / `image-startup`; its isolated `api-smoke-fixture` replaces the browser fixture. Source and local checks are not hosted CI or deployed evidence; do not substitute historical browser passes.

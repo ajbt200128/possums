@@ -2,8 +2,8 @@ use possums::{
     attestation::TinfoilEvidenceVerifier,
     auth::Auth,
     inference::TinfoilInference,
+    server::{serve, AppState},
     telemetry::runtime::{Config as TelemetryConfig, Runtime as TelemetryRuntime},
-    web::{serve, AppState},
 };
 use std::{env, process::ExitCode, sync::Arc};
 
@@ -41,7 +41,7 @@ async fn run() -> Result<(), ()> {
     let listener = tokio::net::TcpListener::bind(bind).await.map_err(|_| ())?;
     let telemetry = TelemetryRuntime::start(
         TelemetryConfig::from_env(),
-        possums::web::admission_capacities(),
+        possums::server::admission_capacities(),
     );
     let state = state.with_telemetry(telemetry.metrics());
     let result = tokio::select! {
