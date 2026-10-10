@@ -156,19 +156,19 @@ await check('native AuthStorage persists recovery key; cold extension start rest
  assert.deepEqual(credential,{type:'api_key',key:recoveryKey});
  assert.deepEqual(JSON.parse(fs.readFileSync(authPath,'utf8')),{possums:credential});
  assert.equal(fs.statSync(authPath).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(authPath)).mode&0o777,0o700);
- assert.equal(await modelsStore.read('possums'),undefined);
+ const discovery=await modelsStore.read('possums');assert.equal(discovery.models.length,1);assert.match(discovery.models[0].name,/last-known/);assert(!JSON.stringify(discovery).includes(recoveryKey));
  provider.logout();
  const extension=fixtureExtension(fixture.establish);
  assert(!extension.commands.has('possums-logout'));
  const restored=await nativeRuntime(extension.provider,NativeAuthStorage.create(authPath),modelsStore);
  const registry=new coding.ModelRegistry(restored);
  const before=structuredClone(fixture.trace);
- assert(await restored.checkAuth('possums'));assert.deepEqual(await restored.getAvailable('possums'),[]);
+ assert(await restored.checkAuth('possums'));assert.match((await restored.getAvailable('possums'))[0].name,/last-known/);assert.deepEqual(extension.provider.catalog,[]);
  assert.deepEqual(fixture.trace,before,'availability is offline even with a saved key');
  await extension.handlers.get('session_start')({}, {modelRegistry:registry});
  assert.equal(registry.getAvailable().filter(value=>value.provider==='possums').length,1);
  assert.equal(fixture.trace.establish,2);assert.deepEqual(fixture.trace.keys,[recoveryKey,recoveryKey]);
- assert.equal(fixture.s.sends(),0);assert.equal(await modelsStore.read('possums'),undefined);
+ assert.equal(fixture.s.sends(),0);assert.deepEqual((await modelsStore.read('possums')).models.map(value=>value.id),['synthetic']);
  assert.equal((await registry.getProviderAuth('possums')).auth.apiKey,requestMarker);
  const selected=extension.provider.getModels()[0];
  extension.provider.beginRun();await drain(restored.streamSimple(selected,context(false)));
@@ -179,7 +179,7 @@ await check('native AuthStorage persists recovery key; cold extension start rest
  await restored.logout('possums');
  assert.equal(await NativeAuthStorage.create(authPath).read('possums'),undefined);
  assert.deepEqual(JSON.parse(fs.readFileSync(authPath,'utf8')),{});
- assert.deepEqual(extension.provider.getModels(),[]);assert.equal(await registry.getProviderAuth('possums'),undefined);
+ assert.deepEqual(extension.provider.catalog,[]);assert.deepEqual(await restored.getAvailable('possums'),[]);assert.equal(await registry.getProviderAuth('possums'),undefined);
 });
 await check('pinned SDK checks stay offline; saved key wins over env; legacy marker requires fresh login',async()=>{
  const fixture=await authFixture();const provider=new m.PossumsProvider(fixture.establish);
@@ -193,14 +193,14 @@ await check('pinned SDK checks stay offline; saved key wins over env; legacy mar
  assert.equal((await models.refresh({providers:['possums'],allowNetwork:true})).errors.size,0);
  assert.deepEqual(fixture.trace.keys,[recoveryKey]);
  await models.logout('possums');await models.refresh({providers:['possums'],allowNetwork:false});
- assert.deepEqual(provider.getModels(),[]);
+ assert.deepEqual(provider.catalog,[]);
  assert.equal((await models.checkAuth('possums')).source,'POSSUMS_RECOVERY_CREDENTIAL');
  await models.refresh({providers:['possums'],allowNetwork:true});assert.deepEqual(fixture.trace.keys,[recoveryKey,envKey]);
  for(const marker of [legacyMarker,requestMarker]) {
   await credentials.modify('possums',async()=>({type:'api_key',key:marker}));
   assert.equal(await models.checkAuth('possums'),undefined);
   await models.refresh({providers:['possums'],allowNetwork:true});
-  assert.equal(await models.getAuth('possums'),undefined);assert.deepEqual(provider.getModels(),[]);
+  assert.equal(await models.getAuth('possums'),undefined);assert.deepEqual(provider.catalog,[]);assert.deepEqual(await models.getAvailable('possums'),[]);
  }
  assert.deepEqual(fixture.trace.keys,[recoveryKey,envKey],'neither marker is sent or silently falls back to env');
  await models.login('possums','api_key',interaction());
@@ -505,7 +505,7 @@ await check('native later catalog failures clear usable models, deduplicate, and
  const original=fixture.s.client.models;
  fixture.s.client.models=async()=>{throw new Error(hostileConnection);};
  for(let i=0;i<2;i++)await registry.refresh({providers:['possums'],allowNetwork:true});
- assert.deepEqual(extension.provider.getModels(),[]);assert.equal(notices.length,1);
+ assert.deepEqual(extension.provider.catalog,[]);assert.match(extension.provider.getModels()[0].name,/last-known/);assert.equal(notices.length,1);
  assert.match(notices[0],/possums_catalog_unavailable/);
  await extension.commands.get('possums-status').handler('',ctx);assert.equal(notices.at(-1),notices[0]);
  fixture.s.client.models=original;
@@ -548,7 +548,7 @@ await check('catalog diagnostics publish only with accepted current updates, inc
   if(action==='cancel')controller.abort();else if(action==='logout')provider.logout();
   else if(action==='replace'){fixture.s.client.models=original;await provider.auth.apiKey.login(interaction(envKey));}
   const before=[...notices];held.resolve();await settled;
-  assert.deepEqual(notices,before);assert.equal(provider.getModels().length,action==='logout'?0:1);
+  assert.deepEqual(notices,before);assert.equal(provider.catalog.length,action==='logout'?0:1);
   assert.equal(fixture.s.sends(),0);
  }
 });
@@ -565,7 +565,7 @@ await check('throwing connection callbacks and native extension UI never change 
   await provider.auth.apiKey.login(interaction());assert.equal(provider.getModels().length,1);
   const refresh=()=>provider.refreshModels({credential:{type:'api_key',key:requestMarker},allowNetwork:true,signal:new AbortController().signal,publish:async value=>{value.update?.();return true;}});
   const original=fixture.s.client.models;fixture.s.client.models=async()=>{throw new Error(hostileConnection);};
-  await assert.rejects(refresh(),error=>assertConnectionFailure(error,'catalog_unavailable'));assert.deepEqual(provider.getModels(),[]);
+  await assert.rejects(refresh(),error=>assertConnectionFailure(error,'catalog_unavailable'));assert.deepEqual(provider.catalog,[]);assert.deepEqual(provider.listed,[]);
   fixture.s.client.models=original;await refresh();assert.equal(provider.getModels().length,1);
   const extension=fixtureExtension(establish),credentials=new ai.InMemoryCredentialStore();
   await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
@@ -574,7 +574,7 @@ await check('throwing connection callbacks and native extension UI never change 
   failing=true;await extension.handlers.get('session_start')({},ctx);assert.deepEqual(extension.provider.getModels(),[]);
   failing=false;await registry.refresh({providers:['possums'],allowNetwork:true});assert.equal(extension.provider.getModels().length,1);
   fixture.s.client.models=async()=>{throw new Error(hostileConnection);};
-  await registry.refresh({providers:['possums'],allowNetwork:true});assert.deepEqual(extension.provider.getModels(),[]);
+  await registry.refresh({providers:['possums'],allowNetwork:true});assert.deepEqual(extension.provider.catalog,[]);assert.deepEqual(extension.provider.listed,[]);
   await extension.commands.get('possums-status').handler('',ctx);
   fixture.s.client.models=original;await registry.refresh({providers:['possums'],allowNetwork:true});assert.equal(extension.provider.getModels().length,1);
   assert.equal(fixture.s.sends(),0);
@@ -688,7 +688,7 @@ await check('native recovery credential; request auth stays non-secret',async()=
  assert.equal(s.credential.key,recoveryKey);
  assert.equal((await s.provider.auth.apiKey.resolve(authInput(s.credential))).auth.apiKey,requestMarker);
  assert.equal(await s.provider.auth.apiKey.resolve(authInput(undefined)),undefined);
- s.provider.logout();assert.equal(s.provider.getModels().length,0);
+ s.provider.logout();assert.equal(s.provider.catalog.length,0);assert.equal(s.provider.listed.length,0);
  assert.equal(await s.provider.auth.apiKey.resolve(authInput(undefined)),undefined);
 });
 await check('progress before receipt, hooks and submitted-rate cost',async()=>{
@@ -795,7 +795,7 @@ await check('repeated over-deep requests fail deterministically without inferenc
 await check('failed catalog refresh removes prior usable list',async()=>{
  const s=await setup(['stop']);assert.equal(s.provider.getModels().length,1);s.failModels();
  await assert.rejects(s.provider.refreshModels({credential:{type:'api_key',key:requestMarker},allowNetwork:true,signal:new AbortController().signal,publish:async value=>{value.update?.();return true;}}),/possums_catalog_unavailable/);
- assert.equal(s.provider.getModels().length,0);
+ assert.equal(s.provider.catalog.length,0);assert.equal(s.provider.listed.length,0);assert.match(s.provider.getModels()[0].name,/last-known/);
 });
 await check('length after tool deltas never authorizes tool execution',async()=>{
  const s=await setup(['tool_length']);s.provider.beginRun();const result=await drain(s.provider.streamSimple(s.selected,context(true)));
@@ -985,7 +985,7 @@ await check('Stop during deferred verification/login aborts the real run and lat
    assert.deepEqual(f.trace.verified,['A','B']);
    await f.session.abort();await pending;assert(signal.aborted);assert.equal(f.s.sends(),0);
    release.resolve();await new Promise(setImmediate);
-   assert.equal(f.provider.release.tag,'A');assert.deepEqual(f.provider.getModels(),[]);
+   assert.equal(f.provider.release.tag,'A');assert.deepEqual(f.provider.catalog,[]);assert.deepEqual(f.provider.listed,[]);
    assert.equal(f.s.sends(),0);
    f.verifyHook(async()=>{});f.loginHook(async()=>{});
    await f.session.prompt('Synthetic deliberate next turn');
@@ -1059,7 +1059,7 @@ await check('logout/session/account replacement invalidates pending renewal and 
    assert(heldSignal.aborted);release.resolve();await pending;await new Promise(setImmediate);
    assert.equal(f.s.sends(),0);
    if(action==='account'){assert.equal(f.provider.recoveryKey,envKey);assert.equal(f.provider.getModels().length,1);}
-   else assert.deepEqual(f.provider.getModels(),[]);
+   else {assert.deepEqual(f.provider.catalog,[]);assert.deepEqual(f.provider.listed,[]);}
   } finally {release.resolve();f.session.dispose();}
  }
 });
@@ -1241,7 +1241,7 @@ await check('late public verification after logout or session replacement cannot
    assert(oldSignal.aborted);release.resolve();await pending;await new Promise(setImmediate);
    assert.equal(f.provider.release.tag,action==='logout'?'A':'C');
    assert.equal(f.trace.credentials.length,1);assert.equal(f.s.sends(),0);
-   assert.deepEqual(f.provider.getModels(),[]);
+   assert.deepEqual(f.provider.catalog,[]);assert.deepEqual(f.provider.listed,[]);
   } finally {release.resolve();f.session.dispose();}
  }
 });
@@ -1911,4 +1911,4 @@ await check('actual Pi threshold compaction is native and never retries a comple
  } finally {f.session.dispose();}
 });
 
-fs.writeFileSync(path.join(root,'results.json'),JSON.stringify({pi:'1.0.4',passed,scope:'Synthetic provider/client mocks and actual Pi SDK; no production model qualification or gateway evidence'},null,2)+'\n');
+fs.writeFileSync(path.join(root,'results.json'),JSON.stringify({pi:JSON.parse(fs.readFileSync(path.join(piRoot,'node_modules/@earendil-works/pi-ai/package.json'),'utf8')).version,passed,scope:'Synthetic provider/client mocks and actual Pi SDK; no production model qualification or gateway evidence'},null,2)+'\n');

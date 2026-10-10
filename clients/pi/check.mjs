@@ -34,7 +34,9 @@ function run(name, options) {
 run('phase01_client.mjs', { PHASE01_BUILD: output });
 run('phase02_client.mjs', { PHASE02_CLIENT_BUILD: output, PHASE02_CLIENT_INSTALL: packageSource });
 run('phase02_release.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
+run('phase02_cache.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs') });
 run('phase02_pi.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), PHASE02_SCRATCH: path.join(scratch, 'checks/pi-cases'), POSSUMS_PI_ROOT: piRoot });
+run('phase02_discovery.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), PHASE02_SCRATCH: path.join(scratch, 'checks/discovery-cases'), POSSUMS_PI_ROOT: piRoot });
 const text = await readFile(path.join(testSource, 'phase01_transport.mjs'), 'utf8');
 const start = text.indexOf('async function admissionRegressions('), end = text.indexOf('\nconst admissionNode =', start);
 assert(start >= 0 && end > start, 'shared admission test body missing');

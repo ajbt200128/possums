@@ -6,7 +6,7 @@
 // SAN decoding, Sigstore policy helpers, expiry, SHA-256, gzip bounds and EHBP
 // public-config decoding remain real. The production build has no mock hooks.
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
@@ -19,9 +19,12 @@ const output = path.resolve(source, '../../../checks/release');
 await mkdir(output, { recursive: true });
 const entry = `
 export { connect, connectPublished } from './bootstrap.ts';
+export { evidenceDirectory } from './evidence-cache.ts';
 export { Channel, ReferenceClient, API_APPROVALS } from '../../examples/phase01/transport.ts';
 export { PUBLISHER, qualifyPublished, requireReleaseTag } from '../../examples/phase01/approval.ts';
 export { X509Certificate, SigstoreVerifier } from '@freedomofpress/sigstore-browser';
+export { CertificateChain } from './node_modules/@tinfoilsh/verifier/dist/sev/cert-chain.js';
+export { ReportSigner } from './node_modules/@tinfoilsh/verifier/dist/sev/constants.js';
 `;
 for (const fixture of [false, true]) {
   await build({ stdin: { contents: entry, resolveDir: source, loader: 'ts' },
@@ -108,8 +111,10 @@ function reset() {
     sanDomain: host, sanKey: Buffer.alloc(32, 7), sanHash: sha(doc.format + doc.body) };
 }
 reset();
-globalThis.__possumsReleaseTestHardware = async () => {
+globalThis.__possumsReleaseTestHardware = async (report, vcek) => {
   hardwareCalls++;
+  assert.equal(report.format, doc.format); assert.equal(report.body, doc.body);
+  if (vcek !== base.vcek) throw new Error('HOSTILE wrong VCEK DER');
   if (!state.hardwareSignature) throw new Error('HOSTILE hardware signature');
   return { measurement: { type: doc.format, registers: [state.measurement] }, hpkePublicKey: state.hpkeKey, tlsPublicKeyFingerprint: state.tlsFingerprint };
 };
@@ -141,7 +146,70 @@ async function rejects(name, fn, code = 'rejected') {
   }, name); passed++;
 }
 const qualify = (b = base, m = bytes(manifest), k = key) => test.Channel.published(bytes(b), m, k);
+// Actual pinned CertificateChain methods, with synthetic certificate objects.
+// Signature results are controlled: these are NOT real AMD cryptography tests.
+async function certificateChainChecks() {
+  const fixtureParse = test.X509Certificate.parse;
+  const hwid = new Uint8Array(64).fill(7);
+  const tcb = { blSpl: 1, teeSpl: 2, snpSpl: 3, ucodeSpl: 4 };
+  const extensions = new Map([
+    ['1.3.6.1.4.1.3704.1.4', hwid],
+    ['1.3.6.1.4.1.3704.1.2', new Uint8Array([0x16, 5, ...Buffer.from('Genoa')])],
+    ...['1', '2', '3', '8'].map((suffix, i) => [`1.3.6.1.4.1.3704.1.3.${suffix}`, new Uint8Array([2, 1, i + 1])]),
+  ]);
+  const location = new Map([['C', 'US'], ['L', 'Santa Clara'], ['ST', 'CA'], ['O', 'Advanced Micro Devices'], ['OU', 'Engineering']]);
+  const edges = [];
+  function certificate(name) {
+    return { version: 'v3', issuerDN: location, subjectDN: new Map([...location, ['CN', name]]),
+      notBefore: new Date(now - 1000), notAfter: new Date(now + 1000),
+      validForDate: test.X509Certificate.prototype.validForDate, signatureValid: true,
+      async verify(issuer) { edges.push([this, issuer]); return this.signatureValid; },
+      extension(oid) { const value = extensions.get(oid); return value && { value }; },
+      root: { subs: [{ subs: Array.from({ length: 7 }, (_, i) => i === 6
+        ? { subs: [{ subs: [{ toOID: () => '1.2.840.10045.2.1' }, { toOID: () => '1.3.132.0.34' }] }] } : {}) },
+        { subs: [{ toOID: () => '1.2.840.113549.1.1.10' }] }] },
+    };
+  }
+  const certs = [certificate('ARK-Genoa'), certificate('SEV-Genoa'), certificate('SEV-VCEK')];
+  const report = { productName: 'Genoa', signerInfoParsed: { signingKey: test.ReportSigner.VcekReportSigner } };
+  const supplied = new Uint8Array([1, 2, 3]), parsed = [];
+  try {
+    test.X509Certificate.parse = value => { parsed.push(value); return certs[parsed.length - 1]; };
+    const chain = await test.CertificateChain.fromReport(report, supplied);
+    assert.equal(parsed.length, 3); assert.equal(parsed[2], supplied);
+    assert(parsed.slice(0, 2).every(value => typeof value === 'string' && value.startsWith('-----BEGIN CERTIFICATE-----')));
+    assert.equal(await chain.verifyChain(), true);
+    assert.deepEqual(edges, [[certs[0], undefined], [certs[1], certs[0]], [certs[2], certs[1]]]); passed++;
+    for (const cert of certs) {
+      for (const field of ['notBefore', 'notAfter']) {
+        const saved = cert[field]; cert[field] = new Date(field === 'notBefore' ? now + 1 : now - 1);
+        await assert.rejects(() => chain.verifyChain()); cert[field] = saved; passed++;
+      }
+      cert.signatureValid = false; await assert.rejects(() => chain.verifyChain()); cert.signatureValid = true; passed++;
+    }
+    chain.validateVcekTcb(tcb); chain.validateVcekHwid(hwid.slice()); passed++;
+    for (const field of Object.keys(tcb)) {
+      assert.throws(() => chain.validateVcekTcb({ ...tcb, [field]: 99 })); passed++;
+    }
+    for (const oid of ['1', '2', '3', '8'].map(suffix => `1.3.6.1.4.1.3704.1.3.${suffix}`)) {
+      const saved = extensions.get(oid); extensions.delete(oid);
+      assert.throws(() => chain.validateVcekTcb(tcb)); extensions.set(oid, saved); passed++;
+    }
+    assert.throws(() => chain.validateVcekHwid(new Uint8Array(64).fill(8))); passed++;
+    extensions.delete('1.3.6.1.4.1.3704.1.4');
+    assert.throws(() => chain.validateVcekHwid(hwid)); assert.throws(() => chain.validateVcekFormat()); passed++;
+    extensions.set('1.3.6.1.4.1.3704.1.4', new Uint8Array(63));
+    assert.throws(() => chain.validateVcekFormat()); passed++;
+    await assert.rejects(() => test.CertificateChain.fromReport({ ...report, productName: 'Milan' }, supplied));
+    await assert.rejects(() => test.CertificateChain.fromReport({ ...report, signerInfoParsed: { signingKey: test.ReportSigner.VlekReportSigner } }, supplied));
+    assert.equal(parsed.length, 3); passed++;
+    // Real X509 parser and embedded ARK/ASK, but deliberately invalid VCEK DER.
+    test.X509Certificate.parse = originalParse;
+    await assert.rejects(() => test.CertificateChain.fromReport(report, new Uint8Array([0]))); passed++;
+  } finally { test.X509Certificate.parse = fixtureParse; }
+}
 try {
+  await certificateChainChecks();
   assert.equal(prod.API_APPROVALS[0].expires, NativeDate.parse('2026-10-11T00:00:00Z'));
   await rejects('compiled admin expiry unchanged', () => prod.Channel.api(bytes(base), bytes(manifest), key));
   await rejects('real hardware crypto rejects synthetic report', () => prod.Channel.published(bytes(base), bytes(manifest), key));
@@ -265,9 +333,61 @@ try {
   };
   const connected = await test.connectPublished();
   assert.equal(connected.release.tag, tag); assert.equal(seen.length, 8);
+  assert.equal(seen[0], origin + '/.well-known/tinfoil-attestation');
   assert.equal(new Set(seen).size, seen.length); assert(!seen.some(url => url.includes('HOSTILE'))); passed++;
   const attempts = network;
   assert.equal(connected.freshSession().release, connected.release); assert.equal(network, attempts);
+  const cacheFile = path.join(test.evidenceDirectory(), 'entry.json');
+  const record = JSON.parse(await readFile(cacheFile, 'utf8'));
+  assert.deepEqual(Object.keys(record).sort(), ['digest', 'hint', 'manifest', 'origin', 'provenance', 'repository', 'tag', 'vcek', 'version']);
+  assert.equal(record.version, 2); assert.equal(record.vcek, base.vcek);
+  assert.equal(Buffer.from(record.manifest, 'base64').toString(), Buffer.from(manifestBody).toString());
+  const verifyBefore = [hardwareCalls, dsseCalls], hitsBefore = seen.length;
+  await test.connectPublished();
+  assert.deepEqual(seen.slice(hitsBefore).map(url => new URL(url).hostname), [host, host, host]);
+  assert.equal(hardwareCalls, verifyBefore[0] + 1); assert.equal(dsseCalls, verifyBefore[1] + 1); passed++;
+  const { vcek: _vcek, ...legacyFields } = record;
+  await writeFile(cacheFile, JSON.stringify({ ...legacyFields, version: 1 }));
+  const migrationStart = seen.length, migrationHardware = hardwareCalls;
+  await test.connectPublished();
+  assert.deepEqual(seen.slice(migrationStart).map(url => new URL(url).hostname), [host, 'kdsintf.amd.com', host, host]);
+  assert.equal(hardwareCalls, migrationHardware + 1);
+  assert.deepEqual(JSON.parse(await readFile(cacheFile)), record); passed++;
+  for (const wrong of ['Ag==', b64(Buffer.from('HOSTILE certificate chip URL credential'))]) {
+    await writeFile(cacheFile, JSON.stringify({ ...record, vcek: wrong }));
+    const before = seen.length;
+    await rejects('cached wrong/corrupt VCEK DER', () => test.connectPublished(), 'verification_failed');
+    assert(!seen.slice(before).some(url => url.includes('github.com') || url.includes('kdsintf.amd.com')));
+    assert.equal(JSON.parse(await readFile(cacheFile)).vcek, wrong);
+  }
+  await writeFile(cacheFile, JSON.stringify(record));
+  for (const [name, mutate] of [
+    ['cached hardware signature', s => { s.hardwareSignature = false; }],
+    ['cached certificate expiry', s => { s.notAfter = now - 1; }],
+    ['cached certificate not yet valid', s => { s.notBefore = now + 1000; }],
+    ['cached certificate report binding', s => { s.sanHash = '0'.repeat(64); }],
+    ['cached live endpoint key', s => { s.sanKey = Buffer.alloc(32, 8); }],
+    ['cached measurement', s => { s.measurement = 'c'.repeat(96); }],
+    ['cached endpoint key', s => { s.hpkeKey = '08'.repeat(32); }],
+    ['cached publisher', s => { s.signer.extBuildSignerDigest.buildSignerDigest = 'c'.repeat(40); }],
+  ]) {
+    reset(); mutate(state);
+    const before = seen.length;
+    await rejects(name, () => test.connectPublished(), 'verification_failed');
+    assert(!seen.slice(before).some(url => url.includes('github.com') || url.includes('kdsintf.amd.com')), 'no fallback after failed verification');
+  }
+  reset();
+  const wrongAssociation = JSON.parse(Buffer.from(record.provenance, 'base64'));
+  wrongAssociation.attestations[0].bundle.dsseEnvelope.payload = b64(bytes({ _type: 'https://in-toto.io/Statement/v1', subject: [{ name: 'wrong-artifact' }], predicate: manifest }));
+  await writeFile(cacheFile, JSON.stringify({ ...record, provenance: b64(bytes(wrongAssociation)) }));
+  await rejects('cached wrong artifact association', () => test.connectPublished(), 'verification_failed');
+  await writeFile(cacheFile, JSON.stringify(record));
+  payload.enclaveAttestationReport.extra = 'public serialization change';
+  const changedStart = seen.length;
+  await test.connectPublished(); assert.equal(seen.length - changedStart, 8); passed++;
+  payload = structuredClone(base);
+  const cold = async () => { await rm(test.evidenceDirectory(), { recursive: true, force: true }); return test.connectPublished(); };
+  await rm(test.evidenceDirectory(), { recursive: true, force: true });
   latestTag = 'v1.2.3/../../HOSTILE';
   await rejects('discovery path injection', () => test.connectPublished(), 'verification_failed');
   latestTag = tag;
@@ -287,14 +407,14 @@ try {
     'https://release-assets.githubusercontent.com:8443/manifest', cdn + '#fragment', 'relative-manifest', '']) {
     const start = network;
     await rejects('manifest redirect authority', () => test.connectPublished(), 'evidence_unavailable');
-    assert.equal(network, start + 2, 'unapproved redirect is never followed');
+    assert.equal(network, start + 3, 'unapproved redirect is never followed');
   }
   assetLocation = cdn;
   for (assetStatus of [200, 301, 303, 307, 308]) await rejects('manifest redirect status', () => test.connectPublished(), 'evidence_unavailable');
   assetStatus = 302; mode = 'cdn-redirect';
   const beforeLoop = network;
   await rejects('no second asset redirect', () => test.connectPublished(), 'evidence_unavailable');
-  assert.equal(network, beforeLoop + 3);
+  assert.equal(network, beforeLoop + 4);
   mode = 'ok';
   const acquisitionFetch = globalThis.fetch;
   for (const [stage, matches] of [
@@ -312,12 +432,13 @@ try {
           { status: failure === 'body' ? 200 : failure === 'rate_limited' ? 429 : 503 });
         Object.defineProperty(response, 'url', { value: request.url }); return response;
       };
-      await assert.rejects(test.connectPublished(), error => {
+      await assert.rejects(cold(), error => {
         assert(error.message.includes(`Stage: ${stage}`), error.message);
         assert(error.message.includes(`constraint: ${failure}`) || error.message.includes(`constraint: ${failure === 'http' && stage === 'manifest_redirect' ? 'redirect' : failure}`), error.message);
         if (failure === 'http' || failure === 'rate_limited') assert(error.message.includes(`Observed HTTP status: ${failure === 'http' ? 503 : 429}`));
         assert(!error.message.includes('HOSTILE')); assert.equal(error.cause, undefined); return true;
-      }); passed++;
+      });
+      await assert.rejects(readFile(cacheFile), error => error.code === 'ENOENT'); passed++;
     }
   }
   globalThis.fetch = acquisitionFetch;

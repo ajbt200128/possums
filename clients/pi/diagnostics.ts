@@ -57,6 +57,7 @@ const evidenceStages = Object.freeze({
   manifest_download: 'public manifest download', gateway_attestation: 'gateway attestation',
   amd_certificate: 'AMD endorsement certificate', gateway_certificate: 'gateway certificate',
   release_provenance: 'GitHub release provenance', gateway_keys: 'gateway endpoint keys',
+  public_evidence_cache: 'local public evidence cache',
 });
 const evidenceConstraints = Object.freeze({
   request: 'request transport did not complete before a response',
@@ -66,6 +67,7 @@ const evidenceConstraints = Object.freeze({
   redirect: 'manifest redirect status or authority did not match policy',
   body: 'response body could not be read within transport/parser limits',
   schema: 'evidence format did not satisfy the required schema',
+  storage: 'local public cache read, coordination or publication did not complete; check cache directory permissions',
 });
 export type EvidenceStage = keyof typeof evidenceStages;
 export type EvidenceConstraint = keyof typeof evidenceConstraints;
@@ -96,7 +98,7 @@ export class ConnectionFailure extends Error {
       ? ` Stage: ${catalog.stage} (${evidenceStages[catalog.stage]}); constraint: ${catalog.constraint} (${evidenceConstraints[catalog.constraint]}).${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}${catalog.constraint === 'rate_limited' ? ' Wait before starting a new Pi session; re-entering credentials will not fix this.' : ''}` :
       catalog instanceof GatewayError ? ` Stage: admission; constraint: service_quiescing.${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}` :
       ` Stage: ${catalog instanceof CatalogFailure ? 'catalog' : 'connection'}; constraint: ${catalog instanceof CatalogFailure ? catalog.stage : code}.${catalog instanceof CatalogFailure && catalog.reason === 'service_quiescing' ? ' Gateway stage: admission; constraint: service_quiescing.' : ''}`;
-    super(`${catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} No inference request was sent by this connection attempt. Cached models do not authorize inference.`);
+    super(`${catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} No inference request was sent by this connection attempt. Cached models do not authorize inference. Prior billing outcomes are not established by this check.`);
     Object.freeze(this);
   }
 }

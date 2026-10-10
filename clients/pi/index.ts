@@ -1,23 +1,11 @@
-import { fileURLToPath } from 'node:url';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { open, type FileHandle } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { LIMITS } from '../../examples/phase01/limits.js';
 import { connect, connectPublished } from './bootstrap.js';
 import { ConnectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
 import { PossumsProvider, PROVIDER_ID } from './provider.js';
 
-export const PI_PIN = '1.0.4';
-function requirePinnedRuntime(): void {
-  try {
-    for (const name of ['pi-ai', 'pi-coding-agent', 'pi-agent-core']) {
-      const entry = fileURLToPath(import.meta.resolve(`@earendil-works/${name}`));
-      const metadata = JSON.parse(readFileSync(join(dirname(entry), '..', 'package.json'), 'utf8'));
-      if (metadata.version !== PI_PIN) throw new Error();
-    }
-  } catch { throw new Error('[possums_requires_pi_1_0_4] Stage: extension_load; constraint: runtime_version. This extension requires Pi 1.0.4 with matching pi-ai and pi-agent-core packages. Use the approved matching runtime/client pair. No inference request sent. Share only this code for support.'); }
-}
 async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
   try {
     if (typeof file !== 'string' || !isAbsolute(file)) throw new Error();
@@ -35,10 +23,9 @@ async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
 }
 
 export default function possums(pi: ExtensionAPI): void {
-  requirePinnedRuntime();
   pi.registerFlag('possums-manifest', { type: 'string', description: 'Independently hash-approved Possums release manifest (public file, never a credential)' });
   let ui: ExtensionContext['ui'] | undefined;
-  let lastFailure: ConnectionFailure | undefined;
+  let sessionEpoch = 0;
   const notifiedCodes = new Set<ConnectionFailure['code']>();
   const provider = new PossumsProvider(async signal => {
     const pinnedManifest = pi.getFlag('possums-manifest');
@@ -46,7 +33,6 @@ export default function possums(pi: ExtensionAPI): void {
       ? connectPublished(signal)
       : connect(await manifest(pinnedManifest), signal);
   }, failure => {
-    lastFailure = failure;
     if (!failure) { notifiedCodes.clear(); return; }
     if (!ui || notifiedCodes.has(failure.code)) return;
     notifiedCodes.add(failure.code);
@@ -54,23 +40,27 @@ export default function possums(pi: ExtensionAPI): void {
   });
   pi.registerProvider(provider);
   pi.on('session_start', async (_event, ctx) => {
+    const epoch = ++sessionEpoch;
+    notifiedCodes.clear();
     ui = ctx.hasUI ? ctx.ui : undefined;
     provider.newSession();
     try { await provider.verifySession(); }
     catch { return; } // Already reported as a closed, transient connection diagnostic.
+    if (epoch !== sessionEpoch) return;
     try { await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], allowNetwork: true }); }
     catch (error) {
-      const failure = catalogConnectionFailure(error);
-      lastFailure = failure;
+      if (epoch !== sessionEpoch) return;
+      const failure = provider.currentFailure ?? catalogConnectionFailure(error);
       try { ui?.notify(failure.message, 'warning'); } catch { /* Transient UI only. */ }
     }
   });
-  pi.on('session_shutdown', () => { ui = undefined; provider.shutdown(); });
+  pi.on('session_shutdown', () => { sessionEpoch++; ui = undefined; provider.shutdown(); });
   pi.registerCommand('possums-status', {
     description: 'Show the last safe connection failure or session-pinned release (offline)',
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return;
-      try { ctx.ui.notify(lastFailure?.message ?? approvalSummary(provider.release), lastFailure ? 'warning' : 'info'); }
+      const failure = provider.currentFailure;
+      try { ctx.ui.notify(failure?.message ?? approvalSummary(provider.release), failure ? 'warning' : 'info'); }
       catch { /* Transient UI only. */ }
     },
   });

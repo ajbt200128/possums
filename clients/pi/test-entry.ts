@@ -2,7 +2,8 @@
 export { default as extension } from './index.js';
 export { PossumsProvider } from './provider.js';
 export { connect, connectPublished } from './bootstrap.js';
-export { ConnectionFailure, connectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
+export { publicEvidence, evidenceDirectory } from './evidence-cache.js';
+export { ConnectionFailure, EvidenceObservation, connectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
 export { API_APPROVALS, PUBLISHER, qualifyPublished } from '../../examples/phase01/approval.js';
 export { invocation } from './wire.js';
 export { Channel } from '../../examples/phase01/transport.js';
