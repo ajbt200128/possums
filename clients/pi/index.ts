@@ -1,23 +1,11 @@
-import { fileURLToPath } from 'node:url';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { open, type FileHandle } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { LIMITS } from '../../examples/phase01/limits.js';
 import { connect, connectPublished } from './bootstrap.js';
 import { ConnectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
 import { PossumsProvider, PROVIDER_ID } from './provider.js';
 
-export const PI_PIN = '1.0.4';
-function requirePinnedRuntime(): void {
-  try {
-    for (const name of ['pi-ai', 'pi-coding-agent', 'pi-agent-core']) {
-      const entry = fileURLToPath(import.meta.resolve(`@earendil-works/${name}`));
-      const metadata = JSON.parse(readFileSync(join(dirname(entry), '..', 'package.json'), 'utf8'));
-      if (metadata.version !== PI_PIN) throw new Error();
-    }
-  } catch { throw new Error('[possums_requires_pi_1_0_4] Stage: extension_load; constraint: runtime_version. This extension requires Pi 1.0.4 with matching pi-ai and pi-agent-core packages. Use the approved matching runtime/client pair. No inference request sent. Share only this code for support.'); }
-}
 async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
   try {
     if (typeof file !== 'string' || !isAbsolute(file)) throw new Error();
@@ -35,7 +23,6 @@ async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
 }
 
 export default function possums(pi: ExtensionAPI): void {
-  requirePinnedRuntime();
   pi.registerFlag('possums-manifest', { type: 'string', description: 'Independently hash-approved Possums release manifest (public file, never a credential)' });
   let ui: ExtensionContext['ui'] | undefined;
   let lastFailure: ConnectionFailure | undefined;

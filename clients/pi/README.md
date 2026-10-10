@@ -4,7 +4,7 @@ The catalog-wide gateway tool profile is deployed as **v0.0.15** (the official g
 
 ## Build and load
 
-Requires Node **24.13.0**, npm, and the existing **Pi 1.0.4** installation. The build creates a fresh scratch source/install/package tree, installs the locked verification dependencies with lifecycle scripts disabled, checks TypeScript, verifies the three Pi package versions, and emits `extension.mjs` plus a source/artifact hash report. It does not install into the repository or modify the Pi installation.
+The qualified build uses Node **24.13.0**, npm, and the existing **Pi 1.0.4** installation. Extension startup no longer rejects other Pi versions solely by version number; this is not qualification of newer runtimes. Build-time version checks remain unchanged. The build creates a fresh scratch source/install/package tree, installs the locked verification dependencies with lifecycle scripts disabled, checks TypeScript, verifies the three Pi package versions, and emits `extension.mjs` plus a source/artifact hash report. It does not install into the repository or modify the Pi installation.
 
 `POSSUMS_PI_ROOT="$HOME/.pi/agent/install/releases/1.0.4" sh clients/pi/build.sh`
 
