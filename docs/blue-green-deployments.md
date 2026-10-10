@@ -14,7 +14,7 @@ Policy: [data boundaries](../PRIVACY.md#data-handling-boundaries), [forbidden ex
 4. **Review verifier compatibility:** existing `clients/pi/bootstrap.ts` discovers latest at the fixed production origin; `qualifyPublished` and `Channel.published` bind to `PUBLISHER.origin`. Do not simply replace an acquisition URL or use a caller-supplied verified flag. A review endpoint with a port needs a separately reviewed, public-only explicit-tag verifier entry point that reuses the pinned JS libraries and exact authority checks; it must not construct an authenticated client. Native CLI v3 has the unresolved platform-signer mismatch; neither adoption nor bypass is approved. The Go helper's separate v3 result does not qualify the review endpoint. Legacy-v2 freshness limitations remain.
 5. **Discovery coordination:** candidate artifacts must be published without moving paid latest from the currently serving release. Inspect the pinned measurement action's actual latest behavior first; the existing workflow does not explicitly enforce this. Do not dispatch it unchanged on the assumption latest stays put. Latest is discovery, not authority. Promotion and latest publication are not one atomic operation: the gap must fail closed before credentials. Coordinate a maintenance/fresh-session window or prove a separate safe mechanism before claiming uninterrupted admission.
 
-These gates prevent a zero-session-loss claim and currently prevent an approved paid overlap rollout. A ready candidate and matching measurements alone do not open them. The target sequence and interruption boundaries are in the [runtime plan](blue-green-runtime-plan.md#complete-target-cutover-and-user-experience); it remains planning only.
+These gates prevent a zero-session-loss claim and currently prevent an approved paid overlap rollout. A ready candidate and matching measurements alone do not open them. The target sequence and interruption boundaries are in the [runtime plan](blue-green-runtime-plan.md#complete-target-cutover-and-user-experience). Local server/readiness implementation is separately authorized after Astra review; recovery activation is blocked pending native permission qualification. Operational actions remain held.
 
 ## Supported public contracts (not live qualification)
 
@@ -49,6 +49,18 @@ Published contracts do not establish old-connection drain duration, old endpoint
 - Future public-only verification must bind the exact expected tag and downloaded manifest bytes to the signed subject/predicate, approved fixed repository/workflow/source/invocation, whole config/image and CVM policy, hardware signature/chain/measurement, certificate validity/SAN/key endorsements, TLS public-key fingerprint and HPKE key configuration. No credentials before all checks succeed; candidate checks here need no credentials at all.
 - Preserve the exact origin/port for acquisition and key binding; restrict review destinations to independently confirmed platform-owned paid candidate endpoints. Do not allow arbitrary URLs, redirects, repository/workflow values, discovery latest or secret-bearing URL components. Reject wrong tag/measurement/key, mixed artifacts, acquisition failure, unsupported v3 evidence or malformed status without echoing offending values.
 - If the review endpoint does not provide evidence compatible with the approved JS path, record **review_verifier_blocked** and stop. Do not invent a native-v3 success or legacy downgrade.
+
+### Proposed startup healthcheck (not enabled)
+
+The future command is the image-contained `/bin/possums --healthcheck`, with a fixed credential-free loopback HTTP readiness check. Keep root `tinfoil-config.yml` unchanged until an independently qualified image digest actually includes it. Do not invoke this mode on the deployed predecessor, which lacks that command mode. Supported measured-config shape, with timing values selected from startup qualification:
+
+```yaml
+healthcheck:
+  test: ["CMD", "/bin/possums", "--healthcheck"]
+  # interval, timeout, retries and start_period: qualify before activation
+```
+
+Place the stanza under the gateway container, not a Dockerfile-only healthcheck: Tinfoil's boot gate uses the config healthcheck. Qualify the proposed command in the generated image, 204 only while serving/503 after quiescence, and content-free output privacy. Do not add curl, restart-policy changes or runtime secret access. Readiness never replaces public release/hardware/key verification or accounting drain. Implementation/test results belong in a new scoped record, not historical evidence.
 
 ### Promotion gate and latest ordering
 
