@@ -172,3 +172,50 @@ mocks; they do not requalify live attestation, billing, retention or timeout
 behavior. Legacy-v2 freshness and the native-v3 CLI signer mismatch remain
 unresolved. A failed delivery/Stop still establishes neither remote cancellation
 nor a refund; native retries can incur another charge.
+
+## Subsequent scoped formatting and review acceptance
+
+After the initial paused checkpoint, the parent requested first-party formatting
+only. Commit `3b30b0105779da97b5fab4b48ffe459ecbb51fd5` formats exactly
+`src/inference.rs`, `src/inference/stream.rs`, `src/inference/upload_tests.rs`,
+`src/server.rs`, `src/server/resource_streaming_tests.rs` and `tests/transport.rs`.
+No client or vendor file changed. Used the existing Rust 1.88 toolchain's
+`rustfmt 1.8.0-stable (6b00bc3880 2025-06-23)` with
+`--edition 2021 --config skip_children=true` and those six explicit paths.
+Each result exactly matches rustfmt applied to its prior committed bytes.
+It is formatting-only, not literally whitespace-only: default rustfmt also
+normalizes optional trailing commas, removes redundant braces around one
+single-expression match arm and orders two `cfg(test)` module declarations.
+A normalized comparison verified those are the only non-whitespace differences;
+no expression, literal, timeout, assertion or error-policy change was introduced.
+
+A fresh `git archive 3b30b01` in the same scratch root's `formatted-source`
+passed `cargo fmt -p possums -- --check`, all **302 Rust tests** (three live tests
+ignored) and strict Clippy using the same offline commands/cache/toolchain.
+Logs: `formatted-fmt.log`, `formatted-rust-tests.log`, `formatted-clippy.log`.
+The first-party formatting gate now passes. `git diff --check` passes too.
+
+The broad `cargo fmt --all -- --check` also traverses the local path dependency
+`vendor/tinfoil`; it is not limited to the first-party package. Reproduced that
+check on a separate pristine `git archive 6149e42` in `format-baseline`.
+Both baseline and post-format integration report the **same 22 vendor files**,
+with all 22 diagnostic bodies identical after normalizing absolute paths and
+hunk line numbers. This includes `vendor/tinfoil/src/verifier/tls.rs`: the added
+connection-timeout comment/call introduces no formatting discrepancy, so the
+vendor file was not reformatted. The other 21 vendor files were not changed.
+Logs: `fmt-baseline.log`, `fmt-all-after.log`. The broad vendor-inclusive gate
+still fails on established baseline formatting, not new timeout-line drift;
+no all-checks-green claim is made.
+
+The independent reviewer then completed read-only review of the actual
+integration worktree and reported **no semantic blockers**: closed diagnostic
+snapshots, byte-idle timers and signal/epoch-bound renewal are preserved. The
+reviewer did not rerun tests; the test evidence above belongs to the implementer.
+The parent accepted that review and authorized installation after the first-party
+formatting gate. Installation evidence is recorded separately below when done.
+
+Client build inputs remain byte-identical to merge source `e622af1`; the qualified
+JavaScript artifact/report retains that exact build-source identity and hash.
+The formatting-only Rust source is `3b30b01`, not a claim of a new JS rebuild or
+new gateway deployment. Root dirty files and the installed link remained
+untouched throughout formatting and review.

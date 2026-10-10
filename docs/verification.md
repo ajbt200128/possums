@@ -1637,3 +1637,13 @@ credentials, live inference/public evidence, runtime upgrade, session interrupti
 or gateway deployment was involved. This new checkpoint does not revise the
 historical source/installation evidence above; privacy sections, synthetic-test
 scope and unresolved platform/runtime limits are linked in its record.
+
+### Subsequent first-party formatting and integration review
+
+Formatting-only commit `3b30b01` passes the first-party Cargo formatting gate,
+302 Rust tests (three live tests ignored) and strict Clippy. The vendor-inclusive
+format check retains exactly the baseline's 22 vendor failures; the added TLS
+timeout lines introduce none. [Detailed comparison and review scope](pi-timeout-renewal-integration.md#subsequent-scoped-formatting-and-review-acceptance).
+Independent source-only review found no semantic blocker, without rerunning
+tests; the parent accepted it and authorized installation after the formatting
+gate. Client inputs and qualified JS artifact are unchanged from `e622af1`.
