@@ -94,7 +94,7 @@ export class ConnectionFailure extends Error {
       ? ` Observed HTTP status: ${catalog.status ?? 'unavailable'}.${catalog.reason ? ` Gateway code: ${catalog.reason}.` : ''}${catalog.detail ? ` Gateway detail: ${gatewayDetailLabel(catalog.detail)}.` : ''}` : '';
     const evidence = catalog instanceof EvidenceObservation
       ? ` Stage: ${catalog.stage} (${evidenceStages[catalog.stage]}); constraint: ${catalog.constraint} (${evidenceConstraints[catalog.constraint]}).${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}${catalog.constraint === 'rate_limited' ? ' Wait before starting a new Pi session; re-entering credentials will not fix this.' : ''}` :
-      catalog instanceof GatewayError ? ` Stage: challenge; constraint: http. Gateway stage: admission; constraint: service_quiescing.${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}` :
+      catalog instanceof GatewayError ? ` Stage: admission; constraint: service_quiescing.${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}` :
       ` Stage: ${catalog instanceof CatalogFailure ? 'catalog' : 'connection'}; constraint: ${catalog instanceof CatalogFailure ? catalog.stage : code}.${catalog instanceof CatalogFailure && catalog.reason === 'service_quiescing' ? ' Gateway stage: admission; constraint: service_quiescing.' : ''}`;
     super(`${catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} No inference request was sent by this connection attempt. Cached models do not authorize inference.`);
     Object.freeze(this);

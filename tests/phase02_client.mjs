@@ -253,6 +253,7 @@ const client = new f.ReferenceClient(channel);
 const nativeFetch = globalThis.fetch;
 let sent = [], decoded = [], responsePulls = 0, holdPath, held, catalogModel = model, chatText = valid, corrupt = false;
 let observedAbort = false, balanceStatus = 200;
+let encryptedFailureRoute, encryptedFailureStatus = 503, encryptedFailureWire, delayedClose, interruptClose;
 let fragmentMode;
 const realTimer = globalThis.setTimeout;
 let balanceText = '{"available_microunits":"18446744073709551615","in_flight":4294967295,"completed_requests":"18446744073709551615"}';
@@ -271,7 +272,8 @@ globalThis.fetch = async req => {
   const recipient = await server.suite.SetupRecipient(server.getPrivateKey(), encapsulated, { info: enc.encode(ehbp.HPKE_REQUEST_INFO) });
   const body = new Uint8Array(await req.arrayBuffer());
   const payload = JSON.parse(dec.decode(await recipient.Open(body.slice(4)))); decoded.push({ route, payload });
-  const response = route === '/v1/sessions' ? JSON.stringify({ token: 'b'.repeat(43), token_type: 'Bearer', expires_in: 43200 }) :
+  const response = route === encryptedFailureRoute ? JSON.stringify(encryptedFailureWire) :
+    route === '/v1/sessions' ? JSON.stringify({ token: 'b'.repeat(43), token_type: 'Bearer', expires_in: 43200 }) :
     route === '/v1/submissions' ? JSON.stringify({ submission: 's'.repeat(43) }) : route === '/v1/balance' ? balanceText : chatText;
   const nonce = crypto.getRandomValues(new Uint8Array(32));
   const secret = new Uint8Array(await recipient.Export(enc.encode(ehbp.EXPORT_LABEL), ehbp.EXPORT_LENGTH));
@@ -292,8 +294,12 @@ globalThis.fetch = async req => {
       'Ehbp-Response-Nonce': ehbp.bytesToHex(nonce), 'Content-Type': 'text/event-stream',
     } });
   }
-  return new Response(new ReadableStream({ pull(c) { responsePulls++; if (!emitted) { emitted = true; c.enqueue(frame); } else c.close(); } }, { highWaterMark: 0 }),
-    { status: route === '/v1/balance' ? balanceStatus : 200, headers: { 'Ehbp-Response-Nonce': ehbp.bytesToHex(nonce), 'Content-Type': route === '/v1/chat/completions' ? 'text/event-stream; fixture=hidden' : 'application/json', 'X-Private': 'not-for-hook' } });
+  return new Response(new ReadableStream({ async pull(c) {
+    responsePulls++;
+    if (!emitted) { emitted = true; c.enqueue(frame); }
+    else { if (route === encryptedFailureRoute && delayedClose) await delayedClose; if (route === encryptedFailureRoute && interruptClose) c.error(new Error('PRIVATE_PROMPT_CREDENTIAL')); else c.close(); }
+  } }, { highWaterMark: 0 }),
+    { status: route === encryptedFailureRoute ? encryptedFailureStatus : route === '/v1/balance' ? balanceStatus : 200, headers: { 'Ehbp-Response-Nonce': ehbp.bytesToHex(nonce), 'Content-Type': route === '/v1/chat/completions' ? 'text/event-stream; fixture=hidden' : 'application/json', 'X-Private': 'not-for-hook' } });
 };
 try {
   const pre = AbortSignal.abort();
@@ -346,6 +352,59 @@ try {
     check(sent.slice(initial).join(',') === '/v1/balance');
   }
   balanceStatus = 200;
+  const quiesce = { error: { code: 'service_quiescing', stage: 'admission', constraint: 'service_quiescing',
+    billing: 'not_submitted', message: 'PRIVATE_PROMPT_CREDENTIAL' } };
+  const assertQuiesce = error => error.reason === 'service_quiescing' && error.code === 'uncertain' &&
+    error.status === 503 && error.billing === 'unknown' && !String(error).includes('PRIVATE_PROMPT_CREDENTIAL') &&
+    !String(error).includes('Reservation refunded');
+  encryptedFailureWire = quiesce;
+  for (const route of ['/v1/sessions', '/v1/submissions', '/v1/chat/completions', '/v1/balance']) {
+    encryptedFailureRoute = route; initial = sent.length;
+    const operation = route === '/v1/sessions' ? () => client.login('c'.repeat(43)) :
+      route === '/v1/balance' ? () => client.balance() :
+      () => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] });
+    await assert.rejects(operation, assertQuiesce); checks++;
+    check(sent.slice(initial).join(',') === (route === '/v1/sessions' ? '/v1/auth/challenge,/v1/sessions' :
+      route === '/v1/balance' ? '/v1/balance' :
+      route === '/v1/submissions' ? '/v1/models,/v1/submissions' : '/v1/models,/v1/submissions,/v1/chat/completions'));
+    encryptedFailureRoute = undefined;
+    if (route === '/v1/sessions') await client.login('c'.repeat(43));
+  }
+  encryptedFailureRoute = '/v1/chat/completions';
+  let releaseEOF;
+  delayedClose = new Promise(resolve => { releaseEOF = resolve; });
+  let finished = false;
+  const pendingQuiesce = client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] })
+    .then(() => assert.fail('quiesce must reject'), error => { finished = true; return error; });
+  await new Promise(resolve => realTimer(resolve, 10)); check(!finished);
+  releaseEOF(); check(assertQuiesce(await pendingQuiesce)); delayedClose = undefined;
+  for (const mutation of [
+    { status: 502, wire: quiesce },
+    { status: 200, wire: quiesce },
+    { status: 503, wire: { error: { ...quiesce.error, billing: 'refunded' } } },
+    { status: 503, wire: { error: { ...quiesce.error, extra: 'PRIVATE_PROMPT_CREDENTIAL' } } },
+    { status: 503, wire: { error: { ...quiesce.error, message: null } } },
+  ]) {
+    encryptedFailureStatus = mutation.status; encryptedFailureWire = mutation.wire;
+    await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error =>
+      error.stage === 'stream' && error.constraint === 'json' && error.billing !== 'refunded' && !String(error).includes('PRIVATE_PROMPT_CREDENTIAL')); checks++;
+  }
+  encryptedFailureStatus = 503; encryptedFailureWire = quiesce;
+  interruptClose = true;
+  await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error =>
+    !assertQuiesce(error) && error.billing !== 'refunded' && !String(error).includes('PRIVATE_PROMPT_CREDENTIAL')); checks++;
+  interruptClose = false;
+  corrupt = true;
+  await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error =>
+    error.stage === 'transport' && error.constraint === 'decryption' && error.status === 503 && !assertQuiesce(error)); checks++;
+  corrupt = false;
+  const encryptedFetch = globalThis.fetch;
+  globalThis.fetch = async req => new URL(req.url).pathname === '/v1/chat/completions' ?
+    Response.json(quiesce, { status: 503 }) : encryptedFetch(req);
+  await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error =>
+    error.stage === 'transport' && error.constraint === 'endpoint_binding' && error.status === 503 && !assertQuiesce(error)); checks++;
+  globalThis.fetch = encryptedFetch;
+  encryptedFailureRoute = undefined;
   // An older gateway cannot silently fall back to login, catalog or inference.
   const failedBalanceFetch = globalThis.fetch;
   globalThis.fetch = async req => new URL(req.url).pathname === '/v1/balance' ? new Response('not found', { status: 404 }) : failedBalanceFetch(req);

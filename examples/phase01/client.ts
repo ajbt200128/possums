@@ -159,7 +159,7 @@ export class CatalogFailure extends ChannelError {
 // Success requires the ordered, authenticated gateway receipt AND stream EOF.
 // No answer is accumulated; interruption is uncertain and never causes a resend.
 export async function consumeCompletion(body: ReadableStream<Uint8Array>, model: string | LiveModel,
-  onDelta: (text: string) => void, options: CompletionOptions = {}): Promise<Receipt> {
+  onDelta: (text: string) => void, options: CompletionOptions = {}, httpStatus?: number): Promise<Receipt> {
   let reader: ReadableStreamDefaultReader<Uint8Array>, op: Operation;
   try { reader = body.getReader(); op = new Operation(null, options.signal); }
   catch { throw new DiagnosticFailure('stream', 'envelope', 'uncertain'); }
@@ -329,7 +329,8 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
       }
       if (next.done) {
         constraint = 'utf8'; requireThat(decoder.decode() === '');
-        if (controlError) { constraint = 'json'; failure = gatewayError(parseJSON(utf8.encode(pending), LIMITS.error)); }
+        // Only a Channel-produced, SDK-decrypted body may carry HTTP admission status.
+        if (controlError) { constraint = 'json'; failure = gatewayError(parseJSON(utf8.encode(pending), LIMITS.error), hasByteReadTimeout(body) ? httpStatus : undefined); }
         else { constraint = 'envelope'; requireThat(pending === '' && data === undefined); }
         if (failure) {
           terminal = true;
@@ -426,6 +427,7 @@ export class ReferenceClient {
       requireThat(this.#bearer);
       value = await this.channel.balance(this.#bearer, signal);
     } catch (error) {
+      if (error instanceof GatewayError) throw error;
       throw new BalanceFailure('request', error instanceof ChannelError ? error.code : 'rejected', error instanceof DiagnosticFailure ? error : undefined);
     }
     try {
@@ -491,7 +493,7 @@ export class ReferenceClient {
         const name = payload.tool_choice.function.name; tools = tools?.filter(tool => tool.function.name === name);
       }
       stage = 'stream';
-      return await consumeCompletion(body, entry, onDelta, { signal: op.controller.signal, tools, onEvent: opts.onEvent });
+      return await consumeCompletion(body, entry, onDelta, { signal: op.controller.signal, tools, onEvent: opts.onEvent }, status);
     } catch (error) {
       if (error instanceof GatewayError) {
         // Preserve the same authenticated refund carrier; copying would lose its evidence.

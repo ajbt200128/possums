@@ -341,7 +341,7 @@ await check('quiescing HTTP 503 reaches catalog and challenge presentations only
    assert(error instanceof m.GatewayError);assert.equal(error.reason,'service_quiescing');assert.equal(error.status,503);
    assert.equal(error.billing,'unknown');assert(!error.message.includes(hostileConnection));
    const shown=m.connectionFailure(error);assertConnectionFailure(shown,'service_quiescing');
-   assert.match(shown.message,/Stage: challenge; constraint: http.*Gateway stage: admission; constraint: service_quiescing.*Observed HTTP status: 503/);
+   assert.match(shown.message,/Stage: admission; constraint: service_quiescing.*Observed HTTP status: 503/);
    return true;
   });
   assert.deepEqual(calls,['/v1/auth/challenge']);
@@ -370,7 +370,7 @@ await check('quiescing HTTP 503 reaches catalog and challenge presentations only
   await assert.rejects(channel.control('/v1/sessions',{challenge:'c'.repeat(43),credential:'c'.repeat(43)}),error=>
    error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
   await assert.rejects(channel.balance('b'.repeat(43)),error=>
-   error instanceof m.DiagnosticFailure && error.stage==='hook' && error.constraint==='unexpected' && error.status===503);
+   error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
   await assert.rejects(channel.chat({model:'synthetic',stream:true,submission:'s'.repeat(43),messages:[{role:'user',content:'synthetic'}]},'b'.repeat(43)),error=>
    error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
   assert.deepEqual(calls,['/v1/sessions','/v1/balance','/v1/chat/completions']);
@@ -467,7 +467,7 @@ await check('native challenge quiescing warning preserves admission without cata
  try {
   globalThis.fetch=async request=>{routes.push(new URL(request.url).pathname);return Response.json({error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}},{status:503});};
   await assert.rejects(extension.provider.auth.apiKey.login(interaction()),error=>{
-   assertConnectionFailure(error,'service_quiescing');assert.match(error.message,/Stage: challenge; constraint: http.*Observed HTTP status: 503/);return true;
+   assertConnectionFailure(error,'service_quiescing');assert.match(error.message,/Stage: admission; constraint: service_quiescing.*Observed HTTP status: 503/);return true;
   });
   assert.deepEqual(routes,['/v1/auth/challenge']);
   assert.deepEqual(extension.provider.getModels(),[]);

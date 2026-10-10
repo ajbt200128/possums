@@ -127,6 +127,11 @@ export async function diagnosticChecks(m, check) {
     assert.equal(fabricated.billing, 'unknown'); assert(!fabricated.message.includes('Reservation refunded'));
     await rejected([JSON.stringify(wire)], 'stream', 'json');
     await rejected([frame(wire)], 'stream', 'schema');
+    await assert.rejects(m.consumeCompletion(stream([JSON.stringify(wire)], true), 'synthetic', () => {}, {}, 503), error =>
+      !(error instanceof m.GatewayError) && error.billing !== 'refunded' && !String(error).includes(secret));
+    for (const status of [undefined, 200, 502, 503])
+      await assert.rejects(m.consumeCompletion(stream([JSON.stringify(wire)]), 'synthetic', () => {}, {}, status), error =>
+        error instanceof m.DiagnosticFailure && error.billing !== 'refunded' && !String(error).includes(secret));
   });
   await check('gateway status is bounded to an observed HTTP status', async () => {
     assert.equal(new m.GatewayError('unavailable', undefined, 'unknown', 503).status, 503);
