@@ -5,7 +5,6 @@ pub mod attestation;
 pub mod auth;
 mod bounded_json;
 pub mod catalog;
-pub mod free;
 #[cfg(test)]
 mod process_alloc_tests;
 // Shared admission and detached preflight, before API handoff.

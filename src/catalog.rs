@@ -153,8 +153,7 @@ impl Catalog {
         })
     }
 
-    /// Full context-legal allowance, independent of payment policy.
-    pub fn context_model(&self, model_id: &str, input_tokens: u64) -> Result<Model, CatalogError> {
+    pub fn quote(&self, model_id: &str, input_tokens: u64) -> Result<Quote, CatalogError> {
         let mut model = self
             .models
             .iter()
@@ -170,11 +169,6 @@ impl Catalog {
             .filter(|remaining| *remaining > 0)
             .ok_or(CatalogError::ContextExceeded)?;
         model.max_output_tokens = model.max_output_tokens.min(remaining_context);
-        Ok(model)
-    }
-
-    pub fn quote(&self, model_id: &str, input_tokens: u64) -> Result<Quote, CatalogError> {
-        let model = self.context_model(model_id, input_tokens)?;
         let reserved_microunits = marked_up_cost(
             input_tokens,
             model.max_output_tokens,

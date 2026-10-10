@@ -1,7 +1,5 @@
 # Possums API-only gateway specification
 
-The separate operator-approved [`free.possums.dev` experiment](docs/free-experiment.md) is an explicit exception to individual account/reservation/markup behavior and adds only a canonical static `index.html`, not a web UI. Its implementation and deployment evidence are tracked separately; the paid API contract below remains unchanged.
-
 **API-only source contract; deployment pending.** The existing v0.0.15 deployment and previous Phase 0 browser behavior are historical; see [phase evidence](docs/phase0.md) and [verification](docs/verification.md). This document does not certify an API-only deployment. `AGENTS.md` is authoritative where historical plans disagree.
 
 The measured clearnet gateway serves JSON `GET /attestation` and the authenticated `/v1` API (challenge, sessions, submissions, model discovery, streaming chat completions). No gateway HTML, `/app`, browser session cookies, CSRF forms, recovery/download or claims pages, web streaming, or browser UI is offered or planned. The Pi client remains supported. Obsidian is an independently proposed API client running outside the gateway, not a deferred gateway UI.

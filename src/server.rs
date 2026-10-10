@@ -427,7 +427,7 @@ async fn total_body_deadline(
         .await
 }
 
-pub(crate) async fn collect_request(mut body: Body, limit: usize) -> Result<Bytes, ()> {
+async fn collect_request(mut body: Body, limit: usize) -> Result<Bytes, ()> {
     // Do not collect a list of frames: an 8-MiB one-byte-fragmented request
     // otherwise retains millions of frame headers before coalescing. One fixed
     // allocation, one borrowed incoming frame, no growth/copy-overlap or queue.

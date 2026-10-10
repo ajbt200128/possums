@@ -29,18 +29,6 @@ pub(crate) fn to_vec(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, se
     Ok(writer.bytes)
 }
 
-pub(crate) fn to_vec_pretty(
-    value: &impl Serialize,
-    limit: usize,
-) -> Result<Vec<u8>, serde_json::Error> {
-    let mut writer = BoundedWriter {
-        bytes: Vec::new(),
-        limit,
-    };
-    serde_json::to_writer_pretty(&mut writer, value)?;
-    Ok(writer.bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,9 +41,5 @@ mod tests {
             b"\"\\u0000\\u0000\\u0000\\u0000\""
         );
         assert!(to_vec(&value, 25).is_err());
-        let object = serde_json::json!({"value":value});
-        let pretty = serde_json::to_vec_pretty(&object).unwrap();
-        assert_eq!(to_vec_pretty(&object, pretty.len()).unwrap(), pretty);
-        assert!(to_vec_pretty(&object, pretty.len() - 1).is_err());
     }
 }
