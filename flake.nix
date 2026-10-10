@@ -38,6 +38,7 @@
                 ./vendor/tinfoil/assets/genoa_cert_chain.pem
                 ./vendor/tinfoil/assets/trusted_root.json
                 ./vendor/tinfoil/assets/rekor_test_bundle.json
+                ./index.html
               ];
             in
             (craneLib.filterCargoSources path type || builtins.elem (toString path) sdkAssets) &&
@@ -52,6 +53,14 @@
         # Tests have their own check; image builds should not compile/run them again.
         gateway = craneLib.buildPackage (common // {
           inherit cargoArtifacts;
+          cargoExtraArgs = "--bin possums";
+          doCheck = false;
+        });
+        freeGateway = craneLib.buildPackage (common // {
+          inherit cargoArtifacts;
+          cargoExtraArgs = "--bin possums-free";
+          POSSUMS_SOURCE_REVISION = self.rev or "unavailable";
+          POSSUMS_VERSION = "free-v0.0.1";
           doCheck = false;
         });
         attestationHelper = buildGoModule {
@@ -76,12 +85,27 @@
           ulimit -c 0
           exec ${gateway}/bin/possums
         '';
+        freeGatewayEntrypoint = pkgs.writeShellScriptBin "possums-free-entrypoint" ''
+          ulimit -c 0
+          exec ${freeGateway}/bin/possums-free
+        '';
         gatewayImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway";
           tag = "phase0";
           contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert ];
           config = {
             Entrypoint = [ "${gatewayEntrypoint}/bin/possums-entrypoint" ];
+            Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
+            User = "65532:65532";
+            WorkingDir = "/tmp";
+          };
+        };
+        freeGatewayImage = pkgs.dockerTools.buildLayeredImage {
+          name = "possums-free";
+          tag = "phase0";
+          contents = [ freeGateway freeGatewayEntrypoint attestationHelper pkgs.cacert ];
+          config = {
+            Entrypoint = [ "${freeGatewayEntrypoint}/bin/possums-free-entrypoint" ];
             Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
             User = "65532:65532";
             WorkingDir = "/tmp";
@@ -109,6 +133,19 @@
             passthru.rebuildDerivations = map (drv: drv.drvPath)
               ([ gateway attestationHelper gatewayEntrypoint ] ++ imageStages gatewayImage);
           });
+        freeDependencyImage = freeGatewayImage.override {
+          name = "possums-free-dependency-probe";
+          contents = [ pkgs.cacert ];
+          config = { };
+        };
+        freeReleaseBuildDeps = (pkgs.linkFarm "free-release-build-deps"
+          (pkgs.lib.imap0 (n: drv: {
+            name = toString n;
+            path = builtins.derivation (builtins.removeAttrs drv.inputDerivation.drvAttrs [ "outputChecks" ]);
+          }) ([ freeGateway attestationHelper ] ++ imageStages freeDependencyImage))).overrideAttrs (_: {
+            passthru.rebuildDerivations = map (drv: drv.drvPath)
+              ([ freeGateway attestationHelper freeGatewayEntrypoint ] ++ imageStages freeGatewayImage);
+          });
         smokeImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway-smoke";
           tag = "phase0";
@@ -124,9 +161,12 @@
         packages = {
           default = gateway;
           attestation-helper = attestationHelper;
+          free-gateway = freeGateway;
           api-smoke-fixture = apiSmokeFixture;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;
+          free-gateway-image = freeGatewayImage;
+          free-release-build-deps = freeReleaseBuildDeps;
           gateway-smoke-image = smokeImage;
           release-build-deps = releaseBuildDeps;
         };

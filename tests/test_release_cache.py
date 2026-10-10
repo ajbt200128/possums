@@ -33,6 +33,25 @@ class ReleaseCacheTests(unittest.TestCase):
             [APP, HELPER], (valid if valid is not None else {DEP_OUT}).__contains__,
         )
 
+    def test_cli_selects_only_vetted_image_and_dependency_pair(self):
+        for flag, image, deps in [
+            ([], "gateway-image", "release-build-deps"),
+            (["--free"], "free-gateway-image", "free-release-build-deps"),
+        ]:
+            with (
+                self.subTest(flag=flag),
+                patch.object(release_cache, "nix_json", side_effect=[graph(), {DEP: graph()[DEP]}, [APP, HELPER]]) as nix_json,
+                patch.object(release_cache, "is_valid", side_effect={DEP_OUT}.__contains__),
+                patch("sys.argv", ["check-release-cache.py", *flag]),
+                patch("builtins.print"),
+            ):
+                release_cache.main()
+                self.assertEqual([call.args for call in nix_json.call_args_list], [
+                    ("derivation", "show", "--recursive", f".#{image}"),
+                    ("derivation", "show", "--recursive", f".#{deps}"),
+                    ("eval", "--json", f".#{deps}.rebuildDerivations"),
+                ])
+
     def test_prewarmed_dependencies_and_fresh_application(self):
         self.assertEqual(self.validate(), 2)
 
@@ -93,6 +112,7 @@ class ReleaseCacheTests(unittest.TestCase):
         error = release_cache.subprocess.CalledProcessError(1, "nix", stderr="hostile-error-sentinel")
         with (
             patch.object(release_cache, "nix_json", side_effect=error),
+            patch("sys.argv", ["check-release-cache.py"]),
             self.assertRaises(SystemExit) as failure,
         ):
             release_cache.main()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail closed if dependency prewarming weakens application/image reproduction."""
 
+import argparse
 import json
 import subprocess
 
@@ -66,10 +67,15 @@ def is_valid(path):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--free", action="store_true", help="check the free image boundary")
+    args = parser.parse_args()
+    image_name = "free-gateway-image" if args.free else "gateway-image"
+    deps_name = "free-release-build-deps" if args.free else "release-build-deps"
     try:
-        image = derivations(nix_json("derivation", "show", "--recursive", ".#gateway-image"))
-        dependencies = derivations(nix_json("derivation", "show", "--recursive", ".#release-build-deps"))
-        expected = nix_json("eval", "--json", ".#release-build-deps.rebuildDerivations")
+        image = derivations(nix_json("derivation", "show", "--recursive", f".#{image_name}"))
+        dependencies = derivations(nix_json("derivation", "show", "--recursive", f".#{deps_name}"))
+        expected = nix_json("eval", "--json", f".#{deps_name}.rebuildDerivations")
         count = validate_boundary(image, dependencies, expected, is_valid)
     except ValueError as error:
         # Only locally authored boundary messages may be reported, not parser payloads.
