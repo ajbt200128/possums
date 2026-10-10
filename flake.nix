@@ -124,6 +124,7 @@
         packages = {
           default = gateway;
           attestation-helper = attestationHelper;
+          attestation-go = attestationGo;
           api-smoke-fixture = apiSmokeFixture;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;

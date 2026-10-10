@@ -1,0 +1,96 @@
+name: Deploy production
+run-name: Production ${{ inputs.tag }} from ${{ inputs.source }}
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Eligible main source S
+        required: true
+        type: string
+      release:
+        description: Immutable release-only commit R
+        required: true
+        type: string
+      tag:
+        description: Paid semantic tag V
+        required: true
+        type: string
+      image:
+        description: Reproduced image digest D
+        required: true
+        type: string
+      manifest:
+        description: Verified public manifest SHA256 (without prefix)
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+  deployments: read
+  attestations: read
+env:
+  SOURCE: ${{ inputs.source }}
+  RELEASE: ${{ inputs.release }}
+  TAG: ${{ inputs.tag }}
+  IMAGE: ${{ inputs.image }}
+  MANIFEST: ${{ inputs.manifest }}
+  PRODUCTION_DEPLOYMENT_ENABLED: ${{ vars.PRODUCTION_DEPLOYMENT_ENABLED }}
+jobs:
+  preflight:
+    # No environment reference and no deployment credential: a missing environment
+    # must fail here rather than GitHub implicitly creating an unprotected one.
+    if: github.repository == 'ajbt200128/possums' && github.ref == 'refs/heads/main' && vars.PRODUCTION_DEPLOYMENT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      environment_id: ${{ steps.gate.outputs.environment_id }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+        with:
+          diagnostic-endpoint: ""
+      - name: Build credential-free serving verifier with the pinned compiler
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          nix build .#attestation-go --out-link "$RUNNER_TEMP/possums-serving-go"
+          "$RUNNER_TEMP/possums-serving-go/bin/go" -C attestation-helper build -mod=readonly \
+            -o "$RUNNER_TEMP/possums-verify-serving" ../scripts/verify-serving/main.go
+      - id: gate
+        name: Verify candidate, existing policy and serving tool
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/deploy.py preflight "$SOURCE" "$RELEASE" "$TAG" "$IMAGE" "$MANIFEST"
+  production:
+    needs: preflight
+    environment: production
+    concurrency:
+      group: production-update
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+        with:
+          diagnostic-endpoint: ""
+      - name: Build credential-free serving verifier with the pinned compiler
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          nix build .#attestation-go --out-link "$RUNNER_TEMP/possums-serving-go"
+          "$RUNNER_TEMP/possums-serving-go/bin/go" -C attestation-helper build -mod=readonly \
+            -o "$RUNNER_TEMP/possums-verify-serving" ../scripts/verify-serving/main.go
+      - name: Reverify after approval; admit at most one update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TINFOIL_ADMIN_KEY: ${{ secrets.TINFOIL_PRODUCTION_ADMIN_KEY }}
+          ENVIRONMENT_ID: ${{ needs.preflight.outputs.environment_id }}
+        run: python3 scripts/deploy.py protected "$SOURCE" "$RELEASE" "$TAG" "$IMAGE" "$MANIFEST" "$ENVIRONMENT_ID"

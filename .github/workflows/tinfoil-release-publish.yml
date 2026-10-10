@@ -1,23 +1,50 @@
-# Dispatched by tinfoil-release.yml against the newly created release tag.
+# Measurement executes only in this tagged workflow; never in the orchestrator.
 name: Tinfoil Release - Publish
-
-run-name: Publish release ${{ github.ref_name }}
-
+run-name: tinfoil-release-publish.yml:${{ inputs.release_request }}:${{ inputs.build_run }}:${{ inputs.build_attempt }}
 on:
   workflow_dispatch:
-
+    inputs:
+      release_request:
+        description: Exact release-only commit, for invocation correlation
+        required: true
+        type: string
+      build_run:
+        description: Originating independent image build run
+        required: true
+        type: string
+      build_attempt:
+        description: Exact independent image build attempt
+        required: true
+        type: string
 concurrency:
   group: tinfoil-container-release-${{ github.ref_name }}
-
+  cancel-in-progress: false
+permissions:
+  contents: read
 jobs:
   measure-and-release:
+    if: github.repository == 'ajbt200128/possums' && vars.RELEASE_AUTOMATION_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
       id-token: write
       attestations: write
+      actions: read
     steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse stale, unchecked or partially published releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_AUTOMATION_ENABLED: ${{ vars.RELEASE_AUTOMATION_ENABLED }}
+          RELEASE_REQUEST: ${{ inputs.release_request }}
+          BUILD_RUN: ${{ inputs.build_run }}
+          BUILD_ATTEMPT: ${{ inputs.build_attempt }}
+        run: python3 scripts/release.py publication-guard
       - name: Measure image, attest, and publish release
         uses: tinfoilsh/measure-image-action@f2ec2fdf4510459730f0a5158c5817f5361e9461 # v0.13.2
         with:

@@ -1,9 +1,15 @@
 name: check
+run-name: check.yml:${{ inputs.release_request || github.sha }}
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_request:
+        description: Public release commit used to correlate explicit tag checks
+        type: string
+        required: false
 concurrency:
   group: check-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -25,7 +31,14 @@ jobs:
           use-flakehub: false
           use-gha-cache: true
           source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
-      - run: python3 -m unittest discover -s tests -p 'test_release_cache.py'
+      - run: python3 -m unittest discover -s tests -p 'test_release*.py'
+      - name: Test standalone serving verifier without public traffic
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          nix build .#attestation-go --out-link "$RUNNER_TEMP/possums-serving-go"
+          "$RUNNER_TEMP/possums-serving-go/bin/go" -C attestation-helper test -mod=readonly \
+            ../scripts/verify-serving/main.go ../scripts/verify-serving/main_test.go
       - run: nix flake check --print-build-logs
       - name: Seed API smoke and image outputs
         run: nix build .#api-smoke-fixture .#gateway-image .#gateway-smoke-image --no-link --print-build-logs
@@ -80,5 +93,7 @@ jobs:
           done
           test "$(docker inspect -f '{{.State.Running}}' "$container")" = true
           docker logs "$container" 2>&1 | grep -q '^http://127.0.0.1:'
-          ! docker logs "$container" 2>&1 | grep -q 'startup-canary'
+          if docker logs "$container" 2>&1 | grep -q 'startup-canary'; then
+            exit 1
+          fi
           test "$(docker logs "$container" 2>&1 | wc -l)" -eq 1
