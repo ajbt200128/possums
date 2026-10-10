@@ -67,6 +67,38 @@ API reads. Protected approval and one-update production behavior are likewise
 pending. No automatic retry, rollback, inference canary or Pi approval update
 is authorized by this evidence.
 
+## Automatic v0.0.22 and operator-approved simplification
+
+PR49 merged the canonical-shape correction to main
+`a654637206255a1efd8424a4272c519e8f6266ab`. Main CI38085376011 passed and
+[automatic workflow-run publication38085590411](https://github.com/ajbt200128/possums/actions/runs/38085590411)
+passed independent build agreement, tagged checks, signed publication and final
+public verification. `v0.0.22` binds release-only
+`3fd4d9474941b15b99fc78140e4d559c9d584e12` and manifest
+`9b5bea6c99ff816c138c5a91549f80885e128203c5df20b08f5a1f5be24afc47`.
+This qualifies ordinary automatic publication, not concurrency/race cases.
+
+[Production38086515736](https://github.com/ajbt200128/possums/actions/runs/38086515736)
+built the pinned verifier but failed preflight with `RELEASE_COMMAND`. No HTTP
+status or exact failed endpoint was retained; no upstream cause is claimed.
+Approval was never requested, production skipped and no update was sent.
+Publication remains enabled; production was disabled again.
+
+PR52 proposed a supplemental metadata reader and passed its hosted checks, but
+was **not merged** and no reader was supplied. The operator explicitly chose to
+remove live activation-variable reads and secret-location metadata checks instead.
+The replacement trusts configured secret placement and GitHub activation snapshots;
+switch changes are not guaranteed to revoke queued/approved runs. No PAT or broad
+OAuth credential copy is needed. Required native environment/reviewer/branch policy,
+actual exact-run approval, current-main admission, signed provenance, real admin
+credential presence and at-most-one update/no-replay checks remain unchanged.
+
+All 43 local release/cache tests pass after this simplification. Regressions assert
+no variable/secret metadata API reads, exact-true activation snapshots, stale-main
+rejection and existing missing-credential/actual-review/no-rerun protections.
+Hosted simplified preflight/approval/update and new-release serving acceptance
+remain pending; no earlier failed workflow/publisher is replayed.
+
 Privacy references: [data boundaries](../PRIVACY.md#data-handling-boundaries),
 [forbidden diagnostics/content](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data),
 [processor/history boundaries](../PRIVACY.md#processors-retention-access-and-shutdown),

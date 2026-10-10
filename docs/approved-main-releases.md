@@ -1,8 +1,11 @@
 # Automatic paid releases and approved production deployment
 
-**Branch implementation; not enabled or hosted/live qualified.** No environment,
-reviewer, credential, repository variable or production runtime was configured by
-this change. Both activation variables are absent-by-default/off. Historical
+**Automatic publication qualified; simplified protected deployment pending.**
+The operator configured production approval and privately supplied the admin key.
+Automatic `v0.0.22` passed; production is disabled while the simplified gate is
+qualified. No supplemental PAT is needed. Defaults remain off; current scoped
+results are in [hosted qualification](approved-main-release-qualification.md).
+Historical
 [v0.0.20 rollout evidence](timeout-renewal-v20-rollout.md) is not qualification of
 these new workflows.
 
@@ -58,12 +61,16 @@ Do not activate these workflows merely because local tests passed. Before setup:
   Entering a job by bypass without that review cannot authorize its update.
 - Provision `TINFOIL_PRODUCTION_ADMIN_KEY` only as an environment secret using
   private secret entry. Never copy credentials from local CLI config or chat.
-  Preflight requires readable environment-secret **name metadata** to reject an
-  accidental repository/organization fallback; it never reads a secret value.
-- Qualify hosted `GITHUB_TOKEN` read access to environment policy, secret-name
-  metadata, repository variables and deployment review history. Missing or
-  unreadable evidence fails closed. If these permissions are unavailable, stop
-  and review a supported permission/setup solution; do not weaken the checks.
+  Correct environment placement is an operator setup responsibility; the gate
+  does not inspect secret-name metadata or prove the absence of a same-named
+  repository/organization fallback. Missing actual credentials still block update.
+- Qualify native `GITHUB_TOKEN` read access to environment policy, branch
+  restrictions, public provenance and deployment review history. No supplemental
+  reader/PAT is required. Unreadable required evidence still fails closed.
+- Activation uses GitHub-provided variable snapshots, not live variable API reads.
+  Disabling a switch is **not guaranteed to revoke a queued/approved run**; do not
+  treat it as cancellation. Actual operator review and current main are still
+  checked after approval and immediately before the single update.
 - Exercise the actual hosted graph with controlled public/synthetic candidates:
   successful CI, reversed completion of two main arrivals, stale queued/approved
   candidates, tag/run/artifact binding, version/partial-publication rejection,
