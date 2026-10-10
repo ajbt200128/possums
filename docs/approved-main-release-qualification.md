@@ -59,13 +59,60 @@ candidate was dispatched by the failed parent. Both activation switches were
 returned to `false` while the correction was prepared. A later merged source
 must qualify as a new candidate, not replay the old publisher.
 
-## Remaining boundary at this checkpoint
+## Remaining boundary after the first qualification
 
 Hosted deployment-token access to variables, environment policy, secret-name
 metadata and approval history is not qualified by successful **local-account**
 API reads. Protected approval and one-update production behavior are likewise
 pending. No automatic retry, rollback, inference canary or Pi approval update
 is authorized by this evidence.
+
+## Automatic v0.0.22 and production-token boundary
+
+[PR 49](https://github.com/ajbt200128/possums/pull/49) passed CI and merged the
+shape correction to main `a654637206255a1efd8424a4272c519e8f6266ab`.
+[Main CI](https://github.com/ajbt200128/possums/actions/runs/38085376011) passed
+and automatically triggered
+[release run 38085590411](https://github.com/ajbt200128/possums/actions/runs/38085590411)
+through `workflow_run`. Admission, fresh independent build agreement, tagged
+checks, signed publication and final public verification all passed. No manual
+publication dispatch or publisher rerun was needed for this new source.
+
+`v0.0.22` binds release-only R `3fd4d9474941b15b99fc78140e4d559c9d584e12`,
+image `sha256:ce3a371f8c5879e91ba63c3e4a8e9c8aa8f06af75aca4c28d419d42bfc55fab2`
+and manifest `9b5bea6c99ff816c138c5a91549f80885e128203c5df20b08f5a1f5be24afc47`.
+Full independent local public verification also passed. This qualifies ordinary
+successful automatic publication, not reversed-completion/concurrency races.
+
+The operator-authorized exact current-main candidate entered
+[production run 38086515736](https://github.com/ajbt200128/possums/actions/runs/38086515736).
+The pinned serving verifier built; preflight failed on a required GitHub API read
+with `RELEASE_COMMAND`. The old command boundary did not retain the HTTP status
+or identify the failed endpoint; neither an observed status nor upstream cause
+is claimed. No environment approval was requested, the production job was
+skipped and no update was sent. Publication remains enabled; production was
+returned to `false`.
+
+A scoped correction supports an additional read-only metadata credential only
+for repository variables and environment-secret names. Native Actions
+credentials still perform policy, provenance and approval reads. Official
+[GitHub permission documentation](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
+assigns these supplemental endpoints to **Variables: read** and
+**Environments: read**, which are not configurable native workflow permissions.
+A fine-grained reader must be limited to this repository; the broad operator
+OAuth credential is not copied. No reader credential has yet been supplied.
+Reader absence/errors still fail closed with `RELEASE_METADATA_UNREADABLE`,
+explicitly unknown underlying cause and only a safely known status if available.
+No approval, fresh-main, secret-scope or public-provenance check is removed.
+
+The parent ran 46 offline release/cache tests, actionlint and whitespace checks.
+Tests cover reader-only metadata selection, unchanged native authentication,
+credential-free admin/serving subprocesses and hostile error/status handling.
+Focused Astra review independently ran 35 automation tests and approved the
+patch with no blocker; actionlint was unavailable to that reviewer. This is
+local code evidence, not successful hosted reader/approval/update qualification.
+The new reader and actual approval/update/serving acceptance remain pending;
+no mutating workflow rerun or automatic replay is authorized.
 
 Privacy references: [data boundaries](../PRIVACY.md#data-handling-boundaries),
 [forbidden diagnostics/content](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data),

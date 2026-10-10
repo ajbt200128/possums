@@ -1,8 +1,11 @@
 # Automatic paid releases and approved production deployment
 
-**Branch implementation; not enabled or hosted/live qualified.** No environment,
-reviewer, credential, repository variable or production runtime was configured by
-this change. Both activation variables are absent-by-default/off. Historical
+**Automatic publication qualified; protected deployment pending reader setup.**
+The implementation is merged and the operator authorized environment setup and
+qualification. Automatic `v0.0.22` passed; production preflight failed before
+approval/update and deployment was disabled again. Activation remains off by
+code default; current settings and scoped evidence are recorded chronologically
+in [hosted qualification](approved-main-release-qualification.md). Historical
 [v0.0.20 rollout evidence](timeout-renewal-v20-rollout.md) is not qualification of
 these new workflows.
 
@@ -60,10 +63,18 @@ Do not activate these workflows merely because local tests passed. Before setup:
   private secret entry. Never copy credentials from local CLI config or chat.
   Preflight requires readable environment-secret **name metadata** to reject an
   accidental repository/organization fallback; it never reads a secret value.
-- Qualify hosted `GITHUB_TOKEN` read access to environment policy, secret-name
-  metadata, repository variables and deployment review history. Missing or
-  unreadable evidence fails closed. If these permissions are unavailable, stop
-  and review a supported permission/setup solution; do not weaken the checks.
+- Qualify native `GITHUB_TOKEN` access to environment policy, branch restrictions,
+  provenance and deployment review history. Repository-variable and environment
+  secret-name metadata reads can use a supplemental `PRODUCTION_GATE_READ_TOKEN`
+  **repository secret**: a fine-grained token limited to this repository with only
+  **Variables: read** and **Environments: read**. These permissions are documented
+  in [GitHub's permission table](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
+  The native token remains authoritative for all other API reads. The reader
+  cannot approve/edit deployments and never retrieves a secret value. It must
+  be available before environment entry; do not put it only in `production`.
+  Use short expiration and renew privately before expiry; no automatic renewal
+  is implemented. Never copy the operator's broad OAuth login token. Missing or
+  unreadable metadata fails closed; do not weaken the checks.
 - Exercise the actual hosted graph with controlled public/synthetic candidates:
   successful CI, reversed completion of two main arrivals, stale queued/approved
   candidates, tag/run/artifact binding, version/partial-publication rejection,
