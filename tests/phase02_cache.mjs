@@ -9,13 +9,15 @@ const bundle = process.env.PHASE02_TEST_BUILD;
 assert(bundle && path.isAbsolute(bundle));
 const { publicEvidence, Operation, ConnectionFailure, EvidenceObservation, LIMITS } = await import(pathToFileURL(bundle));
 const hint = 'a'.repeat(64), changed = 'b'.repeat(64);
-const entry = { tag: 'v1.2.3', manifest: new TextEncoder().encode('public manifest'), provenance: new TextEncoder().encode('public provenance') };
+const entry = { tag: 'v1.2.3', manifest: new TextEncoder().encode('public manifest'), provenance: new TextEncoder().encode('public provenance'), vcek: new Uint8Array([1, 2, 3]) };
 const hostile = 'HOSTILE credential URL prompt history stack';
 if (process.env.CACHE_CHILD) {
   const op = new Operation(2000);
   try {
-    await publicEvidence(process.env.CACHE_HINT, op, async () => {
-      process.send({ event: 'download' });
+    await publicEvidence(process.env.CACHE_HINT, op, async legacy => {
+      if (!legacy) process.send({ event: 'download' });
+      else assert.deepEqual(legacy, { tag: entry.tag, manifest: entry.manifest, provenance: entry.provenance });
+      process.send({ event: 'amd' });
       await new Promise(resolve => setTimeout(resolve, process.env.CACHE_CRASH ? 10000 : 75));
       return entry;
     }, async value => { assert.deepEqual(value, entry); process.send({ event: 'verify' }); return true; }, process.env.CACHE_DIRECTORY);
@@ -44,14 +46,31 @@ if (process.env.CACHE_CHILD) {
   try {
     const runs = (await Promise.all(Array.from({ length: 6 }, () => child()))).flat();
     assert.equal(runs.filter(e => e.event === 'download').length, 1);
+    assert.equal(runs.filter(e => e.event === 'amd').length, 1);
     assert.equal(runs.filter(e => e.event === 'verify').length, 6); passed++;
-    assert.equal((await child()).filter(e => e.event === 'download').length, 0); passed++;
+    const warm = await child();
+    assert.equal(warm.filter(e => e.event === 'download' || e.event === 'amd').length, 0); passed++;
     const changedRuns = (await Promise.all(Array.from({ length: 4 }, () => child(changed)))).flat();
     assert.equal(changedRuns.filter(e => e.event === 'download').length, 1);
+    assert.equal(changedRuns.filter(e => e.event === 'amd').length, 1);
     assert.equal(changedRuns.filter(e => e.event === 'verify').length, 4); passed++;
     const record = JSON.parse(await readFile(path.join(directory, 'entry.json'), 'utf8'));
-    assert.equal(record.hint, changed); assert(!JSON.stringify(record).includes('verified')); passed++;
-    for (const bad of ['{', '{}', JSON.stringify({ ...record, hint, digest: '0'.repeat(64) }), JSON.stringify({ ...record, hint, repository: hostile }), JSON.stringify({ ...record, hint, credentials: hostile })]) {
+    assert.equal(record.hint, changed); assert.equal(record.version, 2);
+    assert.equal(record.vcek, Buffer.from(entry.vcek).toString('base64'));
+    assert(!JSON.stringify(record).includes('verified')); passed++;
+    const { vcek: _vcek, ...withoutVcek } = record;
+    const legacy = { ...withoutVcek, hint, version: 1 };
+    await writeFile(path.join(directory, 'entry.json'), JSON.stringify(legacy));
+    const migrated = (await Promise.all(Array.from({ length: 6 }, () => child()))).flat();
+    assert.equal(migrated.filter(e => e.event === 'download').length, 0);
+    assert.equal(migrated.filter(e => e.event === 'amd').length, 1);
+    assert.equal(migrated.filter(e => e.event === 'verify').length, 6);
+    assert.equal(JSON.parse(await readFile(path.join(directory, 'entry.json'))).version, 2); passed++;
+    assert.equal((await child()).filter(e => e.event === 'amd').length, 0); passed++;
+    for (const bad of ['{', '{}', JSON.stringify({ ...record, hint, digest: '0'.repeat(64) }), JSON.stringify({ ...record, hint, repository: hostile }), JSON.stringify({ ...record, hint, credentials: hostile }),
+      JSON.stringify({ ...withoutVcek, hint }), JSON.stringify({ ...record, hint, vcek: '' }),
+      JSON.stringify({ ...record, hint, vcek: hostile }), JSON.stringify({ ...record, hint, vcek: Buffer.alloc(LIMITS.certificate + 1).toString('base64') }),
+      JSON.stringify({ ...record, hint, version: 1 }), JSON.stringify({ ...record, hint, version: 3 })]) {
       await writeFile(path.join(directory, 'entry.json'), bad);
       let downloads = 0; await attempt(directory, async () => { downloads++; return entry; });
       assert.equal(downloads, 1); passed++;
@@ -60,7 +79,27 @@ if (process.env.CACHE_CHILD) {
     await assert.rejects(attempt(directory, async () => { throw new Error('must not download'); }, async () => {
       throw new ConnectionFailure('verification_failed');
     }), e => e.code === 'verification_failed'); passed++;
+    // Structurally valid wrong certificate bytes are verifier input, not a miss.
+    await writeFile(path.join(directory, 'entry.json'), JSON.stringify({ ...record, hint, vcek: 'BA==' }));
+    let fallback = 0;
+    await assert.rejects(attempt(directory, async () => { fallback++; return entry; }, async value => {
+      assert.deepEqual(value.vcek, new Uint8Array([4])); throw new ConnectionFailure('verification_failed');
+    }), e => e.code === 'verification_failed');
+    assert.equal(fallback, 0); passed++;
+    await writeFile(path.join(directory, 'entry.json'), JSON.stringify(legacy));
+    await assert.rejects(attempt(directory, async reused => {
+      assert.equal(reused.tag, entry.tag);
+      throw new ConnectionFailure('evidence_unavailable', new EvidenceObservation('amd_certificate', 'rate_limited', 429));
+    }), e => e.message.includes('Stage: amd_certificate') && e.message.includes('HTTP status: 429'));
+    assert.deepEqual(JSON.parse(await readFile(path.join(directory, 'entry.json'))), legacy); passed++;
     await rm(path.join(directory, 'entry.json'));
+    for (const bad of [{ ...entry, vcek: new Uint8Array() }, { ...entry, vcek: new Uint8Array(LIMITS.certificate + 1) },
+      { ...entry, vcek: hostile }, { ...entry, tag: hostile }, { ...entry, manifest: new Uint8Array(LIMITS.provenance + 1) },
+      { ...entry, provenance: hostile }, { ...entry, credentials: hostile }]) {
+      let verified = 0;
+      await assert.rejects(attempt(directory, async () => bad, async () => { verified++; }), e => !e.message.includes(hostile));
+      assert.equal(verified, 0); assert.deepEqual(await readdir(directory), []); passed++;
+    }
     const lock = path.join(directory, 'acquisition.lock');
     await new Promise((resolve, reject) => {
       const worker = fork(fileURLToPath(import.meta.url), [], { env: { PHASE02_TEST_BUILD: bundle, CACHE_CHILD: '1', CACHE_CRASH: '1', CACHE_HINT: hint, CACHE_DIRECTORY: directory }, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });

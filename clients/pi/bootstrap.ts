@@ -1,7 +1,7 @@
 import { API_APPROVALS, PUBLISHER, requireApiApproval, requireReleaseTag } from '../../examples/phase01/approval.js';
 import { ConnectionFailure, EvidenceObservation, connectionFailure, type EvidenceConstraint, type EvidenceStage } from './diagnostics.js';
 import { ReferenceClient } from '../../examples/phase01/client.js';
-import { publicEvidence, type PublicEvidence } from './evidence-cache.js';
+import { publicEvidence } from './evidence-cache.js';
 import { LIMITS, DiagnosticFailure, OperationFailure, Operation, base64, boundedReport, cleanup, collect, digest, hex, parseJSON, requireThat } from '../../examples/phase01/limits.js';
 
 // Public acquisition only: callers below construct every destination locally.
@@ -79,7 +79,8 @@ export async function connectPublished(signal?: AbortSignal): Promise<ReferenceC
   try {
     // Unauthenticated response bytes select evidence only; never trust/freshness.
     const report = await acquire(PUBLISHER.origin + '/.well-known/tinfoil-attestation', LIMITS.evidence, op, 'gateway_attestation');
-    return await publicEvidence(await digest(report), op, async () => {
+    return await publicEvidence(await digest(report), op, async legacy => {
+      if (legacy) return { ...legacy, vcek: await amdCertificate(report, op) };
       const bytes = await acquire(`https://api.github.com/repos/${PUBLISHER.repository}/releases/latest`, LIMITS.provenance, op, 'release_discovery');
       let latest;
       try { latest = parseJSON(bytes, LIMITS.provenance); requireReleaseTag(latest.tag_name); }
@@ -88,25 +89,38 @@ export async function connectPublished(signal?: AbortSignal): Promise<ReferenceC
       requireReleaseTag(tag);
       const manifest = await downloadManifest(tag, op);
       const provenance = await acquire(`https://api.github.com/repos/${PUBLISHER.repository}/attestations/sha256:${await digest(manifest)}`, LIMITS.provenance, op, 'release_provenance');
-      return { tag, manifest, provenance };
-    }, async (entry: PublicEvidence) => serving({ ...PUBLISHER, tag: entry.tag, manifest: await digest(entry.manifest) }, entry.manifest, op, true, report, entry.provenance));
+      return { tag, manifest, provenance, vcek: await amdCertificate(report, op) };
+    }, async entry => serving({ ...PUBLISHER, tag: entry.tag, manifest: await digest(entry.manifest) }, entry.manifest, op, true, report, entry.provenance, entry.vcek));
   } catch (error) { throw connectionFailure(error); }
   finally { op.close(); }
 }
 
-type Candidate = { origin: string; repository: string; tag: string; manifest: string };
-async function serving(candidate: Candidate, manifest: Uint8Array<ArrayBuffer>, op: Operation, published: boolean,
-  report?: Uint8Array<ArrayBuffer>, publicProvenance?: Uint8Array<ArrayBuffer>): Promise<ReferenceClient> {
-  let stage: EvidenceStage = 'gateway_attestation';
+async function amdCertificate(report: Uint8Array<ArrayBuffer>, op: Operation): Promise<Uint8Array<ArrayBuffer>> {
   try {
-    const doc = parseJSON(report ?? await acquire(candidate.origin + '/.well-known/tinfoil-attestation', LIMITS.evidence, op, stage), LIMITS.evidence);
+    const doc = parseJSON(report, LIMITS.evidence);
     requireThat(doc.format === 'https://tinfoil.sh/predicate/sev-snp-guest/v2');
     const raw = await boundedReport(base64(doc.body, LIMITS.evidence), op);
-    // Untrusted routing fields; hardware verification authenticates Genoa/TCB/chip.
+    // Untrusted routing fields from the CURRENT report, never a cached HWID/TCB.
     const tcb = raw.slice(0x180, 0x188);
     const kds = `https://kdsintf.amd.com/vcek/v1/Genoa/${hex(raw.slice(0x1a0, 0x1e0))}?blSPL=${tcb[0]}&teeSPL=${tcb[1]}&snpSPL=${tcb[6]}&ucodeSPL=${tcb[7]}`;
+    return await acquire(kds, LIMITS.certificate, op, 'amd_certificate');
+  } catch (error) {
+    if (error instanceof ConnectionFailure) throw error;
+    throw new ConnectionFailure('verification_failed', new EvidenceObservation('gateway_attestation', error instanceof OperationFailure ? error.constraint : 'schema'));
+  }
+}
+
+type Candidate = { origin: string; repository: string; tag: string; manifest: string };
+async function serving(candidate: Candidate, manifest: Uint8Array<ArrayBuffer>, op: Operation, published: boolean,
+  report?: Uint8Array<ArrayBuffer>, publicProvenance?: Uint8Array<ArrayBuffer>, publicVcek?: Uint8Array<ArrayBuffer>): Promise<ReferenceClient> {
+  let stage: EvidenceStage = 'gateway_attestation';
+  try {
+    const currentReport = report ?? await acquire(candidate.origin + '/.well-known/tinfoil-attestation', LIMITS.evidence, op, stage);
+    const doc = parseJSON(currentReport, LIMITS.evidence);
+    requireThat(doc.format === 'https://tinfoil.sh/predicate/sev-snp-guest/v2');
+    await boundedReport(base64(doc.body, LIMITS.evidence), op);
     stage = 'amd_certificate';
-    const vcek = await acquire(kds, LIMITS.certificate, op, stage);
+    const vcek = publicVcek ?? await amdCertificate(currentReport, op);
     stage = 'gateway_certificate';
     const cert = parseJSON(await acquire(candidate.origin + '/.well-known/tinfoil-certificate', LIMITS.certificate, op, stage), LIMITS.certificate);
     stage = 'release_provenance';

@@ -8,8 +8,9 @@ import { LIMITS, Operation, OperationFailure, base64, digest, parseJSON, require
 import { ConnectionFailure, EvidenceObservation } from './diagnostics.js';
 
 // One replaceable public entry, not a history, verification verdict or client.
-export type PublicEvidence = { tag: string; manifest: Uint8Array<ArrayBuffer>; provenance: Uint8Array<ArrayBuffer> };
-const CAP = 2 * Math.ceil(LIMITS.provenance / 3) * 4 + 1024;
+export type PublicEvidence = { tag: string; manifest: Uint8Array<ArrayBuffer>; provenance: Uint8Array<ArrayBuffer>; vcek?: Uint8Array<ArrayBuffer> };
+export type CompletePublicEvidence = PublicEvidence & { vcek: Uint8Array<ArrayBuffer> };
+const CAP = (2 * Math.ceil(LIMITS.provenance / 3) + Math.ceil(LIMITS.certificate / 3)) * 4 + 1024;
 const HASH = /^[0-9a-f]{64}$/;
 export function evidenceDirectory(): string {
   const root = process.env.XDG_CACHE_HOME;
@@ -34,13 +35,18 @@ async function readEntry(file: string, hint: string): Promise<PublicEvidence | u
     // Malformed/partial entries are misses. Never copy arbitrary cache fields.
     try {
       const entry = parseJSON(bytes.slice(0, bytesRead), CAP);
-      requireThat(Object.keys(entry).sort().join(',') === 'digest,hint,manifest,origin,provenance,repository,tag,version');
-      requireThat(entry.version === 1 && entry.origin === PUBLISHER.origin && entry.repository === PUBLISHER.repository);
+      requireThat(entry.version === 1 || entry.version === 2);
+      const fields = 'digest,hint,manifest,origin,provenance,repository,tag,' + (entry.version === 2 ? 'vcek,' : '') + 'version';
+      requireThat(Object.keys(entry).sort().join(',') === fields);
+      requireThat(entry.origin === PUBLISHER.origin && entry.repository === PUBLISHER.repository);
       requireThat(HASH.test(entry.hint) && entry.hint === hint && HASH.test(entry.digest));
       requireReleaseTag(entry.tag);
       const manifest = base64(entry.manifest, LIMITS.provenance), provenance = base64(entry.provenance, LIMITS.provenance);
       requireThat(await digest(manifest) === entry.digest);
-      return { tag: entry.tag, manifest, provenance };
+      if (entry.version === 1) return { tag: entry.tag, manifest, provenance };
+      const vcek = base64(entry.vcek, LIMITS.certificate);
+      requireThat(vcek.length > 0);
+      return { tag: entry.tag, manifest, provenance, vcek };
     } catch { return; }
   } catch (error) {
     if (errno(error, 'ENOENT') || errno(error, 'ELOOP')) return;
@@ -83,7 +89,7 @@ async function takeLock(lock: string, op: Operation): Promise<string> {
 }
 
 export async function publicEvidence<T>(hint: string, op: Operation,
-  acquire: () => Promise<PublicEvidence>, verify: (entry: PublicEvidence) => Promise<T>, directory = evidenceDirectory()): Promise<T> {
+  acquire: (legacy?: PublicEvidence) => Promise<CompletePublicEvidence>, verify: (entry: CompletePublicEvidence) => Promise<T>, directory = evidenceDirectory()): Promise<T> {
   const file = join(directory, 'entry.json'), lock = join(directory, 'acquisition.lock');
   let owner: string | undefined, temporary: string | undefined;
   try {
@@ -91,19 +97,27 @@ export async function publicEvidence<T>(hint: string, op: Operation,
     op.check();
     const cached = await readEntry(file, hint);
     op.check();
-    if (cached) return await verify(cached); // No cached verdict: verify in EVERY process.
+    if (cached?.vcek) return await verify({ ...cached, vcek: cached.vcek }); // Verify in EVERY process.
     await mkdir(directory, { recursive: true, mode: 0o700 });
     owner = await takeLock(lock, op);
     const shared = await readEntry(file, hint);
     op.check();
-    if (shared) return await verify(shared);
-    const entry = await acquire();
+    if (shared?.vcek) return await verify({ ...shared, vcek: shared.vcek });
+    // A matching strict v1 entry saves GitHub acquisition during migration.
+    const entry = await acquire(shared);
     op.check();
+    requireThat(Object.keys(entry).sort().join(',') === 'manifest,provenance,tag,vcek');
+    requireReleaseTag(entry.tag);
+    for (const [bytes, cap] of [[entry.manifest, LIMITS.provenance], [entry.provenance, LIMITS.provenance], [entry.vcek, LIMITS.certificate]] as const) {
+      requireThat(bytes instanceof Uint8Array && bytes.length <= cap);
+    }
+    requireThat(entry.vcek.length > 0);
     const result = await verify(entry); // Publish only after the complete serving-channel checks.
     op.check();
-    const record = JSON.stringify({ version: 1, origin: PUBLISHER.origin, repository: PUBLISHER.repository,
+    const record = JSON.stringify({ version: 2, origin: PUBLISHER.origin, repository: PUBLISHER.repository,
       hint, tag: entry.tag, digest: await digest(entry.manifest),
-      manifest: Buffer.from(entry.manifest).toString('base64'), provenance: Buffer.from(entry.provenance).toString('base64') });
+      manifest: Buffer.from(entry.manifest).toString('base64'), provenance: Buffer.from(entry.provenance).toString('base64'),
+      vcek: Buffer.from(entry.vcek).toString('base64') });
     requireThat(Buffer.byteLength(record) <= CAP);
     temporary = join(directory, `entry-${randomUUID()}.tmp`);
     const handle = await open(temporary, 'wx', 0o600);

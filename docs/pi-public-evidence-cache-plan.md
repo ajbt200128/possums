@@ -1,6 +1,8 @@
-# Shared GitHub public-evidence acquisition cache — agreed direction
+# Shared public-evidence acquisition cache — agreed direction
 
-2026-10-10. **Planning only.** The operator selected this direction and deferred GitHub CLI/token authentication. This document does not authorize installation, deployment, retries or changes to trust validity. No cache implementation or qualification is claimed.
+## Original GitHub-only direction
+
+2026-10-10. **Historical planning.** The operator selected this direction and deferred GitHub CLI/token authentication. This document does not authorize installation, deployment, retries or changes to trust validity. No cache implementation or qualification is claimed.
 
 ## Scope
 
@@ -30,8 +32,20 @@ GitHub discovery and gateway deployment must still agree when acquiring new evid
 
 ## Implementation decisions and acceptance
 
-Before implementation, choose the smallest reusable acquisition helper, local public-cache location, entry schema and bounded cross-process coordination using existing libraries. Read `PRIVACY.md` before diagnostic/cache tooling; do not add logs, traces, support bundles or user-linked cache keys. Do not cache live attestation reports, credentials or request content as part of this GitHub-only cache.
+Before implementation, choose the smallest reusable acquisition helper, local public-cache location, entry schema and bounded cross-process coordination using existing libraries. Read `PRIVACY.md` before diagnostic/cache tooling; do not add logs, traces, support bundles or user-linked cache keys. Do not cache live attestation reports, credentials or request content. The original GitHub-only/hardware-ID exclusion is superseded only by the narrow public AMD certificate exception below.
 
 Use synthetic/offline tests for concurrent fresh processes, unchanged and changed attestation hints, corrupt/partial entries, wrong manifest/provenance associations, failed download, rate-limit status, publisher/key/measurement mismatch, cancelled acquisition and stale publication. Ensure no cached verdict can bypass verification and no diagnostic/control action sends inference. Test actual Pi startup and generated artifacts, not just the cache helper.
 
 Record source, build, installed and activated evidence separately. Preserve current installed package for rollback. Full Pi 1.1.0 qualification and installed T3 presentation remain separate acceptance requirements.
+
+## Authorized bounded AMD extension
+
+After supplied actual T3 startup failure `possums_evidence_unavailable`, stage `amd_certificate`, constraint `rate_limited`, observed HTTP **429**, the operator requested “New cache should include amd too.” Authorization covers local retention of public AMD VCEK DER **including its embedded gateway hardware ID**. This is a narrow hardware-public-certificate exception to the original exclusion, now explicit in [PRIVACY.md](../PRIVACY.md#data-handling-boundaries). It does not permit raw reports, bare chip IDs, full KDS URLs, credentials, auth/account/request/history data, failures or verdicts, nor telemetry/log/support artifacts.
+
+- Extend the same one-entry cache and owner lock. Keep `pi-public-evidence-v1` as the directory name; strict schema **version 2** adds bounded base64 `vcek` DER. Accept only exact schema fields for versions 1 and 2; validate newly acquired fields before verification/publication.
+- A complete matching v2 entry supplies exact public bytes without GitHub or AMD download. Every process independently reruns the pinned SDK's complete chain/date/TCB/HWID/current-report signature and measurement checks, publisher/workflow/artifact validation and current gateway-certificate/live-HPKE/key binding.
+- A well-formed matching v1 entry enters the existing owner lock, is re-read, reuses its GitHub manifest/provenance, and acquires **only AMD** from the current bounded report. Publish v2 atomically only after full qualification; concurrent consumers acquire once and verify independently.
+- Absent, malformed, unknown-field, wrong-hint or oversized entries are full acquisition misses. A v2 entry missing/malformed/empty `vcek` is not a partial migration entry. Structurally valid DER bytes that fail SDK cryptographic/date/TCB/HWID verification remain terminal: no fallback/reacquisition to mask rejection.
+- Changed report bytes conservatively reacquire both sources; never match by cached HWID or TCB. No TTL, expiry, freshness, retry, renewal, inference or authenticated quote policy changes. Explicit compiled-manifest connection remains independent and uncached.
+
+The earlier GitHub-only candidate was locally installed; this AMD-inclusive source extension is **not installed or live-T3 accepted**. See [separate verification scopes](pi-public-evidence-cache-verification.md). No installation/activation/public probe/host restart/deployment/push/merge is authorized by this packet; rollout remains held for the separate automatic-release/deployment work.
