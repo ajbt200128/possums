@@ -1494,32 +1494,75 @@ await check('encrypted balance HTTP 503 body and EOF failures reach actual Pi re
   assert.deepEqual(paths,['/v1/balance','/v1/balance']);
  }finally{globalThis.fetch=originalFetch;}
 });
-await check('only authenticated complete submission 422 has the narrow binding observation',async()=>{
+await check('rotated recipient rejects old EHBP request; plaintext submission 422 observes only local binding status',async()=>{
+ const ehbp=await import(pathToFileURL(path.resolve(path.dirname(file),'../../source/clients/pi/node_modules/ehbp/dist/esm/index.js')).href);
+ const old=await ehbp.Identity.generate(),rotated=await ehbp.Identity.generate();
+ const channel=await m.Channel.fixture('https://localhost:18443',await old.marshalConfig(),await old.getPublicKeyHex());
+ const originalFetch=globalThis.fetch;let calls=0,reads=0;
+ try {
+  for(const body of [JSON.stringify({type:hostileConnection,error:{code:'unauthorized',billing:'refunded'}}),
+   'unreadable '+hostileConnection,new ReadableStream({pull(controller){reads++;controller.error(Error(hostileConnection));}}, {highWaterMark:0})]){
+   globalThis.fetch=async request=>{
+    calls++;assert.equal(new URL(request.url).pathname,'/v1/submissions');
+    const encapsulated=ehbp.hexToBytes(request.headers.get('Ehbp-Encapsulated-Key'));
+    const recipient=await rotated.suite.SetupRecipient(rotated.getPrivateKey(),encapsulated,{info:new TextEncoder().encode(ehbp.HPKE_REQUEST_INFO)});
+    const encrypted=new Uint8Array(await request.arrayBuffer());
+    await assert.rejects(recipient.Open(encrypted.slice(4)),'rotated key cannot open the old request');
+    return new Response(body,{status:422,headers:{'content-type':'application/problem+json'}});
+   };
+   await assert.rejects(channel.control('/v1/submissions',{model:'synthetic',new_conversation:false},'b'.repeat(43)),error=>{
+    assert(error instanceof m.DiagnosticFailure);assert.equal(error.stage,'submission');assert.equal(error.constraint,'endpoint_binding');
+    assert.equal(error.status,422);assert.equal(error.code,'uncertain');assert.equal(error.billing,undefined);
+    assert(!error.message.includes(hostileConnection));return true;
+   });
+  }
+  assert.equal(reads,0,'missing nonce must not parse the untrusted plaintext body');
+  for(const nonce of ['bad','a'.repeat(62)]){
+   globalThis.fetch=async()=>{calls++;return new Response(hostileConnection,{status:422,headers:{'Ehbp-Response-Nonce':nonce}});};
+   await assert.rejects(channel.control('/v1/submissions',{model:'synthetic',new_conversation:false},'b'.repeat(43)),error=>
+    error instanceof m.DiagnosticFailure && error.stage==='submission' && error.constraint==='endpoint_binding' && error.status===422 && !error.message.includes(hostileConnection));
+  }
+  globalThis.fetch=async()=>{calls++;return new Response(hostileConnection,{status:401});};
+  await assert.rejects(channel.control('/v1/submissions',{model:'synthetic',new_conversation:false},'b'.repeat(43)),error=>
+   error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===401);
+  assert.equal(calls,6,'no retry, trust probe or inference from a diagnostic');
+ }finally{globalThis.fetch=originalFetch;}
+});
+await check('authenticated submission rejection retains its original HTTP, body and typed quiescing classification',async()=>{
  const ehbp=await import(pathToFileURL(path.resolve(path.dirname(file),'../../source/clients/pi/node_modules/ehbp/dist/esm/index.js')).href);
  const server=await ehbp.Identity.generate(),encoder=new TextEncoder();
  const channel=await m.Channel.fixture('https://localhost:18443',await server.marshalConfig(),await server.getPublicKeyHex());
  const originalFetch=globalThis.fetch;let calls=0;
  try {
-  for(const mode of ['complete','malformed','wrong_envelope','interrupted','plaintext']){
+  for(const mode of ['complete','malformed','wrong_envelope','interrupted','quiescing']){
    globalThis.fetch=async request=>{
     calls++;assert.equal(new URL(request.url).pathname,'/v1/submissions');
-    if(mode==='plaintext')return Response.json({error:{code:'unauthorized',message:hostileConnection}},{status:422});
     const encapsulated=ehbp.hexToBytes(request.headers.get('Ehbp-Encapsulated-Key'));
     const recipient=await server.suite.SetupRecipient(server.getPrivateKey(),encapsulated,{info:encoder.encode(ehbp.HPKE_REQUEST_INFO)});
     const nonce=crypto.getRandomValues(new Uint8Array(32));
     const secret=new Uint8Array(await recipient.Export(encoder.encode(ehbp.EXPORT_LABEL),ehbp.EXPORT_LENGTH));
     const keys=await ehbp.deriveResponseKeys(secret,encapsulated,nonce);
-    const text=mode==='malformed'?'{':JSON.stringify(mode==='wrong_envelope'?{}:{error:{code:'unauthorized',message:hostileConnection}});
+    const text=mode==='malformed'?'{':JSON.stringify(mode==='wrong_envelope'?{}:mode==='quiescing'?{
+     error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}}:{error:{code:'unauthorized',message:hostileConnection}});
     const cipher=await ehbp.encryptChunk(keys,0,encoder.encode(text));
     const frame=new Uint8Array(4+cipher.length);new DataView(frame.buffer).setUint32(0,cipher.length,false);frame.set(cipher,4);
     let once=false;
     return new Response(new ReadableStream({pull(controller){if(!once){once=true;controller.enqueue(frame);}else if(mode==='interrupted')controller.error(Error(hostileConnection));else controller.close();}}, {highWaterMark:0}),
-     {status:422,headers:{'Ehbp-Response-Nonce':ehbp.bytesToHex(nonce)}});
+     {status:mode==='quiescing'?503:422,headers:{'Ehbp-Response-Nonce':ehbp.bytesToHex(nonce)}});
    };
-   await assert.rejects(channel.control('/v1/submissions',{model:'synthetic',new_conversation:false},'b'.repeat(43)),error=>{
-    assert(error instanceof m.DiagnosticFailure);assert.equal(error.stage,mode==='interrupted'?'transport':'submission');assert.equal(error.status,422);
-    assert.equal(error.constraint==='endpoint_binding',mode==='complete');
-    assert.equal(error.code,'uncertain');assert(!error.message.includes(hostileConnection));return true;
+   const result=channel.control('/v1/submissions',{model:'synthetic',new_conversation:false},'b'.repeat(43));
+   if(mode==='wrong_envelope'){
+    assert.deepEqual(await result,{},'the caller, not a 422 shortcut, rejects a missing submission token');
+   }else await assert.rejects(result,error=>{
+    if(mode==='quiescing'){
+     assert(error instanceof m.GatewayError);assert.equal(error.reason,'service_quiescing');assert.equal(error.status,503);
+     assert.equal(error.billing,'unknown');
+    }else{
+     assert(error instanceof m.DiagnosticFailure);assert.equal(error.stage,mode==='interrupted'?'transport':'submission');assert.equal(error.status,422);
+     assert.equal(error.constraint,mode==='complete'?'http':mode==='malformed'?'body':'fetch');
+     assert.equal(error.code,'uncertain');
+    }
+    assert(!error.message.includes(hostileConnection));return true;
    });
   }
   assert.equal(calls,5);

@@ -221,13 +221,6 @@ export class Channel {
     const op = new Operation(LIMITS.operationMs, signal);
     try {
       const value = parseJSON(await collect(body, LIMITS.control, op), LIMITS.control);
-      // Only an authenticated, fully decoded submission response qualifies this
-      // narrow binding observation; plaintext/malformed 422 is not evidence.
-      if (path === '/v1/submissions' && status === 422) {
-        try { gatewayError(value, 422); }
-        catch { throw new DiagnosticFailure('submission', 'body', 'uncertain', 422); }
-        throw new DiagnosticFailure('submission', 'endpoint_binding', 'uncertain', 422);
-      }
       // Only classify a rejection envelope here; successful control admission remains unchanged.
       if (status !== undefined && (status < 200 || status >= 300) && value && Object.hasOwn(value, 'error')) {
         if (status === 503 && value.error?.code === 'service_quiescing') {
@@ -294,7 +287,7 @@ export class Channel {
         try { await op.wait(Promise.resolve(options.onResponse(info)), LIMITS.idleMs); }
         catch (error) { throw new DiagnosticFailure('hook', error instanceof OperationFailure ? error.constraint : 'unexpected', 'uncertain', status); }
       }
-      constraint = path === '/v1/submissions' && status === 422 ? 'envelope' : 'endpoint_binding';
+      constraint = 'endpoint_binding';
       requireThat(res.body && /^[0-9a-f]{64}$/.test(res.headers.get('Ehbp-Response-Nonce') ?? ''));
       const bounded = new Response(encryptedFrames(res.body, op, failure => { frameFailure ??= failure; }), { headers: res.headers });
       constraint = 'decryption';
