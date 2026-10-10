@@ -10,7 +10,7 @@ networks:
       - kds-proxy.tinfoil.sh
 containers:
   - name: gateway
-    image: ghcr.io/ajbt200128/possums-free@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: ghcr.io/ajbt200128/possums-free@sha256:20d04b3b1ba79f669bac66345f6a80fdaa88365e835718004459b7f3bda3e709
     restart: "no"
     env:
       - HOME: "/tmp"
