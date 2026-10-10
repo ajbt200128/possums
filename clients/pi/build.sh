@@ -13,7 +13,7 @@ S=$(mktemp -d "${TMPDIR:-/tmp}/possums-pi-build-XXXXXX")
 mkdir -p "$S/source/clients/pi" "$S/source/examples/phase01" "$S/home" "$S/tmp" "$S/cache" "$S/checks/source"
 cp "$SOURCE"/*.ts "$SOURCE"/*.mjs "$SOURCE"/*.json "$S/source/clients/pi/"
 cp "$REPO/examples/phase01"/*.ts "$S/source/examples/phase01/"
-for TEST in phase01_client phase01_transport phase02_client phase02_pi phase02_release; do
+for TEST in phase01_client phase01_transport phase02_client phase02_pi phase02_diagnostics phase02_release; do
   cp "$REPO/tests/$TEST.mjs" "$S/checks/source/"
 done
 : > "$S/user.npmrc"

@@ -18,7 +18,7 @@ const ai = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-
 const coding = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js')).href);
 const { prepareCompaction } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js')).href);
 const { AuthStorage: NativeAuthStorage } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js')).href);
-const { isRetryableAssistantError, retryDelayMs } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-ai/dist/utils/retry.js')).href);
+const { isRetryableAssistantError, retryDelayMs, retryAssistantCall } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-ai/dist/utils/retry.js')).href);
 fs.mkdirSync(root, { recursive: true });
 const passed = [];
 async function check(name, body) { await body(); passed.push(name); console.log('PASS '+name); }
@@ -110,6 +110,8 @@ async function setup(plan, tools = true) {
 }
 async function drain(stream) { const events=[];for await(const event of stream)events.push(event); return {events,message:await stream.result()}; }
 const context = tools => ai.normalizeContext({messages:[user],tools:tools?[tool]:[]});
+const { diagnosticChecks } = await import('./phase02_diagnostics.mjs');
+await diagnosticChecks(m, check);
 
 // Native SDK storage is always injected beneath this test's isolated scratch root.
 async function nativeRuntime(provider, credentials, modelsStore = new ai.InMemoryModelsStore()) {
@@ -737,7 +739,7 @@ await check('gateway failure descriptions preserve fixed reason and proven billi
   assert.equal(result.events.some(e=>e.type==='toolcall_end'),false);assert.equal(s.sends(),1);
  }
  const s=await setup(['hostile']);s.provider.beginRun();const result=await drain(s.provider.streamSimple(s.selected,context(false)));
- assert.equal(result.message.errorMessage,'Possums: request rejected. Not replayed.');
+ assert.match(result.message.errorMessage,/\[possums_provider_unexpected\].*Stage: provider; constraint: unexpected.*cause is unknown.*Charge unknown.*Not replayed/);
  assert(!JSON.stringify(result).includes('PRIVATE_PROMPT'));
 });
 await check('pinned Pi classifier admits only closed gateway operational failures',async()=>{
@@ -797,6 +799,76 @@ function balancePlan(client, snapshots) {
 const balanceSnapshot=(available='5000000',completed='0',inFlight=0)=>({availableMicrounits:available,completedRequests:completed,inFlight});
 const reconciliationContext=s=>({isIdle:()=>true,signal:new AbortController().signal,
  modelRegistry:{getProviderAuth:()=>s.provider.auth.apiKey.resolve(authInput(s.credential))}});
+await check('actual Pi SDK retains every closed component failure with unknown billing and no native retry',async()=>{
+ const f=await sdkSetup('sdk-component-diagnostics',[],false);let calls=0;
+ try {
+  for(const [stage,constraint] of [['trust','expired'],['request','encoding'],['catalog','schema'],['submission','http'],
+    ['transport','endpoint_binding'],['transport','frames'],['transport','decryption'],['transport','idle'],['transport','deadline'],
+    ['stream','utf8'],['stream','json'],['stream','choice'],['stream','delta'],['stream','tool'],['stream','finish_missing'],
+    ['stream','usage_missing'],['stream','done_missing'],['stream','eof'],['settlement','receipt'],['provider','unexpected'],['hook','unexpected']]) {
+   f.s.client.chat=async()=>{calls++;throw new m.DiagnosticFailure(stage,constraint,'uncertain',stage==='submission'?401:undefined);};
+   await f.session.prompt('Synthetic failure fixture');
+   const result=f.session.messages.at(-1);
+   assert.equal(result.stopReason,'error');
+   assert(result.errorMessage.includes(`[possums_${stage}_${constraint}]`),result.errorMessage);
+   assert(result.errorMessage.includes(`Stage: ${stage}; constraint: ${constraint}`));
+   assert.match(result.errorMessage,/Charge unknown.*Not replayed.*another charge/);
+   assert(!isRetryableAssistantError(result));
+   assert(result.diagnostics.some(value=>value.type==='possums_billing_unknown'));
+  }
+  assert.equal(calls,21);assert.equal(f.toolRuns(),0);assert.equal(f.s.sends(),0);
+ } finally {f.session.dispose();}
+});
+await check('post-receipt display precision failure retains settled accounting instead of inventing unknown billing',async()=>{
+ const s=await setup([]),charged='18446744073709551615';let calls=0;
+ s.client.chat=async(_model,_messages,onDelta,_fresh,options)=>{
+  calls++;
+  const values=[event({role:'assistant'}),{object:'chat.completion.chunk',model:'synthetic',choices:[{index:0,delta:{},finish_reason:'stop'}]},
+   {object:'chat.completion.chunk',model:'synthetic',choices:[],usage:{prompt_tokens:2,completion_tokens:3,total_tokens:5},possums:{outcome:'settled',charged_microunits:charged,refunded_microunits:'0'}}];
+  const body=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(values.map(value=>'data: '+JSON.stringify(value)+'\n\n').join('')+'data: [DONE]\n\n'));controller.close();}});
+  return m.consumeCompletion(body,'synthetic',onDelta,{onEvent:options.onEvent,signal:options.signal});
+ };
+ const result=(await drain(s.provider.streamSimple(s.selected,context(false)))).message;
+ assert.equal(calls,1);assert.equal(result.stopReason,'error');
+ assert.match(result.errorMessage,/possums_settlement_precision.*Stage: settlement.*supported safe-integer.*Authenticated receipt: charge settled/);
+ assert.doesNotMatch(result.errorMessage,/Charge unknown|Model catalog exceeds|No complete validated receipt/);
+ assert.equal(result.diagnostics[0].type,'possums_settled_receipt');assert.equal(result.diagnostics[0].details.chargedMicrounits,charged);
+});
+await check('actual native auth wrapper preserves the closed provider cause and transient diagnostic',async()=>{
+ const s=await setup([]);const notices=[];
+ const provider=new m.PossumsProvider(async()=>{
+  const client=freshFixture(s.client);client.login=async()=>{throw new m.DiagnosticFailure('authentication','http','rejected',401);};
+  client.freshSession=()=>client;return client;
+ },failure=>{if(failure)notices.push(failure.message);});
+ const credentials=new ai.InMemoryCredentialStore();await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+ const runtime=await nativeRuntime(provider,credentials);
+ await assert.rejects(runtime.getAuth('possums'),error=>{
+  assert.match(error.message,/API key auth failed for provider possums: \[possums_authentication_http\].*Stage: authentication.*Observed HTTP status: 401/);
+  assert.doesNotMatch(error.message,/PRIVATE_PROMPT|synthetic_not_a_usable/);
+  assert(error.cause instanceof m.ConnectionFailure);return true;
+ });
+ assert.match(notices.at(-1),/possums_authentication_http.*Stage: authentication.*Observed HTTP status: 401.*No inference request/);
+ assert.doesNotMatch(notices.join(' '),/Session expired|PRIVATE_PROMPT|synthetic_not_a_usable/);assert.equal(s.sends(),0);
+});
+await check('credential selection and entry failures never echo native hostile exceptions or initiate inference',async()=>{
+ const s=await setup([]),notices=[];
+ const provider=new m.PossumsProvider(async()=>s.client,failure=>{if(failure)notices.push(failure.message);});
+ const hostile={...authInput(undefined),ctx:{env:async()=>{throw new Error('HOSTILE_CREDENTIAL_STACK_URL');},fileExists:async()=>false}};
+ for(const action of ['check','resolve'])await assert.rejects(provider.auth.apiKey[action](hostile),error=>error instanceof m.ConnectionFailure&&error.code==='credential_resolution_failed');
+ await assert.rejects(provider.auth.apiKey.login({...interaction(),prompt:async()=>{throw new Error('HOSTILE_CREDENTIAL_STACK_URL');}}),error=>error instanceof m.ConnectionFailure&&error.code==='credential_entry_failed');
+ assert.equal(await provider.auth.apiKey.resolve(authInput(undefined)),undefined);
+ assert.match(notices.at(-1),/possums_credential_missing.*Use \/login/);
+ assert(!notices.join(' ').includes('HOSTILE_CREDENTIAL_STACK_URL'));assert.equal(s.sends(),0);
+});
+await check('actual SDK retry backoff abort drops errorMessage at retryAssistantCall, retaining the closed callback diagnostic',async()=>{
+ const s=await setup(['unknown_bill']);const result=(await drain(s.provider.streamSimple(s.selected,context(false)))).message;
+ const abort=new AbortController();let observed;
+ const final=await retryAssistantCall(async()=>result,{enabled:true,maxRetries:1,baseDelayMs:1000},abort.signal,
+  {onRetryScheduled:(_attempt,_max,_delay,message)=>{observed=message;abort.abort();}});
+ assert.equal(final.stopReason,'aborted');assert.equal(final.errorMessage,undefined);
+ assert.match(observed,/\[unavailable\].*Stage: gateway_admission.*Charge unknown.*another charge/);
+ assert.equal(s.sends(),1);
+});
 await check('actual Pi reconciliation commands compare exact receipts and balance without inference or persistent reports',async()=>{
  for(const [name,plan,tools,completed] of [['tools',['tool_calls','stop'],true,'2'],['refund-retry',['refund','stop'],false,'2']]) {
   const f=await sdkSetup('sdk-reconcile-'+name,plan,tools);const charged=tools?'14':'7';
@@ -1181,7 +1253,7 @@ await check('summary success/failure preserves native continuation and ordinary 
  }
 });
 await check('summary errors, length, empty text and tool attempts fail closed with safe stages and no replay',async()=>{
- for(const [mode,pattern] of [['refund',/Generation failed.*stream idle timeout.*Reservation refunded/],['unknown_bill',/Gateway unavailable.*inference unavailable.*Charge unknown/],['sdk_decode',/sdk stream decode failed/],['hostile',/request rejected/],['length',/possums_summary_length/],['empty',/possums_summary_empty/],['tool_calls',/possums_summary_tools/],['stop_tools',/possums_summary_tools/]]) {
+ for(const [mode,pattern] of [['refund',/Generation failed.*stream idle timeout.*Reservation refunded/],['unknown_bill',/Gateway unavailable.*inference unavailable.*Charge unknown/],['sdk_decode',/sdk stream decode failed/],['hostile',/possums_provider_unexpected/],['length',/possums_summary_length/],['empty',/possums_summary_empty/],['tool_calls',/possums_summary_tools/],['stop_tools',/possums_summary_tools/]]) {
   const f=await compactionFixture([mode,'stop'],true),observed=[];const perform=f.provider.perform.bind(f.provider);
   f.provider.perform=(...args)=>{const stream=perform(...args);observed.push(drain(stream));return stream;};
   const result=await f.run();

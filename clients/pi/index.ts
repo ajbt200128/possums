@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { LIMITS } from '../../examples/phase01/limits.js';
 import { connect, connectPublished } from './bootstrap.js';
-import { ConnectionFailure, approvalSummary } from './diagnostics.js';
+import { ConnectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
 import { PossumsProvider, PROVIDER_ID } from './provider.js';
 
 export const PI_PIN = '1.0.4';
@@ -16,7 +16,7 @@ function requirePinnedRuntime(): void {
       const metadata = JSON.parse(readFileSync(join(dirname(entry), '..', 'package.json'), 'utf8'));
       if (metadata.version !== PI_PIN) throw new Error();
     }
-  } catch { throw new Error('possums_requires_pi_1_0_4'); }
+  } catch { throw new Error('[possums_requires_pi_1_0_4] Stage: extension_load; constraint: runtime_version. This extension requires Pi 1.0.4 with matching pi-ai and pi-agent-core packages. Use the approved matching runtime/client pair. No inference request sent. Share only this code for support.'); }
 }
 async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
   try {
@@ -58,7 +58,12 @@ export default function possums(pi: ExtensionAPI): void {
     provider.newSession();
     try { await provider.verifySession(); }
     catch { return; } // Already reported as a closed, transient connection diagnostic.
-    await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], allowNetwork: true });
+    try { await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], allowNetwork: true }); }
+    catch (error) {
+      const failure = catalogConnectionFailure(error);
+      lastFailure = failure;
+      try { ui?.notify(failure.message, 'warning'); } catch { /* Transient UI only. */ }
+    }
   });
   pi.on('session_shutdown', () => { ui = undefined; provider.shutdown(); });
   pi.registerCommand('possums-status', {

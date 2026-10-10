@@ -9,8 +9,8 @@ import {
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
 import { ReferenceClient, BalanceFailure, CatalogFailure, GatewayError, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
-import { ChannelError, JSONDepthError, LIMITS, Operation } from '../../examples/phase01/limits.js';
-import { ConnectionFailure, connectionFailure, catalogConnectionFailure } from './diagnostics.js';
+import { ChannelError, DiagnosticFailure, OperationFailure, JSONDepthError, LIMITS, Operation, type FailureStage } from '../../examples/phase01/limits.js';
+import { ConnectionFailure, connectionFailure, catalogConnectionFailure, diagnosticDescription } from './diagnostics.js';
 import { invocation } from './wire.js';
 
 export const PROVIDER_ID = 'possums';
@@ -22,9 +22,9 @@ const recoveryAuth = envApiKeyAuth('Possums recovery credential', ['POSSUMS_RECO
 const isRecoveryKey = (key: string | undefined): key is string => !!key && key !== LEGACY_AUTH && key !== REQUEST_AUTH;
 type RequestOptions = StreamOptions & { reasoning?: unknown; reasoningEffort?: unknown; toolChoice?: unknown };
 
-function safeNumber(value: string): number {
+function safeNumber(value: string, stage: 'catalog' | 'settlement' = 'catalog'): number {
   const result = Number(value);
-  if (!Number.isSafeInteger(result) || result < 0) throw new Error('possums_catalog_out_of_range');
+  if (!Number.isSafeInteger(result) || result < 0) throw new DiagnosticFailure(stage, 'precision');
   return result;
 }
 function dollars(microunits: string): string {
@@ -63,10 +63,9 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_summary_empty: 'Summary was empty.',
   possums_summary_tools: 'Summary attempted tool use; no tool executed.',
   possums_summary_length: 'Summary hit the output limit.',
-  possums_catalog_out_of_range: 'Model catalog exceeds supported limits.',
   possums_catalog_unavailable: 'Model catalog unavailable. Use /login to refresh the session.',
   possums_incomplete_tool_round: 'Tool response incomplete; no tool executed. Charge settled. Not automatically continued. A new request may incur another charge.',
-  possums_invalid_stream: 'Response incomplete; no tool executed.',
+  possums_invalid_stream: 'Pi stream assembly violated the validated event ordering/identity constraint; no tool executed. Share this code for support.',
   possums_login_cancelled: 'Login cancelled. Use /login to start again.',
   possums_request_options_unsupported: 'Request options unsupported; remove custom options.',
   possums_run_replaced: 'Session changed; no tool executed. Any settled charge remains recorded.',
@@ -87,19 +86,36 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
 const transientDetails = new Set(['tokenizer_send_failed', 'tokenizer_http_failed',
   'generation_send_failed', 'generation_http_failed', 'stream_transport_failed',
   'stream_idle_timeout', 'stream_deadline_exceeded']);
-function safeFailure(error: unknown, nativeRetry = false): string {
-  if (error instanceof JSONDepthError) return '[possums_request_json_depth] Request encoding exceeds the JSON nesting limit. Simplify tool schemas or history. No inference request sent. Not replayed.';
+function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 'provider'): string {
+  if (error instanceof CatalogFailure) return catalogConnectionFailure(error).message;
+  if (error instanceof BalanceFailure && error.observation) return `${diagnosticDescription(error.observation)} This balance command sent no inference; prior billing is unchanged or unknown.`;
+  if (error instanceof DiagnosticFailure || error instanceof OperationFailure) {
+    const failure = error instanceof DiagnosticFailure ? error : new DiagnosticFailure(stage, error.constraint, 'uncertain');
+    return `Possums: ${diagnosticDescription(failure)} Billing status: Charge unknown. Not replayed. A new request may incur another charge.`;
+  }
+  if (error instanceof JSONDepthError) return '[possums_request_json_depth] Stage: request; constraint: json_depth. Request encoding exceeds the JSON nesting limit. Simplify tool schemas or history. No inference request sent. Not replayed.';
   if (error instanceof ConnectionFailure) return `${error.message} No automatic retry for this connection/billing check.`;
   if (error instanceof GatewayError) {
     const reason: Readonly<Record<string, string>> = {
       insufficient_credit: 'Insufficient credit for this model’s maximum reservation.',
-      unauthorized: 'Session expired; use /login to authenticate again.',
+      unauthorized: 'Gateway rejected authentication; use /login again. Expiry is not established.',
       invalid_request: 'Request rejected by gateway.', account_limit: 'Account limit reached.',
       duplicate_request: 'Duplicate submission rejected.', unavailable: 'Gateway unavailable.',
       generation_failed: 'Generation failed.',
     };
     const label = gatewayDetailLabel(error.detail);
-    const description = `${Object.hasOwn(reason, error.reason) ? `[${error.reason}] ${reason[error.reason]}` : 'Gateway request failed.'}${label ? ` ${label}.` : ''}`;
+    const known = Object.hasOwn(reason, error.reason);
+    const detailStages: Readonly<Record<string, string>> = {
+      settlement_failed: 'settlement', sdk_stream_decode_failed: 'gateway_sdk_decoding',
+      endpoint_binding_failed: 'gateway_verified_transport', verification_failed: 'gateway_verification',
+      catalog_failed: 'gateway_catalog', request_encoding_failed: 'gateway_request_encoding',
+    };
+    const detail = label ? error.detail! : '';
+    const gatewayStage = error.reason === 'unauthorized' ? 'gateway_authentication' :
+      Object.hasOwn(detailStages, detail) ? detailStages[detail] :
+      detail.startsWith('stream_') || detail.startsWith('tool_') ? 'gateway_stream' : 'gateway_admission';
+    const action = error.reason === 'insufficient_credit' ? 'Add credit before submitting this model again.' : error.reason === 'invalid_request' ? 'Review supported request options and context limits.' : error.reason === 'account_limit' ? 'Wait for pending requests before submitting again.' : error.reason === 'unauthorized' ? 'Check authentication, not trust pins.' : 'If this persists, share only the content-free code/stage/constraint for support.';
+    const description = `${known ? `[${error.reason}] ${reason[error.reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; underlying cause unknown.'}${label ? ` ${label}.` : error.detail === 'unclassified' ? ' [possums_gateway_detail_unclassified] Gateway detail is unclassified; underlying cause unknown.' : ''} Stage: ${gatewayStage}; constraint: ${error.detail === 'unclassified' ? 'unclassified' : label ? error.detail : known ? error.reason : 'unclassified'}.${error.status === undefined ? '' : ` Observed HTTP status: ${error.status}.`} ${action}`;
     const transient = (error.reason === 'unavailable' && (error.detail === undefined || error.detail === 'inference_unavailable')) ||
       (error.reason === 'generation_failed' && error.detail !== undefined && transientDetails.has(error.detail));
     if (nativeRetry && transient) {
@@ -111,10 +127,10 @@ function safeFailure(error: unknown, nativeRetry = false): string {
     return `Possums: ${description} Billing status: ` +
       (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown. A new request may incur another charge.') + ' Not replayed.';
   }
-  if (error instanceof ChannelError && error.code === 'uncertain') return 'Possums: request interrupted; charge unknown. Not replayed. A new request may incur another charge.';
+  if (error instanceof ChannelError && error.code === 'uncertain') return `Possums: [possums_${stage}_uncertain] Stage: ${stage}; constraint: outcome_unknown. Request interrupted; charge unknown. Cause unknown; check connectivity and share only this code for support. Not replayed. A new request may incur another charge.`;
   // Only exact internal literals are displayable. Never echo a hook exception.
-  if (error instanceof Error && Object.hasOwn(localFailures, error.message)) return `[${error.message}] ${localFailures[error.message]}`;
-  return 'Possums: request rejected. Not replayed.';
+  if (error instanceof Error && Object.hasOwn(localFailures, error.message)) return `[${error.message}] Stage: ${stage}; constraint: ${error.message.slice('possums_'.length)}. ${localFailures[error.message]}`;
+  return `Possums: ${diagnosticDescription(new DiagnosticFailure(stage, 'unexpected', 'uncertain'))} Billing status: Charge unknown. Not replayed. A new request may incur another charge.`;
 }
 
 export class PossumsProvider implements Provider {
@@ -196,15 +212,30 @@ export class PossumsProvider implements Provider {
     name: recoveryAuth.name,
     // Only select configured material here: availability/listing must not connect.
     check: async input => {
-      const result = await recoveryAuth.resolve(input);
+      let result;
+      try { result = await recoveryAuth.resolve(input); }
+      catch {
+        const failure = new ConnectionFailure('credential_resolution_failed');
+        try { this.reportConnection(failure); } catch { /* Transient UI only. */ }
+        throw failure;
+      }
       return isRecoveryKey(result?.auth.apiKey) ? { type: 'api_key', source: result.source } : undefined;
     },
     resolve: async input => {
       const epoch = this.authEpoch;
-      const result = await recoveryAuth.resolve(input);
+      let result;
+      try { result = await recoveryAuth.resolve(input); }
+      catch {
+        const failure = new ConnectionFailure('credential_resolution_failed');
+        try { this.reportConnection(failure); } catch { /* Transient UI only. */ }
+        throw failure;
+      }
       this.requireCurrent(epoch, input.signal);
       const key = result?.auth.apiKey;
-      if (!isRecoveryKey(key)) return undefined;
+      if (!isRecoveryKey(key)) {
+        try { this.reportConnection(new ConnectionFailure('credential_missing')); } catch { /* Transient UI only. */ }
+        return undefined;
+      }
       if (key !== this.recoveryKey) {
         this.logout();
         this.recoveryKey = key;
@@ -222,8 +253,7 @@ export class PossumsProvider implements Provider {
         }
         try { await this.restoring; }
         catch (error) {
-          if (error instanceof ConnectionFailure) throw error;
-          throw new Error('possums_session_unavailable');
+          throw error instanceof ConnectionFailure ? error : connectionFailure(error);
         }
       }
       this.requireCurrent(current, input.signal);
@@ -235,7 +265,13 @@ export class PossumsProvider implements Provider {
       const epoch = this.authEpoch;
       // Verify public evidence and the actual channel before requesting a secret.
       const candidate = await this.establishVerified(interaction.signal, epoch);
-      const credential = await recoveryAuth.login!(interaction);
+      let credential;
+      try { credential = await recoveryAuth.login!(interaction); }
+      catch {
+        const failure = new ConnectionFailure('credential_entry_failed');
+        try { this.reportConnection(failure); } catch { /* Transient UI only. */ }
+        throw failure;
+      }
       this.requireCurrent(epoch, interaction.signal);
       if (!isRecoveryKey(credential.key)) throw new Error('possums_session_unavailable');
       await this.authenticate(candidate, credential.key, epoch, interaction.signal);
@@ -263,7 +299,7 @@ export class PossumsProvider implements Provider {
       try { this.reportConnection(undefined); } catch { /* UI reporting cannot change authentication. */ }
     } catch (error) {
       this.requireCurrent(epoch, signal);
-      const failure = stage === 'catalog_unavailable' ? catalogConnectionFailure(error) : new ConnectionFailure(stage);
+      const failure = stage === 'catalog_unavailable' ? catalogConnectionFailure(error) : error instanceof DiagnosticFailure ? connectionFailure(error) : new ConnectionFailure(stage);
       try { this.reportConnection(failure); } catch { /* UI reporting cannot change authentication. */ }
       throw failure;
     }
@@ -308,7 +344,7 @@ export class PossumsProvider implements Provider {
       }
       return snapshot;
     } catch (error) {
-      if (error instanceof BalanceFailure) throw new Error(error.message);
+      if (error instanceof BalanceFailure && !error.observation) throw new Error(error.message);
       throw error;
     }
   }
@@ -344,7 +380,7 @@ export class PossumsProvider implements Provider {
     return `Reconciliation matched: balance debit $${dollars(window.charged.toString())} equals authenticated receipt charges across ${completed} completed requests (including confirmed refunds). Available demo credit: $${dollars(snapshot.availableMicrounits)}. This does not verify upstream invoices.`;
   }
 
-  reconciliationFailure(error: unknown): string { return safeFailure(error); }
+  reconciliationFailure(error: unknown): string { return `${safeFailure(error, false, 'balance')} This command sent no inference; it does not establish prior accounting outcomes.`; }
 
   private observeReconciliation(output: AssistantMessage): void {
     const window = this.reconciliation;
@@ -468,7 +504,7 @@ export class PossumsProvider implements Provider {
       const billing = `${settled > 0n ? ` Observed settled charges: $${dollars(settled.toString())}; not undone.` : ''}${unknown ? ' Additional charge unknown.' : ''}`;
       // ExtensionRunner swallows thrown hooks and would then use the default
       // summarizer. Even a failing UI must not turn this into a fallback/replay.
-      try { ctx.ui.notify(`Possums compaction (${stage}): ${failure ?? safeFailure(error)}${billing} No checkpoint saved. Not replayed. Use /compact deliberately or /new.`, 'warning'); }
+      try { ctx.ui.notify(`Possums compaction (${stage}): ${failure ?? safeFailure(error, false, 'compaction')}${billing} No checkpoint saved. Not replayed. Use /compact deliberately or /new.`, 'warning'); }
       catch { /* Transient UI only; never log or persist failed summaries. */ }
       return { cancel: true };
     } finally { closed = true; }
@@ -481,6 +517,8 @@ export class PossumsProvider implements Provider {
     const reconciliation = this.reconciliation;
     const args = new Map<number, { block: ToolCall; contentIndex: number; json: string }>();
     let started = false;
+    let failureStage: FailureStage = 'request';
+    let submitted = false;
     let textIndex: number | undefined;
     const endText = () => {
       if (textIndex === undefined) return;
@@ -500,6 +538,8 @@ export class PossumsProvider implements Provider {
         if (options.toolChoice !== undefined) payload.tool_choice = options.toolChoice as NonNullable<typeof payload.tool_choice>;
         const entry = this.catalog.find(entry => entry.id === selected.id);
         if (!entry || (payload.tools?.length && entry.tool_protocol !== 'openai-functions-v1')) throw new Error('possums_tools_unsupported');
+        failureStage = 'provider';
+        submitted = true; // The reference client carries more precise pre-send failures.
         const receipt = await this.client.chat(selected.id, payload.messages, text => {
           if (!started) throw new Error('possums_invalid_stream');
           if (textIndex === undefined) {
@@ -540,22 +580,24 @@ export class PossumsProvider implements Provider {
             }
           },
         });
-        if (!summary && epoch === this.epoch) this.newConversation = false;
-        if (!started) throw new Error('possums_invalid_stream');
-        endText();
-        const charged = safeNumber(receipt.chargedMicrounits) / 1_000_000;
+        failureStage = 'settlement';
         const quoted = receipt.quotedInputMicrounitsPerMillion !== undefined && receipt.quotedOutputMicrounitsPerMillion !== undefined;
-        // The submitted rate is authoritative. Assign the sub-microunit rounding
-        // remainder to output so the displayed components equal the settled total.
-        const inputMicrounits = quoted ? BigInt(receipt.inputTokens) * BigInt(receipt.quotedInputMicrounitsPerMillion!) * 130n / 100_000_000n : 0n;
-        const inputCost = safeNumber(inputMicrounits.toString()) / 1_000_000;
-        output.usage = { input: receipt.inputTokens, output: receipt.outputTokens,
-          cacheRead: 0, cacheWrite: 0, totalTokens: receipt.totalTokens,
-          cost: { input: inputCost, output: quoted ? charged - inputCost : 0, cacheRead: 0, cacheWrite: 0, total: charged } };
+        // Record authenticated accounting before local display/precision conversion.
         output.diagnostics = [{ type: 'possums_settled_receipt', timestamp: Date.now(), details: {
           chargedMicrounits: receipt.chargedMicrounits, refundedMicrounits: receipt.refundedMicrounits,
           quotedCostComponents: quoted, finish: receipt.finish,
         } }];
+        if (!summary && epoch === this.epoch) this.newConversation = false;
+        if (!started) throw new Error('possums_invalid_stream');
+        endText();
+        const charged = safeNumber(receipt.chargedMicrounits, 'settlement') / 1_000_000;
+        // The submitted rate is authoritative. Assign the sub-microunit rounding
+        // remainder to output so the displayed components equal the settled total.
+        const inputMicrounits = quoted ? BigInt(receipt.inputTokens) * BigInt(receipt.quotedInputMicrounitsPerMillion!) * 130n / 100_000_000n : 0n;
+        const inputCost = safeNumber(inputMicrounits.toString(), 'settlement') / 1_000_000;
+        output.usage = { input: receipt.inputTokens, output: receipt.outputTokens,
+          cacheRead: 0, cacheWrite: 0, totalTokens: receipt.totalTokens,
+          cost: { input: inputCost, output: quoted ? charged - inputCost : 0, cacheRead: 0, cacheWrite: 0, total: charged } };
         if (epoch !== this.epoch || options.signal?.aborted) throw new Error('possums_run_replaced');
         if (summary) {
           summary();
@@ -576,7 +618,7 @@ export class PossumsProvider implements Provider {
         output.stopReason = toolUse ? 'toolUse' : 'stop';
         if (receipt.finish === 'length') {
           output.stopReason = 'error';
-          output.errorMessage = 'Possums: partial answer; charge settled. Not automatically continued. A deliberate new request may incur another charge.';
+          output.errorMessage = 'Possums: [possums_output_limit] Stage: completion; constraint: output_limit. Partial answer reached the model output limit; charge settled. Not automatically continued. Submit a deliberate follow-up if needed; a new request may incur another charge.';
         }
         if (output.stopReason === 'error') events.push({ type: 'error', reason: 'error', error: output });
         else events.push({ type: 'done', reason: output.stopReason, message: output });
@@ -587,13 +629,13 @@ export class PossumsProvider implements Provider {
         }
         if (!output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_settled_receipt') &&
           ((error instanceof GatewayError && error.billing === 'unknown') ||
-            (!(error instanceof GatewayError) && (options.signal?.aborted || (error instanceof ChannelError && error.code === 'uncertain'))))) {
+            (!(error instanceof GatewayError) && ((submitted && !(error instanceof ChannelError && error.code === 'rejected')) || options.signal?.aborted || (error instanceof ChannelError && error.code === 'uncertain'))))) {
           output.diagnostics = [{ type: 'possums_billing_unknown', timestamp: Date.now(), details: { receipt: false } }];
         }
         output.errorMessage = output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_settled_receipt') ?
-          safeFailure(error) : options.signal?.aborted && !(error instanceof GatewayError) ?
-          'Possums: interrupted; charge unknown. Not replayed. A new request may incur another charge.' :
-          safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted);
+          `${safeFailure(error, false, failureStage).replace(/ Billing status: Charge unknown\..*$/, '')} Authenticated receipt: charge settled; not undone. Not replayed.` : options.signal?.aborted && !(error instanceof GatewayError) ?
+          'Possums: [possums_stream_interrupted] Stage: stream; constraint: interrupted. Delivery interrupted; charge unknown. Check connectivity and share only this code for support. Not replayed. A new request may incur another charge.' :
+          safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted, failureStage);
         events.push({ type: 'error', reason: output.stopReason, error: output });
       } finally {
         if (reconciliation && reconciliation === this.reconciliation) this.observeReconciliation(output);
