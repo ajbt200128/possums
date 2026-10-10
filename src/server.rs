@@ -37,6 +37,8 @@ use tower_http::catch_panic::CatchPanicLayer;
 #[cfg(test)]
 mod admission_tests;
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 pub(crate) mod resource_streaming_tests;
 #[cfg(test)]
 mod timeout_tests;
@@ -73,6 +75,7 @@ pub fn admission_capacities() -> [(Lane, u64); 5] {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub lifecycle: crate::lifecycle::Lifecycle,
     pub auth: Arc<Auth>,
     pub accounting: Arc<Accounting>,
     pub inference: SharedInference,
@@ -135,6 +138,7 @@ impl AppState {
     ) -> Self {
         let accounting = Accounting::new(auth.account_budgets());
         Self {
+            lifecycle: Default::default(),
             auth: Arc::new(auth),
             accounting: Arc::new(accounting),
             inference,
@@ -255,6 +259,16 @@ async fn request_admission(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    let Some(ticket) = state.lifecycle.try_admit() else {
+        return crate::api::quiescing();
+    };
+    request.extensions_mut().insert(ticket.clone());
+    // The independent middleware envelope outlives all handler captures, even
+    // when an extractor consumes/drops the extension or the future is cancelled.
+    ticket.track(admitted_request(state, request, next)).await
+}
+
+async fn admitted_request(state: AppState, mut request: Request<Body>, next: Next) -> Response {
     // Match the router's exact method/path semantics; query strings do not
     // affect routing. Wrong methods, trailing slashes and encoded aliases stay
     // in the bounded control lane and cannot reach a heavy handler.

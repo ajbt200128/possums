@@ -156,6 +156,7 @@ impl Generation<'_> {
     /// delivery/observation has disappeared. Never spawn a second accounting owner.
     pub(crate) async fn submit<T, F>(
         self,
+        ticket: crate::lifecycle::Ticket,
         submission: Submission<'_>,
         input: GenerationInput,
         heavy: Arc<crate::telemetry::hooks::Lease>,
@@ -166,6 +167,7 @@ impl Generation<'_> {
         F: FnOnce(ReservedGeneration, PreparedGeneration) -> T + Send + 'static,
     {
         self.submit_core(
+            ticket,
             submission,
             RequestInput::Text(input),
             heavy,
@@ -181,6 +183,7 @@ impl Generation<'_> {
 
     pub(crate) async fn submit_structured<T, F>(
         self,
+        ticket: crate::lifecycle::Ticket,
         submission: Submission<'_>,
         input: StructuredGenerationInput,
         heavy: Arc<crate::telemetry::hooks::Lease>,
@@ -191,6 +194,7 @@ impl Generation<'_> {
         F: FnOnce(ReservedGeneration, PreparedStructuredGeneration) -> T + Send + 'static,
     {
         self.submit_core(
+            ticket,
             submission,
             RequestInput::Structured(input),
             heavy,
@@ -206,6 +210,7 @@ impl Generation<'_> {
 
     async fn submit_core<T, F>(
         self,
+        ticket: crate::lifecycle::Ticket,
         submission: Submission<'_>,
         input: RequestInput,
         heavy: Arc<crate::telemetry::hooks::Lease>,
@@ -279,6 +284,7 @@ impl Generation<'_> {
             permit,
             heavy.clone(),
         )
+        .tracked(ticket.clone())
         .observed(self.observation.generation(model), model);
         self.observation.disposition(Disposition::NewGeneration);
         let (sender, receiver) = oneshot::channel();
@@ -378,6 +384,7 @@ impl Generation<'_> {
                     .send(Ok(output));
             }),
             _heavy: heavy,
+            _ticket: ticket,
         });
         receiver.await.unwrap_or(Err(Rejection::Unavailable))
     }
@@ -397,6 +404,7 @@ struct PreflightInput<F, T> {
 struct ChargedPreflight<F> {
     work: Pin<Box<F>>,
     _heavy: Arc<crate::telemetry::hooks::Lease>,
+    _ticket: crate::lifecycle::Ticket,
 }
 
 impl<F: Future<Output = ()>> Future for ChargedPreflight<F> {
