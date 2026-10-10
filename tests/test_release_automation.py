@@ -306,7 +306,7 @@ class ProvenanceTest(StopTest):
         config = r.transform(CONFIG, D)
         manifest = {"config": base64.b64encode(config).decode(), "hashes": {"version": "v0.14.12"},
                     "cmdline": "tinfoil-config-hash=" + hashlib.sha256(config).hexdigest(),
-                    "vm_shape": {"cpus": 2, "memory_mb": 8192, "gpus": 0}}
+                    "vm_shape": {"cpus": 2, "memory_mb": 8192, "gpus": 0, "disks": 3}}
         raw = json.dumps(manifest).encode()
         digest = hashlib.sha256(raw).hexdigest()
         identity = f"https://github.com/{r.REPO}/.github/workflows/tinfoil-release-publish.yml@refs/tags/{V}"
@@ -324,6 +324,19 @@ class ProvenanceTest(StopTest):
         self.stop("manifest", r.verify_manifest, raw, digest.encode(), config + b"\n", D)
         self.stop("manifest", r.verify_manifest, raw, digest.encode(), config, "sha256:" + "e" * 64)
         self.stop("manifest", r.verify_manifest, b"SYNTHETIC-SECRET", hashlib.sha256(b"SYNTHETIC-SECRET").hexdigest().encode(), config, D)
+
+    def test_manifest_canonical_shape_rejects_missing_changed_and_untyped_dimensions(self):
+        config, manifest, _, _, _ = self.fixture()
+        for key in ("cpus", "memory_mb", "gpus", "disks"):
+            for value in (None, False, "3", manifest["vm_shape"][key] + 1):
+                changed = copy.deepcopy(manifest)
+                if value is None:
+                    del changed["vm_shape"][key]
+                else:
+                    changed["vm_shape"][key] = value
+                raw = json.dumps(changed).encode()
+                self.stop("manifest", r.verify_manifest, raw,
+                          hashlib.sha256(raw).hexdigest().encode(), config, D)
 
     def test_signed_actual_attempt_not_hardcoded_one(self):
         _, manifest, _, digest, checked = self.fixture()
