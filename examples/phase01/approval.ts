@@ -4,7 +4,7 @@ import { X509Certificate, AllOf, Identity as SignerIdentity, GitHubWorkflowSHA,
   GitHubWorkflowRepository, GitHubWorkflowRef, OIDCSourceRepositoryURI,
   OIDCSourceRepositoryDigest, OIDCSourceRepositoryRef, OIDCBuildSignerURI,
   OIDCBuildSignerDigest } from '@freedomofpress/sigstore-browser';
-import { LIMITS, Operation, base64, boundedReport, decode, digest, parseJSON, requireThat, ChannelError } from './limits.js';
+import { LIMITS, Operation, base64, boundedReport, decode, digest, parseJSON, requireThat, DiagnosticFailure, OperationFailure, type FailureConstraint } from './limits.js';
 
 export type Approval = { origin: string; repository: string; tag: string; manifest: string;
   image: string; commit: string; config: string; workflow: string; invocation: string; expires: number };
@@ -42,7 +42,8 @@ export function requireApiApproval(): Approval {
   return approval;
 }
 export function checkApproval(now: number, expires: number, revoked: boolean): void {
-  requireThat(Number.isFinite(now) && Number.isFinite(expires) && now < expires && !revoked);
+  if (Number.isFinite(now) && Number.isFinite(expires) && now >= expires && !revoked) throw new DiagnosticFailure('trust', 'expired');
+  if (!(Number.isFinite(now) && Number.isFinite(expires) && now < expires && !revoked)) throw new DiagnosticFailure('trust', 'policy');
 }
 export function validateKeyConfig(config: Uint8Array, endorsed: string): void {
   requireThat(config.length === 41 && /^[0-9a-f]{64}$/.test(endorsed));
@@ -65,6 +66,7 @@ export async function qualifyPublished(bundleBytes: Uint8Array, manifestBytes: U
 }
 async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, approval?: Approval, signal?: AbortSignal) {
   const op = new Operation(LIMITS.operationMs, signal);
+  let constraint: FailureConstraint = 'manifest';
   try {
     op.check();
     if (approval) checkApproval(Date.now(), approval.expires, REVOKED_MANIFESTS.has(approval.manifest));
@@ -92,6 +94,7 @@ async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Arra
       requireThat(hashes.length === 1 && hashes[0] === `tinfoil-config-hash=${await digest(config)}`);
     }
     requireThat(manifest.hashes.version === 'v0.14.12');
+    constraint = 'attestation';
     const doc = bundle.enclaveAttestationReport;
     requireThat(doc.format === 'https://tinfoil.sh/predicate/sev-snp-guest/v2');
     // The published verifier collects decompression output internally. Preflight the
@@ -99,6 +102,7 @@ async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Arra
     await boundedReport(base64(doc.body, LIMITS.evidence), op);
     const vcek = base64(bundle.vcek, LIMITS.certificate);
     requireThat(vcek.length > 0 && typeof bundle.enclaveCert === 'string' && bundle.enclaveCert.length <= LIMITS.certificate);
+    constraint = 'provenance';
     const signatureBundle = bundle.sigstoreBundle as any;
     requireThat(JSON.stringify(signatureBundle).length <= LIMITS.provenance);
     requireThat(signatureBundle.dsseEnvelope.signatures.length === 1);
@@ -109,8 +113,10 @@ async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Arra
     requireThat(canonical(statement.predicate) === canonical(manifest));
     // This is the actual pinned verifier: hardware signature/chain/policy, Sigstore
     // DSSE/Rekor/root/tag, measurement comparison, certificate SAN endorsements.
+    constraint = 'verification'; // The SDK combines hardware, provenance and measurement verification.
     const verifier = new Verifier({ configRepo: policy.repository });
     const verified = await op.wait<AttestationResponse>(verifier.verifyBundle(bundle), LIMITS.operationMs);
+    constraint = 'publisher';
     const signer = X509Certificate.parse(base64(signatureBundle.verificationMaterial.certificate.rawBytes, LIMITS.certificate));
     // These candidate values acquire authority ONLY through the library's DSSE,
     // certificate-chain and Rekor verification above, never from release metadata.
@@ -136,11 +142,13 @@ async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Arra
         new OIDCBuildSignerDigest(commit),
       ] : []),
     ]).verify(signer);
+    constraint = 'certificate';
     const cert = X509Certificate.parse(bundle.enclaveCert);
     requireThat(cert.validForDate(new Date()));
     const tlsFingerprint = await digest(new Uint8Array(cert.publicKey));
     requireThat(tlsFingerprint === verified.tlsPublicKeyFingerprint);
     requireThat(verified.hpkePublicKey && !REVOKED_KEYS.has(verified.hpkePublicKey));
+    constraint = 'key_config';
     validateKeyConfig(keyConfig, verified.hpkePublicKey);
     // Finite local trust-session lifetime, NOT administrative approval or quote
     // freshness. Certificate SAN verification is not Node TLS socket pinning.
@@ -149,6 +157,9 @@ async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Arra
     op.check();
     return Object.freeze({ hpkeKey: verified.hpkePublicKey, tlsFingerprint,
       release: Object.freeze({ tag, expires }) });
-  } catch { throw new ChannelError(); }
+  } catch (error) {
+    if (error instanceof DiagnosticFailure) throw error;
+    throw new DiagnosticFailure('trust', error instanceof OperationFailure ? error.constraint : constraint);
+  }
   finally { op.close(); }
 }

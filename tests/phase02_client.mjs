@@ -214,7 +214,7 @@ const fabricated = new legitimate.constructor('generation_failed', 'stream_idle_
 check(fabricated.billing === 'unknown' && /Generation failed.*Charge unknown/.test(fabricated.message) &&
   !fabricated.message.includes('SECRET_PROMPT_AND_KEY'));
 const hostileConstructor = new legitimate.constructor('possums_private_key', 'possums_private_prompt', 'refunded');
-check(hostileConstructor.billing === 'unknown' && /Gateway request failed.*Charge unknown/.test(hostileConstructor.message) &&
+check(hostileConstructor.reason === 'unclassified' && hostileConstructor.detail === 'unclassified' && hostileConstructor.billing === 'unknown' && /\[possums_gateway_unclassified\].*cause unknown.*Charge unknown/.test(hostileConstructor.message) &&
   !hostileConstructor.message.includes('possums_private'));
 for (const injected of [fabricated, legitimate]) {
   await assert.rejects(() => m.consumeCompletion(stream(role + delta({ content: 'synthetic' })), model, () => {},
@@ -274,7 +274,7 @@ globalThis.fetch = async req => {
   const nonce = crypto.getRandomValues(new Uint8Array(32));
   const secret = new Uint8Array(await recipient.Export(enc.encode(ehbp.EXPORT_LABEL), ehbp.EXPORT_LENGTH));
   const keys = await ehbp.deriveResponseKeys(secret, encapsulated, nonce);
-  const cipher = await ehbp.encryptChunk(keys, 0, enc.encode(response));
+  const cipher = await ehbp.encryptChunk(keys, 0, typeof response === 'string' ? enc.encode(response) : response);
   if (corrupt && route === '/v1/chat/completions') cipher[cipher.length - 1] ^= 1;
   const frame = new Uint8Array(4 + cipher.length); new DataView(frame.buffer).setUint32(0, cipher.length, false); frame.set(cipher, 4);
   let emitted = false;
@@ -394,7 +394,19 @@ try {
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool], onResponse() { throw new Error('private hook diagnostics'); } }));
   check(sent.slice(initial).join(',') === '/v1/models,/v1/submissions,/v1/chat/completions');
   corrupt = true;
-  await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] })); corrupt = false;
+  await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error => error.stage === 'transport' && error.constraint === 'decryption' && error.status === 200); checks++; corrupt = false;
+  chatText = new Uint8Array([0xff]);
+  await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error => error.stage === 'transport' && error.constraint === 'utf8' && error.status === 200); checks++;
+  chatText = valid;
+  const validFramedFetch = globalThis.fetch;
+  globalThis.fetch = async request => {
+    const response = await validFramedFetch(request);
+    if (new URL(request.url).pathname !== '/v1/chat/completions') return response;
+    await response.body.cancel();
+    return new Response(new Uint8Array([0, 16, 0, 0]), { status: 200, headers: response.headers });
+  };
+  await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error => error.stage === 'transport' && error.constraint === 'frames' && error.status === 200); checks++;
+  globalThis.fetch = validFramedFetch;
   for (const route of ['/v1/auth/challenge', '/v1/sessions', '/v1/models', '/v1/submissions', '/v1/chat/completions', '/v1/balance']) {
     const controller = new AbortController(); holdPath = route; observedAbort = false;
     const reached = new Promise(resolve => { held = resolve; });

@@ -230,7 +230,8 @@ try {
   reset(); state.notAfter = now + 1000;
   channel = await qualify(); assert.equal(channel.release.expires, now + 1000); passed++;
   const before = network; now += 1000;
-  await rejects('expired trust before new request', () => channel.challenge()); assert.equal(network, before);
+  await assert.rejects(channel.challenge(), error => error.stage === 'trust' && error.constraint === 'expired' && error.code === 'rejected'); passed++;
+  assert.equal(network, before);
   reset();
   // Acquisition uses controlled in-memory responses, not any real public server.
   const seen = [];
@@ -295,6 +296,31 @@ try {
   await rejects('no second asset redirect', () => test.connectPublished(), 'evidence_unavailable');
   assert.equal(network, beforeLoop + 3);
   mode = 'ok';
+  const acquisitionFetch = globalThis.fetch;
+  for (const [stage, matches] of [
+    ['release_discovery', url => url === discovery], ['manifest_redirect', url => url === asset],
+    ['manifest_download', url => url === cdn], ['gateway_attestation', url => url.endsWith('/.well-known/tinfoil-attestation')],
+    ['amd_certificate', url => url.startsWith('https://kdsintf.amd.com/')],
+    ['gateway_certificate', url => url.endsWith('/.well-known/tinfoil-certificate')],
+    ['release_provenance', url => url.includes('/attestations/sha256:')], ['gateway_keys', url => url.endsWith('/.well-known/hpke-keys')],
+  ]) {
+    for (const failure of ['http', 'rate_limited', 'request', ...(stage === 'manifest_redirect' ? [] : ['body'])]) {
+      globalThis.fetch = async request => {
+        if (!matches(request.url)) return acquisitionFetch(request);
+        if (failure === 'request') throw new Error('HOSTILE credential prompt history stack URL');
+        const response = new Response(failure === 'body' ? new Uint8Array(1024 * 1024) : 'HOSTILE credential prompt history stack URL',
+          { status: failure === 'body' ? 200 : failure === 'rate_limited' ? 429 : 503 });
+        Object.defineProperty(response, 'url', { value: request.url }); return response;
+      };
+      await assert.rejects(test.connectPublished(), error => {
+        assert(error.message.includes(`Stage: ${stage}`), error.message);
+        assert(error.message.includes(`constraint: ${failure}`) || error.message.includes(`constraint: ${failure === 'http' && stage === 'manifest_redirect' ? 'redirect' : failure}`), error.message);
+        if (failure === 'http' || failure === 'rate_limited') assert(error.message.includes(`Observed HTTP status: ${failure === 'http' ? 503 : 429}`));
+        assert(!error.message.includes('HOSTILE')); assert.equal(error.cause, undefined); return true;
+      }); passed++;
+    }
+  }
+  globalThis.fetch = acquisitionFetch;
   const controller = new AbortController(); controller.abort();
   const start = network;
   await rejects('cancel before acquisition', () => test.connectPublished(controller.signal), 'evidence_unavailable');

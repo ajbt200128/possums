@@ -7,5 +7,5 @@ export { API_APPROVALS, PUBLISHER, qualifyPublished } from '../../examples/phase
 export { invocation } from './wire.js';
 export { Channel } from '../../examples/phase01/transport.js';
 export { ReferenceClient, BalanceFailure, CatalogFailure, GatewayError, consumeCompletion, validateModels } from '../../examples/phase01/client.js';
-export { ChannelError, JSONDepthError } from '../../examples/phase01/limits.js';
+export { ChannelError, DiagnosticFailure, OperationFailure, Operation, LIMITS, JSONDepthError } from '../../examples/phase01/limits.js';
 export { snapshotInvocation } from '../../examples/phase01/tools.js';

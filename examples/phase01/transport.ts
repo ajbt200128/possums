@@ -1,7 +1,7 @@
 import { Identity, type RequestContext } from 'ehbp';
 import { CatalogFailure } from './client.js';
 import { PUBLISHER, qualifyApi, qualifyPublished, requireApiApproval, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';
-import { LIMITS, ChannelError, Operation, cleanup, collect, parseJSON, requireThat, serialize } from './limits.js';
+import { LIMITS, ChannelError, DiagnosticFailure, OperationFailure, type FailureConstraint, Operation, cleanup, collect, parseJSON, requireThat, serialize } from './limits.js';
 import { admitInvocation, fields, type Chat } from './tools.js';
 export type { Chat, Invocation, Message, Tool, ToolChoice, ToolCall, JSONObject, JSONValue } from './tools.js';
 export type { LiveModel, Receipt, BalanceSnapshot, CompletionOptions, CompletionEvent, ChatOptions } from './client.js';
@@ -28,7 +28,7 @@ function request(url: string, op: Operation, method = 'GET', body?: Uint8Array<A
 async function send(req: Request, op: Operation, observeStatus?: (status: number) => void): Promise<Response> {
   op.check();
   const response = await op.wait(fetch(req), LIMITS.operationMs);
-  // Catalog-only observation, before transport rejection/cleanup (e.g. redirects).
+  // Observe status before transport rejection/cleanup; never retain response text.
   observeStatus?.(response.status);
   if (response.redirected || (response.status >= 300 && response.status < 400) ||
       (response.headers.has('content-encoding') && !['identity', 'gzip', 'deflate', 'br'].includes(response.headers.get('content-encoding')!))) {
@@ -44,7 +44,7 @@ export function encodeChat(chat: Chat): Uint8Array<ArrayBuffer> {
 }
 // Frame-size validation precedes the library's 64-MiB buffering boundary. This
 // parses framing only; authentication/decryption remains entirely published EHBP.
-function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation): ReadableStream<Uint8Array> {
+function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation, onFailure: (failure: DiagnosticFailure) => void): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   let total = 0, frames = 0, length = 0, prefix = 0, remaining = 0;
   const cancel = async () => { op.close(); await cleanup(reader.cancel()); };
@@ -68,24 +68,34 @@ function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation): Reada
           }
         }
         controller.enqueue(value);
-      } catch { await cancel(); controller.error(new ChannelError('uncertain')); }
+      } catch (error) {
+        const failure = error instanceof DiagnosticFailure ? error : new DiagnosticFailure('transport', error instanceof OperationFailure ? error.constraint : error instanceof ChannelError ? 'frames' : 'fetch', 'uncertain');
+        // EHBP's wait can observe our cancellation before its decoder sees this error.
+        onFailure(failure);
+        await cancel(); controller.error(failure);
+      }
     }, cancel,
   }, { highWaterMark: 0 });
 }
-function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean): ReadableStream<Uint8Array> {
+function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean, frameFailure: () => DiagnosticFailure | undefined): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
   let total = 0, eventBytes = 0, lineBytes = 0, events = 0;
   return new ReadableStream({
     async pull(controller) {
+      let constraint: FailureConstraint = 'decryption';
       try {
         op.check();
         const { done, value } = await op.wait(reader.read(), sse ? LIMITS.streamMs : LIMITS.idleMs);
+        constraint = 'utf8';
         if (done) { if (sse) decoder.decode(); op.close(); controller.close(); return; }
         total += value.length;
+        constraint = 'envelope';
         requireThat(value.length <= LIMITS.frame && total <= LIMITS.stream);
         if (sse) {
+          constraint = 'utf8';
           decoder.decode(value, { stream: true });
+          constraint = 'envelope';
           // Envelope budgets only. Ordered role/finish/usage/DONE/EOF semantics
           // belong to the later client parser, not this transport qualification.
           for (const byte of value) {
@@ -97,7 +107,10 @@ function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean
           }
         }
         controller.enqueue(value);
-      } catch { op.close(); await cleanup(reader.cancel()); controller.error(new ChannelError('uncertain')); }
+      } catch (error) {
+        const failure = frameFailure() ?? (error instanceof DiagnosticFailure ? error : new DiagnosticFailure('transport', error instanceof OperationFailure ? error.constraint : constraint, 'uncertain'));
+        op.close(); await cleanup(reader.cancel()); controller.error(failure);
+      }
     }, async cancel() { op.close(); await cleanup(reader.cancel()); },
   }, { highWaterMark: 0 });
 }
@@ -129,15 +142,17 @@ export class Channel {
     }, Object.freeze({ tag: approval.tag, expires: approval.expires }));
   }
   static async published(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal): Promise<Channel> {
+    let constraint: FailureConstraint = 'schema';
     try {
       requireThat(bundleBytes && manifestBytes && keyConfig && bundleBytes.length <= LIMITS.bundle && manifestBytes.length <= LIMITS.provenance && keyConfig.length === LIMITS.key);
       const bundle = new Uint8Array(bundleBytes), manifest = new Uint8Array(manifestBytes), config = new Uint8Array(keyConfig);
       const { release } = await qualifyPublished(bundle, manifest, config, signal);
+      constraint = 'key_config';
       const identity = await Identity.unmarshalPublicConfig(config);
       const check = () => checkApproval(Date.now(), release.expires, false);
       check(); requireThat(!signal?.aborted);
       return new Channel(channelAuthority, PUBLISHER.origin, identity, check, release);
-    } catch { throw new ChannelError(); }
+    } catch (error) { throw error instanceof DiagnosticFailure ? error : new DiagnosticFailure('trust', signal?.aborted ? 'interrupted' : constraint); }
   }
   static async fixture(origin: string, config: Uint8Array, independentKey: string): Promise<Channel> {
     // Build-time elimination, plus loopback restriction: fixture trust cannot
@@ -151,7 +166,7 @@ export class Channel {
   async models(bearer: string, signal?: AbortSignal): Promise<unknown> {
     try { return await this.#get('/v1/models', LIMITS.catalog, bearer, signal); }
     catch (error) {
-      if (error instanceof CatalogFailure) throw error;
+      if (error instanceof CatalogFailure || error instanceof DiagnosticFailure) throw error;
       throw new CatalogFailure('request', error instanceof ChannelError ? error.code : 'rejected');
     }
   }
@@ -160,24 +175,29 @@ export class Channel {
     this.#policyCheck();
     const op = new Operation(LIMITS.operationMs, signal);
     let sent = false, res: Response | undefined, status: number | undefined;
+    let constraint: FailureConstraint = 'encoding';
     const catalog = path === '/v1/models';
     try {
       const req = request(this.#origin + path, op, 'GET', undefined, bearer);
-      sent = true; res = await send(req, op, catalog ? value => { status = value; } : undefined);
+      constraint = 'fetch';
+      sent = true; res = await send(req, op, value => { status = value; constraint = 'http'; });
       if (catalog && !res.ok) {
         let value: unknown;
         try { value = parseJSON(await collect(res.body, LIMITS.error, op), LIMITS.error); }
         catch { /* Keep the observed HTTP rejection even if its bounded body fails. */ }
         throw new CatalogFailure('http', sent && op.controller.signal.aborted ? 'uncertain' : 'rejected', status, value);
       }
-      requireThat(res.ok); return parseJSON(await collect(res.body, cap, op), cap);
+      requireThat(res.ok);
+      constraint = 'body';
+      return parseJSON(await collect(res.body, cap, op), cap);
     } catch (error) {
       const code = sent && op.controller.signal.aborted ? 'uncertain' : 'rejected';
+      if (error instanceof DiagnosticFailure) throw error;
       if (catalog) {
         if (error instanceof CatalogFailure) throw error;
         throw new CatalogFailure(status === undefined ? 'request' : status >= 200 && status < 300 ? 'body' : 'http', code, status);
       }
-      throw new ChannelError(code);
+      throw new DiagnosticFailure('challenge', error instanceof OperationFailure ? error.constraint : constraint, code, status);
     }
     finally { op.close(); if (res?.body && !res.body.locked) await cleanup(res.body.cancel()); }
   }
@@ -187,10 +207,21 @@ export class Channel {
     if (path === '/v1/sessions') {
       requireThat(typeof admitted.credential === 'string' && typeof admitted.challenge === 'string' && /^[A-Za-z0-9_-]{32,512}$/.test(admitted.credential) && /^[A-Za-z0-9_-]{32,512}$/.test(admitted.challenge) && bearer === undefined);
     } else { requireThat(typeof admitted.model === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(admitted.model) && typeof admitted.new_conversation === 'boolean' && bearer !== undefined); }
-    const body = await this.#encrypted(path, serialize(admitted, LIMITS.control), bearer, { signal });
+    let status: number | undefined;
+    const body = await this.#encrypted(path, serialize(admitted, LIMITS.control), bearer, { signal, onResponse: response => { status = response.status; } });
     const op = new Operation(LIMITS.operationMs, signal);
-    try { return parseJSON(await collect(body, LIMITS.control, op), LIMITS.control); }
-    catch { throw new ChannelError('uncertain'); } finally { op.close(); }
+    try {
+      const value = parseJSON(await collect(body, LIMITS.control, op), LIMITS.control);
+      // Only classify a rejection envelope here; successful control admission remains unchanged.
+      if (status !== undefined && (status < 200 || status >= 300) && value && Object.hasOwn(value, 'error')) {
+        throw new DiagnosticFailure(path === '/v1/sessions' ? 'authentication' : 'submission', 'http', 'uncertain', status);
+      }
+      return value;
+    }
+    catch (error) {
+      if (error instanceof DiagnosticFailure) throw new DiagnosticFailure(error.stage, error.constraint, error.code, error.status ?? status);
+      throw new DiagnosticFailure(path === '/v1/sessions' ? 'authentication' : 'submission', error instanceof OperationFailure ? error.constraint : 'body', 'uncertain', status);
+    } finally { op.close(); }
   }
   async balance(bearer: string, signal?: AbortSignal): Promise<unknown> {
     // Reject missing/invalid authority before asking EHBP to encrypt anything.
@@ -207,28 +238,38 @@ export class Channel {
   async #encrypted(path: string, bytes: Uint8Array<ArrayBuffer>, bearer?: string, options: ResponseOptions = {}): Promise<ReadableStream<Uint8Array>> {
     this.#policyCheck();
     const op = new Operation(LIMITS.streamMs, options.signal);
-    let sent = false, res: Response | undefined;
+    let sent = false, res: Response | undefined, status: number | undefined;
+    let constraint: FailureConstraint = 'encryption';
+    let frameFailure: DiagnosticFailure | undefined;
     try {
       const encrypted = await op.wait<{ request: Request; context: RequestContext | null }>(this.#identity.encryptRequestWithContext(request(this.#origin + path, op, 'POST', bytes, bearer)));
       requireThat(encrypted.context && !op.controller.signal.aborted);
       sent = true; // Once handed to fetch, receipt/admission is uncertain on ANY failure.
-      res = await send(encrypted.request, op);
+      constraint = 'fetch';
+      res = await send(encrypted.request, op, value => { status = value; constraint = 'http'; });
       if (options.onResponse) {
         const mime = res.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
         // Never hand the Response, arbitrary header values, or EHBP diagnostics to hooks.
         const info: ResponseInfo = Object.freeze({ status: res.status,
           contentType: mime === 'text/event-stream' || mime === 'application/json' ? mime : null });
-        op.check(); await op.wait(Promise.resolve(options.onResponse(info)), LIMITS.streamMs);
+        op.check();
+        try { await op.wait(Promise.resolve(options.onResponse(info)), LIMITS.streamMs); }
+        catch (error) { throw new DiagnosticFailure('hook', error instanceof OperationFailure ? error.constraint : 'unexpected', 'uncertain', status); }
       }
+      constraint = 'endpoint_binding';
       requireThat(res.body && /^[0-9a-f]{64}$/.test(res.headers.get('Ehbp-Response-Nonce') ?? ''));
-      const bounded = new Response(encryptedFrames(res.body, op), { headers: res.headers });
+      const bounded = new Response(encryptedFrames(res.body, op, failure => { frameFailure ??= failure; }), { headers: res.headers });
+      constraint = 'decryption';
       const decrypted = await op.wait<Response>(this.#identity.decryptResponseWithContext(bounded, encrypted.context));
       requireThat(decrypted.body);
-      return plaintext(decrypted.body, op, path === '/v1/chat/completions');
-    } catch {
+      return plaintext(decrypted.body, op, path === '/v1/chat/completions', () => frameFailure);
+    } catch (error) {
+      const observedFailure = frameFailure;
       op.close();
       if (res?.body && !res.body.locked) await cleanup(res.body.cancel());
-      throw new ChannelError(sent ? 'uncertain' : 'rejected');
+      if (observedFailure) throw new DiagnosticFailure(observedFailure.stage, observedFailure.constraint, observedFailure.code, status);
+      if (error instanceof DiagnosticFailure) throw error;
+      throw new DiagnosticFailure(path === '/v1/sessions' ? 'authentication' : path === '/v1/submissions' ? 'submission' : 'transport', error instanceof OperationFailure ? error.constraint : constraint, sent ? 'uncertain' : 'rejected', status);
     }
   }
 }

@@ -13,6 +13,30 @@ export const LIMITS = Object.freeze({
 export class ChannelError extends Error {
   constructor(public readonly code: 'rejected' | 'uncertain' = 'rejected') { super(code); }
 }
+export type FailureStage = 'trust' | 'challenge' | 'authentication' | 'catalog' | 'request' | 'submission' | 'transport' | 'stream' | 'settlement' | 'provider' | 'hook' | 'balance' | 'compaction';
+export type FailureConstraint = 'manifest' | 'attestation' | 'verification' | 'provenance' | 'publisher' | 'certificate' | 'key_config' | 'precision' | 'expired' | 'policy' | 'encoding' | 'fetch' | 'http' | 'body' | 'schema' | 'encryption' | 'endpoint_binding' | 'frames' | 'decryption' | 'utf8' | 'json' | 'envelope' | 'choice' | 'delta' | 'tool' | 'finish' | 'usage' | 'receipt' | 'finish_missing' | 'usage_missing' | 'done_missing' | 'eof' | 'interrupted' | 'idle' | 'deadline' | 'unexpected';
+// Content-free observations only: never attach the original exception or cause.
+export class DiagnosticFailure extends ChannelError {
+  readonly status?: number;
+  constructor(readonly stage: FailureStage, readonly constraint: FailureConstraint,
+    code: ChannelError['code'] = 'rejected', status?: number) {
+    super(code);
+    requireThat('trust challenge authentication catalog request submission transport stream settlement provider hook balance compaction'.split(' ').includes(stage));
+    requireThat('manifest attestation verification provenance publisher certificate key_config precision expired policy encoding fetch http body schema encryption endpoint_binding frames decryption utf8 json envelope choice delta tool finish usage receipt finish_missing usage_missing done_missing eof interrupted idle deadline unexpected'.split(' ').includes(constraint));
+    requireThat(code === 'rejected' || code === 'uncertain');
+    if (Number.isInteger(status) && status! >= 100 && status! <= 599) this.status = status;
+    this.message = `possums_${stage}_${constraint}`;
+    Object.freeze(this);
+  }
+}
+export class OperationFailure extends ChannelError {
+  constructor(readonly constraint: 'interrupted' | 'idle' | 'deadline') {
+    super();
+    requireThat(['interrupted', 'idle', 'deadline'].includes(constraint));
+    this.message = `possums_operation_${constraint}`;
+    Object.freeze(this);
+  }
+}
 export class JSONDepthError extends ChannelError {
   constructor() { super(); this.message = 'possums_request_json_depth'; }
 }
@@ -162,25 +186,31 @@ export async function cleanup(action: Promise<unknown>): Promise<void> {
 export class Operation {
   readonly controller = new AbortController();
   private timer: ReturnType<typeof setTimeout>;
-  private readonly abort = () => this.controller.abort();
+  private constraint: OperationFailure['constraint'] = 'interrupted';
+  private readonly abort = () => {
+    const reason = this.parent?.reason;
+    if (reason instanceof OperationFailure) this.constraint = reason.constraint;
+    this.controller.abort(new OperationFailure(this.constraint));
+  };
+  private readonly deadline = () => { this.constraint = 'deadline'; this.abort(); };
   constructor(ms: number = LIMITS.operationMs, private readonly parent?: AbortSignal) {
     requireThat(parent === undefined || parent instanceof AbortSignal);
-    this.timer = setTimeout(this.abort, ms);
+    this.timer = setTimeout(this.deadline, ms);
     parent?.addEventListener('abort', this.abort, { once: true });
     if (parent?.aborted) this.abort();
   }
-  check(): void { requireThat(!this.controller.signal.aborted); }
+  check(): void { if (this.controller.signal.aborted) throw new OperationFailure(this.constraint); }
   close(): void { clearTimeout(this.timer); this.parent?.removeEventListener('abort', this.abort); this.controller.abort(); }
   async wait<T>(promise: Promise<T>, idle: number = LIMITS.idleMs): Promise<T> {
     const signal = this.controller.signal;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let abort: () => void = () => {};
     try {
-      if (signal.aborted) { void promise.catch(() => {}); throw new ChannelError(); }
+      if (signal.aborted) { void promise.catch(() => {}); throw new OperationFailure(this.constraint); }
       const result = await Promise.race([promise, new Promise<never>((_, reject) => {
-        abort = () => reject(new ChannelError());
+        abort = () => reject(new OperationFailure(this.constraint));
         signal.addEventListener('abort', abort, { once: true });
-        timer = setTimeout(() => { this.controller.abort(); }, idle);
+        timer = setTimeout(() => { this.constraint = 'idle'; this.abort(); }, idle);
       })]);
       this.check();
       return result;
@@ -205,7 +235,7 @@ export async function collect(body: ReadableStream<Uint8Array> | null, cap: numb
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
     return bytes;
-  } catch { op.close(); throw new ChannelError(); }
+  } catch (error) { op.close(); throw error instanceof OperationFailure || error instanceof DiagnosticFailure ? error : new ChannelError(); }
   finally { await cleanup(reader.cancel()); }
 }
 export async function boundedReport(compressed: Uint8Array<ArrayBuffer>, op: Operation): Promise<Uint8Array<ArrayBuffer>> {

@@ -1,5 +1,6 @@
 import { Channel, type ResponseOptions } from './transport.js';
-import { ChannelError, JSONDepthError, LIMITS, Operation, cleanup, parseJSON, requireThat, serialize, utf8 } from './limits.js';
+import { ChannelError, DiagnosticFailure, JSONDepthError, LIMITS, Operation, OperationFailure, cleanup, parseJSON, requireThat, serialize, utf8,
+  type FailureConstraint, type FailureStage } from './limits.js';
 import { admitTools, fields, freezeJSON, objectArguments, snapshotInvocation, toolID, toolName,
   type Chat, type Invocation, type Tool, type ToolChoice } from './tools.js';
 
@@ -28,7 +29,7 @@ export type Receipt = { finish: 'stop' | 'length' | 'tool_calls'; inputTokens: n
   quotedInputMicrounitsPerMillion?: string; quotedOutputMicrounitsPerMillion?: string };
 export type BalanceSnapshot = Readonly<{ availableMicrounits: string; inFlight: number; completedRequests: string }>;
 export class BalanceFailure extends ChannelError {
-  constructor(readonly stage: 'request' | 'validation', code: ChannelError['code'] = 'rejected') {
+  constructor(readonly stage: 'request' | 'validation', code: ChannelError['code'] = 'rejected', readonly observation?: DiagnosticFailure) {
     super(code);
     this.message = `possums_balance_${stage}_failed`;
     Object.freeze(this);
@@ -78,24 +79,33 @@ const details = new Set(`inference_unavailable upstream_response_invalid verific
 export function gatewayDetailLabel(detail: string | undefined): string | undefined {
   return detail !== undefined && details.has(detail) ? `[${detail}] ${detail.replaceAll('_', ' ')}` : undefined;
 }
+const gatewayReasons = new Set(['insufficient_credit', 'unauthorized', 'invalid_request', 'account_limit', 'duplicate_request', 'unavailable', 'generation_failed']);
 const claimedRefunds = new WeakSet<GatewayError>();
 const confirmedRefunds = new WeakSet<GatewayError>();
 function gatewayDescription(reason: string, detail: string | undefined, refunded: boolean): string {
   const reasons: Readonly<Record<string, string>> = {
     insufficient_credit: 'Insufficient credit for this model’s maximum reservation.',
-    unauthorized: 'Session expired; use /login to authenticate again.',
+    unauthorized: 'Gateway rejected authentication; use /login to authenticate again.',
     invalid_request: 'Request rejected by gateway.', account_limit: 'Account limit reached.',
     duplicate_request: 'Duplicate submission rejected.', unavailable: 'Gateway unavailable.',
     generation_failed: 'Generation failed.',
   };
   const label = gatewayDetailLabel(detail);
-  return `Possums: ${Object.hasOwn(reasons, reason) ? reasons[reason] : 'Gateway request failed.'}` +
-    (label ? ` ${label}.` : '') + (refunded ? ' Reservation refunded. Not replayed.' :
+  const known = Object.hasOwn(reasons, reason);
+  return `Possums: ${known ? `[${reason}] ${reasons[reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; cause unknown.'}` +
+    (label ? ` ${label}.` : '') + ` Stage: gateway; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (refunded ? ' Reservation refunded. Not replayed.' :
       ' Charge unknown. Not replayed. A new request may incur another charge.');
 }
 export class GatewayError extends ChannelError {
-  constructor(readonly reason: string, readonly detail?: string, _claimedBilling: 'refunded' | 'unknown' = 'unknown') {
-    super('uncertain'); this.message = gatewayDescription(reason, detail, false);
+  readonly status?: number;
+  readonly reason: string;
+  readonly detail?: string;
+  constructor(reason: string, detail?: string, _claimedBilling: 'refunded' | 'unknown' = 'unknown', status?: number) {
+    super('uncertain');
+    this.reason = gatewayReasons.has(reason) ? reason : 'unclassified';
+    this.detail = detail === undefined ? undefined : details.has(detail) ? detail : 'unclassified';
+    if (Number.isInteger(status) && status! >= 100 && status! <= 599) this.status = status;
+    this.message = gatewayDescription(this.reason, this.detail, false);
   }
   get billing(): 'refunded' | 'unknown' { return confirmedRefunds.has(this) ? 'refunded' : 'unknown'; }
 }
@@ -103,7 +113,7 @@ function gatewayError(value: any): GatewayError {
   keys(value, ['error']);
   fields(value.error, ['code'], ['detail', 'message', 'billing', 'outcome']);
   requireThat(typeof value.error.code === 'string' &&
-    ['insufficient_credit', 'unauthorized', 'invalid_request', 'account_limit', 'duplicate_request', 'unavailable', 'generation_failed'].includes(value.error.code));
+    gatewayReasons.has(value.error.code));
   requireThat(value.error.detail === undefined || (typeof value.error.detail === 'string' && details.has(value.error.detail)));
   requireThat(value.error.message === undefined || typeof value.error.message === 'string');
   requireThat(value.error.billing === undefined || value.error.billing === 'refunded' || value.error.billing === 'unknown');
@@ -141,28 +151,40 @@ export class CatalogFailure extends ChannelError {
 // No answer is accumulated; interruption is uncertain and never causes a resend.
 export async function consumeCompletion(body: ReadableStream<Uint8Array>, model: string | LiveModel,
   onDelta: (text: string) => void, options: CompletionOptions = {}): Promise<Receipt> {
-  const reader = body.getReader(), decoder = new TextDecoder('utf-8', { fatal: true }), op = new Operation(LIMITS.streamMs, options.signal);
+  let reader: ReadableStreamDefaultReader<Uint8Array>, op: Operation;
+  try { reader = body.getReader(); op = new Operation(LIMITS.streamMs, options.signal); }
+  catch { throw new DiagnosticFailure('stream', 'envelope', 'uncertain'); }
+  const decoder = new TextDecoder('utf-8', { fatal: true });
   let pending = '', data: string | undefined, state: 'role' | 'text' | 'usage' | 'done' | 'eof' | 'error' = 'role';
   let finish: Receipt['finish'] | undefined, receipt: Receipt | undefined, events = 0, total = 0, controlError = false;
   let failure: GatewayError | undefined, terminal = false;
+  let stage: FailureStage = 'stream', constraint: FailureConstraint = 'envelope';
   let modelID: string, names: Set<string> | undefined;
   const calls: { id: string; name: string; arguments: string; bytes: number }[] = [], ids = new Set<string>();
   let argumentBytes = 0;
   async function event(payload: string): Promise<void> {
+    constraint = 'envelope';
     requireThat(++events <= LIMITS.sseEvents);
-    if (payload === '[DONE]') { requireThat(state === 'done'); state = 'eof'; return; }
+    if (payload === '[DONE]') {
+      constraint = state === 'role' || state === 'text' ? 'finish_missing' : 'usage_missing';
+      requireThat(state === 'done'); state = 'eof'; return;
+    }
     requireThat(state !== 'eof' && state !== 'error');
+    constraint = 'json';
     const value = parseJSON(utf8.encode(payload), LIMITS.sseEvent);
+    constraint = 'schema';
     requireThat(value && typeof value === 'object');
     if (Object.hasOwn(value, 'error')) { requireThat(!receipt); failure = gatewayError(value); state = 'error'; return; }
     requireThat(value.object === 'chat.completion.chunk' && value.model === modelID && Array.isArray(value.choices));
     let textDelta: string | undefined;
     if (state === 'usage') {
+      constraint = 'usage';
       keys(value, ['object', 'model', 'choices', 'usage', 'possums']);
       requireThat(value.choices.length === 0 && finish);
       keys(value.usage, ['prompt_tokens', 'completion_tokens', 'total_tokens']);
       const { prompt_tokens: input, completion_tokens: output, total_tokens: sum } = value.usage;
       requireThat([input, output, sum].every(n => Number.isSafeInteger(n) && n >= 0) && input + output === sum);
+      constraint = 'receipt';
       fields(value.possums, ['outcome', 'charged_microunits', 'refunded_microunits'],
         ['quoted_input_microunits_per_million_tokens', 'quoted_output_microunits_per_million_tokens']);
       requireThat(value.possums.outcome === 'settled');
@@ -183,16 +205,19 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     } else {
       keys(value, ['object', 'model', 'choices']);
       requireThat(value.choices.length === 1 && (state === 'role' || state === 'text'));
+      constraint = 'choice';
       const choice = value.choices[0]; keys(choice, ['index', 'delta', 'finish_reason']);
       requireThat(choice.index === 0);
       if (state === 'role') {
         keys(choice.delta, ['role']); requireThat(choice.delta.role === 'assistant' && choice.finish_reason === null);
         state = 'text';
       } else if (choice.finish_reason !== null) {
+        constraint = 'finish';
         keys(choice.delta, []);
         requireThat(choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop' || choice.finish_reason === 'length');
-        if (choice.finish_reason === 'tool_calls') requireThat(names && calls.length > 0);
+        if (choice.finish_reason === 'tool_calls') { constraint = 'tool'; requireThat(names && calls.length > 0); }
         if (calls.length && choice.finish_reason !== 'length') {
+          constraint = 'tool';
           requireThat(names);
           for (const call of calls) {
             toolID(call.id); toolName(call.name); objectArguments(call.arguments);
@@ -200,6 +225,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
         }
         finish = choice.finish_reason; state = 'usage';
       } else if (Object.hasOwn(choice.delta, 'tool_calls')) {
+        constraint = 'tool';
         keys(choice.delta, ['tool_calls']);
         requireThat(names && Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0 && choice.delta.tool_calls.length <= LIMITS.tools);
         const indexes = new Set<number>();
@@ -236,6 +262,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
           requireThat(size <= LIMITS.toolArguments && argumentBytes <= LIMITS.totalToolArguments);
         }
       } else {
+        constraint = 'delta';
         keys(choice.delta, ['content']); requireThat(typeof choice.delta.content === 'string');
         textDelta = choice.delta.content;
       }
@@ -244,8 +271,18 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     // mutate parser state, and awaiting them bounds queueing/backpressure.
     freezeJSON(value);
     op.check();
-    if (textDelta !== undefined) await op.wait(Promise.resolve(onDelta(textDelta)), LIMITS.streamMs);
-    if (options.onEvent) { op.check(); await op.wait(Promise.resolve(options.onEvent(value)), LIMITS.streamMs); }
+    if (textDelta !== undefined) {
+      stage = 'hook'; constraint = 'unexpected';
+      try { await op.wait(Promise.resolve().then(() => onDelta(textDelta)), LIMITS.streamMs); }
+      catch (error) { if (error instanceof OperationFailure) throw error; throw new DiagnosticFailure('hook', 'unexpected', 'uncertain'); }
+      stage = 'stream';
+    }
+    if (options.onEvent) {
+      op.check(); stage = 'hook'; constraint = 'unexpected';
+      try { await op.wait(Promise.resolve().then(() => options.onEvent!(value)), LIMITS.streamMs); }
+      catch (error) { if (error instanceof OperationFailure) throw error; throw new DiagnosticFailure('hook', 'unexpected', 'uncertain'); }
+      stage = 'stream';
+    }
   }
   async function line(value: string): Promise<void> {
     if (value.endsWith('\r')) value = value.slice(0, -1);
@@ -257,6 +294,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
   function atEOF(): boolean { return state === 'eof'; }
   try {
     op.check();
+    stage = 'request'; constraint = 'schema';
     // String models retain the legacy text-only API. Tools require an explicitly
     // qualified live entry AND declarations; no name-based model inference.
     if (typeof model === 'string') modelID = model;
@@ -270,14 +308,20 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
       }
     }
     requireThat(options.tools === undefined || names);
+    stage = 'stream'; constraint = 'envelope';
     for (;;) {
       op.check();
       // Reasoning can pause visible output; the absolute stream deadline stays bounded.
-      const next = await op.wait(reader.read(), LIMITS.streamMs);
+      let next: ReadableStreamReadResult<Uint8Array>;
+      try { next = await op.wait(reader.read(), LIMITS.streamMs); }
+      catch (error) {
+        if (error instanceof OperationFailure || error instanceof DiagnosticFailure) throw error;
+        throw new DiagnosticFailure(atEOF() ? 'stream' : 'transport', atEOF() ? 'eof' : 'fetch', 'uncertain');
+      }
       if (next.done) {
-        requireThat(decoder.decode() === '');
-        if (controlError) failure = gatewayError(parseJSON(utf8.encode(pending), LIMITS.error));
-        else requireThat(pending === '' && data === undefined);
+        constraint = 'utf8'; requireThat(decoder.decode() === '');
+        if (controlError) { constraint = 'json'; failure = gatewayError(parseJSON(utf8.encode(pending), LIMITS.error)); }
+        else { constraint = 'envelope'; requireThat(pending === '' && data === undefined); }
         if (failure) {
           terminal = true;
           if (claimedRefunds.has(failure)) {
@@ -286,12 +330,16 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
           }
           throw failure;
         }
+        constraint = state === 'role' || state === 'text' ? 'finish_missing' :
+          state === 'usage' ? 'usage_missing' : state === 'done' ? 'done_missing' : 'eof';
         requireThat(atEOF() && receipt);
         return Object.freeze(receipt);
       }
+      constraint = 'envelope';
       total += next.value.length;
       requireThat(next.value.length <= LIMITS.frame && total <= LIMITS.stream);
-      pending += decoder.decode(next.value, { stream: true });
+      constraint = 'utf8'; pending += decoder.decode(next.value, { stream: true });
+      constraint = 'envelope';
       if (!events && !failure && pending.trimStart().startsWith('{')) controlError = true;
       if (controlError) { requireThat(pending.length <= LIMITS.error); continue; }
       let end: number;
@@ -303,8 +351,10 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     }
   } catch (error) {
     if (terminal && error === failure) throw failure;
-    if (failure) throw new GatewayError(failure.reason, failure.detail); // No authenticated EOF: refund is unproven.
-    throw new ChannelError('uncertain');
+    if (failure) throw new GatewayError(failure.reason, failure.detail, 'unknown', failure.status); // No authenticated EOF: refund is unproven.
+    if (error instanceof DiagnosticFailure) throw error;
+    if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint, 'uncertain');
+    throw new DiagnosticFailure(stage, constraint, 'uncertain');
   }
   finally { op.close(); await cleanup(reader.cancel()); }
 }
@@ -322,20 +372,26 @@ export class ReferenceClient {
   freshSession(): ReferenceClient { return new ReferenceClient(this.channel); }
   async login(credential: string, signal?: AbortSignal): Promise<void> {
     this.#bearer = undefined;
-    const op = new Operation(LIMITS.operationMs, signal);
+    let op: Operation;
+    try { op = new Operation(LIMITS.operationMs, signal); }
+    catch { throw new DiagnosticFailure('challenge', 'schema'); }
+    let stage: 'challenge' | 'authentication' = 'challenge', constraint: FailureConstraint = 'fetch';
     let started = false;
     try {
       op.check(); started = true;
       const challenge: any = await this.channel.challenge(op.controller.signal);
+      constraint = 'schema';
       keys(challenge, ['challenge', 'expires_in']); requireThat(token(challenge.challenge) && challenge.expires_in === 600);
-      op.check();
+      op.check(); stage = 'authentication'; constraint = 'fetch';
       const session: any = await this.channel.control('/v1/sessions', { challenge: challenge.challenge, credential }, undefined, op.controller.signal);
+      constraint = 'schema';
       keys(session, ['token', 'token_type', 'expires_in']);
       requireThat(token(session.token) && session.token_type === 'Bearer' && session.expires_in === 43200);
       op.check(); this.#bearer = session.token;
     } catch (error) {
-      if (started && op.controller.signal.aborted) throw new ChannelError('uncertain');
-      throw error;
+      if (error instanceof DiagnosticFailure || error instanceof CatalogFailure) throw error;
+      if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint, started ? 'uncertain' : 'rejected');
+      throw new DiagnosticFailure(stage, constraint, op.controller.signal.aborted || (error instanceof ChannelError && error.code === 'uncertain') ? 'uncertain' : 'rejected');
     } finally { op.close(); }
   }
   async models(signal?: AbortSignal): Promise<readonly LiveModel[]> {
@@ -343,7 +399,7 @@ export class ReferenceClient {
     try {
       requireThat(this.#bearer); value = await this.channel.models(this.#bearer, signal);
     } catch (error) {
-      if (error instanceof CatalogFailure) throw error;
+      if (error instanceof CatalogFailure || error instanceof DiagnosticFailure) throw error;
       throw new CatalogFailure('request', error instanceof ChannelError ? error.code : 'rejected');
     }
     try { return validateModels(value); }
@@ -355,7 +411,7 @@ export class ReferenceClient {
       requireThat(this.#bearer);
       value = await this.channel.balance(this.#bearer, signal);
     } catch (error) {
-      throw new BalanceFailure('request', error instanceof ChannelError ? error.code : 'rejected');
+      throw new BalanceFailure('request', error instanceof ChannelError ? error.code : 'rejected', error instanceof DiagnosticFailure ? error : undefined);
     }
     try {
       keys(value, ['available_microunits', 'in_flight', 'completed_requests']);
@@ -367,47 +423,78 @@ export class ReferenceClient {
   }
   async chat(model: string, messages: Chat['messages'], onDelta: (text: string) => void, newConversation = false,
     options: ChatOptions = {}): Promise<Receipt> {
-    requireThat(this.#bearer && typeof newConversation === 'boolean' && typeof onDelta === 'function');
-    // Copy option descriptors once. No arbitrary request options / fetch / headers.
-    const opts = fields(options, [], ['signal', 'tools', 'tool_choice', 'onPayload', 'onResponse', 'onEvent']);
-    for (const key of ['onPayload', 'onResponse', 'onEvent']) requireThat(opts[key] === undefined || typeof opts[key] === 'function');
-    const bearer = this.#bearer, op = new Operation(LIMITS.streamMs, opts.signal);
-    let issued = false, consuming = false;
+    let opts: ChatOptions, op: Operation;
+    try {
+      requireThat(this.#bearer && typeof newConversation === 'boolean' && typeof onDelta === 'function');
+      // Copy option descriptors once. No arbitrary request options / fetch / headers.
+      opts = fields(options, [], ['signal', 'tools', 'tool_choice', 'onPayload', 'onResponse', 'onEvent']);
+      for (const key of ['onPayload', 'onResponse', 'onEvent'] as const) requireThat(opts[key] === undefined || typeof opts[key] === 'function');
+      op = new Operation(LIMITS.streamMs, opts.signal);
+    } catch { throw new DiagnosticFailure('request', 'schema'); }
+    const bearer = this.#bearer;
+    let issued = false, hookThrown = false, stage: FailureStage = 'request', constraint: FailureConstraint = 'encoding';
+    let status: number | undefined;
     try {
       op.check();
       let payload = snapshotInvocation({ model, messages, stream: true,
         ...(opts.tools !== undefined ? { tools: opts.tools } : {}), ...(opts.tool_choice !== undefined ? { tool_choice: opts.tool_choice } : {}) });
       if (opts.onPayload) {
-        const replacement = await op.wait(Promise.resolve(opts.onPayload(payload)), LIMITS.streamMs);
+        stage = 'hook'; constraint = 'unexpected';
+        let replacement: unknown;
+        try { replacement = await op.wait(Promise.resolve().then(() => opts.onPayload!(payload)), LIMITS.streamMs); }
+        catch (error) { if (error instanceof OperationFailure) throw error; throw new DiagnosticFailure('hook', 'unexpected'); }
+        stage = 'request'; constraint = 'encoding';
         // Returning undefined keeps the immutable original; replacements are
         // re-admitted with the same model and cannot smuggle transport options.
         payload = snapshotInvocation(replacement === undefined ? payload : replacement);
         requireThat(payload.model === model);
       }
-      op.check();
+      op.check(); stage = 'catalog'; constraint = 'fetch';
       // Refresh, never cache a usable offline catalog or substitute a cheaper model.
       // One invocation uses one in-memory session even if another login overlaps.
-      const entry = validateModels(await this.channel.models(bearer, op.controller.signal)).find(entry => entry.id === model);
+      const catalog = await this.channel.models(bearer, op.controller.signal);
+      constraint = 'schema';
+      const entry = validateModels(catalog).find(entry => entry.id === model);
       requireThat(entry);
       const usesTools = payload.tools !== undefined || payload.messages.some(message => message.role === 'tool' || (message.role === 'assistant' && message.tool_calls !== undefined));
       requireThat(!usesTools || entry.tool_protocol === 'openai-functions-v1');
-      op.check(); issued = true;
+      op.check(); issued = true; stage = 'submission'; constraint = 'fetch';
       const issuance: any = await this.channel.control('/v1/submissions', { model, new_conversation: newConversation }, bearer, op.controller.signal);
+      constraint = 'schema';
       keys(issuance, ['submission']); requireThat(token(issuance.submission));
-      op.check();
+      op.check(); stage = 'transport'; constraint = 'fetch';
       const body = await this.channel.chat({ ...payload, submission: issuance.submission }, bearer,
-        { signal: op.controller.signal, onResponse: opts.onResponse });
+        { signal: op.controller.signal, onResponse: async info => {
+          if (Number.isInteger(info.status) && info.status >= 100 && info.status <= 599) status = info.status;
+          if (!opts.onResponse) return;
+          try { await opts.onResponse(info); }
+          catch { hookThrown = true; throw new DiagnosticFailure('hook', 'unexpected', 'uncertain', status); }
+        } });
       // A forced function constrains generation; 'none' never permits live calls.
       let tools = payload.tool_choice === 'none' ? undefined : payload.tools;
       if (typeof payload.tool_choice === 'object') {
         const name = payload.tool_choice.function.name; tools = tools?.filter(tool => tool.function.name === name);
       }
-      consuming = true;
+      stage = 'stream';
       return await consumeCompletion(body, entry, onDelta, { signal: op.controller.signal, tools, onEvent: opts.onEvent });
     } catch (error) {
-      if (consuming && error instanceof GatewayError) throw error;
+      if (error instanceof GatewayError) {
+        // Preserve the same authenticated refund carrier; copying would lose its evidence.
+        if (status !== undefined) Object.defineProperty(error, 'status', { value: status });
+        throw error;
+      }
+      if (error instanceof CatalogFailure) throw error;
+      if (hookThrown) throw new DiagnosticFailure('hook', 'unexpected', 'uncertain', status);
+      if (error instanceof DiagnosticFailure) {
+        if ((issued && error.code !== 'uncertain') || (error.status === undefined && status !== undefined)) {
+          throw new DiagnosticFailure(error.stage, error.constraint, issued ? 'uncertain' : error.code, error.status ?? status);
+        }
+        throw error;
+      }
       if (!issued && error instanceof JSONDepthError) throw error;
-      throw new ChannelError(issued || (error instanceof ChannelError && error.code === 'uncertain') ? 'uncertain' : 'rejected');
+      if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint, issued ? 'uncertain' : 'rejected');
+      throw new DiagnosticFailure(stage, constraint,
+        issued || (error instanceof ChannelError && error.code === 'uncertain') ? 'uncertain' : 'rejected');
     } finally { op.close(); }
   }
 }
