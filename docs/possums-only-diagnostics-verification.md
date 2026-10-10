@@ -45,6 +45,20 @@ Qualified scratch-only production extension: `/private/tmp/possums-pi-build-cach
 
 SHA-256: `f3ed79084dd2c67bb506403721d01644512ff8e4c4d62df19e39b7fdf8660ccf`.
 
+## PR #51 integration qualification (2026-10-10)
+
+PR #50 integrated current main `e40bad9fc28a9864874176a58f3e9eb7fba0746d` in merge commit `91b63a41d54881e450b816fef138c3b632af7120`, after the PR #51 owner supplied its scoped normal-path rollout acceptance. Independently read back PR #51's merge and protected production run `38092186719`: both preflight and production jobs succeeded at that source. That prerequisite evidence is not approval or serving verification of this changed PR #50 candidate. PR #51's historical v0.0.24 verification record is unchanged.
+
+The two source conflicts preserve PR #51's authenticated `service_quiescing` classification/admission stage/observed HTTP status and PR #50's provider-owned failure/discovery handling and unknown-prior-billing wording. No recovery activation, native retry policy, expiry-renewal eligibility, deployment workflow, gateway source or trust pin changed relative to integrated main. New actual SDK/RPC fixtures cover both quiescing challenge and catalog failures with saved public metadata: selected stale models report the closed admission failure, status performs no work, hostile body text does not escape, and setup failures trigger neither inference nor native retry.
+
+Fresh scratch `/var/folders/5v/1zw417197236y_k11j994g8r0000gn/T/possums-pi-build-rPtJth` built the identical integrated runtime/test bytes with the pinned production toolchain. Full Pi **1.0.4** harness passed: **35** reference, **638** client/transport, **166** release/helper, **39** cross-process cache, all SDK/provider regression groups, **28** actual SDK/RPC discovery groups and **71** admission checks. The release cryptography/public responses remain synthetic as disclosed above. Production extension SHA-256: `988efd995ef2b3902c9c9b0c71c8998ec834c9e6ffefa4029d917da5c5dd512e`.
+
+Scoped Pi **1.1.0** strict compilation, all SDK/provider regression groups and **28** actual SDK/RPC discovery groups also passed using separate scratch runtime peers. Initial scratch setup attempts stopped because the fixture's relative EHBP dependency path was absent, then because a declarations map mixed the 1.0.4 API subpath with 1.1.0 root types; correcting only scratch layout/maps allowed the complete scoped rerun. Production build/runtime pins were not changed. This is not full 1.1.0 qualification.
+
+Bare-checkout LSP still reported missing peer declarations/cascading contextual-type findings. A temporary ignored dependency link did not refresh that push-only server and was removed. Active probes of the dependency-complete scratch reported zero findings but remained inconclusive; strict identical-source compilers are the type-check evidence, not a clean-LSP claim. No source suppressions or weaker types were added.
+
+No live inference, serving probe, production approval/update, local Possums installation or existing-session replay occurred in this integration qualification. Installed/rollback artifacts and earlier installation evidence remain separate; the newly built candidate is not the installed artifact. Exact-head hosted CI and independent source review remain required before merge. Existing hardware/freshness, billing/session/retention and host-presentation unknowns remain.
+
 ## Remaining host and privacy limits
 
 First use/no metadata still reproduces **Model not found**; deleted credentials leave Possums unavailable. No placeholder IDs, fabricated auth or substitute provider/model are introduced. Older installed clients that never wrote native discovery metadata cannot benefit until a successful authenticated refresh/login with this candidate seeds it. Extension-load failure, process loss before reporting, native store failure outside provider callbacks, host-owned startup/selection and actual T3 presentation remain external boundaries.
