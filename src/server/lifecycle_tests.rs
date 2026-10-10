@@ -278,38 +278,84 @@ async fn lost_handler_and_finished_worker_still_wait_for_whole_preflight() {
 
 #[tokio::test]
 async fn health_is_credential_free_unobserved_and_independent_of_control_capacity() {
-    let (state, probe, _) = fixture();
+    let (state, probe, session) = fixture();
+    let metrics = Arc::new(crate::telemetry::AggregateMetrics::new(
+        crate::telemetry::Deployment::IsolatedSynthetic,
+        crate::telemetry::SystemClock::default(),
+    ));
+    // TEST ONLY: bypass the synthetic fixture's warmup, not the production
+    // release gate. These assertions inspect active counts, not exported windows.
+    metrics.prime_synthetic_application_window();
+    let state = state.with_telemetry(Some(metrics.clone()));
+    // Positive control through the same oneshot router: a real application
+    // request must create HTTP observations before absence can be meaningful.
+    let response = router(state.clone())
+        .oneshot(
+            Request::get("/v1/models")
+                .header(header::AUTHORIZATION, format!("Bearer {session}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    let observations = metrics.application_counts();
+    assert_eq!(observations[0], 1); // HTTP start
+    assert_eq!(observations[1], 1); // HTTP terminal
+    assert_eq!(observations[2], 1); // HTTP duration bucket
+    assert_eq!(probe.verify_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.catalog_calls.load(Ordering::SeqCst), 1);
+    let dependency_calls = || {
+        (
+            probe.calls.load(Ordering::SeqCst),
+            probe.verify_calls.load(Ordering::SeqCst),
+            probe.catalog_calls.load(Ordering::SeqCst),
+            probe.tokenize_calls.load(Ordering::SeqCst),
+            probe.document_calls.load(Ordering::SeqCst),
+        )
+    };
+    let dependencies = dependency_calls();
+    let balance = state.accounting.snapshot("demo").unwrap();
+    let auth = state.auth.api_session(&session).unwrap();
     let control = state.control_memory.clone().acquire_owned().await.unwrap();
-    let request = || Request::get("/healthz").body(Body::empty()).unwrap();
-    let response = router(state.clone()).oneshot(request()).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert!(response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes()
-        .is_empty());
-    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(probe.verify_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(probe.catalog_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(probe.tokenize_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(probe.document_calls.load(Ordering::SeqCst), 0);
+    for status in [StatusCode::NO_CONTENT, StatusCode::SERVICE_UNAVAILABLE] {
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            state.lifecycle.quiesce();
+        }
+        for method in [Method::GET, Method::HEAD] {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/healthz")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            assert!(response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty());
+            assert_eq!(metrics.application_counts(), observations);
+            assert_eq!(dependency_calls(), dependencies);
+            assert_eq!(state.accounting.snapshot("demo").unwrap(), balance);
+            let current = state.auth.api_session(&session).unwrap();
+            assert!(
+                current.account_id == auth.account_id
+                    && current.admission_binding == auth.admission_binding
+                    && current.selected_model == auth.selected_model
+                    && current.conversation == auth.conversation
+            );
+        }
+    }
+    // oneshot does not exercise the real network connection lease.
     drop(control);
-    state.lifecycle.quiesce();
-    let response = router(state.clone()).oneshot(request()).await.unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes()
-        .is_empty());
-    assert_eq!(probe.verify_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(probe.catalog_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(probe.tokenize_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(probe.document_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
