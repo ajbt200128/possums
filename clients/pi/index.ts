@@ -69,6 +69,19 @@ export default function possums(pi: ExtensionAPI): void {
       catch { /* Transient UI only. */ }
     },
   });
+  pi.registerCommand('possums-reconcile', {
+    description: 'Start, finish or cancel a private receipt/balance check (no inference)',
+    handler: async (args, ctx) => {
+      if (!ctx.hasUI) return;
+      try {
+        const result = await provider.reconcile(args.trim(), ctx);
+        ctx.ui.notify(result, result.startsWith('Reconciliation unavailable:') || result.startsWith('Reconciliation mismatch:') ? 'warning' : 'info');
+      } catch (error) {
+        try { ctx.ui.notify(provider.reconciliationFailure(error), 'warning'); }
+        catch { /* Transient diagnostics never fall back to logging or inference. */ }
+      }
+    },
+  });
   pi.on('before_agent_start', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) provider.beginRun();
   });

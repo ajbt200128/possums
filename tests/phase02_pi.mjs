@@ -48,7 +48,7 @@ async function terminalGatewayError(code, detail, billing) {
 }
 function freshFixture(candidate) {
  const fresh=new m.ReferenceClient(candidate.channel);
- for(const name of ['login','models','chat'])if(Object.hasOwn(candidate,name))fresh[name]=(...args)=>candidate[name](...args);
+ for(const name of ['login','models','chat','balance'])if(Object.hasOwn(candidate,name))fresh[name]=(...args)=>candidate[name](...args);
  return fresh;
 }
 async function setup(plan, tools = true) {
@@ -58,6 +58,7 @@ async function setup(plan, tools = true) {
   const requests = [];
   let sends = 0; let failModels = false; let abortSeen = false; let release;
   client.login = async () => {};
+  client.balance = async () => ({availableMicrounits:'5000000',inFlight:0,completedRequests:'0'});
   client.models = async () => {
     if (failModels) throw new Error('private diagnostic must not escape');
     return m.validateModels({ object:'list', data:[entry(tools)] });
@@ -124,6 +125,7 @@ async function authFixture(plan = []) {
   const candidate=new m.ReferenceClient(s.client.channel);
   candidate.login=async key=>{trace.keys.push(key);};
   candidate.models=async()=>{trace.models++;return s.client.models();};
+  candidate.balance=(...args)=>s.client.balance(...args);
   candidate.chat=(model,messages,onDelta,newConversation,options)=>{
    trace.conversations.push(newConversation);return s.client.chat(model,messages,onDelta,newConversation,options);
   };
@@ -775,7 +777,7 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  const runtime=await coding.ModelRuntime.create({credentials,modelsStore:new ai.InMemoryModelsStore(),modelsPath:null,allowModelNetwork:false,refreshOnCreate:false});
  const cwd=path.join(root,name);fs.mkdirSync(cwd,{recursive:true});
  const loader=new coding.DefaultResourceLoader({cwd,agentDir:cwd,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,systemPrompt:'Synthetic test',
-  extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[])]});
+  extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;if(name==='possums-reconcile'){const original=command;command={...original,handler:(args,ctx)=>original.handler(args,{...ctx,hasUI:true,ui:{...ctx.ui,notify:text=>notices.push(text)}})};}pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[])]});
  await loader.reload();assert.deepEqual(loader.getExtensions().errors,[]);
  runtime.registerNativeProvider(provider);
  await runtime.refresh({providers:['possums'],allowNetwork:false});
@@ -789,6 +791,65 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
  return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
 }
+function balancePlan(client, snapshots) {
+ let reads=0;client.balance=async()=>{assert(reads<snapshots.length,'unexpected balance read');return snapshots[reads++];};return ()=>reads;
+}
+const balanceSnapshot=(available='5000000',completed='0',inFlight=0)=>({availableMicrounits:available,completedRequests:completed,inFlight});
+const reconciliationContext=s=>({isIdle:()=>true,signal:new AbortController().signal,
+ modelRegistry:{getProviderAuth:()=>s.provider.auth.apiKey.resolve(authInput(s.credential))}});
+await check('actual Pi reconciliation commands compare exact receipts and balance without inference or persistent reports',async()=>{
+ for(const [name,plan,tools,completed] of [['tools',['tool_calls','stop'],true,'2'],['refund-retry',['refund','stop'],false,'2']]) {
+  const f=await sdkSetup('sdk-reconcile-'+name,plan,tools);const charged=tools?'14':'7';
+  const reads=balancePlan(f.s.client,[balanceSnapshot(),balanceSnapshot((5000000n-BigInt(charged)).toString(),completed)]);
+  try {
+   await f.session.prompt('/possums-reconcile start');assert.equal(f.s.sends(),0);assert.equal(f.session.messages.length,0);assert.equal(reads(),1);
+   assert.match(f.notices.at(-1),/Reconciliation started/);
+   await f.session.prompt('Synthetic accounting task');const before=f.session.messages.length;
+   await f.session.prompt('/possums-reconcile finish');assert.equal(f.s.sends(),2);assert.equal(reads(),2);assert.equal(f.session.messages.length,before);
+   assert.match(f.notices.at(-1),new RegExp('Reconciliation matched: balance debit \\$0\\.0000'+(tools?'14':'07')));
+   assert.equal(f.session.sessionManager.getSessionFile(),undefined);
+   assert(!JSON.stringify(f.session.sessionManager.getEntries()).includes('Reconciliation matched'));
+  } finally {f.session.dispose();}
+ }
+});
+await check('reconciliation keeps u64 precision, detects unrelated activity, unknown charges and mismatches',async()=>{
+ const cases=[
+  {name:'wide',before:balanceSnapshot('18446744073709551615','9007199254740993'),after:balanceSnapshot('18446744073709551608','9007199254740994'),plan:['stop'],expected:/Reconciliation matched/},
+  {name:'outside',after:balanceSnapshot('4999993','2'),plan:['stop'],expected:/Reconciliation unavailable/},
+  {name:'unknown',after:balanceSnapshot('4999993','2'),plan:['unknown_bill','stop'],expected:/Reconciliation unavailable/},
+  {name:'reset',before:balanceSnapshot('5000000','10'),after:balanceSnapshot('4999993','0'),plan:['stop'],expected:/Reconciliation unavailable/},
+  {name:'mismatch',after:balanceSnapshot('4999994','1'),plan:['stop'],expected:/Reconciliation mismatch/},
+ ];
+ for(const c of cases) {
+  const s=await setup(c.plan);balancePlan(s.client,[c.before??balanceSnapshot(),c.after]);const ctx=reconciliationContext(s);
+  await s.provider.reconcile('start',ctx);s.provider.beginRun();for(const _ of c.plan)await drain(s.provider.streamSimple(s.selected,context(false)));
+  assert.match(await s.provider.reconcile('finish',ctx),c.expected);
+ }
+});
+await check('reconciliation pending, busy, cancel, session replacement and failed reads never infer or claim a match',async()=>{
+ const s=await setup(['stop']);const ctx=reconciliationContext(s);let reads=balancePlan(s.client,[balanceSnapshot('5000000','0',1)]);
+ await assert.rejects(()=>s.provider.reconcile('start',{...ctx,isIdle:()=>false}),/possums_reconcile_busy/);assert.equal(reads(),0);
+ await assert.rejects(()=>s.provider.reconcile('start',ctx),/possums_reconcile_pending/);assert.equal(reads(),1);assert.equal(s.sends(),0);
+ reads=balancePlan(s.client,[balanceSnapshot(),balanceSnapshot('4999948','0',1),balanceSnapshot('4999993','1')]);
+ await s.provider.reconcile('start',ctx);await assert.rejects(()=>s.provider.reconcile('start',ctx),/possums_reconcile_started/);assert.equal(reads(),1);
+ await assert.rejects(()=>s.provider.reconcile('finish',ctx),/possums_reconcile_pending/);assert.equal(reads(),2);
+ s.provider.beginRun();await drain(s.provider.streamSimple(s.selected,context(false)));assert.match(await s.provider.reconcile('finish',ctx),/Reconciliation matched/);
+ balancePlan(s.client,[balanceSnapshot()]);await s.provider.reconcile('start',ctx);assert.match(await s.provider.reconcile('cancel',ctx),/discarded/);
+ await assert.rejects(()=>s.provider.reconcile('finish',ctx),/possums_reconcile_not_started/);
+ balancePlan(s.client,[balanceSnapshot()]);await s.provider.reconcile('start',ctx);s.provider.newSession();
+ await assert.rejects(()=>s.provider.reconcile('finish',ctx),/possums_reconcile_not_started/);
+ assert.equal(s.sends(),1);
+ const race=await setup([]),entered=deferred(),gate=deferred(),raceCtx=reconciliationContext(race);
+ race.client.balance=async()=>{entered.resolve();await gate.promise;return balanceSnapshot();};
+ const pending=race.provider.reconcile('start',raceCtx);await entered.promise;
+ await race.provider.reconcile('cancel',raceCtx);gate.resolve();
+ await assert.rejects(()=>pending,/possums_reconcile_scope_changed/);
+ await assert.rejects(()=>race.provider.reconcile('finish',raceCtx),/possums_reconcile_not_started/);assert.equal(race.sends(),0);
+ const f=await sdkSetup('sdk-reconcile-hostile',[],false);
+ f.s.client.balance=async()=>{throw new m.BalanceFailure('request');};
+ try {await f.session.prompt('/possums-reconcile start');assert.equal(f.s.sends(),0);assert.equal(f.session.messages.length,0);assert.match(f.notices.at(-1),/possums_balance_request_failed/);}
+ finally {f.session.dispose();}
+});
 await check('trust starts closed, caches failed verification and never refreshes on login/logout/catalog within a session',async()=>{
  const fixture=await authFixture([]);let fail=true,checks=0,prompts=0;
  const provider=new bundle.PossumsProvider(async()=>{checks++;if(fail)throw new m.ConnectionFailure('verification_failed');return fixture.establish();});
@@ -1080,6 +1141,12 @@ async function compactionFixture(plan, split = false, previous = false) {
  const event={type:'session_before_compact',preparation,branchEntries:manager.getBranch(),reason:'manual',willRetry:false,signal:controller.signal,customInstructions:'Synthetic focus'};
  return {...fixture,...extension,runtime,manager,event,ctx,controller,notices,run:()=>extension.handlers.get('session_before_compact')(event,ctx)};
 }
+await check('reconciliation includes paid native compaction summaries without reading or persisting summary content',async()=>{
+ const f=await compactionFixture(['stop','stop'],true);const ctx={...f.ctx,isIdle:()=>true,signal:f.controller.signal};
+ balancePlan(f.s.client,[balanceSnapshot(),balanceSnapshot('4999986','2')]);
+ await f.provider.reconcile('start',ctx);const result=await f.run();assert(result.compaction);
+ assert.match(await f.provider.reconcile('finish',ctx),/Reconciliation matched: balance debit \$0\.000014/);assert.equal(f.s.sends(),2);
+});
 await check('native one/two-summary prompts, previous checkpoint, files, advisory hints and combined usage',async()=>{
  for(const split of [false,true]) {
   const f=await compactionFixture(['stop','stop'],split,true),nativeRequests=[],hints=[];

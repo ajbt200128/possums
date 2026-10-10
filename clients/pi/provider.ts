@@ -8,7 +8,7 @@ import {
   type TranscriptContext, type ToolCall,
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
-import { ReferenceClient, CatalogFailure, GatewayError, gatewayDetailLabel, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
+import { ReferenceClient, BalanceFailure, CatalogFailure, GatewayError, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
 import { ChannelError, JSONDepthError, LIMITS, Operation } from '../../examples/phase01/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure } from './diagnostics.js';
 import { invocation } from './wire.js';
@@ -52,6 +52,13 @@ function blank(selected: Model<typeof API>): AssistantMessage {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 }
 const localFailures: Readonly<Record<string, string>> = Object.freeze({
+  possums_balance_request_failed: 'Balance read failed. This command sent no inference; prior charges are unchanged or unknown.',
+  possums_balance_validation_failed: 'Balance response failed validation. This command sent no inference; prior charges are unchanged or unknown.',
+  possums_reconcile_busy: 'Wait until Pi finishes its run, retries and compaction before taking a snapshot.',
+  possums_reconcile_pending: 'Account has unfinished reservations. Wait for them to finish before taking a snapshot.',
+  possums_reconcile_started: 'Reconciliation already started. Use finish or cancel first.',
+  possums_reconcile_not_started: 'No reconciliation window. Use /possums-reconcile start first.',
+  possums_reconcile_scope_changed: 'Session or account changed. Start a fresh reconciliation window.',
   possums_compaction_failed: 'Native summary unavailable.',
   possums_summary_empty: 'Summary was empty.',
   possums_summary_tools: 'Summary attempted tool use; no tool executed.',
@@ -127,6 +134,8 @@ export class PossumsProvider implements Provider {
   private trustController = new AbortController();
   private trustEpoch = 0;
   private sessionClosed = true;
+  private reconciliation: { before: BalanceSnapshot; charged: bigint; completed: bigint; unknown: boolean } | undefined;
+  private reconciliationEpoch = 0;
 
   constructor(
     private readonly establish: (signal: AbortSignal) => Promise<ReferenceClient>,
@@ -281,6 +290,78 @@ export class PossumsProvider implements Provider {
     this.client = undefined; this.catalog = []; this.listed = [];
     this.recoveryKey = undefined; this.restoring = undefined;
     this.newConversation = true;
+    this.reconciliationEpoch++;
+    this.reconciliation = undefined;
+  }
+
+  private async balance(ctx: ExtensionContext): Promise<BalanceSnapshot> {
+    const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_ID);
+    const epoch = this.authEpoch;
+    if (auth?.auth.apiKey !== REQUEST_AUTH || !this.client) {
+      throw new Error('possums_reconcile_scope_changed');
+    }
+    const client = this.client;
+    try {
+      const snapshot = await client.balance(ctx.signal);
+      if (epoch !== this.authEpoch || client !== this.client || ctx.signal?.aborted) {
+        throw new Error('possums_reconcile_scope_changed');
+      }
+      return snapshot;
+    } catch (error) {
+      if (error instanceof BalanceFailure) throw new Error(error.message);
+      throw error;
+    }
+  }
+
+  async reconcile(action: string, ctx: ExtensionContext): Promise<string> {
+    if (action === 'cancel') {
+      this.reconciliationEpoch++;
+      this.reconciliation = undefined;
+      return 'Reconciliation window discarded. No inference or accounting change.';
+    }
+    if (action !== 'start' && action !== 'finish') return 'Use /possums-reconcile start, finish or cancel. These commands do not initiate inference.';
+    if (!ctx.isIdle()) throw new Error('possums_reconcile_busy');
+    const window = this.reconciliation;
+    const epoch = this.reconciliationEpoch;
+    if (action === 'start' && window) throw new Error('possums_reconcile_started');
+    if (action === 'finish' && !window) throw new Error('possums_reconcile_not_started');
+    const snapshot = await this.balance(ctx);
+    if (!ctx.isIdle()) throw new Error('possums_reconcile_busy');
+    if (snapshot.inFlight !== 0) throw new Error('possums_reconcile_pending');
+    if (epoch !== this.reconciliationEpoch || window !== this.reconciliation) throw new Error('possums_reconcile_scope_changed');
+    if (action === 'start') {
+      this.reconciliation = { before: snapshot, charged: 0n, completed: 0n, unknown: false };
+      return `Reconciliation started. Available demo credit: $${dollars(snapshot.availableMicrounits)}. Run your chosen Possums task, then /possums-reconcile finish. New inference, retries and compaction may charge credit.`;
+    }
+    if (!window) throw new Error('possums_reconcile_not_started');
+    this.reconciliation = undefined;
+    const completed = BigInt(snapshot.completedRequests) - BigInt(window.before.completedRequests);
+    if (window.unknown || completed !== window.completed) {
+      return 'Reconciliation unavailable: an outcome is unknown, accounting changed outside the observed window, or the ledger reset. No confirmed match or refund is inferred.';
+    }
+    const debit = BigInt(window.before.availableMicrounits) - BigInt(snapshot.availableMicrounits);
+    if (debit !== window.charged) return 'Reconciliation mismatch: balance change differs from authenticated receipt charges. No refund or upstream-invoice agreement is inferred.';
+    return `Reconciliation matched: balance debit $${dollars(window.charged.toString())} equals authenticated receipt charges across ${completed} completed requests (including confirmed refunds). Available demo credit: $${dollars(snapshot.availableMicrounits)}. This does not verify upstream invoices.`;
+  }
+
+  reconciliationFailure(error: unknown): string { return safeFailure(error); }
+
+  private observeReconciliation(output: AssistantMessage): void {
+    const window = this.reconciliation;
+    if (!window) return;
+    const receipts = output.diagnostics?.filter(diagnostic => diagnostic.type === 'possums_settled_receipt') ?? [];
+    const refunds = output.diagnostics?.filter(diagnostic => diagnostic.type === 'possums_reservation_refunded') ?? [];
+    if (receipts.length === 1 && refunds.length === 0) {
+      const charged = receipts[0].details?.chargedMicrounits;
+      if (typeof charged !== 'string' || !/^(0|[1-9][0-9]{0,19})$/.test(charged)) { window.unknown = true; return; }
+      window.charged += BigInt(charged);
+      window.completed++;
+    } else if (refunds.length === 1 && receipts.length === 0) {
+      window.completed++;
+    } else if (receipts.length || refunds.length || output.stopReason === 'error' || output.stopReason === 'aborted') {
+      window.unknown = true;
+    }
+    if (output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_billing_unknown')) window.unknown = true;
   }
 
   async refreshModels(context: Parameters<NonNullable<Provider['refreshModels']>>[0]): Promise<void> {
@@ -397,6 +478,7 @@ export class PossumsProvider implements Provider {
     const events = createAssistantMessageEventStream();
     const output = blank(selected);
     const epoch = this.epoch;
+    const reconciliation = this.reconciliation;
     const args = new Map<number, { block: ToolCall; contentIndex: number; json: string }>();
     let started = false;
     let textIndex: number | undefined;
@@ -513,7 +595,10 @@ export class PossumsProvider implements Provider {
           'Possums: interrupted; charge unknown. Not replayed. A new request may incur another charge.' :
           safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted);
         events.push({ type: 'error', reason: output.stopReason, error: output });
-      } finally { events.end(); }
+      } finally {
+        if (reconciliation && reconciliation === this.reconciliation) this.observeReconciliation(output);
+        events.end();
+      }
     })();
     return events;
   }

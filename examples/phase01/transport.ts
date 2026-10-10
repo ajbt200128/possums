@@ -4,12 +4,12 @@ import { WEB_APPROVAL, PUBLISHER, qualifyWeb, qualifyApi, qualifyPublished, requ
 import { LIMITS, ChannelError, Operation, base64, boundedReport, cleanup, collect, hex, parseJSON, requireThat, serialize } from './limits.js';
 import { admitInvocation, fields, type Chat } from './tools.js';
 export type { Chat, Invocation, Message, Tool, ToolChoice, ToolCall, JSONObject, JSONValue } from './tools.js';
-export type { LiveModel, Receipt, CompletionOptions, CompletionEvent, ChatOptions } from './client.js';
+export type { LiveModel, Receipt, BalanceSnapshot, CompletionOptions, CompletionEvent, ChatOptions } from './client.js';
 export type ResponseInfo = Readonly<{ status: number; contentType: 'text/event-stream' | 'application/json' | null }>;
 export type ResponseOptions = { signal?: AbortSignal; onResponse?: (response: ResponseInfo) => void | Promise<void> };
 export { WEB_APPROVAL, API_APPROVALS, qualifyWeb, validateKeyConfig, checkApproval } from './approval.js';
 export { LIMITS, serialize, parseJSON } from './limits.js';
-export { ReferenceClient, consumeCompletion, validateModels } from './client.js';
+export { ReferenceClient, BalanceFailure, consumeCompletion, validateModels } from './client.js';
 declare const __PHASE01_FIXTURE__: boolean;
 
 const publicPaths = ['/.well-known/tinfoil-attestation', '/.well-known/tinfoil-certificate', '/.well-known/hpke-keys'] as const;
@@ -238,6 +238,15 @@ export class Channel {
       requireThat(typeof admitted.credential === 'string' && typeof admitted.challenge === 'string' && /^[A-Za-z0-9_-]{32,512}$/.test(admitted.credential) && /^[A-Za-z0-9_-]{32,512}$/.test(admitted.challenge) && bearer === undefined);
     } else { requireThat(typeof admitted.model === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(admitted.model) && typeof admitted.new_conversation === 'boolean' && bearer !== undefined); }
     const body = await this.#encrypted(path, serialize(admitted, LIMITS.control), bearer, { signal });
+    const op = new Operation(LIMITS.operationMs, signal);
+    try { return parseJSON(await collect(body, LIMITS.control, op), LIMITS.control); }
+    catch { throw new ChannelError('uncertain'); } finally { op.close(); }
+  }
+  async balance(bearer: string, signal?: AbortSignal): Promise<unknown> {
+    // Reject missing/invalid authority before asking EHBP to encrypt anything.
+    requireThat(typeof bearer === 'string' && /^[A-Za-z0-9_-]{43}$/.test(bearer));
+    const body = await this.#encrypted('/v1/balance', serialize({}, LIMITS.control), bearer,
+      { signal, onResponse: response => { requireThat(response.status === 200); } });
     const op = new Operation(LIMITS.operationMs, signal);
     try { return parseJSON(await collect(body, LIMITS.control, op), LIMITS.control); }
     catch { throw new ChannelError('uncertain'); } finally { op.close(); }

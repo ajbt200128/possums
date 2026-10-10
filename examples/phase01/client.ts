@@ -26,6 +26,14 @@ export type LiveModel = { object: 'model'; id: string; context_tokens: string; m
 export type Receipt = { finish: 'stop' | 'length' | 'tool_calls'; inputTokens: number; outputTokens: number; totalTokens: number;
   chargedMicrounits: string; refundedMicrounits: string;
   quotedInputMicrounitsPerMillion?: string; quotedOutputMicrounitsPerMillion?: string };
+export type BalanceSnapshot = Readonly<{ availableMicrounits: string; inFlight: number; completedRequests: string }>;
+export class BalanceFailure extends ChannelError {
+  constructor(readonly stage: 'request' | 'validation', code: ChannelError['code'] = 'rejected') {
+    super(code);
+    this.message = `possums_balance_${stage}_failed`;
+    Object.freeze(this);
+  }
+}
 const token = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
 function keys(value: any, names: readonly string[]): void {
   requireThat(value && typeof value === 'object' && !Array.isArray(value));
@@ -340,6 +348,22 @@ export class ReferenceClient {
     }
     try { return validateModels(value); }
     catch { throw new CatalogFailure('validation'); }
+  }
+  async balance(signal?: AbortSignal): Promise<BalanceSnapshot> {
+    let value: any;
+    try {
+      requireThat(this.#bearer);
+      value = await this.channel.balance(this.#bearer, signal);
+    } catch (error) {
+      throw new BalanceFailure('request', error instanceof ChannelError ? error.code : 'rejected');
+    }
+    try {
+      keys(value, ['available_microunits', 'in_flight', 'completed_requests']);
+      amount(value.available_microunits); amount(value.completed_requests);
+      requireThat(Number.isInteger(value.in_flight) && !Object.is(value.in_flight, -0) && value.in_flight >= 0 && value.in_flight <= 0xffffffff);
+      return Object.freeze({ availableMicrounits: value.available_microunits,
+        inFlight: value.in_flight, completedRequests: value.completed_requests });
+    } catch { throw new BalanceFailure('validation'); }
   }
   async chat(model: string, messages: Chat['messages'], onDelta: (text: string) => void, newConversation = false,
     options: ChatOptions = {}): Promise<Receipt> {

@@ -8,6 +8,10 @@ Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILE
 
 The operator-approved client-only relaxation and its local qualification status are recorded in [Pi steering/retry verification](pi-steering-retry-verification.md). It does not change gateway idempotency/settlement, establish live balance reconciliation, or update historical no-replay evidence. Installation and live qualification remain separate.
 
+## Private receipt/balance reconciliation source candidate
+
+The operator-approved authenticated balance read and explicit Pi reconciliation-window scope are recorded in [reconciliation verification](pi-reconciliation-verification.md). This candidate requires a newly measured gateway release and paired client rollout. Local tests do not reconcile historical live receipts or establish upstream-invoice agreement. Account balance/count snapshots remain first-party accounting, never telemetry.
+
 ## Evidence checklist
 
 | Claim | Status | Required evidence |
