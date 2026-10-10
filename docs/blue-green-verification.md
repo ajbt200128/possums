@@ -63,6 +63,8 @@ Only the exact bounded envelope at the qualified response boundary acquires the 
 
 Parent reran the seven offline planner tests and base-to-head whitespace checks. Final local acceptance covers implemented A–D and these closed client diagnostics, **not conditional recovery E or deployment**. No merge, publication, installation, platform mutation, image healthcheck activation or live inference occurred. The final runbook distinguishes accepted local source/binary evidence from remaining generated-image, public-candidate-verifier, platform retention, overlapping accounting and discovery-ordering gates.
 
+Final read-only repository checks found `main` had advanced to `a487d203` (approved-main release work) while this packet ran. The reviews and tests above apply to this feature's `ca24b869` base, not integration with that newer main. No rebase or merge of the advanced main was performed; qualification against it is a prerequisite for a later merge/release, not an implied pass.
+
 [Pi permission qualification](blue-green-pi-qualification.md) passed 111/111 offline groups and independently confirmed native/nested ambiguity at the tested boundary. Recovery E remains disabled; the existing expiry-permission limitation was documented, not silently repaired. These tests are not live billing, runtime attestation, generated-image or platform qualification. Successful local drain covers tracked envelopes and accounting, not all Hyper-owned upload buffers, delivery, preserved sessions or balances.
 
 ## Release decision
