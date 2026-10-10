@@ -27,8 +27,8 @@ The complete scratch local-check command passed:
 - 31 reference-client checks.
 - 382 client/admission checks, with offline fetch fixtures only.
 - 98 synthetic/local release-policy checks. These mock hardware/crypto/public responses as declared; they are not production attestation verification.
-- 71 actual pinned-Pi/provider checks, including native steering during held text/tool responses, queued follow-up, refunded/unknown transient retry then success, exact default three-retry exhaustion, 2/4/8-second default delay calculation, budget reset after success, abort during backoff, retained raw diagnostics/native context omission, and no execution of incomplete tool fragments from a failed attempt.
-- Shared admission regressions: 65,540 wide properties, with zero whole-object collections, stringify/encryption/network on rejection, or getter calls in the reported vectors.
+- 66 actual pinned-Pi/provider checks (counted from their `results.json`; the separately reported 71 belongs to shared admission regressions), including native steering during held text/tool responses, queued follow-up, refunded/unknown transient retry then success, exact default three-retry exhaustion, 2/4/8-second default delay calculation, budget reset after success, abort during backoff, retained raw diagnostics/native context omission, and no execution of incomplete tool fragments from a failed attempt.
+- 71 shared admission regressions: 65,540 wide properties, with zero whole-object collections, stringify/encryption/network on rejection, or getter calls in the reported vectors.
 
 Negative checks retain terminal auth/credit/request/integrity/decoding/settlement/paid-length outcomes and hostile-content privacy. Existing compaction, cache-warming, session verification, logout/replacement and receipt gating checks passed. Synthetic native retries use millisecond fixture delays; production defaults are verified from the pinned SDK, not measured with a live provider.
 
