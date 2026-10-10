@@ -108,6 +108,31 @@ export async function diagnosticChecks(m, check) {
       await assert.rejects(client.login(token), error => error instanceof m.DiagnosticFailure && error.stage === 'authentication' && error.status === 401);
     } finally { globalThis.fetch = originalFetch; }
   });
+  await check('quiescing wire shape is exact, not a refund, and stream errors need HTTP admission evidence', async () => {
+    const wire = { error: { code: 'service_quiescing', stage: 'admission', constraint: 'service_quiescing',
+      billing: 'not_submitted', message: secret } };
+    const observation = new m.CatalogFailure('http', 'rejected', 503, wire);
+    assert.equal(observation.reason, 'service_quiescing'); assert.equal(observation.status, 503);
+    assert.equal(observation.detail, undefined); assert.equal(observation.billing, undefined);
+    assert(!JSON.stringify(observation).includes(secret));
+    for (const altered of [
+      { ...wire, error: { ...wire.error, stage: 'stream' } },
+      { ...wire, error: { ...wire.error, constraint: 'unknown' } },
+      { ...wire, error: { ...wire.error, billing: 'refunded' } },
+      { ...wire, error: { ...wire.error, detail: secret } },
+      { ...wire, error: { ...wire.error, message: null } },
+    ]) assert.equal(new m.CatalogFailure('http', 'rejected', 503, altered).reason, undefined);
+    assert.equal(new m.CatalogFailure('http', 'rejected', 502, wire).reason, undefined);
+    const fabricated = new m.GatewayError('service_quiescing', undefined, 'refunded', 503);
+    assert.equal(fabricated.billing, 'unknown'); assert(!fabricated.message.includes('Reservation refunded'));
+    await rejected([JSON.stringify(wire)], 'stream', 'json');
+    await rejected([frame(wire)], 'stream', 'schema');
+    await assert.rejects(m.consumeCompletion(stream([JSON.stringify(wire)], true), 'synthetic', () => {}, {}, 503), error =>
+      !(error instanceof m.GatewayError) && error.billing !== 'refunded' && !String(error).includes(secret));
+    for (const status of [undefined, 200, 502, 503])
+      await assert.rejects(m.consumeCompletion(stream([JSON.stringify(wire)]), 'synthetic', () => {}, {}, status), error =>
+        error instanceof m.DiagnosticFailure && error.billing !== 'refunded' && !String(error).includes(secret));
+  });
   await check('gateway status is bounded to an observed HTTP status', async () => {
     assert.equal(new m.GatewayError('unavailable', undefined, 'unknown', 503).status, 503);
     for (const status of [0, 600, 503.5, Number.NaN, secret])

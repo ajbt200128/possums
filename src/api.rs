@@ -68,6 +68,21 @@ pub(crate) fn error(status: StatusCode) -> Response {
     response
 }
 
+pub(crate) fn quiescing() -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({"error": {
+            "code": "service_quiescing",
+            "stage": "admission",
+            "constraint": "service_quiescing",
+            "billing": "not_submitted",
+            "message": "Service is shutting down; this request was not submitted and no prompt was sent. Submit deliberately after service is available."
+        }})),
+    ).into_response();
+    response.extensions_mut().insert(SafeError);
+    response
+}
+
 fn reject(observation: &RequestContext, status: StatusCode, reason: MetricRejection) -> Response {
     observation.reject(AdmissionModel::Unknown, reason);
     error(status)
@@ -483,6 +498,7 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 
 async fn chat(
     State(state): State<AppState>,
+    Extension(ticket): Extension<crate::lifecycle::Ticket>,
     Extension(heavy): Extension<Arc<crate::telemetry::hooks::Lease>>,
     Extension(observation): Extension<RequestContext>,
     headers: HeaderMap,
@@ -529,6 +545,7 @@ async fn chat(
             .generation()
             .observed(observation.clone())
             .submit_structured(
+                ticket,
                 submission,
                 StructuredGenerationInput {
                     model: input.model,
@@ -565,6 +582,7 @@ async fn chat(
             .generation()
             .observed(observation.clone())
             .submit(
+                ticket,
                 submission,
                 GenerationInput {
                     model: input.model,

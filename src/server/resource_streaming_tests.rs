@@ -245,7 +245,7 @@ impl Pause {
 #[derive(Default)]
 pub(crate) struct PreflightHooks {
     before: std::sync::Mutex<Option<Pause>>,
-    after: std::sync::Mutex<Option<Pause>>,
+    pub(super) after: std::sync::Mutex<Option<Pause>>,
     pub(crate) resources: Arc<ResourceHooks>,
 }
 

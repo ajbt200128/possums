@@ -32,6 +32,40 @@ impl Clock for FakeClock {
         })
     }
 }
+// Router tests use the application's concrete SystemClock metrics type. Prime
+// only their isolated synthetic fixture past warmup; this does not qualify a
+// complete window for release or change the production eligibility gate.
+impl AggregateMetrics<SystemClock> {
+    pub(crate) fn prime_synthetic_application_window(&self) {
+        assert_eq!(self.epoch.load(Ordering::SeqCst) % 2, 1);
+        let mut state = self.state.lock().unwrap();
+        assert!(state.anchor.is_some());
+        assert_eq!(state.requests.active.ticks, 0);
+        state.requests.eligible = state.requests.start;
+    }
+
+    // HTTP starts/completions/durations/dispositions, generation starts/
+    // completions/durations/first output, delivery, then rejections. Excludes
+    // connection-level occupancy, which router oneshot cannot exercise.
+    pub(crate) fn application_counts(&self) -> [u64; 10] {
+        let state = self.state.lock().unwrap();
+        let table = &state.requests.active;
+        let sum = |cells: &[u64]| cells.iter().sum();
+        [
+            sum(&table.http_starts),
+            sum(&table.http_completed),
+            table.http_duration.iter().map(|h| sum(&h.0)).sum(),
+            table.dispositions.iter().map(|d| sum(d)).sum(),
+            sum(&table.generation_starts),
+            sum(&table.generation_completed),
+            table.generation_duration.iter().map(|h| sum(&h.0)).sum(),
+            table.first_output.iter().map(|h| sum(&h.0)).sum(),
+            sum(&table.delivery),
+            sum(&table.rejected),
+        ]
+    }
+}
+
 pub(super) type Metrics = AggregateMetrics<FakeClock>;
 pub(super) fn new() -> Metrics {
     Metrics::new(Deployment::IsolatedSynthetic, FakeClock::new(0))
