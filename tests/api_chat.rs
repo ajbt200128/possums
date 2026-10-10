@@ -16,7 +16,7 @@ use possums::{
         tools::{CompletionDelta, ToolInvocation, ToolProfile},
         Inference, InferenceError, InferenceFailure, Message,
     },
-    web::{router, AppState, BODY_LIMIT},
+    server::{router, AppState, BODY_LIMIT},
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -50,6 +50,7 @@ struct Provider {
     hold_tokenizer: AtomicBool,
     tokenizer_error: AtomicBool,
     invalid_receipt: AtomicBool,
+    panic_generation: AtomicBool,
     tokenizer_started: Notify,
     tokenizer_release: Notify,
     started: Notify,
@@ -109,6 +110,9 @@ impl Inference for Provider {
         on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<StreamCompletion, InferenceError> {
         self.generation_calls.fetch_add(1, Ordering::SeqCst);
+        if self.panic_generation.load(Ordering::SeqCst) {
+            panic!("synthetic generation panic; no request content");
+        }
         self.output_allowance
             .store(model.max_output_tokens, Ordering::SeqCst);
         let mut parser = ProtocolParser::default();
@@ -296,6 +300,7 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         hold_tokenizer: false.into(),
         tokenizer_error: false.into(),
         invalid_receipt: false.into(),
+        panic_generation: false.into(),
         tokenizer_started: Notify::new(),
         tokenizer_release: Notify::new(),
         started: Notify::new(),
@@ -419,6 +424,33 @@ async fn progressive_stream_preserves_finish_and_settles_before_success_markers_
         })
     );
     assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn disconnect_near_authenticated_eof_keeps_single_settlement() {
+    let (state, provider, bearer, submission) = fixture(5_000_000);
+    let response = send(&state, &bearer, &submission).await;
+    wait(&provider.started).await;
+    let completed = provider.completed.notified();
+    provider.finish.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), completed)
+        .await
+        .unwrap();
+    drop(response);
+    terminal(&state, 5_000_000 - 7).await;
+    duplicate(&state, &bearer, &submission, "settled").await;
+    assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn detached_generation_panic_refunds_once_without_replay() {
+    let (state, provider, bearer, submission) = fixture(5_000_000);
+    provider.panic_generation.store(true, Ordering::SeqCst);
+    let response = send(&state, &bearer, &submission).await;
+    drop(response);
+    terminal(&state, 5_000_000).await;
+    duplicate(&state, &bearer, &submission, "refunded").await;
     assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
 }
 
@@ -650,6 +682,33 @@ async fn large_synthetic_history_and_catalog_reach_upstream_within_body_bound() 
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(bytes.ends_with(b"data: [DONE]\n\n"));
     terminal(&state, 5_000_000 - 7).await;
+}
+
+#[tokio::test]
+async fn near_eight_mib_api_history_is_not_product_capped_or_replayed() {
+    let (state, provider, bearer, submission) = fixture(5_000_000);
+    let mut input = json!({"model":"m","stream":true,"stream_options":{"include_usage":true},
+        "submission": submission, "messages":[{"role":"user","content":""}]});
+    input["messages"][0]["content"] = json!("x".repeat(BODY_LIMIT - 512));
+    let wire = input.to_string();
+    assert!(wire.len() < BODY_LIMIT && wire.len() > BODY_LIMIT - 1024);
+    let response = router(state.clone())
+        .oneshot(
+            Request::post("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(wire))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    wait(&provider.started).await;
+    drop(response);
+    provider.finish.notify_one();
+    terminal(&state, 5_000_000 - 7).await;
+    duplicate(&state, &bearer, &submission, "settled").await;
+    assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

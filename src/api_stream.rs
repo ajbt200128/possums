@@ -12,7 +12,7 @@ use crate::{
     stream_owner::{delivery, DeliveryBody, DeliveryTx, Limits},
 };
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 const CHUNK_BYTES: usize = 8 * 1024;
 
@@ -74,10 +74,8 @@ fn compose_core(
             payload_bytes: 64 * 1024,
             chunk_bytes: CHUNK_BYTES as u32,
         },
-        Duration::from_secs(30),
     );
     let body = body.observed(owner.delivery_observation());
-    let tx = tx.into_streaming();
     let observer = owner.spawn_settling(tx, move |tx, mut settlement| async move {
         let mut output = Output {
             tx,

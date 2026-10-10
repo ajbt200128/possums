@@ -88,16 +88,14 @@ impl Fixture {
     }
 
     fn delivery(&self) -> (DeliveryTx, DeliveryBody) {
-        let (startup, body) = delivery(
+        delivery(
             Lease::from(self.lanes.clone().try_acquire_owned().unwrap()),
             Limits {
                 frames: 1,
                 payload_bytes: 8,
                 chunk_bytes: 8,
             },
-            Duration::from_secs(1),
-        );
-        (startup.into_streaming(), body)
+        )
     }
 
     fn outcome(&self, id: u8, outcome: Outcome, balance: u64) {
@@ -199,26 +197,13 @@ fn generation_tracking_retires_before_memory_handoff_in_both_owner_envelopes() {
 }
 
 #[tokio::test]
-async fn settling_handoff_accepts_owned_startup_before_any_blocking_write() {
+async fn settling_handoff_delivers_before_terminal_settlement() {
     let f = Fixture::new();
     let pending = f.pending(1);
-    let (startup, mut body) = delivery(
-        Lease::from(f.lanes.clone().try_acquire_owned().unwrap()),
-        Limits {
-            frames: 1,
-            payload_bytes: 8,
-            chunk_bytes: 8,
-        },
-        Duration::from_secs(1),
-    );
+    let (tx, mut body) = f.delivery();
     let (finish_tx, finish) = oneshot::channel();
-    let completion = pending.spawn_settling(startup, move |mut startup, settlement| async move {
-        let _delivery = tokio::task::spawn_blocking(move || {
-            startup.send_blocking(b"startup").unwrap();
-            startup.into_streaming()
-        })
-        .await
-        .unwrap();
+    let completion = pending.spawn_settling(tx, move |mut tx, settlement| async move {
+        tx.try_send(b"startup").unwrap();
         finish.await.unwrap();
         settlement.finish(&Ok(usage()))
     });
@@ -246,18 +231,17 @@ async fn shared_heavy_admission_returns_only_after_worker_body_and_slices_releas
         let generation = f.generations.clone().try_acquire_owned().unwrap();
         assert_eq!(f.reserve(ACCOUNT, 1).unwrap(), ReserveResult::Reserved);
         let pending = ReservedGeneration::new(f.ledger.clone(), [1; 32], generation, heavy.clone());
-        let (startup, mut body) = delivery(
+        let (tx, mut body) = delivery(
             heavy,
             Limits {
                 frames: 1,
                 payload_bytes: 8,
                 chunk_bytes: 8,
             },
-            Duration::from_secs(1),
         );
         let (started_tx, started) = oneshot::channel();
         let (finish_tx, finish) = oneshot::channel();
-        let completion = pending.spawn(startup.into_streaming(), move |mut tx| async move {
+        let completion = pending.spawn(tx, move |mut tx| async move {
             tx.try_send(b"partial").unwrap();
             // Detach sender ownership, so only the worker/body/frame can pin it.
             assert_eq!(tx.try_send(b"tail"), Err(DeliveryError::Full));

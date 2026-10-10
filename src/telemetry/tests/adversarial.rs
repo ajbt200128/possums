@@ -86,7 +86,7 @@ fn concurrent_contention_is_nonblocking_and_allocation_free() {
 fn frozen_slot_pressure_discards_new_output_without_allocation() {
     let isolated = std::env::var_os("POSSUMS_TELEMETRY_ALLOCATION_TEST").is_some();
     let mut slots = Slots::<RequestTables>::default();
-    slots.active.rejected[1176] = 10;
+    slots.active.rejected[616] = 10;
     slots.freeze(1, 300 * SECOND, true);
     let before = if isolated {
         crate::process_alloc_tests::ALLOCATOR.begin_phase()
@@ -94,12 +94,12 @@ fn frozen_slot_pressure_discards_new_output_without_allocation() {
         crate::process_alloc_tests::ALLOCATOR.snapshot()
     };
     for i in 2..100 {
-        slots.active.rejected[1176] = 11;
+        slots.active.rejected[616] = 11;
         slots.freeze(1, i * 300 * SECOND, true);
-        assert_eq!(slots.frozen.as_ref().unwrap().rejected[1176], 10);
+        assert_eq!(slots.frozen.as_ref().unwrap().rejected[616], 10);
         assert_eq!(slots.pending.unwrap().0.end_ns, 300 * SECOND);
         assert_eq!(slots.attempted, i * 300 * SECOND);
-        assert_eq!(slots.active.rejected[1176], 0);
+        assert_eq!(slots.active.rejected[616], 0);
     }
     let after = crate::process_alloc_tests::ALLOCATOR.snapshot();
     if isolated {
@@ -292,7 +292,7 @@ fn pool_serial_and_epoch_exhaustion_do_not_wrap() {
     let metrics = new();
     ready(&metrics);
     metrics.state.lock().unwrap().serial = (1 << 56) - 1;
-    assert_eq!(metrics.http(Endpoint::Home).key, 0);
+    assert_eq!(metrics.http(Endpoint::Other).key, 0);
     assert_eq!(metrics.epoch.load(Ordering::SeqCst) % 2, 0);
     let metrics = new();
     ready(&metrics);

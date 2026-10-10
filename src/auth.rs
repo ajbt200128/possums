@@ -43,24 +43,16 @@ impl ConversationId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SessionKind {
-    Web,
-    Api,
-}
-
 #[derive(Clone)]
 pub struct Session {
     pub account_id: String,
-    pub csrf: String,
-    pub recovery_credential: String,
+    pub admission_binding: String,
     pub selected_model: Option<String>,
     pub conversation: ConversationId,
     expires_at: Instant,
-    kind: SessionKind,
 }
 
-// Neither credentials, CSRF nor account/conversation identifiers are diagnostic data.
+// Neither credentials, admission binding nor account/conversation identifiers are diagnostic data.
 impl std::fmt::Debug for Session {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("Session { [redacted] }")
@@ -69,7 +61,6 @@ impl std::fmt::Debug for Session {
 
 struct LoginChallenge {
     expires_at: Instant,
-    kind: SessionKind,
 }
 
 struct SubmissionToken {
@@ -84,7 +75,6 @@ struct SubmissionToken {
 pub struct BoundSubmission {
     pub id: [u8; 32],
     pub expires_at: Instant,
-    pub conversation: ConversationId,
 }
 
 #[derive(Debug)]
@@ -158,15 +148,7 @@ impl Auth {
         self
     }
 
-    pub fn issue_login_challenge(&self) -> Result<String, AuthError> {
-        self.issue_challenge(SessionKind::Web)
-    }
-
     pub fn issue_api_challenge(&self) -> Result<String, AuthError> {
-        self.issue_challenge(SessionKind::Api)
-    }
-
-    fn issue_challenge(&self, kind: SessionKind) -> Result<String, AuthError> {
         let now = Instant::now();
         let mut challenges = self
             .login_challenges
@@ -181,33 +163,15 @@ impl Auth {
             challenge.clone(),
             LoginChallenge {
                 expires_at: now + LOGIN_CHALLENGE_LIFETIME,
-                kind,
             },
         );
         Ok(challenge)
     }
 
-    pub fn authenticate(
-        &self,
-        credential: &str,
-        login_challenge: &str,
-    ) -> Result<(String, Session), AuthError> {
-        self.authenticate_kind(credential, login_challenge, SessionKind::Web)
-    }
-
     pub fn authenticate_api(
         &self,
         credential: &str,
-        challenge: &str,
-    ) -> Result<(String, Session), AuthError> {
-        self.authenticate_kind(credential, challenge, SessionKind::Api)
-    }
-
-    fn authenticate_kind(
-        &self,
-        credential: &str,
         login_challenge: &str,
-        kind: SessionKind,
     ) -> Result<(String, Session), AuthError> {
         let now = Instant::now();
         let challenge = self
@@ -216,7 +180,7 @@ impl Auth {
             .map_err(|_| AuthError::Configuration)?
             .remove(login_challenge)
             .ok_or(AuthError::Invalid)?;
-        if challenge.expires_at <= now || challenge.kind != kind {
+        if challenge.expires_at <= now {
             return Err(AuthError::Invalid);
         }
         if credential.len() > CREDENTIAL_MAX_ENCODED_BYTES {
@@ -240,17 +204,10 @@ impl Auth {
         let session_id = random_token();
         let session = Session {
             account_id: account.id.clone(),
-            csrf: random_token(),
-            // API sessions never offer browser recovery export.
-            recovery_credential: if kind == SessionKind::Web {
-                credential.to_owned()
-            } else {
-                String::new()
-            },
+            admission_binding: random_token(),
             selected_model: None,
             conversation: ConversationId::new(),
             expires_at: now + SESSION_LIFETIME,
-            kind,
         };
         let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
         sessions.retain(|_, session| session.expires_at > now);
@@ -261,44 +218,17 @@ impl Auth {
         Ok((session_id, session))
     }
 
-    pub fn session(&self, id: &str) -> Option<Session> {
-        self.session_kind(id, SessionKind::Web)
-    }
-
     pub fn api_session(&self, id: &str) -> Option<Session> {
-        self.session_kind(id, SessionKind::Api)
-    }
-
-    fn session_kind(&self, id: &str, kind: SessionKind) -> Option<Session> {
         let now = Instant::now();
         let mut sessions = self.sessions.lock().ok()?;
         sessions.retain(|_, session| session.expires_at > now);
-        sessions
-            .get(id)
-            .filter(|session| session.kind == kind)
-            .cloned()
-    }
-
-    pub fn logout(&self, id: &str, csrf: &str) -> Result<(), AuthError> {
-        self.logout_kind(id, Some(csrf), SessionKind::Web)
+        sessions.get(id).cloned()
     }
 
     pub fn logout_api(&self, id: &str) -> Result<(), AuthError> {
-        self.logout_kind(id, None, SessionKind::Api)
-    }
-
-    fn logout_kind(
-        &self,
-        id: &str,
-        csrf: Option<&str>,
-        kind: SessionKind,
-    ) -> Result<(), AuthError> {
         let mut sessions = self.sessions.lock().map_err(|_| AuthError::Invalid)?;
         let session = sessions.get(id).ok_or(AuthError::Invalid)?;
-        if session.expires_at <= Instant::now()
-            || session.kind != kind
-            || csrf.is_some_and(|csrf| !Self::verify_csrf(session, csrf))
-        {
+        if session.expires_at <= Instant::now() {
             return Err(AuthError::Invalid);
         }
         #[cfg(test)]
@@ -312,60 +242,14 @@ impl Auth {
         Ok(())
     }
 
-    /// Reset auth state only: accepted reservations and account slots belong to
-    /// the ledger and survive both reset and logout until a terminal transition.
-    pub fn new_chat(&self, id: &str, csrf: &str) -> Result<(), AuthError> {
-        let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
-        let session = sessions.get_mut(id).ok_or(AuthError::Invalid)?;
-        if session.expires_at <= Instant::now()
-            || session.kind != SessionKind::Web
-            || !Self::verify_csrf(session, csrf)
-        {
-            return Err(AuthError::Invalid);
-        }
-        #[cfg(test)]
-        self.pause_at(tests::PausePoint::Invalidation);
-        let mut tokens = self
-            .submission_tokens
-            .lock()
-            .map_err(|_| AuthError::Configuration)?;
-        tokens.retain(|_, token| token.session_id != id);
-        session.conversation = ConversationId::new();
-        session.selected_model = None;
-        Ok(())
-    }
-
-    pub fn verify_csrf(session: &Session, csrf: &str) -> bool {
-        constant_time_equal(session.csrf.as_bytes(), csrf.as_bytes())
+    pub fn verify_admission_binding(session: &Session, binding: &str) -> bool {
+        constant_time_equal(session.admission_binding.as_bytes(), binding.as_bytes())
     }
 
     pub fn account_budgets(&self) -> impl Iterator<Item = (String, u64)> + '_ {
         self.accounts
             .iter()
             .map(|account| (account.id.clone(), account.demo_microunits))
-    }
-
-    pub fn issue_submission(&self, session_id: &str) -> Result<String, AuthError> {
-        let sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
-        let session = sessions.get(session_id).ok_or(AuthError::Invalid)?;
-        self.insert_submission(session_id, session)
-    }
-
-    /// Home/duplicate/completion callers must supply their original snapshot.
-    /// Validation and insertion share the session/token locks with reset/logout;
-    /// stale completion can neither relock nor mint for the new conversation.
-    pub fn issue_submission_for(
-        &self,
-        session_id: &str,
-        conversation: ConversationId,
-        model: Option<&str>,
-    ) -> Result<String, AuthError> {
-        let sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
-        let session = sessions.get(session_id).ok_or(AuthError::Invalid)?;
-        if session.conversation != conversation || session.selected_model.as_deref() != model {
-            return Err(AuthError::Invalid);
-        }
-        self.insert_submission(session_id, session)
     }
 
     /// Atomically bind issuance to the selected model, optionally invalidating the
@@ -379,8 +263,7 @@ impl Auth {
     ) -> Result<String, AuthError> {
         let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
         let session = sessions.get_mut(id).ok_or(AuthError::Invalid)?;
-        if session.kind != SessionKind::Api
-            || session.expires_at <= Instant::now()
+        if session.expires_at <= Instant::now()
             || (!new_conversation
                 && session
                     .selected_model
@@ -421,27 +304,6 @@ impl Auth {
         Ok(token)
     }
 
-    // Caller holds sessions throughout insertion (never pass a detached snapshot).
-    fn insert_submission(&self, session_id: &str, session: &Session) -> Result<String, AuthError> {
-        let mut tokens = self
-            .submission_tokens
-            .lock()
-            .map_err(|_| AuthError::Configuration)?;
-        let now = Instant::now();
-        if session.expires_at <= now
-            || (session.kind == SessionKind::Api && session.selected_model.is_none())
-        {
-            return Err(AuthError::Invalid);
-        }
-        tokens.retain(|_, token| token.expires_at > now);
-        if tokens.len() >= self.submission_capacity {
-            return Err(AuthError::Capacity);
-        }
-        #[cfg(test)]
-        self.pause_at(tests::PausePoint::Insertion);
-        Ok(Self::insert_token(&mut tokens, session_id, session, now))
-    }
-
     fn insert_token(
         tokens: &mut HashMap<String, SubmissionToken>,
         session_id: &str,
@@ -479,7 +341,7 @@ impl Auth {
         &self,
         accounting: &Accounting,
         session_id: &str,
-        csrf: &str,
+        admission_binding: &str,
         token: &str,
         quote: Quote,
     ) -> Result<Admission, AdmissionError> {
@@ -493,7 +355,7 @@ impl Auth {
         let issued = tokens.get_mut(token).ok_or(AuthError::Invalid)?;
         let model = &quote.model.id;
         if session.expires_at <= now
-            || !Self::verify_csrf(session, csrf)
+            || !Self::verify_admission_binding(session, admission_binding)
             || issued.expires_at <= now
             || issued.session_id != session_id
             || issued.account_id != session.account_id
@@ -516,7 +378,6 @@ impl Auth {
         let submission = BoundSubmission {
             id: digest.finalize().into(),
             expires_at: issued.expires_at,
-            conversation: session.conversation,
         };
         // Allocate bindings before acceptance; commit only on reserve success.
         let selected_model = model.clone();
@@ -573,20 +434,6 @@ pub fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-pub fn session_cookie(value: &str) -> String {
-    format!("possums_session={value}; Path=/; Secure; HttpOnly; SameSite=Strict")
-}
-
-pub fn login_challenge_cookie(value: &str) -> String {
-    format!(
-        "possums_login_csrf={value}; Path=/login; Max-Age=600; Secure; HttpOnly; SameSite=Strict"
-    )
-}
-
-pub fn clear_session_cookie() -> &'static str {
-    "possums_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,9 +472,9 @@ mod tests {
         ))
         .unwrap();
         let (id, session) = auth
-            .authenticate(&credential, &auth.issue_login_challenge().unwrap())
+            .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
             .unwrap();
-        let token = auth.issue_submission(&id).unwrap();
+        let token = auth.issue_api_submission(&id, "m", false).unwrap();
         let ledger = Accounting::new(auth.account_budgets());
         (auth, ledger, id, session, token)
     }
@@ -646,33 +493,36 @@ mod tests {
         }
     }
 
-    fn invalidate(auth: &Auth, id: &str, csrf: &str, logout: bool) {
+    fn invalidate(auth: &Auth, id: &str, logout: bool) {
         if logout {
-            auth.logout(id, csrf).unwrap();
+            auth.logout_api(id).unwrap();
         } else {
-            auth.new_chat(id, csrf).unwrap();
+            auth.issue_api_submission(id, "m", true).unwrap();
         }
     }
 
     fn assert_invalidated(auth: &Auth, id: &str, original: ConversationId, logout: bool) {
         if logout {
-            assert!(auth.session(id).is_none());
+            assert!(auth.api_session(id).is_none());
         } else {
-            let current = auth.session(id).unwrap();
-            assert_ne!(current.conversation, original);
-            assert_eq!(current.selected_model, None);
+            assert_ne!(auth.api_session(id).unwrap().conversation, original);
         }
-        assert!(auth.submission_tokens.lock().unwrap().is_empty());
+        assert!(auth
+            .submission_tokens
+            .lock()
+            .unwrap()
+            .values()
+            .all(|token| token.session_id != id || !logout));
     }
 
     #[test]
-    fn reset_or_logout_winning_session_lock_prevents_admission_and_continuation() {
+    fn reset_or_logout_winning_session_lock_prevents_admission() {
         for logout in [false, true] {
             let (auth, ledger, id, session, token) = fixture();
             let held = pause(&auth, PausePoint::Invalidation);
-            let start = Barrier::new(3);
+            let start = Barrier::new(2);
             thread::scope(|scope| {
-                let reset = scope.spawn(|| invalidate(&auth, &id, &session.csrf, logout));
+                let reset = scope.spawn(|| invalidate(&auth, &id, logout));
                 held.entered.wait();
                 assert!(matches!(
                     auth.sessions.try_lock(),
@@ -683,11 +533,7 @@ mod tests {
                 assert_eq!(ledger.available("a"), Some(1000));
                 let admission = scope.spawn(|| {
                     start.wait();
-                    auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
-                });
-                let continuation = scope.spawn(|| {
-                    start.wait();
-                    auth.issue_submission_for(&id, session.conversation, None)
+                    auth.admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
                 });
                 start.wait();
                 held.release.wait();
@@ -696,7 +542,6 @@ mod tests {
                     admission.join().unwrap().unwrap_err(),
                     AdmissionError::Auth(AuthError::Invalid)
                 );
-                assert_eq!(continuation.join().unwrap(), Err(AuthError::Invalid));
             });
             assert_eq!(ledger.available("a"), Some(1000));
             assert_invalidated(&auth, &id, session.conversation, logout);
@@ -711,8 +556,9 @@ mod tests {
             let start = Barrier::new(2);
             thread::scope(|scope| {
                 let accounting_lock = ledger.hold_test_lock();
-                let admission = scope
-                    .spawn(|| auth.admit_submission(&ledger, &id, &session.csrf, &token, quote()));
+                let admission = scope.spawn(|| {
+                    auth.admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
+                });
                 held.entered.wait();
                 assert!(matches!(
                     auth.sessions.try_lock(),
@@ -724,7 +570,7 @@ mod tests {
                 ));
                 let reset = scope.spawn(|| {
                     start.wait();
-                    invalidate(&auth, &id, &session.csrf, logout);
+                    invalidate(&auth, &id, logout);
                 });
                 start.wait();
                 held.release.wait();
@@ -750,49 +596,6 @@ mod tests {
     }
 
     #[test]
-    fn insertion_winning_session_lock_is_invalidated_by_later_reset_or_logout() {
-        for logout in [false, true] {
-            let (auth, ledger, id, session, token) = fixture();
-            let accepted = auth
-                .admit_submission(&ledger, &id, &session.csrf, &token, quote())
-                .unwrap();
-            let held = pause(&auth, PausePoint::Insertion);
-            let start = Barrier::new(2);
-            thread::scope(|scope| {
-                let issue = scope.spawn(|| {
-                    auth.issue_submission_for(&id, accepted.submission.conversation, Some("m"))
-                });
-                held.entered.wait();
-                assert!(matches!(
-                    auth.sessions.try_lock(),
-                    Err(TryLockError::WouldBlock)
-                ));
-                assert!(matches!(
-                    auth.submission_tokens.try_lock(),
-                    Err(TryLockError::WouldBlock)
-                ));
-                // Terminal operations need no auth locks, even during issuance.
-                assert_eq!(
-                    ledger.finish(accepted.submission.id, None).unwrap(),
-                    Outcome::Refunded
-                );
-                let reset = scope.spawn(|| {
-                    start.wait();
-                    invalidate(&auth, &id, &session.csrf, logout);
-                });
-                start.wait();
-                held.release.wait();
-                let continuation = issue.join().unwrap().unwrap();
-                reset.join().unwrap();
-                assert_invalidated(&auth, &id, session.conversation, logout);
-                assert!(auth
-                    .admit_submission(&ledger, &id, &session.csrf, &continuation, quote())
-                    .is_err());
-            });
-        }
-    }
-
-    #[test]
     fn expired_sessions_and_tokens_are_revalidated_without_committing_bindings() {
         for expire_session in [false, true] {
             let (auth, ledger, id, session, token) = fixture();
@@ -804,12 +607,11 @@ mod tests {
                     .get_mut(&id)
                     .unwrap()
                     .expires_at = past;
-                assert_eq!(auth.new_chat(&id, &session.csrf), Err(AuthError::Invalid));
-                assert_eq!(auth.logout(&id, &session.csrf), Err(AuthError::Invalid));
                 assert_eq!(
-                    auth.issue_submission_for(&id, session.conversation, None),
+                    auth.issue_api_submission(&id, "m", true),
                     Err(AuthError::Invalid)
                 );
+                assert_eq!(auth.logout_api(&id), Err(AuthError::Invalid));
             } else {
                 auth.submission_tokens
                     .lock()
@@ -819,19 +621,27 @@ mod tests {
                     .expires_at = past;
             }
             assert_eq!(
-                auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                auth.admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
                     .unwrap_err(),
                 AdmissionError::Auth(AuthError::Invalid)
             );
-            assert_eq!(auth.sessions.lock().unwrap()[&id].selected_model, None);
-            assert_eq!(auth.submission_tokens.lock().unwrap()[&token].model, None);
+            assert_eq!(
+                auth.sessions.lock().unwrap()[&id].selected_model.as_deref(),
+                Some("m")
+            );
+            assert_eq!(
+                auth.submission_tokens.lock().unwrap()[&token]
+                    .model
+                    .as_deref(),
+                Some("m")
+            );
             assert_eq!(ledger.available("a"), Some(1000));
         }
     }
 
     fn api_fixture() -> (Auth, Accounting, String, Session, String) {
-        let (auth, ledger, web_id, web, _) = fixture();
-        auth.logout(&web_id, &web.csrf).unwrap();
+        let (auth, ledger, previous_id, _, _) = fixture();
+        auth.logout_api(&previous_id).unwrap();
         let (id, session) = auth
             .authenticate_api(
                 &URL_SAFE_NO_PAD.encode([7; 32]),
@@ -864,7 +674,6 @@ mod tests {
             auth.issue_api_challenge().unwrap();
         }
         assert_eq!(auth.issue_api_challenge(), Err(AuthError::Capacity));
-        assert_eq!(auth.issue_login_challenge(), Err(AuthError::Capacity));
         for challenge in auth.login_challenges.lock().unwrap().values_mut() {
             challenge.expires_at = past;
         }
@@ -907,7 +716,7 @@ mod tests {
         let current = auth.api_session(&id).unwrap();
         assert_ne!(session.conversation, current.conversation);
         assert!(auth
-            .admit_submission(&ledger, &id, &session.csrf, &token, quote())
+            .admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
             .is_err());
         auth.submission_capacity = 0;
         assert_eq!(
@@ -933,7 +742,13 @@ mod tests {
         let mut other = quote();
         other.model.id = "other".into();
         assert!(auth
-            .admit_submission(&ledger, &id, &session.csrf, &replacement, other)
+            .admit_submission(
+                &ledger,
+                &id,
+                &session.admission_binding,
+                &replacement,
+                other
+            )
             .is_err());
         auth.issue_api_submission(&id, "other", false).unwrap();
         assert_eq!(ledger.available("a"), Some(1000));
@@ -968,7 +783,13 @@ mod tests {
                 thread::scope(|scope| {
                     if admission_first {
                         let admission = scope.spawn(|| {
-                            auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                            auth.admit_submission(
+                                &ledger,
+                                &id,
+                                &session.admission_binding,
+                                &token,
+                                quote(),
+                            )
                         });
                         held.entered.wait();
                         assert!(matches!(
@@ -992,9 +813,6 @@ mod tests {
                             ledger.finish(accepted.submission.id, None).unwrap(),
                             Outcome::Refunded
                         );
-                        assert!(auth
-                            .issue_submission_for(&id, accepted.submission.conversation, Some("m"))
-                            .is_err());
                     } else {
                         let invalidation = scope.spawn(|| invalidate_api(&auth, &id, logout));
                         held.entered.wait();
@@ -1003,7 +821,13 @@ mod tests {
                             Err(TryLockError::WouldBlock)
                         ));
                         let admission = scope.spawn(|| {
-                            auth.admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                            auth.admit_submission(
+                                &ledger,
+                                &id,
+                                &session.admission_binding,
+                                &token,
+                                quote(),
+                            )
                         });
                         held.release.wait();
                         invalidation.join().unwrap();
@@ -1039,7 +863,13 @@ mod tests {
                         let token = issue.join().unwrap().unwrap();
                         invalidation.join().unwrap();
                         assert!(auth
-                            .admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                            .admit_submission(
+                                &ledger,
+                                &id,
+                                &session.admission_binding,
+                                &token,
+                                quote()
+                            )
                             .is_err());
                     } else {
                         let invalidation = scope.spawn(|| invalidate_api(&auth, &id, logout));
@@ -1069,9 +899,12 @@ mod tests {
                 }
             }
             assert!(auth
-                .admit_submission(&ledger, &id, &session.csrf, &token, quote())
+                .admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
                 .is_err());
-            assert_eq!(auth.session(&id).unwrap().selected_model, None);
+            assert_eq!(
+                auth.api_session(&id).unwrap().selected_model.as_deref(),
+                Some("m")
+            );
             assert_eq!(ledger.available("a"), Some(1000));
         }
     }

@@ -61,25 +61,6 @@ in
       exec go test -mod=readonly ./...
     '';
   };
-  scripts.possums-browser-setup = {
-    description = "Install locked browser-test dependencies and Chromium";
-    exec = ''
-      set -euo pipefail
-      cd "$DEVENV_ROOT"
-      npm ci
-      npx --no-install playwright install chromium
-    '';
-  };
-  scripts.possums-test-browser = {
-    description = "Build and test the synthetic no-JavaScript browser fixture";
-    exec = ''
-      set -euo pipefail
-      cd "$DEVENV_ROOT"
-      cargo build --locked --example browser_fixture
-      npm run test:browser
-    '';
-  };
-
   enterShell = ''
     # Worktrees share incremental artifacts, but not across compiler/host changes.
     if [ -z "''${CARGO_TARGET_DIR:-}" ]; then
@@ -90,8 +71,6 @@ in
     echo "Possums: Rust 1.88 / Go 1.27 / Node 24"
     echo "  possums-check          formatting + Clippy"
     echo "  possums-test           local Rust + Go tests"
-    echo "  possums-browser-setup  install browser dependencies (once)"
-    echo "  possums-test-browser   synthetic browser acceptance"
   '';
 
   enterTest = ''

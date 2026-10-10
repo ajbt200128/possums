@@ -77,7 +77,6 @@ pub(super) enum Vector {
     Plain,
     RareError,
     RareModel,
-    RareEndpoint,
     RareBin,
     Mixed,
     MissingRare,
@@ -94,11 +93,7 @@ pub(super) fn cohort_before_close(metrics: &Metrics, n: u64, vector: Vector) {
     for j in 0..n {
         let t = (300 + 10 * j) * SECOND;
         drive(metrics, t);
-        let endpoint = if vector == Vector::RareEndpoint && j == 10 {
-            Endpoint::ChatWeb
-        } else {
-            Endpoint::ChatApi
-        };
+        let endpoint = Endpoint::ChatApi;
         let model = QualifiedModel(if vector == Vector::RareModel && j == 10 {
             1
         } else {
@@ -159,22 +154,22 @@ pub(super) fn cohort_before_close(metrics: &Metrics, n: u64, vector: Vector) {
 /// implementation. Compare every exported cell, including absence elsewhere.
 fn expected(n: u64, vector: Vector) -> RequestTables {
     let mut out = RequestTables::default();
-    out.http_starts[14] = n;
-    out.http_completed[255] = n; // (chat_api=14, 2xx=1, eof=0)
-    out.http_duration[255].0[3] = n;
-    out.generation_starts[3] = n; // (chat_api=1, kimi=0)
-    out.delivery[9] = n;
+    out.http_starts[6] = n;
+    out.http_completed[111] = n; // (chat_api=6, 2xx=1, eof=0)
+    out.http_duration[111].0[3] = n;
+    out.generation_starts[0] = n; // (chat_api=0, kimi=0)
+    out.delivery[0] = n;
     if vector == Vector::Mixed {
-        for cell in [36, 41] {
+        for cell in [0, 5] {
             out.generation_completed[cell] = 10;
             out.generation_duration[cell].0[2] = 10;
             out.first_output[cell].0[1] = 10;
         }
     } else {
         let cell = if vector == Vector::OutputFailure {
-            44
+            8
         } else {
-            36
+            0
         };
         out.generation_completed[cell] = n;
         out.generation_duration[cell].0[2] = n;
@@ -191,50 +186,42 @@ fn expected(n: u64, vector: Vector) -> RequestTables {
     for lane in [1, 3] {
         out.occupancy[lane].0 = [300 - n, n, 0, 0, 0, 0, 0, 0, 0, 0];
     }
-    out.contributors = [n, n, n, n, 0, 0];
+    out.contributors = [n, n, n, n, 0];
     match vector {
-        Vector::RareError | Vector::RareModel | Vector::RareEndpoint => {
+        Vector::RareError | Vector::RareModel => {
             let cell = match vector {
-                Vector::RareError => 41, // transport failure
-                Vector::RareModel => 48, // chat_api/glm-5-3/success
-                _ => 0,                  // chat_web/kimi-k3/success
+                Vector::RareError => 5,  // transport failure
+                Vector::RareModel => 12, // chat_api/glm-5-3/success
+                _ => unreachable!(),
             };
-            out.generation_completed[36] = 10;
-            out.generation_duration[36].0[2] = 10;
-            out.first_output[36].0[1] = 10;
+            out.generation_completed[0] = 10;
+            out.generation_duration[0].0[2] = 10;
+            out.first_output[0].0[1] = 10;
             out.generation_completed[cell] = 1;
             out.generation_duration[cell].0[2] = 1;
             out.first_output[cell].0[1] = 1;
             if vector != Vector::RareError {
                 let (start, delivery) = if vector == Vector::RareModel {
-                    (4, 12)
+                    (1, 3)
                 } else {
                     (0, 0)
                 };
-                out.generation_starts[3] = 10;
+                out.generation_starts[0] = 10;
                 out.generation_starts[start] = 1;
-                out.delivery[9] = 10;
+                out.delivery[0] = 10;
                 out.delivery[delivery] = 1;
-            }
-            if vector == Vector::RareEndpoint {
-                out.http_starts[14] = 10;
-                out.http_starts[3] = 1;
-                out.http_completed[255] = 10;
-                out.http_duration[255].0[3] = 10;
-                out.http_completed[57] = 1;
-                out.http_duration[57].0[3] = 1;
             }
         }
         Vector::RareBin => {
-            out.first_output[36].0[1] = 10;
-            out.first_output[36].0[2] = 1;
+            out.first_output[0].0[1] = 10;
+            out.first_output[0].0[2] = 1;
         }
         Vector::Duplicate => {
-            out.generation_starts[3] = 9;
-            out.generation_completed[36] = 9;
-            out.generation_duration[36].0[2] = 9;
-            out.first_output[36].0[1] = 9;
-            out.delivery[9] = 9;
+            out.generation_starts[0] = 9;
+            out.generation_completed[0] = 9;
+            out.generation_duration[0].0[2] = 9;
+            out.first_output[0].0[1] = 9;
+            out.delivery[0] = 9;
             out.contributors[1] = 9;
             out.occupancy[1].0 = [291, 9, 0, 0, 0, 0, 0, 0, 0, 0];
         }
@@ -252,7 +239,7 @@ fn assert_export(actual: &RequestTables, expected: &RequestTables) {
     assert_eq!(actual.first_output, expected.first_output);
     assert_eq!(actual.delivery, expected.delivery);
     assert_eq!(actual.rejected, expected.rejected);
-    for lane in 0..6 {
+    for lane in 0..5 {
         if expected.contributors[lane] == 0 {
             assert_eq!(actual.contributors[lane], 0);
         } else {
@@ -280,7 +267,6 @@ fn cohort_vectors(mode: Deployment) {
         (11, Vector::Plain, true, 12),
         (11, Vector::RareError, true, 15),
         (11, Vector::RareModel, true, 17),
-        (11, Vector::RareEndpoint, true, 20),
         (11, Vector::RareBin, true, 12),
         (20, Vector::Mixed, true, 15),
         (11, Vector::MissingRare, true, 12),
@@ -325,7 +311,7 @@ fn frozen_rejection_and_unknown_vectors() {
         drive(&metrics, 600 * SECOND);
         let view = metrics.request().unwrap();
         let mut expected = RequestTables::default();
-        expected.rejected[1176] = n;
+        expected.rejected[616] = n;
         assert_export(view.tables().unwrap(), &expected);
     }
     let metrics = new();
@@ -340,9 +326,9 @@ fn frozen_rejection_and_unknown_vectors() {
     drive(&metrics, 600 * SECOND);
     let view = metrics.request().unwrap();
     let mut expected = RequestTables::default();
-    expected.generation_starts[3] = 10;
-    expected.generation_completed[47] = 10;
-    expected.generation_duration[47].0[2] = 10;
+    expected.generation_starts[0] = 10;
+    expected.generation_completed[11] = 10;
+    expected.generation_duration[11].0[2] = 10;
     assert_export(view.tables().unwrap(), &expected);
 }
 #[test]
@@ -370,8 +356,8 @@ fn frozen_split_and_split_failure_vectors() {
         {
             let view = metrics.request().unwrap();
             let mut expected = RequestTables::default();
-            expected.http_starts[14] = 10;
-            expected.generation_starts[3] = 10;
+            expected.http_starts[6] = 10;
+            expected.generation_starts[0] = 10;
             assert_export(view.tables().unwrap(), &expected);
         }
         assert!(metrics.request().is_none());
@@ -389,13 +375,13 @@ fn frozen_split_and_split_failure_vectors() {
         drive(&metrics, 900 * SECOND);
         let view = metrics.request().unwrap();
         let mut expected = RequestTables::default();
-        expected.http_completed[255] = 10;
-        expected.http_duration[255].0[3] = 10;
-        expected.delivery[9] = 10;
+        expected.http_completed[111] = 10;
+        expected.http_duration[111].0[3] = 10;
+        expected.delivery[0] = 10;
         let cell = if terminal == GenerationTerminal::Success {
-            36
+            0
         } else {
-            44
+            8
         };
         expected.generation_completed[cell] = 10;
         expected.generation_duration[cell].0[3] = 10;
@@ -443,30 +429,30 @@ fn prompt_quantization_and_invalid_lifecycle_updates() {
 fn release_predicate_keeps_consistency_and_completeness_without_minimum_counts() {
     let mut table = expected(10, Vector::Plain);
     table.ticks = 300;
-    table.dispositions[255][0] = 10;
+    table.dispositions[111][0] = 10;
     assert!(table.releasable());
-    table.dispositions[255] = [9, 1, 0, 0, 0];
+    table.dispositions[111] = [9, 1, 0, 0, 0];
     assert!(table.releasable());
-    table.dispositions[255] = [9, 0, 0, 0, 0];
+    table.dispositions[111] = [9, 0, 0, 0, 0];
     assert!(!table.releasable()); // Partition sum must still match terminals.
-    table.dispositions[255] = [u64::MAX, 11, 0, 0, 0];
+    table.dispositions[111] = [u64::MAX, 11, 0, 0, 0];
     assert!(!table.releasable()); // Overflow must not wrap to ten.
-    table.dispositions[255] = [10, 0, 0, 0, 0];
-    table.first_output[36].0[1] = 9;
+    table.dispositions[111] = [10, 0, 0, 0, 0];
+    table.first_output[0].0[1] = 9;
     assert!(table.releasable());
-    table.first_output[36].0[1] = 11;
+    table.first_output[0].0[1] = 11;
     assert!(!table.releasable());
-    table.first_output[36].0[1] = u64::MAX;
-    table.first_output[36].0[2] = 11;
+    table.first_output[0].0[1] = u64::MAX;
+    table.first_output[0].0[2] = 11;
     assert!(!table.releasable());
-    table.first_output[36].0[2] = 0;
-    table.first_output[36].0[1] = 10;
-    table.http_duration[255].0[3] = 11;
+    table.first_output[0].0[2] = 0;
+    table.first_output[0].0[1] = 10;
+    table.http_duration[111].0[3] = 11;
     assert!(!table.releasable());
-    table.http_duration[255].0[3] = 10;
-    table.generation_duration[36].0[2] = 11;
+    table.http_duration[111].0[3] = 10;
+    table.generation_duration[0].0[2] = 11;
     assert!(!table.releasable());
-    table.generation_duration[36].0[2] = 10;
+    table.generation_duration[0].0[2] = 10;
     table.contributors[0] = 1;
     assert!(table.releasable());
     table.contributors[0] = 10;
@@ -477,7 +463,7 @@ fn release_predicate_keeps_consistency_and_completeness_without_minimum_counts()
     table.occupancy[0].0[0] += 1;
     table.occupancy[0].0[2] = 0;
     assert!(table.releasable());
-    for index in 0..1190 {
+    for index in 0..630 {
         table.rejected[index] = 1;
         assert!(table.releasable()); // Label pairs are checked at the wire boundary.
         table.rejected[index] = 0;
@@ -710,7 +696,7 @@ fn contention_invalidates_pending_and_local_kill_acknowledges_disposal() {
     let guard = metrics.state.lock().unwrap();
     std::thread::scope(|scope| {
         scope
-            .spawn(|| drop(metrics.http(Endpoint::Home)))
+            .spawn(|| drop(metrics.http(Endpoint::Other)))
             .join()
             .unwrap();
         assert!(!metrics.off());
@@ -726,16 +712,16 @@ fn contention_invalidates_pending_and_local_kill_acknowledges_disposal() {
 fn pressure_stale_handles_lost_observations_and_sanitizer_failure() {
     let metrics = new();
     ready(&metrics);
-    let handles: [_; 256] = std::array::from_fn(|_| metrics.http(Endpoint::Home));
+    let handles: [_; 256] = std::array::from_fn(|_| metrics.http(Endpoint::Other));
     let key = handles[0].key;
-    let extra = metrics.http(Endpoint::Home);
+    let extra = metrics.http(Endpoint::Other);
     assert_eq!(extra.key, 0);
     assert_eq!(metrics.epoch.load(Ordering::SeqCst) % 2, 0);
     drop((extra, handles));
     assert!(metrics.enable(Deployment::IsolatedSynthetic));
     drive(&metrics, 600 * SECOND);
     metrics.poll();
-    let mut current = metrics.http(Endpoint::Home);
+    let mut current = metrics.http(Endpoint::Other);
     assert_ne!(current.key, key);
     metrics.update(
         key,
@@ -760,7 +746,7 @@ fn pressure_stale_handles_lost_observations_and_sanitizer_failure() {
         Disposition::ControlOrOther,
     );
     drop(current);
-    drop(metrics.http(Endpoint::Home));
+    drop(metrics.http(Endpoint::Other));
     assert!(!metrics.state.lock().unwrap().requests.active.valid);
     metrics.reject(None, AdmissionModel::Unknown, Rejection::ConnectionCapacity);
     assert!(!metrics.state.lock().unwrap().requests.active.valid);
@@ -819,7 +805,6 @@ fn infrastructure_six_intervals_and_availability() {
                 Lane::Generation,
                 Lane::Heavy,
                 Lane::Ingress,
-                Lane::NewChat,
                 Lane::Control,
             ] {
                 metrics.configured_capacity(
@@ -877,9 +862,9 @@ fn infrastructure_six_intervals_and_availability() {
 
 #[test]
 fn frozen_cardinality_and_layout_ceilings() {
-    assert_eq!(REQUEST_SERIES, 2028);
-    assert_eq!(REQUEST_CELLS, 6402);
-    assert_eq!(INFRASTRUCTURE_SERIES, 20);
+    assert_eq!(REQUEST_SERIES, 1051);
+    assert_eq!(REQUEST_CELLS, 3256);
+    assert_eq!(INFRASTRUCTURE_SERIES, 19);
     assert!(std::mem::size_of::<RequestTables>() <= 67_456);
     assert!(std::mem::size_of::<Infrastructure>() <= 2048);
     assert!(std::mem::size_of::<Record>() <= 128);
@@ -914,7 +899,7 @@ fn frozen_cardinality_and_layout_ceilings() {
         h.0.fill(30);
     }
     assert!(table.releasable());
-    assert_eq!(table.series_count(), 2028);
+    assert_eq!(table.series_count(), 1051);
     let mut infrastructure = Infrastructure::default();
     for interval in 0..6 {
         for scope in [
@@ -937,13 +922,12 @@ fn frozen_cardinality_and_layout_ceilings() {
             Lane::Generation,
             Lane::Heavy,
             Lane::Ingress,
-            Lane::NewChat,
             Lane::Control,
         ] {
             infrastructure.configuration(lane, interval, CAPACITIES[lane as usize]);
         }
     }
-    assert_eq!(infrastructure.series_count(), 20);
+    assert_eq!(infrastructure.series_count(), 19);
 }
 
 #[test]
@@ -963,8 +947,8 @@ fn bounded_allocation_repeated_windows_pressure_and_off_on() {
         let boundary = (window * 600 + 300) * SECOND;
         drive(&metrics, boundary);
         metrics.poll();
-        let handles: [_; 256] = std::array::from_fn(|_| metrics.http(Endpoint::Home));
-        drop(metrics.http(Endpoint::Home));
+        let handles: [_; 256] = std::array::from_fn(|_| metrics.http(Endpoint::Other));
+        drop(metrics.http(Endpoint::Other));
         drop(handles);
         assert!(metrics.off());
         assert!(metrics.enable(Deployment::IsolatedSynthetic));

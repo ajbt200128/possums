@@ -24,7 +24,7 @@ const LIMITS: Limits = Limits {
 };
 
 #[test]
-fn fail_fast_saturation_leaves_new_chat_and_other_controls_independent() {
+fn fail_fast_saturation_leaves_controls_independent() {
     let admission = Admission::new(4);
     let working: Vec<_> = (0..4)
         .map(|_| admission.try_chat().unwrap().into_owners((), LIMITS))
@@ -35,11 +35,6 @@ fn fail_fast_saturation_leaves_new_chat_and_other_controls_independent() {
     }
     let control = admission.try_control().unwrap();
     assert!(admission.try_control().is_none());
-    let new_chat = admission.try_new_chat().unwrap();
-    assert!(admission.try_new_chat().is_none());
-    drop(new_chat);
-    // Other controls and all four work/delivery owners remain live.
-    assert!(admission.try_new_chat().is_some());
     drop(control);
     assert!(admission.try_control().is_some());
     drop(working);
@@ -53,16 +48,6 @@ async fn control_responses_retain_only_their_own_lane_through_frame_drop() {
     let (mut control_tx, control_body) = admission.try_control().unwrap().into_delivery(LIMITS);
     control_tx.try_send(b"unread").unwrap();
     drop(control_tx);
-    assert!(admission.try_control().is_none());
-    let (mut tx, mut body) = admission.try_new_chat().unwrap().into_delivery(LIMITS);
-    tx.try_send(b"new chat").unwrap();
-    let held = body.frame().await.unwrap().unwrap();
-    drop(tx);
-    drop(body);
-    assert!(admission.try_new_chat().is_none());
-    drop(held);
-    // Four work slots and an unread ordinary control response remain held.
-    assert!(admission.try_new_chat().is_some());
     assert!(admission.try_control().is_none());
     drop(control_body);
     assert!(admission.try_control().is_some());
@@ -87,7 +72,6 @@ fn completed_workers_with_unread_responses_block_replacement_and_rollback() {
         // Work acquired first, then automatically rolled back on delivery failure.
         assert_eq!(admission.available(), (4, 0));
     }
-    assert!(admission.try_new_chat().is_some());
     drop(unread.pop());
     let replacement = admission.try_chat().unwrap();
     assert_eq!(admission.available(), (3, 0));
@@ -118,7 +102,6 @@ fn disconnect_does_not_release_work_or_its_reservation() {
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     assert_eq!(admission.available(), (0, 1));
     assert!(admission.try_chat().is_none());
-    assert!(admission.try_new_chat().is_some());
     drop(work);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert_eq!(admission.available(), (1, 1));

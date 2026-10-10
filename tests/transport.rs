@@ -10,7 +10,7 @@ use possums::{
     auth::Auth,
     catalog::Model,
     inference::{Inference, InferenceError, Message},
-    web::{router_with_body_deadline, serve_with_header_deadline, AppState},
+    server::{router_with_body_deadline, serve_with_header_deadline, AppState},
 };
 use sha2::{Digest, Sha256};
 use std::{convert::Infallible, sync::Arc, time::Duration};
@@ -223,6 +223,84 @@ fn state() -> AppState {
     )
 }
 
+#[tokio::test]
+async fn malformed_deep_dense_and_fragmented_api_json_never_reaches_inference() {
+    let state = state();
+    let credential = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+    let (bearer, _) = state
+        .auth
+        .authenticate_api(&credential, &state.auth.issue_api_challenge().unwrap())
+        .unwrap();
+    let app = possums::server::router(state);
+    let dense = format!("[{}]", "0,".repeat(100_000));
+    let deep = format!("{}0{}", "[".repeat(140), "]".repeat(140));
+    for wire in ["{".to_owned(), deep, dense, "\u{0000}".to_owned()] {
+        let fragments = stream::iter(
+            wire.into_bytes()
+                .into_iter()
+                .map(|byte| Ok::<Bytes, Infallible>(Bytes::from(vec![byte]))),
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from_stream(fragments))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+}
+
+#[tokio::test]
+async fn removed_browser_routes_are_bounded_non_html_and_never_infer() {
+    use http_body_util::BodyExt;
+    for path in [
+        "/",
+        "/app",
+        "/login",
+        "/logout",
+        "/chat",
+        "/chat/new",
+        "/recovery",
+        "/recovery/download",
+        "/claims",
+    ] {
+        for method in ["GET", "POST"] {
+            let response = possums::server::router(state())
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(Body::from("csrf=secret&prompt=hostile-prompt-canary"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(!response.status().is_success(), "{method} {path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_ne!(
+                response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .map(|v| v.as_bytes()),
+                Some(b"text/html; charset=utf-8".as_slice())
+            );
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(bytes.len() < 4096);
+            assert!(!bytes
+                .windows(b"hostile-prompt-canary".len())
+                .any(|v| v == b"hostile-prompt-canary"));
+            assert!(!bytes.windows(b"<html".len()).any(|v| v == b"<html"));
+        }
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn request_body_has_one_total_deadline_despite_trickling() {
     let chunks = stream::unfold((), |_| async {
@@ -233,8 +311,8 @@ async fn request_body_has_one_total_deadline_despite_trickling() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/login")
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .uri("/v1/sessions")
+                .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from_stream(chunks))
                 .unwrap(),
         )
@@ -274,7 +352,7 @@ async fn pipelined_http1_rejects_oversized_declared_body_without_reading_its_len
     ));
     let mut client = TcpStream::connect(address).await.unwrap();
     let request = format!(
-        "GET /claims HTTP/1.1\r\nHost: local\r\nX-Fill: {}\r\n\r\nPOST /login HTTP/1.1\r\nHost: local\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        "GET /v1/auth/challenge HTTP/1.1\r\nHost: local\r\nX-Fill: {}\r\n\r\nPOST /v1/sessions HTTP/1.1\r\nHost: local\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
         "h".repeat(10 * 1024),
         8 * 1024,
         "x".repeat(4 * 1024 + 1),

@@ -87,7 +87,7 @@ pub struct Runtime {
     task: Option<JoinHandle<bool>>,
 }
 impl Runtime {
-    pub fn start(config: Config, capacities: [(Lane, u64); 6]) -> Self {
+    pub fn start(config: Config, capacities: [(Lane, u64); 5]) -> Self {
         let (stop, stopped) = watch::channel(false);
         let mut shared = None;
         let task = config.credential.and_then(|credential| {
@@ -137,7 +137,7 @@ async fn sender<C: Clock + 'static>(
     metrics: Arc<AggregateMetrics<C>>,
     template: Client,
     mut stopped: watch::Receiver<bool>,
-    capacities: [(Lane, u64); 6],
+    capacities: [(Lane, u64); 5],
 ) -> bool {
     let mut process = super::process::Sampler::new(capacities);
     let mut tick = tokio::time::interval(Duration::from_millis(100));

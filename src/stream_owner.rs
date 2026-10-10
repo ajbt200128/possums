@@ -14,7 +14,6 @@ use std::{
         Arc,
     },
     task::{Context, Poll},
-    time::Duration,
 };
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
@@ -30,7 +29,6 @@ pub(crate) enum DeliveryError {
     Full,
     Closed,
     TooLarge,
-    TimedOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,21 +60,10 @@ impl Budget {
     }
 }
 
-/// The only blocking-capable phase. Construct before response handoff, use on
-/// `spawn_blocking` while the runtime polls the body, then consume into streaming.
-/// The deadline covers ALL startup writes, not a fresh timeout for every chunk.
-/// Dropping an async JoinHandle does not cancel spawn_blocking: this finite
-/// deadline is therefore essential. It bounds delivery waits, not renderer CPU.
-pub(crate) struct StartupTx {
-    tx: DeliveryTx,
-    deadline: tokio::time::Instant,
-}
-
 pub(crate) fn delivery(
     lease: impl Into<Arc<crate::telemetry::hooks::Lease>>,
     limits: Limits,
-    startup_timeout: Duration,
-) -> (StartupTx, DeliveryBody) {
+) -> (DeliveryTx, DeliveryBody) {
     assert!(limits.frames > 0 && limits.chunk_bytes > 0);
     assert!(limits.chunk_bytes <= limits.payload_bytes);
     let (sender, rx) = mpsc::channel(limits.frames);
@@ -91,15 +78,12 @@ pub(crate) fn delivery(
         producer: AtomicUsize::new(0),
     });
     (
-        StartupTx {
-            tx: DeliveryTx {
-                sender: Some(sender),
-                lease: Some(lease.clone()),
-                budget: budget.clone(),
-                chunk_bytes: limits.chunk_bytes,
-                failure: None,
-            },
-            deadline: tokio::time::Instant::now() + startup_timeout,
+        DeliveryTx {
+            sender: Some(sender),
+            lease: Some(lease.clone()),
+            budget: budget.clone(),
+            chunk_bytes: limits.chunk_bytes,
+            failure: None,
         },
         DeliveryBody {
             rx,
@@ -251,49 +235,6 @@ impl DeliveryTx {
 
     pub(crate) fn usage(&self) -> Usage {
         self.budget.usage()
-    }
-}
-
-impl StartupTx {
-    /// PRE-INFERENCE only; call exclusively from `spawn_blocking`, never from an
-    /// async runtime worker. Only bounded per-chunk storage is copied. Disconnect
-    /// also interrupts a byte-credit wait when the consumer retains old frames.
-    pub(crate) fn send_blocking(&mut self, data: &[u8]) -> Result<(), DeliveryError> {
-        let result = (|| {
-            let size = self.tx.size(data)?;
-            let sender = self.tx.sender.as_ref().unwrap();
-            if sender.is_closed() {
-                return Err(DeliveryError::Closed);
-            }
-            if tokio::time::Instant::now() >= self.deadline {
-                return Err(DeliveryError::TimedOut);
-            }
-            if size == 0 {
-                return Ok(());
-            }
-            tokio::runtime::Handle::current().block_on(async {
-                tokio::time::timeout_at(self.deadline, async {
-                    tokio::select! {
-                        biased;
-                        _ = sender.closed() => Err(DeliveryError::Closed),
-                        result = async {
-                            let slot = sender.reserve().await.map_err(|_| DeliveryError::Closed)?;
-                            let frame = self.tx.budget.frames.clone().acquire_owned().await.map_err(|_| DeliveryError::Closed)?;
-                            let bytes = self.tx.budget.bytes.clone().acquire_many_owned(size).await.map_err(|_| DeliveryError::Closed)?;
-                            slot.send(self.tx.chunk(data, bytes, frame));
-                            Ok(())
-                        } => result,
-                    }
-                }).await.unwrap_or(Err(DeliveryError::TimedOut))
-            })
-        })();
-        self.tx.detach_on_error(result)
-    }
-
-    /// This transition is one-way: inference has no blocking send API. A failed
-    /// startup still yields a detached sender; it does not veto future inference.
-    pub(crate) fn into_streaming(self) -> DeliveryTx {
-        self.tx
     }
 }
 

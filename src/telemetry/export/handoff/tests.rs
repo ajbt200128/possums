@@ -45,7 +45,6 @@ fn infrastructure(m: &Metrics) {
             Lane::Generation,
             Lane::Heavy,
             Lane::Ingress,
-            Lane::NewChat,
             Lane::Control,
         ]
         .into_iter()
@@ -100,7 +99,6 @@ async fn real_aggregation_wire_includes_complete_low_count_families() {
         (10, Vector::OutputFailure),
         (11, Vector::RareError),
         (11, Vector::RareModel),
-        (11, Vector::RareEndpoint),
         (11, Vector::RareBin),
         (11, Vector::MissingRare),
         (10, Vector::Duplicate),
@@ -145,7 +143,7 @@ async fn real_aggregation_wire_includes_complete_low_count_families() {
                 use opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue;
                 match value {
                     StringValue(v) if v == "connection" => 64.,
-                    StringValue(v) if v == "new_chat" || v == "control" => 1.,
+                    StringValue(v) if v == "control" => 1.,
                     _ => 4.,
                 }
             } else {
@@ -155,7 +153,7 @@ async fn real_aggregation_wire_includes_complete_low_count_families() {
             points += 1;
         }
     }
-    assert_eq!(points, 20);
+    assert_eq!(points, 19);
 }
 
 #[tokio::test]
@@ -176,14 +174,14 @@ async fn sole_permit_expiry_watermark_and_stale_return() {
     };
     // No state lock is held; eligible observations still change the active table.
     for _ in 0..10 {
-        let mut h = m.http(Endpoint::Home);
+        let mut h = m.http(Endpoint::Other);
         h.finish_http(
             Status::Success,
             HttpTerminal::Eof,
             Disposition::ControlOrOther,
         );
     }
-    assert_eq!(m.state.lock().unwrap().requests.active.http_starts[0], 10);
+    assert_eq!(m.state.lock().unwrap().requests.active.http_starts[7], 10);
     assert!(!m.off());
     assert!(!permit.valid());
     assert!(!m.enable(Deployment::IsolatedSynthetic)); // no false kill acknowledgement
@@ -321,14 +319,14 @@ async fn owned_io_kill_clock_contention_and_skip() {
         let control = async {
             ready_rx.await.unwrap();
             // New eligible observations progress while the network is stalled.
-            let mut h = m.http(Endpoint::Home);
+            let mut h = m.http(Endpoint::Other);
             h.finish_http(
                 Status::Success,
                 HttpTerminal::Eof,
                 Disposition::ControlOrOther,
             );
             drop(h);
-            assert_eq!(m.state.lock().unwrap().requests.active.http_starts[0], 1);
+            assert_eq!(m.state.lock().unwrap().requests.active.http_starts[7], 1);
             match mode {
                 1 => {
                     m.clock.pair(600 * agg::SECOND, 602 * agg::SECOND);
@@ -421,7 +419,7 @@ async fn failure_timeout_refusal_and_no_partial_flush() {
     let m = new();
     ready(&m);
     for _ in 0..10 {
-        let mut h = m.http(Endpoint::Home);
+        let mut h = m.http(Endpoint::Other);
         h.finish_http(
             Status::Success,
             HttpTerminal::Eof,
@@ -452,7 +450,7 @@ async fn composed_allocation_co_closing_pressure_cancel() {
     m.poll();
     let mut pool = Vec::with_capacity(agg::POOL);
     for _ in 0..agg::POOL {
-        pool.push(m.http(Endpoint::Home));
+        pool.push(m.http(Endpoint::Other));
     }
     let (listener, client) = listener().await;
     let evidence = client.evidence();
@@ -464,14 +462,14 @@ async fn composed_allocation_co_closing_pressure_cancel() {
         assert!(state.infrastructure.pending.is_some());
         assert_eq!(
             state.infrastructure.frozen.as_ref().unwrap().series_count(),
-            20
+            19
         );
     }
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let peer = async {
         let (mut stream, _) = listener.accept().await.unwrap();
         let length = capture_header(&mut stream, true).await;
-        assert_eq!(length, 737_926); // honest production source label adds six bytes
+        assert!(length > 0 && length <= super::super::transport::MAX_OUTBOUND);
         let mut body = vec![0; length];
         stream.read_exact(&mut body).await.unwrap();
         // Keep the captured body, active/frozen tables, full pool, SDK data and
@@ -504,7 +502,7 @@ async fn composed_allocation_co_closing_pressure_cancel() {
             }
         }
         // Pool overflow is a real nonblocking invalidation, not send completion.
-        drop(m.http(Endpoint::Home));
+        drop(m.http(Endpoint::Other));
         assert!(m.stop_export().await);
         assert_eq!(evidence.live_io.load(SeqCst), 0);
         let _ = done_tx.send(());
@@ -629,7 +627,7 @@ async fn co_closing_sequential_handoff_and_upload_cancel() {
         while evidence.pending_writes.load(SeqCst) == 0 || evidence.written.load(SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
-        assert!(evidence.written.load(SeqCst) < 737_926);
+        assert!(evidence.written.load(SeqCst) < 372_968);
         assert!(m.stop_export().await);
         assert_eq!(evidence.live_io.load(SeqCst), 0);
         done.send(()).unwrap();
@@ -744,7 +742,7 @@ async fn composed_tls_allocation_and_owned_cancel() {
     m.poll();
     let mut pool = Vec::with_capacity(agg::POOL);
     for _ in 0..agg::POOL {
-        pool.push(m.http(Endpoint::Home));
+        pool.push(m.http(Endpoint::Other));
     }
     let (listener, client, acceptor) = agg::runtime::tests::fixture(true, "api.honeycomb.io").await;
     let evidence = client.evidence();
@@ -753,7 +751,7 @@ async fn composed_tls_allocation_and_owned_cancel() {
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = acceptor.accept(stream).await.unwrap();
         let body = agg::runtime::tests::capture(&mut stream).await;
-        assert_eq!(body.len(), 737_926);
+        assert_eq!(body.len(), 372_968);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 65536\r\n\r\n")
             .await

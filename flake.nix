@@ -63,13 +63,13 @@
             mv $out/bin/attestation-helper $out/bin/possums-attestation
           '';
         };
-        browserFixture = craneLib.buildPackage (common // {
+        apiSmokeFixture = craneLib.buildPackage (common // {
           inherit cargoArtifacts;
-          cargoExtraArgs = "--example browser_fixture";
+          cargoExtraArgs = "--example api_smoke_fixture";
           doCheck = false;
           installPhaseCommand = ''
             mkdir -p $out/bin
-            cp target/release/examples/browser_fixture $out/bin/
+            cp target/release/examples/api_smoke_fixture $out/bin/
           '';
         });
         gatewayEntrypoint = pkgs.writeShellScriptBin "possums-entrypoint" ''
@@ -112,9 +112,9 @@
         smokeImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway-smoke";
           tag = "phase0";
-          contents = [ browserFixture pkgs.cacert ];
+          contents = [ apiSmokeFixture pkgs.cacert ];
           config = {
-            Entrypoint = [ "${browserFixture}/bin/browser_fixture" ];
+            Entrypoint = [ "${apiSmokeFixture}/bin/api_smoke_fixture" ];
             Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
             User = "65532:65532";
             WorkingDir = "/tmp";
@@ -124,7 +124,7 @@
         packages = {
           default = gateway;
           attestation-helper = attestationHelper;
-          browser-fixture = browserFixture;
+          api-smoke-fixture = apiSmokeFixture;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;
           gateway-smoke-image = smokeImage;
