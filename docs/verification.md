@@ -1738,3 +1738,9 @@ raw diagnostics are transient in-process; GitHub's native workflow history and
 public release artifacts persist. No telemetry destination, family, retention or
 runtime privacy policy changed; no inference, credential-value inspection,
 request-level export or support bundle was used.
+
+Subsequent hosted runs, operator-authorized setup, the public SDK serving check,
+and the first publication qualification/canonical-shape correction are recorded
+chronologically in [approved-main release qualification](approved-main-release-qualification.md).
+The local-branch statements above describe their historical phase, not the later
+activation or deployment state.
