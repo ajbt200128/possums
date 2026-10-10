@@ -235,6 +235,13 @@ for(const mode of ['plaintext','redirect']) {
 await fixtureControl('normal');
 assert.deepEqual(await channel.control('/v1/sessions',{challenge:'c'.repeat(43),credential:'c'.repeat(43)}),{ok:true}); passed++;
 assert.deepEqual(await channel.control('/v1/submissions',{model:'fixture',new_conversation:true},bearer),{ok:true}); passed++;
+const balanceBefore = await fixtureControl('stats');
+await rejects('balance bearer required',()=>channel.balance('invalid'),'rejected');
+assert.equal((await fixtureControl('stats')).encrypted,balanceBefore.encrypted); passed++;
+assert.deepEqual(await channel.balance(bearer),{available_microunits:'0',in_flight:0,completed_requests:'0'}); passed++;
+const balanceAfter = await fixtureControl('stats');
+assert.equal(balanceAfter.encrypted,balanceBefore.encrypted+1);
+assert.equal(balanceAfter.authorized,balanceBefore.authorized+1); passed++;
 for(const model of ['oversized-event','invalid-utf8']) {
   await rejects(model,async()=>{const r=(await channel.chat({...chat,model},bearer)).getReader();for(;;){if((await r.read()).done)break;}},'uncertain');
 }

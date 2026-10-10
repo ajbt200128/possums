@@ -10,6 +10,10 @@ export async function clientCases(moduleURL) {
   const m = await import(moduleURL);
   let count = 0;
   const check = ok => { if (!ok) throw new Error('client contract check'); count++; };
+  const requestFailure = new m.BalanceFailure('request');
+  const validationFailure = new m.BalanceFailure('validation');
+  check(requestFailure instanceof m.BalanceFailure && requestFailure.code === 'rejected' && requestFailure.message === 'possums_balance_request_failed');
+  check(validationFailure.code === 'rejected' && validationFailure.message === 'possums_balance_validation_failed');
   const model = (id, context = '20', price = '1000000', quote = '52') => ({ object: 'model', id,
     context_tokens: context, max_output_tokens: context, input_microunits_per_million_tokens: price,
     output_microunits_per_million_tokens: price, maximum_reservation_microunits: quote });

@@ -18,6 +18,7 @@ const ai = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-
 const coding = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js')).href);
 const { prepareCompaction } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js')).href);
 const { AuthStorage: NativeAuthStorage } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js')).href);
+const { isRetryableAssistantError, retryDelayMs } = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-ai/dist/utils/retry.js')).href);
 fs.mkdirSync(root, { recursive: true });
 const passed = [];
 async function check(name, body) { await body(); passed.push(name); console.log('PASS '+name); }
@@ -47,7 +48,7 @@ async function terminalGatewayError(code, detail, billing) {
 }
 function freshFixture(candidate) {
  const fresh=new m.ReferenceClient(candidate.channel);
- for(const name of ['login','models','chat'])if(Object.hasOwn(candidate,name))fresh[name]=(...args)=>candidate[name](...args);
+ for(const name of ['login','models','chat','balance'])if(Object.hasOwn(candidate,name))fresh[name]=(...args)=>candidate[name](...args);
  return fresh;
 }
 async function setup(plan, tools = true) {
@@ -57,6 +58,7 @@ async function setup(plan, tools = true) {
   const requests = [];
   let sends = 0; let failModels = false; let abortSeen = false; let release;
   client.login = async () => {};
+  client.balance = async () => ({availableMicrounits:'5000000',inFlight:0,completedRequests:'0'});
   client.models = async () => {
     if (failModels) throw new Error('private diagnostic must not escape');
     return m.validateModels({ object:'list', data:[entry(tools)] });
@@ -67,16 +69,17 @@ async function setup(plan, tools = true) {
     if (mode === 'held' || mode === 'held_tools') release=deferred();
     if (options.onPayload) await options.onPayload({model:'synthetic',stream:true,messages,...(options.tools?{tools:options.tools}:{})});
     await options.onResponse?.({status:200,contentType:'text/event-stream'});
-    if(['fragmented_tools','late_fragmented_tools','fragmented_tools_uncertain'].includes(mode)){
+    if(['fragmented_tools','late_fragmented_tools','fragmented_tools_uncertain','fragmented_tools_transient'].includes(mode)){
       const frame=value=>'data: '+JSON.stringify(value)+'\n\n';
       const identity=event({tool_calls:[{index:0,id:'call_one',type:'function',function:{name:'echo'}}]});
-      const argumentsEvent=event({tool_calls:[{index:0,function:{arguments:'{"value":"ok"}'}}]});
+      const argumentsEvent=event({tool_calls:[{index:0,function:{arguments:mode==='fragmented_tools_transient'?'{"value":':'{"value":"ok"}'}}]});
       const fragments=mode==='late_fragmented_tools'?[event({tool_calls:[{index:0}]}),argumentsEvent,identity]:[identity,argumentsEvent];
       const finish={object:'chat.completion.chunk',model:'synthetic',choices:[{index:0,delta:{},finish_reason:'tool_calls'}]};
       const usage={object:'chat.completion.chunk',model:'synthetic',choices:[],usage:{prompt_tokens:2,completion_tokens:3,total_tokens:5},
         possums:{outcome:'settled',charged_microunits:'7',refunded_microunits:'45',quoted_input_microunits_per_million_tokens:'1000000',quoted_output_microunits_per_million_tokens:'1000000'}};
-      const text=[event({role:'assistant'}),event({content:'Synthetic preamble'}),...fragments,finish].map(frame).join('')+
-        (mode==='fragmented_tools_uncertain'?'':frame(usage)+'data: [DONE]\n\n');
+      const text=[event({role:'assistant'}),event({content:'Synthetic preamble'}),...fragments,...(mode==='fragmented_tools_transient'?[]:[finish])].map(frame).join('')+
+        (mode==='fragmented_tools_transient'?frame({error:{code:'generation_failed',detail:'stream_transport_failed',billing:'unknown',message:'PRIVATE_PROMPT'}}):
+          mode==='fragmented_tools_uncertain'?'':frame(usage)+'data: [DONE]\n\n');
       const body=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(text));controller.close();}});
       return m.consumeCompletion(body,entry(true),onDelta,{tools:options.tools,onEvent:options.onEvent,signal:options.signal});
     }
@@ -92,7 +95,8 @@ async function setup(plan, tools = true) {
     if (mode === 'held' || mode === 'held_tools') await release.promise;
     if (mode === 'uncertain') throw new m.ChannelError('uncertain');
     if (mode === 'refund') throw await terminalGatewayError('generation_failed', 'stream_idle_timeout', 'refunded');
-    if (mode === 'unknown_bill') throw new m.GatewayError('unavailable', 'inference_unavailable', 'unknown');
+    if (mode === 'unknown_bill') throw await terminalGatewayError('unavailable', 'inference_unavailable', 'unknown');
+    if (mode && typeof mode === 'object') throw await terminalGatewayError(mode.code, mode.detail, mode.billing ?? 'unknown');
     if (mode === 'sdk_decode') throw new m.GatewayError('generation_failed', 'sdk_stream_decode_failed', 'unknown');
     if (mode === 'hostile') throw new Error('possums_secret_key_PRIVATE_PROMPT');
     if (mode === 'abort') await new Promise((_resolve,reject)=>{ options.signal.addEventListener('abort',()=>{abortSeen=true;reject(new m.ChannelError('uncertain'));},{once:true}); });
@@ -121,6 +125,7 @@ async function authFixture(plan = []) {
   const candidate=new m.ReferenceClient(s.client.channel);
   candidate.login=async key=>{trace.keys.push(key);};
   candidate.models=async()=>{trace.models++;return s.client.models();};
+  candidate.balance=(...args)=>s.client.balance(...args);
   candidate.chat=(model,messages,onDelta,newConversation,options)=>{
    trace.conversations.push(newConversation);return s.client.chat(model,messages,onDelta,newConversation,options);
   };
@@ -609,9 +614,9 @@ await check('progress before receipt, hooks and submitted-rate cost',async()=>{
  assert.equal(result.usage.totalTokens,5);assert.equal(result.usage.cost.total,7/1e6);assert.equal(result.usage.cost.input,2/1e6);
  assert(Math.abs(result.usage.cost.input+result.usage.cost.output-result.usage.cost.total)<1e-15);
 });
-await check('uncertain generation and length cannot authorize another invocation',async()=>{
- for(const mode of ['uncertain','length']){const s=await setup([mode]);s.provider.beginRun();const first=await drain(s.provider.streamSimple(s.selected,context(false)));
- const second=await drain(s.provider.streamSimple(s.selected,context(false)));assert.equal(s.sends(),1);assert.match(second.message.errorMessage,/\[possums_automatic_replay_blocked\].*Automatic replay blocked/);
+await check('provider leaves subsequent invocation policy to native Pi after uncertain or length failure',async()=>{
+ for(const mode of ['uncertain','length']){const s=await setup([mode,'stop']);s.provider.beginRun();const first=await drain(s.provider.streamSimple(s.selected,context(false)));
+ const second=await drain(s.provider.streamSimple(s.selected,context(false)));assert.equal(s.sends(),2);assert.equal(second.message.stopReason,'stop');
  if(mode==='uncertain')assert.match(first.message.errorMessage,/charge unknown/);else {assert.equal(first.message.stopReason,'error');assert.equal(first.message.diagnostics[0].details.finish,'length');assert.equal(first.message.usage.cost.total,7/1e6);}}
 });
 await check('abort propagated without replay',async()=>{
@@ -683,7 +688,7 @@ await check('nested tool schema survives Pi conversion and the complete request 
  assert.deepEqual(payload.tools[0].function.parameters,parameters);
  assert(Object.isFrozen(payload.tools[0].function.parameters));
 });
-await check('over-deep request encoding keeps a private actionable error and cannot replay',async()=>{
+await check('repeated over-deep requests fail deterministically without inference or private content',async()=>{
  let parameters={type:'object',properties:{value:{type:'string',enum:['PRIVATE_SCHEMA_SENTINEL']}}};
  for(let i=0;i<14;i++)parameters={type:'object',properties:{nested:parameters}};
  const s=await setup(['stop']);const chat=s.client.chat;
@@ -699,7 +704,7 @@ await check('over-deep request encoding keeps a private actionable error and can
  assert(!JSON.stringify(first).includes('PRIVATE_SCHEMA_SENTINEL'));
  assert.equal(first.message.diagnostics,undefined);
  const second=await drain(s.provider.streamSimple(s.selected,transcript));
- assert.match(second.message.errorMessage,/\[possums_automatic_replay_blocked\]/);assert.equal(s.sends(),0);
+ assert.equal(second.message.errorMessage,first.message.errorMessage);assert.equal(s.sends(),0);
 });
 await check('failed catalog refresh removes prior usable list',async()=>{
  const s=await setup(['stop']);assert.equal(s.provider.getModels().length,1);s.failModels();
@@ -723,7 +728,11 @@ await check('logout revokes pending tool execution while retaining a late settle
 await check('gateway failure descriptions preserve fixed reason and proven billing without exposing content',async()=>{
  for(const [mode, code, billing] of [['refund','generation_failed','refunded'],['unknown_bill','unavailable','unknown']]){
   const s=await setup([mode]);s.provider.beginRun();const result=await drain(s.provider.streamSimple(s.selected,context(false)));
-  assert.match(result.message.errorMessage,new RegExp(code==='generation_failed'?'Generation failed.*stream idle timeout.*Reservation refunded.*Not replayed':'Gateway unavailable.*inference unavailable.*Charge unknown.*Not replayed'));
+  assert.match(result.message.errorMessage,/Transient service unavailable/);
+  assert(result.message.errorMessage.includes(`[${code}]`));
+  assert.match(result.message.errorMessage,new RegExp(code==='generation_failed'?'Generation failed.*stream idle timeout.*Reservation refunded':'Gateway unavailable.*inference unavailable.*Charge unknown'));
+  assert.match(result.message.errorMessage,/Native automatic retry may incur another charge/);
+  assert.doesNotMatch(result.message.errorMessage,/billing|Not replayed/i);
   assert.equal(result.message.diagnostics?.some(d=>d.type==='possums_billing_unknown')??false,billing==='unknown');
   assert.equal(result.events.some(e=>e.type==='toolcall_end'),false);assert.equal(s.sends(),1);
  }
@@ -731,17 +740,44 @@ await check('gateway failure descriptions preserve fixed reason and proven billi
  assert.equal(result.message.errorMessage,'Possums: request rejected. Not replayed.');
  assert(!JSON.stringify(result).includes('PRIVATE_PROMPT'));
 });
-async function sdkSetup(name, plan, tools, compaction=false, qualified=true, restoreTools=false) {
+await check('pinned Pi classifier admits only closed gateway operational failures',async()=>{
+ const transient=['tokenizer_send_failed','tokenizer_http_failed','generation_send_failed','generation_http_failed','stream_transport_failed','stream_idle_timeout','stream_deadline_exceeded'];
+ const terminal=`inference_unavailable upstream_response_invalid verification_failed catalog_failed request_encoding_failed tool_profile_unqualified
+ tokenizer_response_invalid tokenizer_upload_incomplete endpoint_binding_failed stream_content_type_invalid sdk_stream_decode_failed upstream_error_event
+ stream_event_schema_invalid stream_choice_invalid stream_delta_unsupported tool_index_invalid tool_identity_invalid tool_name_not_allowed
+ tool_choice_violated tool_call_incomplete tool_arguments_too_large stream_finish_invalid stream_finish_missing stream_usage_invalid
+ stream_usage_unexpected stream_usage_missing stream_output_after_finish settlement_failed`.split(/\s+/);
+ for(const detail of [...transient,...terminal,undefined]) {
+  const s=await setup([{code:'generation_failed',detail}]);const {message}=await drain(s.provider.streamSimple(s.selected,context(false)));
+  assert.equal(isRetryableAssistantError(message),transient.includes(detail),String(detail));assert.equal(s.sends(),1);
+  assert(message.errorMessage.includes('[generation_failed]'));if(detail)assert(message.errorMessage.includes(`[${detail}]`));
+  assert(message.diagnostics.some(d=>d.type==='possums_billing_unknown'));
+  assert(!JSON.stringify(message).includes('PRIVATE_PROMPT'));
+ }
+ for(const code of ['unavailable','unauthorized','insufficient_credit','invalid_request','account_limit','duplicate_request']) {
+  for(const detail of [undefined,'inference_unavailable','stream_idle_timeout']) {
+   const s=await setup([{code,detail}]);const {message}=await drain(s.provider.streamSimple(s.selected,context(false)));
+   assert.equal(isRetryableAssistantError(message),code==='unavailable'&&detail!=='stream_idle_timeout',code+'/'+detail);
+   assert.equal(s.sends(),1);assert(message.errorMessage.includes(`[${code}]`));
+  }
+ }
+ for(const [code,detail] of [['unavailable','PRIVATE_PROMPT_timeout'],['PRIVATE_PROMPT_service unavailable','stream_idle_timeout']]) {
+  const s=await setup([]);s.client.chat=async()=>{throw new m.GatewayError(code,detail);};
+  const {message}=await drain(s.provider.streamSimple(s.selected,context(false)));
+  assert.equal(isRetryableAssistantError(message),false);assert(!JSON.stringify(message).includes('PRIVATE_PROMPT'));
+ }
+});
+async function sdkSetup(name, plan, tools, compaction=false, qualified=true, restoreTools=false, retry={baseDelayMs:1,maxAgentDelayMs:8}) {
  const s=await setup(plan,qualified);let toolRuns=0,provider,textOnlyCommand;const notices=[],compactions=[];
  // Keep native physical-model lookup and the selected host model consistent.
  const models=s.client.models;s.client.models=async()=> (await models()).map(model=>({...model,context_tokens:'64000'}));
- const settings=coding.SettingsManager.inMemory({compaction:{enabled:compaction,keepRecentTokens:4},retry:{baseDelayMs:1,maxAgentDelayMs:2},defaultTools:[],cacheWarming:'off',enableInstallTelemetry:false});
+ const settings=coding.SettingsManager.inMemory({compaction:{enabled:compaction,keepRecentTokens:4},retry,defaultTools:[],cacheWarming:'off',enableInstallTelemetry:false});
  const credentials=new ai.InMemoryCredentialStore();
  await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
  const runtime=await coding.ModelRuntime.create({credentials,modelsStore:new ai.InMemoryModelsStore(),modelsPath:null,allowModelNetwork:false,refreshOnCreate:false});
  const cwd=path.join(root,name);fs.mkdirSync(cwd,{recursive:true});
  const loader=new coding.DefaultResourceLoader({cwd,agentDir:cwd,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,systemPrompt:'Synthetic test',
-  extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[])]});
+  extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;if(name==='possums-reconcile'){const original=command;command={...original,handler:(args,ctx)=>original.handler(args,{...ctx,hasUI:true,ui:{...ctx.ui,notify:text=>notices.push(text)}})};}pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[])]});
  await loader.reload();assert.deepEqual(loader.getExtensions().errors,[]);
  runtime.registerNativeProvider(provider);
  await runtime.refresh({providers:['possums'],allowNetwork:false});
@@ -755,6 +791,65 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
  return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
 }
+function balancePlan(client, snapshots) {
+ let reads=0;client.balance=async()=>{assert(reads<snapshots.length,'unexpected balance read');return snapshots[reads++];};return ()=>reads;
+}
+const balanceSnapshot=(available='5000000',completed='0',inFlight=0)=>({availableMicrounits:available,completedRequests:completed,inFlight});
+const reconciliationContext=s=>({isIdle:()=>true,signal:new AbortController().signal,
+ modelRegistry:{getProviderAuth:()=>s.provider.auth.apiKey.resolve(authInput(s.credential))}});
+await check('actual Pi reconciliation commands compare exact receipts and balance without inference or persistent reports',async()=>{
+ for(const [name,plan,tools,completed] of [['tools',['tool_calls','stop'],true,'2'],['refund-retry',['refund','stop'],false,'2']]) {
+  const f=await sdkSetup('sdk-reconcile-'+name,plan,tools);const charged=tools?'14':'7';
+  const reads=balancePlan(f.s.client,[balanceSnapshot(),balanceSnapshot((5000000n-BigInt(charged)).toString(),completed)]);
+  try {
+   await f.session.prompt('/possums-reconcile start');assert.equal(f.s.sends(),0);assert.equal(f.session.messages.length,0);assert.equal(reads(),1);
+   assert.match(f.notices.at(-1),/Reconciliation started/);
+   await f.session.prompt('Synthetic accounting task');const before=f.session.messages.length;
+   await f.session.prompt('/possums-reconcile finish');assert.equal(f.s.sends(),2);assert.equal(reads(),2);assert.equal(f.session.messages.length,before);
+   assert.match(f.notices.at(-1),new RegExp('Reconciliation matched: balance debit \\$0\\.0000'+(tools?'14':'07')));
+   assert.equal(f.session.sessionManager.getSessionFile(),undefined);
+   assert(!JSON.stringify(f.session.sessionManager.getEntries()).includes('Reconciliation matched'));
+  } finally {f.session.dispose();}
+ }
+});
+await check('reconciliation keeps u64 precision, detects unrelated activity, unknown charges and mismatches',async()=>{
+ const cases=[
+  {name:'wide',before:balanceSnapshot('18446744073709551615','9007199254740993'),after:balanceSnapshot('18446744073709551608','9007199254740994'),plan:['stop'],expected:/Reconciliation matched/},
+  {name:'outside',after:balanceSnapshot('4999993','2'),plan:['stop'],expected:/Reconciliation unavailable/},
+  {name:'unknown',after:balanceSnapshot('4999993','2'),plan:['unknown_bill','stop'],expected:/Reconciliation unavailable/},
+  {name:'reset',before:balanceSnapshot('5000000','10'),after:balanceSnapshot('4999993','0'),plan:['stop'],expected:/Reconciliation unavailable/},
+  {name:'mismatch',after:balanceSnapshot('4999994','1'),plan:['stop'],expected:/Reconciliation mismatch/},
+ ];
+ for(const c of cases) {
+  const s=await setup(c.plan);balancePlan(s.client,[c.before??balanceSnapshot(),c.after]);const ctx=reconciliationContext(s);
+  await s.provider.reconcile('start',ctx);s.provider.beginRun();for(const _ of c.plan)await drain(s.provider.streamSimple(s.selected,context(false)));
+  assert.match(await s.provider.reconcile('finish',ctx),c.expected);
+ }
+});
+await check('reconciliation pending, busy, cancel, session replacement and failed reads never infer or claim a match',async()=>{
+ const s=await setup(['stop']);const ctx=reconciliationContext(s);let reads=balancePlan(s.client,[balanceSnapshot('5000000','0',1)]);
+ await assert.rejects(()=>s.provider.reconcile('start',{...ctx,isIdle:()=>false}),/possums_reconcile_busy/);assert.equal(reads(),0);
+ await assert.rejects(()=>s.provider.reconcile('start',ctx),/possums_reconcile_pending/);assert.equal(reads(),1);assert.equal(s.sends(),0);
+ reads=balancePlan(s.client,[balanceSnapshot(),balanceSnapshot('4999948','0',1),balanceSnapshot('4999993','1')]);
+ await s.provider.reconcile('start',ctx);await assert.rejects(()=>s.provider.reconcile('start',ctx),/possums_reconcile_started/);assert.equal(reads(),1);
+ await assert.rejects(()=>s.provider.reconcile('finish',ctx),/possums_reconcile_pending/);assert.equal(reads(),2);
+ s.provider.beginRun();await drain(s.provider.streamSimple(s.selected,context(false)));assert.match(await s.provider.reconcile('finish',ctx),/Reconciliation matched/);
+ balancePlan(s.client,[balanceSnapshot()]);await s.provider.reconcile('start',ctx);assert.match(await s.provider.reconcile('cancel',ctx),/discarded/);
+ await assert.rejects(()=>s.provider.reconcile('finish',ctx),/possums_reconcile_not_started/);
+ balancePlan(s.client,[balanceSnapshot()]);await s.provider.reconcile('start',ctx);s.provider.newSession();
+ await assert.rejects(()=>s.provider.reconcile('finish',ctx),/possums_reconcile_not_started/);
+ assert.equal(s.sends(),1);
+ const race=await setup([]),entered=deferred(),gate=deferred(),raceCtx=reconciliationContext(race);
+ race.client.balance=async()=>{entered.resolve();await gate.promise;return balanceSnapshot();};
+ const pending=race.provider.reconcile('start',raceCtx);await entered.promise;
+ await race.provider.reconcile('cancel',raceCtx);gate.resolve();
+ await assert.rejects(()=>pending,/possums_reconcile_scope_changed/);
+ await assert.rejects(()=>race.provider.reconcile('finish',raceCtx),/possums_reconcile_not_started/);assert.equal(race.sends(),0);
+ const f=await sdkSetup('sdk-reconcile-hostile',[],false);
+ f.s.client.balance=async()=>{throw new m.BalanceFailure('request');};
+ try {await f.session.prompt('/possums-reconcile start');assert.equal(f.s.sends(),0);assert.equal(f.session.messages.length,0);assert.match(f.notices.at(-1),/possums_balance_request_failed/);}
+ finally {f.session.dispose();}
+});
 await check('trust starts closed, caches failed verification and never refreshes on login/logout/catalog within a session',async()=>{
  const fixture=await authFixture([]);let fail=true,checks=0,prompts=0;
  const provider=new bundle.PossumsProvider(async()=>{checks++;if(fail)throw new m.ConnectionFailure('verification_failed');return fixture.establish();});
@@ -843,6 +938,94 @@ await check('actual Pi SDK and shipped extension hooks run one receipted invocat
  try{await session.prompt('Synthetic tool task');assert.equal(toolRuns(),1,session.messages.filter(value=>value.role==='assistant').at(-1)?.errorMessage);assert.equal(s.sends(),2);assert.equal(s.requests[1].messages.find(message=>message.role==='assistant').content,'');assert.equal(session.messages.filter(value=>value.role==='assistant').at(-1).content.find(value=>value.type==='text').text,'progressive');assert.equal(session.sessionManager.getSessionFile(),undefined);}
  finally{session.dispose();}
 });
+await check('actual Pi SDK accepts steering during held text and tool responses, and queued follow-up',async()=>{
+ for(const [mode,method] of [['held','steer'],['held_tools','steer'],['held','followUp']]) {
+  const f=await sdkSetup('sdk-'+method+'-'+mode,[mode,'stop'],mode==='held_tools');
+  const retries=[];let queued;
+  const unsubscribe=f.session.subscribe(event=>{
+   if(event.type==='auto_retry_start')retries.push(event);
+   if(event.type==='message_update' && event.assistantMessageEvent.type===(mode==='held_tools'?'toolcall_delta':'text_delta') && !queued) {
+    queued=f.session[method]('Synthetic queued '+method).finally(()=>f.s.release());
+   }
+  });
+  try {
+   await f.session.prompt('Synthetic held task');await queued;assert(queued);
+   assert.equal(f.s.sends(),2);assert.equal(f.toolRuns(),mode==='held_tools'?1:0);assert.equal(retries.length,0);
+   assert(f.s.requests[1].messages.some(message=>message.role==='user'&&message.content.includes('Synthetic queued '+method)));
+   if(mode==='held_tools')assert(f.s.requests[1].messages.some(message=>message.role==='tool'&&message.tool_call_id==='call_one'));
+   assert.equal(f.session.messages.at(-1).stopReason,'stop');
+  } finally {unsubscribe();f.session.dispose();}
+ }
+});
+const rawAssistants = session => session.sessionManager.getEntries().filter(entry=>entry.type==='message'&&entry.message.role==='assistant').map(entry=>entry.message);
+await check('actual Pi SDK retries validated transient failures with native events and retains raw diagnostics',async()=>{
+ for(const mode of ['refund','unknown_bill']) {
+  const f=await sdkSetup('sdk-retry-'+mode,[mode,'stop'],false);const events=[];
+  const unsubscribe=f.session.subscribe(event=>{if(event.type.startsWith('auto_retry_'))events.push(event);});
+  try {
+   await f.session.prompt('Synthetic transient task');assert.equal(f.s.sends(),2);
+   assert.deepEqual(events.map(event=>event.type),['auto_retry_start','auto_retry_end']);
+   assert.equal(events[0].attempt,1);assert.equal(events[0].maxAttempts,3);assert.equal(events[1].success,true);
+   const raw=rawAssistants(f.session);assert.equal(raw.length,2);assert.equal(raw[0].stopReason,'error');assert.equal(raw[1].stopReason,'stop');
+   assert.match(raw[0].errorMessage,/Transient service unavailable.*Native automatic retry may incur another charge/);
+   assert.match(raw[0].errorMessage,mode==='refund'?/\[generation_failed\].*\[stream_idle_timeout\].*Reservation refunded/:/\[unavailable\].*\[inference_unavailable\].*Charge unknown/);
+   assert.equal(raw[0].diagnostics?.some(d=>d.type==='possums_billing_unknown')??false,mode==='unknown_bill');
+   assert.equal(raw[0].diagnostics?.some(d=>d.type==='possums_reservation_refunded')??false,mode==='refund');
+   assert(!JSON.stringify(raw).includes('PRIVATE_PROMPT'));
+   assert.equal(f.session.messages.filter(message=>message.role==='assistant').length,1,'native projection omits the failed attempt, not raw history');
+   assert.deepEqual(f.s.requests[0].messages,f.s.requests[1].messages);
+  } finally {unsubscribe();f.session.dispose();}
+ }
+});
+await check('actual Pi SDK exhausts exactly the default three retries and resets budget after success',async()=>{
+ const f=await sdkSetup('sdk-retry-budget',[...Array(4).fill('unknown_bill'),'refund','stop','refund','stop'],false);const events=[];
+ const unsubscribe=f.session.subscribe(event=>{if(event.type.startsWith('auto_retry_'))events.push(event);});
+ try {
+  assert.equal(coding.SettingsManager.inMemory().getRetrySettings().maxRetries,3);
+  assert.equal(coding.SettingsManager.inMemory().getRetrySettings().baseDelayMs,2000);
+  assert.deepEqual([1,2,3].map(attempt=>retryDelayMs(coding.SettingsManager.inMemory().getRetrySettings(),attempt)),[2000,4000,8000]);
+  assert.equal(f.settings.getRetrySettings().maxRetries,3);
+  await f.session.prompt('Synthetic exhausted task');assert.equal(f.s.sends(),4);
+  assert.deepEqual(events.filter(event=>event.type==='auto_retry_start').map(event=>event.attempt),[1,2,3]);
+  assert.deepEqual(events.filter(event=>event.type==='auto_retry_start').map(event=>event.delayMs),[1,2,4]);
+  assert(events.filter(event=>event.type==='auto_retry_start').every(event=>event.maxAttempts===3));
+  assert.equal(events.at(-1).type,'auto_retry_end');assert.equal(events.at(-1).success,false);assert.equal(events.at(-1).attempt,3);
+  assert.equal(rawAssistants(f.session).length,4);
+  assert(rawAssistants(f.session).every(message=>message.stopReason==='error'&&message.diagnostics.some(d=>d.type==='possums_billing_unknown')));
+  assert.match(f.session.messages.at(-1).errorMessage,/Charge unknown.*another charge/);
+  for(let i=0;i<2;i++) {
+   events.length=0;await f.session.prompt('Synthetic fresh task '+i);assert.equal(f.s.sends(),6+i*2);
+   assert.deepEqual(events.filter(event=>event.type==='auto_retry_start').map(event=>event.attempt),[1]);assert.equal(events.at(-1).success,true);
+  }
+ } finally {unsubscribe();f.session.dispose();}
+});
+await check('actual Pi SDK aborts native retry backoff without another submission',async()=>{
+ // Only the synthetic fixture changes delay; shipped extension never changes settings.
+ const f=await sdkSetup('sdk-retry-abort',['unknown_bill','stop'],false,false,true,false,{baseDelayMs:1000,maxAgentDelayMs:1000});const events=[];let abort;
+ const unsubscribe=f.session.subscribe(event=>{
+  if(event.type.startsWith('auto_retry_'))events.push(event);
+  if(event.type==='auto_retry_start')abort=new Promise(resolve=>setImmediate(()=>resolve(f.session.abort())));
+ });
+ try {
+  await f.session.prompt('Synthetic abort during backoff');await abort;assert(abort);
+  assert.equal(f.s.sends(),1);assert.deepEqual(events.map(event=>event.type),['auto_retry_start','auto_retry_end']);
+  assert.equal(events.at(-1).success,false);assert.equal(events.at(-1).attempt,1);
+  const raw=rawAssistants(f.session);assert.equal(raw.length,1);assert.match(raw[0].errorMessage,/Charge unknown.*another charge/);
+  assert(raw[0].diagnostics.some(d=>d.type==='possums_billing_unknown'));
+ } finally {unsubscribe();f.session.dispose();}
+});
+await check('actual Pi SDK never executes incomplete tool fragments from a transient failed attempt',async()=>{
+ const f=await sdkSetup('sdk-retry-fragments',['fragmented_tools_transient','stop'],true);const events=[];
+ const unsubscribe=f.session.subscribe(event=>{if(event.type.startsWith('auto_retry_'))events.push(event);});
+ try {
+  await f.session.prompt('Synthetic interrupted tool task');assert.equal(f.s.sends(),2);assert.equal(f.toolRuns(),0);
+  assert.deepEqual(events.map(event=>event.type),['auto_retry_start','auto_retry_end']);assert.equal(events.at(-1).success,true);
+  const raw=rawAssistants(f.session);assert.equal(raw[0].stopReason,'error');assert(raw[0].content.some(block=>block.type==='toolCall'));
+  assert(raw[0].diagnostics.some(d=>d.type==='possums_billing_unknown'));assert(!raw[0].diagnostics.some(d=>d.type==='possums_settled_receipt'));
+  assert.equal(f.s.requests[1].messages.some(message=>message.role==='tool'||message.tool_calls),false);
+  assert(!JSON.stringify(raw).includes('PRIVATE_PROMPT'));
+ } finally {unsubscribe();f.session.dispose();}
+});
 await check('actual Pi SDK completes split identity/arguments and late identity through the real client decoder',async()=>{
  for(const mode of ['fragmented_tools','late_fragmented_tools']){
   const {session,s,toolRuns}=await sdkSetup('sdk-'+mode,[mode,'stop'],true);
@@ -900,6 +1083,18 @@ await check('default Pi retry and compaction cannot replay an uncertain invocati
  try{await session.prompt('Synthetic uncertain task');assert.equal(s.sends(),1);assert.match(session.messages.filter(value=>value.role==='assistant').at(-1).errorMessage,/charge unknown/);}
  finally{session.dispose();}
 });
+await check('actual Pi SDK leaves auth, credit, validation, integrity, settlement and hostile failures terminal',async()=>{
+ const cases=['hostile',...['unauthorized','insufficient_credit','invalid_request','account_limit','duplicate_request'].map(code=>({code,detail:'stream_idle_timeout'})),
+  ...['request_encoding_failed','verification_failed','tool_identity_invalid','stream_usage_invalid','settlement_failed'].map(detail=>({code:'generation_failed',detail}))];
+ for(const [index,mode] of cases.entries()) {
+  const f=await sdkSetup('sdk-terminal-'+index,[mode,'stop'],true);const events=[];
+  const unsubscribe=f.session.subscribe(event=>{if(event.type.startsWith('auto_retry_'))events.push(event);});
+  try {
+   await f.session.prompt('Synthetic terminal failure');assert.equal(f.s.sends(),1);assert.equal(f.toolRuns(),0);assert.deepEqual(events,[]);
+   assert.equal(f.session.messages.at(-1).stopReason,'error');assert(!JSON.stringify(rawAssistants(f.session)).includes('PRIVATE_PROMPT'));
+  } finally {unsubscribe();f.session.dispose();}
+ }
+});
 await check('actual Pi SDK does not retry or compact after detailed gateway decode failure',async()=>{
  const {session,s,toolRuns}=await sdkSetup('sdk-detailed-error',['sdk_decode'],true,true);
  try {await session.prompt('Synthetic decode failure');const result=session.messages.filter(value=>value.role==='assistant').at(-1);
@@ -946,6 +1141,12 @@ async function compactionFixture(plan, split = false, previous = false) {
  const event={type:'session_before_compact',preparation,branchEntries:manager.getBranch(),reason:'manual',willRetry:false,signal:controller.signal,customInstructions:'Synthetic focus'};
  return {...fixture,...extension,runtime,manager,event,ctx,controller,notices,run:()=>extension.handlers.get('session_before_compact')(event,ctx)};
 }
+await check('reconciliation includes paid native compaction summaries without reading or persisting summary content',async()=>{
+ const f=await compactionFixture(['stop','stop'],true);const ctx={...f.ctx,isIdle:()=>true,signal:f.controller.signal};
+ balancePlan(f.s.client,[balanceSnapshot(),balanceSnapshot('4999986','2')]);
+ await f.provider.reconcile('start',ctx);const result=await f.run();assert(result.compaction);
+ assert.match(await f.provider.reconcile('finish',ctx),/Reconciliation matched: balance debit \$0\.000014/);assert.equal(f.s.sends(),2);
+});
 await check('native one/two-summary prompts, previous checkpoint, files, advisory hints and combined usage',async()=>{
  for(const split of [false,true]) {
   const f=await compactionFixture(['stop','stop'],split,true),nativeRequests=[],hints=[];
@@ -965,18 +1166,18 @@ await check('native one/two-summary prompts, previous checkpoint, files, advisor
   assert.match(ordinary.message.errorMessage,/possums_request_options_unsupported/);assert.equal(f.s.sends(),split?2:1);
  }
 });
-await check('summary success/failure preserves ready run, receipted continuation and ordinary conversation state',async()=>{
+await check('summary success/failure preserves native continuation and ordinary conversation state',async()=>{
  for(const summary of ['stop','refund']) {
   const ready=await compactionFixture([summary,'stop']);ready.provider.beginRun();await ready.run();
   assert.equal((await drain(ready.provider.streamSimple(ready.ctx.model,context(false)))).message.stopReason,'stop');
   assert.deepEqual(ready.s.requests.map(r=>r.newConversation),[true,true]);
-  const f=await compactionFixture(['tool_calls',summary,'stop']);f.provider.beginRun();
+  const f=await compactionFixture(['tool_calls',summary,'stop','stop']);f.provider.beginRun();
   const first=(await drain(f.provider.streamSimple(f.ctx.model,context(true)))).message;
   assert.equal(first.stopReason,'toolUse');await f.run();
   const continuation=ai.normalizeContext({messages:[user,first,{role:'toolResult',toolCallId:'call_one',toolName:'echo',content:[{type:'text',text:'ok'}],timestamp:3}],tools:[tool]});
   assert.equal((await drain(f.provider.streamSimple(f.ctx.model,continuation))).message.stopReason,'stop');
-  assert.equal((await drain(f.provider.streamSimple(f.ctx.model,continuation))).message.stopReason,'error');
-  assert.deepEqual(f.s.requests.map(r=>r.newConversation),[true,true,false]);assert.equal(f.s.sends(),3);
+  assert.equal((await drain(f.provider.streamSimple(f.ctx.model,continuation))).message.stopReason,'stop');
+  assert.deepEqual(f.s.requests.map(r=>r.newConversation),[true,true,false,false]);assert.equal(f.s.sends(),4);
  }
 });
 await check('summary errors, length, empty text and tool attempts fail closed with safe stages and no replay',async()=>{
@@ -988,7 +1189,7 @@ await check('summary errors, length, empty text and tool attempts fail closed wi
   assert.deepEqual(result,{cancel:true});assert.equal(f.s.sends(),1);assert.match(f.notices[0],/summary 1/);assert.match(f.notices[0],pattern);
   assert(!f.notices.join('').includes('PRIVATE_PROMPT'));assert.match(f.notices[0],/No checkpoint saved.*Not replayed/);
   if(['length','empty','tool_calls','stop_tools'].includes(mode))assert.match(f.notices[0],/Observed settled charges: \$0.000007/);
-  assert.equal((await drain(f.provider.streamSimple(f.ctx.model,context(false)))).message.stopReason,'error');assert.equal(f.s.sends(),1);
+  assert.equal((await drain(f.provider.streamSimple(f.ctx.model,context(false)))).message.stopReason,'stop');assert.equal(f.s.sends(),2);
  }
 });
 await check('failed second summary reports first paid summary and observed second-call billing without a ledger',async()=>{

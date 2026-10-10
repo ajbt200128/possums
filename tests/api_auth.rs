@@ -520,3 +520,276 @@ async fn controls_keep_body_deadline_header_limits_and_response_frame_admission(
     drop(bytes);
     challenge(&app).await;
 }
+
+// Balance is a first-party accounting control, independent of every upstream
+// service. Panic rather than silently accepting any provider invocation.
+struct NoInference;
+#[async_trait]
+impl EvidenceVerifier for NoInference {
+    async fn verify(&self, _: &str, _: u64) -> Result<GatewayEvidence, EvidenceError> {
+        panic!("balance cannot verify inference evidence")
+    }
+}
+#[async_trait]
+impl Inference for NoInference {
+    async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
+        panic!("balance cannot fetch catalog")
+    }
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[Message],
+        _: Arc<possums::telemetry::hooks::Lease>,
+    ) -> Result<u64, InferenceError> {
+        panic!("balance cannot tokenize")
+    }
+    async fn generate_completion_stream(
+        &self,
+        _: &possums::catalog::Model,
+        _: &[Message],
+        _: Arc<possums::telemetry::hooks::Lease>,
+        _: &mut (dyn for<'d> FnMut(&'d str) + Send),
+    ) -> Result<possums::inference::stream::StreamCompletion, InferenceError> {
+        panic!("balance cannot generate")
+    }
+    fn verification_document(&self) -> Result<Value, InferenceError> {
+        panic!("balance cannot fetch verification document")
+    }
+}
+fn balance_fixture() -> (AppState, [String; 2]) {
+    let credentials = [
+        URL_SAFE_NO_PAD.encode([7; 32]),
+        URL_SAFE_NO_PAD.encode([8; 32]),
+    ];
+    let accounts: Vec<_> = credentials.iter().zip([("demo", u64::MAX), ("other", 17)])
+        .map(|(credential, (id, credit))| json!({"id":id,"credential_sha256":URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes())),"demo_microunits":credit}))
+        .collect();
+    let auth = Auth::from_json(&json!(accounts).to_string()).unwrap();
+    (
+        AppState::new(auth, Arc::new(NoInference), "unused", Arc::new(NoInference)),
+        credentials,
+    )
+}
+fn balance_request(bearer: &str, body: &str) -> Request<Body> {
+    Request::post("/v1/balance")
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn balance_exact_schema_precise_credit_and_account_isolation_without_upstream() {
+    let (state, credentials) = balance_fixture();
+    let app = router(state);
+    for (credential, credit) in credentials.iter().zip([u64::MAX, 17]) {
+        let bearer = login(&app, credential).await;
+        let res = app
+            .clone()
+            .oneshot(balance_request(&bearer, "{}"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(res.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(res.headers()[header::REFERRER_POLICY], "no-referrer");
+        assert!(res.headers().contains_key(header::CONTENT_SECURITY_POLICY));
+        // Exact keys and values rule out account/session/submission identifiers,
+        // prompt/history/content, reservation detail and number rounding.
+        assert_eq!(
+            read(res).await,
+            json!({
+                "available_microunits": credit.to_string(), "in_flight": 0, "completed_requests": "0"
+            })
+        );
+    }
+    assert_eq!(
+        possums::telemetry::Endpoint::route("POST", "/v1/balance"),
+        possums::telemetry::Endpoint::Other
+    );
+}
+
+#[tokio::test]
+async fn balance_requires_exact_api_bearer_and_rejects_cookies_encoding_and_logged_out_sessions() {
+    let (state, credentials) = balance_fixture();
+    let credential = &credentials[0];
+    let (web, _) = state
+        .auth
+        .authenticate(credential, &state.auth.issue_login_challenge().unwrap())
+        .unwrap();
+    let app = router(state);
+    let bearer = login(&app, credential).await;
+    for auth in [
+        None,
+        Some(String::new()),
+        Some("Bearer".into()),
+        Some(format!("bearer {bearer}")),
+        Some(format!("Basic {bearer}")),
+        Some(format!("Bearer  {bearer}")),
+        Some(format!(" Bearer {bearer}")),
+        Some(format!("Bearer {bearer}\t")),
+        Some(format!("Bearer {bearer},{bearer}")),
+        Some("Bearer bad".into()),
+        Some(format!("Bearer {credential}")),
+        Some(format!("Bearer {web}")),
+        Some(credential.clone()),
+    ] {
+        let mut req = balance_request(&bearer, "{}");
+        req.headers_mut().remove(header::AUTHORIZATION);
+        if let Some(auth) = auth {
+            req.headers_mut()
+                .insert(header::AUTHORIZATION, auth.parse().unwrap());
+        }
+        assert_eq!(
+            response(&app, req, StatusCode::UNAUTHORIZED).await,
+            json!({"error":{"code":"unauthorized"}})
+        );
+    }
+    let mut duplicate = balance_request(&bearer, "{}");
+    duplicate.headers_mut().append(
+        header::AUTHORIZATION,
+        format!("Bearer {bearer}").parse().unwrap(),
+    );
+    response(&app, duplicate, StatusCode::UNAUTHORIZED).await;
+    for cookie in [
+        String::new(),
+        format!("possums_session={web}"),
+        format!("possums_session={bearer}"),
+    ] {
+        for with_bearer in [false, true] {
+            let mut req = balance_request(&bearer, "{}");
+            req.headers_mut()
+                .insert(header::COOKIE, cookie.parse().unwrap());
+            if !with_bearer {
+                req.headers_mut().remove(header::AUTHORIZATION);
+            }
+            response(&app, req, StatusCode::BAD_REQUEST).await;
+        }
+    }
+    for encoding in ["", "identity", "gzip"] {
+        let mut req = balance_request(&bearer, "{}");
+        req.headers_mut()
+            .insert(header::CONTENT_ENCODING, encoding.parse().unwrap());
+        response(&app, req, StatusCode::BAD_REQUEST).await;
+    }
+    response(
+        &app,
+        Request::delete("/v1/sessions/current")
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .body(Body::empty())
+            .unwrap(),
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    response(
+        &app,
+        balance_request(&bearer, "{}"),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn balance_rejects_nonempty_duplicate_unknown_and_nonobject_json_and_wrong_media_types() {
+    let (state, credentials) = balance_fixture();
+    let app = router(state);
+    let bearer = login(&app, &credentials[0]).await;
+    for body in [
+        "",
+        " ",
+        "[]",
+        "null",
+        "false",
+        "0",
+        r#""secret-canary""#,
+        r#"{"account_id":"secret-canary"}"#,
+        r#"{"x":0,"x":1}"#,
+        r#"{"completed_requests":0}"#,
+        "{}{}",
+        "{",
+        "{,}",
+    ] {
+        assert_eq!(
+            response(
+                &app,
+                balance_request(&bearer, body),
+                StatusCode::BAD_REQUEST
+            )
+            .await,
+            json!({"error":{"code":"invalid_request"}})
+        );
+    }
+    for content_type in [
+        None,
+        Some("text/plain"),
+        Some("application/json; charset=utf-8"),
+    ] {
+        let mut req = balance_request(&bearer, "{}");
+        req.headers_mut().remove(header::CONTENT_TYPE);
+        if let Some(value) = content_type {
+            req.headers_mut()
+                .insert(header::CONTENT_TYPE, value.parse().unwrap());
+        }
+        response(&app, req, StatusCode::UNSUPPORTED_MEDIA_TYPE).await;
+    }
+    let mut req = balance_request(&bearer, "{}");
+    req.headers_mut()
+        .append(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    response(&app, req, StatusCode::UNSUPPORTED_MEDIA_TYPE).await;
+    let mut req = balance_request(&bearer, "{}");
+    *req.uri_mut() = "/v1/balance?account_id=secret-canary".parse().unwrap();
+    response(&app, req, StatusCode::BAD_REQUEST).await;
+    let mut req = balance_request(&bearer, "{}");
+    *req.method_mut() = axum::http::Method::GET;
+    response(&app, req, StatusCode::METHOD_NOT_ALLOWED).await;
+    response(
+        &app,
+        balance_request(&bearer, &" ".repeat(4097)),
+        StatusCode::PAYLOAD_TOO_LARGE,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn balance_unknown_account_fails_closed_without_leaking_identifiers() {
+    let (mut state, credentials) = balance_fixture();
+    state.accounting = Arc::new(possums::accounting::Accounting::new([]));
+    let app = router(state);
+    let bearer = login(&app, &credentials[0]).await;
+    assert_eq!(
+        response(
+            &app,
+            balance_request(&bearer, "{}"),
+            StatusCode::SERVICE_UNAVAILABLE
+        )
+        .await,
+        json!({"error":{"code":"unavailable"}})
+    );
+}
+
+#[tokio::test]
+async fn balance_inherits_control_deadline_and_retains_admission_until_response_release() {
+    let (state, credentials) = balance_fixture();
+    let app = router_with_body_deadline(state, Duration::from_millis(20));
+    let bearer = login(&app, &credentials[0]).await;
+    let mut req = balance_request(&bearer, "{}");
+    *req.body_mut() = Body::from_stream(futures_util::stream::pending::<
+        Result<axum::body::Bytes, std::io::Error>,
+    >());
+    response(&app, req, StatusCode::REQUEST_TIMEOUT).await;
+    let res = app
+        .clone()
+        .oneshot(balance_request(&bearer, "{}"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    response(
+        &app,
+        balance_request(&bearer, "{}"),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    drop(bytes);
+    response(&app, balance_request(&bearer, "{}"), StatusCode::OK).await;
+}

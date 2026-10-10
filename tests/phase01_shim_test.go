@@ -94,6 +94,14 @@ func TestPhase01ChannelFixture(t *testing.T) {
 			w.WriteHeader(400)
 			return
 		}
+		if r.URL.Path == "/v1/balance" {
+			if string(body) != "{}" {
+				w.WriteHeader(400)
+				return
+			}
+			io.WriteString(w, `{"available_microunits":"0","in_flight":0,"completed_requests":"0"}`)
+			return
+		}
 		if r.URL.Path != "/v1/chat/completions" {
 			io.WriteString(w, `{"ok":true}`)
 			return
@@ -142,7 +150,7 @@ func TestPhase01ChannelFixture(t *testing.T) {
 	}
 	tlsCert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 	upstream := strings.TrimPrefix(backend.URL, "http://")
-	cfg := &config.Config{Paths: []string{"/v1/models", "/v1/auth/challenge", "/v1/sessions", "/v1/submissions", "/v1/chat/completions"},
+	cfg := &config.Config{Paths: []string{"/v1/models", "/v1/auth/challenge", "/v1/sessions", "/v1/submissions", "/v1/balance", "/v1/chat/completions"},
 		OriginDomains: []string{"https://phase01.invalid"}, Authenticated: false}
 	att := &legacy.Document{Format: legacy.DummyV2, Body: "fixture-only"}
 	shim := NewShimServer(nil, nil, att, attestation.BodyV2{}, 0, id, &tlsCert, nil, cfg,

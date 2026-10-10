@@ -252,11 +252,13 @@ const channel = await f.Channel.fixture('https://localhost:18443', config, await
 const client = new f.ReferenceClient(channel);
 const nativeFetch = globalThis.fetch;
 let sent = [], decoded = [], responsePulls = 0, holdPath, held, catalogModel = model, chatText = valid, corrupt = false;
-let observedAbort = false;
+let observedAbort = false, balanceStatus = 200;
+let balanceText = '{"available_microunits":"18446744073709551615","in_flight":4294967295,"completed_requests":"18446744073709551615"}';
 globalThis.fetch = async req => {
   check(req instanceof Request && req.credentials === 'omit' && req.redirect === 'error' && req.cache === 'no-store');
   check(!req.signal.aborted);
   const route = new URL(req.url).pathname; sent.push(route);
+  if (route === '/v1/balance') check(req.headers.get('Authorization') === 'Bearer ' + 'b'.repeat(43));
   if (route === holdPath) {
     held?.();
     return new Promise((_, reject) => req.signal.addEventListener('abort', () => { observedAbort = true; reject(new Error('fixture abort')); }, { once: true }));
@@ -268,7 +270,7 @@ globalThis.fetch = async req => {
   const body = new Uint8Array(await req.arrayBuffer());
   const payload = JSON.parse(dec.decode(await recipient.Open(body.slice(4)))); decoded.push({ route, payload });
   const response = route === '/v1/sessions' ? JSON.stringify({ token: 'b'.repeat(43), token_type: 'Bearer', expires_in: 43200 }) :
-    route === '/v1/submissions' ? JSON.stringify({ submission: 's'.repeat(43) }) : chatText;
+    route === '/v1/submissions' ? JSON.stringify({ submission: 's'.repeat(43) }) : route === '/v1/balance' ? balanceText : chatText;
   const nonce = crypto.getRandomValues(new Uint8Array(32));
   const secret = new Uint8Array(await recipient.Export(enc.encode(ehbp.EXPORT_LABEL), ehbp.EXPORT_LENGTH));
   const keys = await ehbp.deriveResponseKeys(secret, encapsulated, nonce);
@@ -278,13 +280,60 @@ globalThis.fetch = async req => {
   let emitted = false;
   responsePulls = 0;
   return new Response(new ReadableStream({ pull(c) { responsePulls++; if (!emitted) { emitted = true; c.enqueue(frame); } else c.close(); } }, { highWaterMark: 0 }),
-    { headers: { 'Ehbp-Response-Nonce': ehbp.bytesToHex(nonce), 'Content-Type': route === '/v1/chat/completions' ? 'text/event-stream; fixture=hidden' : 'application/json', 'X-Private': 'not-for-hook' } });
+    { status: route === '/v1/balance' ? balanceStatus : 200, headers: { 'Ehbp-Response-Nonce': ehbp.bytesToHex(nonce), 'Content-Type': route === '/v1/chat/completions' ? 'text/event-stream; fixture=hidden' : 'application/json', 'X-Private': 'not-for-hook' } });
 };
 try {
   const pre = AbortSignal.abort();
+  await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'request' && e.message === 'possums_balance_request_failed'); checks++;
+  check(sent.length === 0);
   await rejects(() => client.login('c'.repeat(43), pre), 'rejected'); check(sent.length === 0);
   await client.login('c'.repeat(43)); check(sent.join(',') === '/v1/auth/challenge,/v1/sessions');
   let initial = sent.length;
+  const snapshot = await client.balance();
+  assert.deepEqual(snapshot, { availableMicrounits: '18446744073709551615', inFlight: 4294967295, completedRequests: '18446744073709551615' }); checks++;
+  check(Object.isFrozen(snapshot) && sent.slice(initial).join(',') === '/v1/balance');
+  assert.deepEqual(decoded.at(-1), { route: '/v1/balance', payload: {} }); checks++;
+  const invalidBalances = [
+    { available_microunits: '18446744073709551616', in_flight: 0, completed_requests: '0' },
+    { available_microunits: '1.5', in_flight: 0, completed_requests: '0' },
+    { available_microunits: '-1', in_flight: 0, completed_requests: '0' },
+    { available_microunits: '01', in_flight: 0, completed_requests: '0' },
+    { available_microunits: 1, in_flight: 0, completed_requests: '0' },
+    { available_microunits: '0', in_flight: 4294967296, completed_requests: '0' },
+    { available_microunits: '0', in_flight: -1, completed_requests: '0' },
+    { available_microunits: '0', in_flight: 0.5, completed_requests: '0' },
+    { available_microunits: '0', in_flight: 0, completed_requests: '01' },
+    { available_microunits: '0', in_flight: 0, completed_requests: '18446744073709551616' },
+    { available_microunits: '0', in_flight: 0, completed_requests: '0', id: 'unexpected' },
+  ];
+  for (const value of invalidBalances) {
+    balanceText = JSON.stringify(value); initial = sent.length;
+    await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'validation' && e.message === 'possums_balance_validation_failed'); checks++;
+    check(sent.slice(initial).join(',') === '/v1/balance');
+  }
+  for (const text of ['{"available_microunits":"0","in_flight":0,"completed_requests":"0","in_flight":1}', '{"available_microunits":"0","in_flight":-0,"completed_requests":"0"}', '{"error":{"message":"secret diagnostic"}}']) {
+    balanceText = text; initial = sent.length;
+    await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure &&
+      e.message === (text.includes('secret') || text.includes('-0') ? 'possums_balance_validation_failed' : 'possums_balance_request_failed')); checks++;
+    check(sent.slice(initial).join(',') === '/v1/balance');
+  }
+  balanceText = JSON.stringify({ available_microunits: '0', in_flight: 0, completed_requests: '0' });
+  initial = sent.length;
+  await assert.rejects(() => client.balance(pre), e => e instanceof f.BalanceFailure && e.stage === 'request'); checks++;
+  check(sent.length === initial);
+  for (const status of [401, 404, 429, 503]) {
+    balanceStatus = status; initial = sent.length;
+    await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'request'); checks++;
+    check(sent.slice(initial).join(',') === '/v1/balance');
+  }
+  balanceStatus = 200;
+  // An older gateway cannot silently fall back to login, catalog or inference.
+  const failedBalanceFetch = globalThis.fetch;
+  globalThis.fetch = async req => new URL(req.url).pathname === '/v1/balance' ? new Response('not found', { status: 404 }) : failedBalanceFetch(req);
+  initial = sent.length;
+  await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'request' && !e.message.includes('not found')); checks++;
+  check(sent.length === initial); globalThis.fetch = failedBalanceFetch;
+  initial = sent.length;
   await rejects(() => client.models(pre), 'rejected'); check(sent.length === initial);
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { signal: pre }), 'rejected'); check(sent.length === initial);
   check((await client.chat('fixture',chat.messages,()=>{},false,{tools:[nestedTool]})).finish==='tool_calls');
@@ -346,11 +395,11 @@ try {
   check(sent.slice(initial).join(',') === '/v1/models,/v1/submissions,/v1/chat/completions');
   corrupt = true;
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] })); corrupt = false;
-  for (const route of ['/v1/auth/challenge', '/v1/sessions', '/v1/models', '/v1/submissions', '/v1/chat/completions']) {
+  for (const route of ['/v1/auth/challenge', '/v1/sessions', '/v1/models', '/v1/submissions', '/v1/chat/completions', '/v1/balance']) {
     const controller = new AbortController(); holdPath = route; observedAbort = false;
     const reached = new Promise(resolve => { held = resolve; });
     const operation = route === '/v1/auth/challenge' || route === '/v1/sessions' ? client.login('c'.repeat(43), controller.signal) :
-      route === '/v1/models' ? client.models(controller.signal) : client.chat('fixture', chat.messages, () => {}, false, { tools: [tool], signal: controller.signal });
+      route === '/v1/models' ? client.models(controller.signal) : route === '/v1/balance' ? client.balance(controller.signal) : client.chat('fixture', chat.messages, () => {}, false, { tools: [tool], signal: controller.signal });
     // Attach immediately so no rejected fixture promise is ever unhandled.
     const rejected = assert.rejects(operation, e => e.code === 'uncertain');
     await reached; controller.abort(); await rejected; check(observedAbort);

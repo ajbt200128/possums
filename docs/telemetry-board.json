@@ -1,0 +1,69 @@
+{
+  "environment_slug": "prod",
+  "name": "Possums gateway — aggregate operations",
+  "description": "Approved aggregate request, generation, delivery, admission and process metrics; unavailable data is not zero traffic or health.",
+  "private": false,
+  "tags": ["service:possums", "scope:production"],
+  "panels": [
+    {
+      "type": "text",
+      "content": "## Possums gateway: aggregate operations\n\n[Source](https://github.com/ajbt200128/possums) · [Privacy policy](https://github.com/ajbt200128/possums/blob/main/PRIVACY.md)\n\nRequest, generation, delivery, duration and occupancy data are complete five-minute aggregates. Counts cover released windows only. Gaps/no points are **unavailable**, not zero traffic or health; exported zero bins are genuine zeros. Starts and terminals describe different cohorts. HTTP 2xx is not generation success; completed delivery is not success or confirmed billing. Model `other` means an authenticated, unmapped catalog model.\n\nCPU/RSS and configured capacities use complete one-minute windows. CPU/RSS cover the gateway process, not the enclave, cgroup or model GPU. Generation capacity is the effective heavy-admission bound, not a separate quota. These are configured limits, not free permits or measured memory headroom.\n\nDuration bins b00–b09 have inclusive upper bounds 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600 seconds; each lower bound is the previous upper bound, exclusive. b00 includes zero; b10 is >600 seconds. First output means dispatch to first qualifying text/tool delta, not tokenizer time. Occupancy bins b00–b09 mean 0, 1, 2, 3, 4, 5–8, 9–16, 17–32, 33–64, >64 occupied permits; counts are sampling populations, not users or requests.\n\nApproved aggregates only: no request logs/traces, content, identifiers or token/cost events. Sparse aggregates can reveal individual activity and timing correlation. Honeycomb US uses provider-default MVP retention; this account's effective period is unverified.",
+      "size": {"width": 12, "height": 7}
+    },
+    {
+      "type": "query", "id": "qGCAVotsoPz", "name": "Released HTTP starts by endpoint",
+      "description": "Application HTTP lifetimes started in released five-minute windows; not unique users or complete traffic across missing windows.",
+      "chart_type": "bar", "display_style": "combo", "size": {"width": 6, "height": 5}
+    },
+    {
+      "type": "query", "id": "f8vyF69DQjb", "name": "Released HTTP terminals by status/body",
+      "description": "Selected status class and observed body terminal disposition; HTTP success is not generation or billing success.",
+      "chart_type": "bar", "display_style": "combo", "size": {"width": 6, "height": 5}
+    },
+    {
+      "type": "query", "id": "BkxndcAucyo", "name": "Released generation terminals",
+      "description": "Observed reservation-to-terminal outcomes by closed model/stage categories; not completions divided by same-window starts.",
+      "chart_type": "bar", "display_style": "combo", "size": {"width": 6, "height": 5}
+    },
+    {
+      "type": "query", "id": "HrFEpWARuCz", "name": "Released downstream delivery terminals",
+      "description": "Streaming body delivery disposition; completed delivery can include an error response and does not prove settlement.",
+      "chart_type": "bar", "display_style": "combo", "size": {"width": 6, "height": 5}
+    },
+    {
+      "type": "query", "id": "A3wR6HQyw6V", "name": "HTTP lifetime duration bins",
+      "description": "Released HTTP terminal-duration populations in fixed b00–b10 bins, not exact duration samples or native percentiles.",
+      "chart_type": "categorical_bar", "display_style": "combo", "size": {"width": 6, "height": 5}
+    },
+    {
+      "type": "query", "id": "BeuKSe1dUNB", "name": "Generation first-output bins",
+      "description": "Dispatch-to-first qualifying output among terminal generations with observed output; missing output is not a zero-duration observation.",
+      "chart_type": "categorical_bar", "display_style": "combo", "size": {"width": 6, "height": 5}
+    },
+    {
+      "type": "query", "id": "hcQKbvgQhbK", "name": "Gateway-process CPU cores used",
+      "description": "Complete one-minute mean process CPU cores used, not CPU percentage or model/enclave utilization; gaps remain unavailable.",
+      "chart_type": "line", "display_style": "chart", "size": {"width": 6, "height": 5}
+    },
+    {
+      "type": "query", "id": "35BBLsJwU58", "name": "Gateway-process approximate RSS (MiB)",
+      "description": "Complete one-minute mean approximate process RSS, converted from bytes to MiB; not a capacity, peak or worst-case memory bound.",
+      "chart_type": "line", "display_style": "chart", "size": {"width": 6, "height": 5}
+    },
+    {
+      "type": "query", "id": "CsGZhpGpvju", "name": "Released occupancy sampling populations",
+      "description": "Full emitted occupancy-bin populations for touched lanes; samples are not distinct permit lifetimes, requests or users. Untouched/missing lanes are unavailable.",
+      "chart_type": "none", "display_style": "table", "size": {"width": 12, "height": 7}
+    },
+    {
+      "type": "query", "id": "9WWgEX8jSyk", "name": "Configured application admission capacities",
+      "description": "Configured shared limits: connection 64; generation/heavy/ingress 4; new-chat/control 1. Not current free permits, CPU/memory capacity or a separate generation quota.",
+      "chart_type": "categorical_bar", "display_style": "combo", "size": {"width": 6, "height": 5}
+    },
+    {
+      "type": "query", "id": "jMezULSuxrR", "name": "Released admission rejections",
+      "description": "Observed closed pre-reservation admission causes; duplicate submissions and post-reservation generation failures are not added here.",
+      "chart_type": "bar", "display_style": "combo", "size": {"width": 6, "height": 5}
+    }
+  ]
+}

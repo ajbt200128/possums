@@ -8,10 +8,9 @@ import {
   type TranscriptContext, type ToolCall,
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
-import { ReferenceClient, CatalogFailure, GatewayError, gatewayDetailLabel, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
+import { ReferenceClient, BalanceFailure, CatalogFailure, GatewayError, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
 import { ChannelError, JSONDepthError, LIMITS, Operation } from '../../examples/phase01/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure } from './diagnostics.js';
-import { ReplayGuard } from './replay.js';
 import { invocation } from './wire.js';
 
 export const PROVIDER_ID = 'possums';
@@ -53,6 +52,13 @@ function blank(selected: Model<typeof API>): AssistantMessage {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 }
 const localFailures: Readonly<Record<string, string>> = Object.freeze({
+  possums_balance_request_failed: 'Balance read failed. This command sent no inference; prior charges are unchanged or unknown.',
+  possums_balance_validation_failed: 'Balance response failed validation. This command sent no inference; prior charges are unchanged or unknown.',
+  possums_reconcile_busy: 'Wait until Pi finishes its run, retries and compaction before taking a snapshot.',
+  possums_reconcile_pending: 'Account has unfinished reservations. Wait for them to finish before taking a snapshot.',
+  possums_reconcile_started: 'Reconciliation already started. Use finish or cancel first.',
+  possums_reconcile_not_started: 'No reconciliation window. Use /possums-reconcile start first.',
+  possums_reconcile_scope_changed: 'Session or account changed. Start a fresh reconciliation window.',
   possums_compaction_failed: 'Native summary unavailable.',
   possums_summary_empty: 'Summary was empty.',
   possums_summary_tools: 'Summary attempted tool use; no tool executed.',
@@ -67,7 +73,6 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_session_unavailable: 'Session unavailable. Use /login to authenticate.',
   possums_tools_unsupported: 'Selected model is not qualified for tools. Use /possums-text-only or select a qualified model. No inference request sent.',
   possums_automatic_replay_blocked: 'Automatic replay blocked. Submit a deliberate new request if needed.',
-  possums_invalid_tool_receipt: 'Tool receipt invalid; no tool executed.',
   possums_constrained_sampling_unsupported: 'Constrained sampling unsupported; remove the option.',
   possums_custom_tools_unsupported: 'Custom tools unsupported; remove the option.',
   possums_duplicate_tool_call: 'Duplicate tool call in history; correct the history.',
@@ -76,9 +81,15 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_orphan_tool_result: 'Tool result has no matching call; correct the history.',
   possums_unresolved_tool_calls: 'Tool calls lack results; complete the history.',
 });
-function safeFailure(error: unknown): string {
+// Pi 1.0.4 classifies errorMessage, with no provider classifier hook. Only these
+// closed gateway operational failures opt into its native bounded retry policy.
+// HTTP details do not expose upstream status; this is not a claim of HTTP 503.
+const transientDetails = new Set(['tokenizer_send_failed', 'tokenizer_http_failed',
+  'generation_send_failed', 'generation_http_failed', 'stream_transport_failed',
+  'stream_idle_timeout', 'stream_deadline_exceeded']);
+function safeFailure(error: unknown, nativeRetry = false): string {
   if (error instanceof JSONDepthError) return '[possums_request_json_depth] Request encoding exceeds the JSON nesting limit. Simplify tool schemas or history. No inference request sent. Not replayed.';
-  if (error instanceof ConnectionFailure) return error.message;
+  if (error instanceof ConnectionFailure) return `${error.message} No automatic retry for this connection/billing check.`;
   if (error instanceof GatewayError) {
     const reason: Readonly<Record<string, string>> = {
       insufficient_credit: 'Insufficient credit for this model’s maximum reservation.',
@@ -88,7 +99,16 @@ function safeFailure(error: unknown): string {
       generation_failed: 'Generation failed.',
     };
     const label = gatewayDetailLabel(error.detail);
-    return `Possums: ${reason[error.reason] ?? 'Gateway request failed.'}${label ? ` ${label}.` : ''} ` +
+    const description = `${Object.hasOwn(reason, error.reason) ? `[${error.reason}] ${reason[error.reason]}` : 'Gateway request failed.'}${label ? ` ${label}.` : ''}`;
+    const transient = (error.reason === 'unavailable' && (error.detail === undefined || error.detail === 'inference_unavailable')) ||
+      (error.reason === 'generation_failed' && error.detail !== undefined && transientDetails.has(error.detail));
+    if (nativeRetry && transient) {
+      return `Possums: Transient service unavailable. ${description} ` +
+        (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown.') + ' Native automatic retry may incur another charge.';
+    }
+    // "Billing" explicitly excludes terminal gateway diagnostics from Pi's broad
+    // classifier, even if a detail contains e.g. "timeout". Summaries never retry.
+    return `Possums: ${description} Billing status: ` +
       (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown. A new request may incur another charge.') + ' Not replayed.';
   }
   if (error instanceof ChannelError && error.code === 'uncertain') return 'Possums: request interrupted; charge unknown. Not replayed. A new request may incur another charge.';
@@ -104,7 +124,6 @@ export class PossumsProvider implements Provider {
   private client: ReferenceClient | undefined;
   private catalog: readonly LiveModel[] = [];
   private listed: readonly Model<typeof API>[] = [];
-  private readonly guard = new ReplayGuard();
   private newConversation = true;
   private epoch = 0;
   private authEpoch = 0;
@@ -115,6 +134,8 @@ export class PossumsProvider implements Provider {
   private trustController = new AbortController();
   private trustEpoch = 0;
   private sessionClosed = true;
+  private reconciliation: { before: BalanceSnapshot; charged: bigint; completed: bigint; unknown: boolean } | undefined;
+  private reconciliationEpoch = 0;
 
   constructor(
     private readonly establish: (signal: AbortSignal) => Promise<ReferenceClient>,
@@ -249,8 +270,7 @@ export class PossumsProvider implements Provider {
   }
 
   getModels(): readonly Model<typeof API>[] { return this.listed; }
-  beginRun(): void { this.epoch++; this.guard.beginRun(); }
-  endRun(): void { this.guard.close(); }
+  beginRun(): void { this.epoch++; }
   newSession(): void {
     this.shutdown();
     this.sessionClosed = false;
@@ -266,10 +286,82 @@ export class PossumsProvider implements Provider {
     this.logout();
   }
   logout(): void {
-    this.epoch++; this.authEpoch++; this.guard.close();
+    this.epoch++; this.authEpoch++;
     this.client = undefined; this.catalog = []; this.listed = [];
     this.recoveryKey = undefined; this.restoring = undefined;
     this.newConversation = true;
+    this.reconciliationEpoch++;
+    this.reconciliation = undefined;
+  }
+
+  private async balance(ctx: ExtensionContext): Promise<BalanceSnapshot> {
+    const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_ID);
+    const epoch = this.authEpoch;
+    if (auth?.auth.apiKey !== REQUEST_AUTH || !this.client) {
+      throw new Error('possums_reconcile_scope_changed');
+    }
+    const client = this.client;
+    try {
+      const snapshot = await client.balance(ctx.signal);
+      if (epoch !== this.authEpoch || client !== this.client || ctx.signal?.aborted) {
+        throw new Error('possums_reconcile_scope_changed');
+      }
+      return snapshot;
+    } catch (error) {
+      if (error instanceof BalanceFailure) throw new Error(error.message);
+      throw error;
+    }
+  }
+
+  async reconcile(action: string, ctx: ExtensionContext): Promise<string> {
+    if (action === 'cancel') {
+      this.reconciliationEpoch++;
+      this.reconciliation = undefined;
+      return 'Reconciliation window discarded. No inference or accounting change.';
+    }
+    if (action !== 'start' && action !== 'finish') return 'Use /possums-reconcile start, finish or cancel. These commands do not initiate inference.';
+    if (!ctx.isIdle()) throw new Error('possums_reconcile_busy');
+    const window = this.reconciliation;
+    const epoch = this.reconciliationEpoch;
+    if (action === 'start' && window) throw new Error('possums_reconcile_started');
+    if (action === 'finish' && !window) throw new Error('possums_reconcile_not_started');
+    const snapshot = await this.balance(ctx);
+    if (!ctx.isIdle()) throw new Error('possums_reconcile_busy');
+    if (snapshot.inFlight !== 0) throw new Error('possums_reconcile_pending');
+    if (epoch !== this.reconciliationEpoch || window !== this.reconciliation) throw new Error('possums_reconcile_scope_changed');
+    if (action === 'start') {
+      this.reconciliation = { before: snapshot, charged: 0n, completed: 0n, unknown: false };
+      return `Reconciliation started. Available demo credit: $${dollars(snapshot.availableMicrounits)}. Run your chosen Possums task, then /possums-reconcile finish. New inference, retries and compaction may charge credit.`;
+    }
+    if (!window) throw new Error('possums_reconcile_not_started');
+    this.reconciliation = undefined;
+    const completed = BigInt(snapshot.completedRequests) - BigInt(window.before.completedRequests);
+    if (window.unknown || completed !== window.completed) {
+      return 'Reconciliation unavailable: an outcome is unknown, accounting changed outside the observed window, or the ledger reset. No confirmed match or refund is inferred.';
+    }
+    const debit = BigInt(window.before.availableMicrounits) - BigInt(snapshot.availableMicrounits);
+    if (debit !== window.charged) return 'Reconciliation mismatch: balance change differs from authenticated receipt charges. No refund or upstream-invoice agreement is inferred.';
+    return `Reconciliation matched: balance debit $${dollars(window.charged.toString())} equals authenticated receipt charges across ${completed} completed requests (including confirmed refunds). Available demo credit: $${dollars(snapshot.availableMicrounits)}. This does not verify upstream invoices.`;
+  }
+
+  reconciliationFailure(error: unknown): string { return safeFailure(error); }
+
+  private observeReconciliation(output: AssistantMessage): void {
+    const window = this.reconciliation;
+    if (!window) return;
+    const receipts = output.diagnostics?.filter(diagnostic => diagnostic.type === 'possums_settled_receipt') ?? [];
+    const refunds = output.diagnostics?.filter(diagnostic => diagnostic.type === 'possums_reservation_refunded') ?? [];
+    if (receipts.length === 1 && refunds.length === 0) {
+      const charged = receipts[0].details?.chargedMicrounits;
+      if (typeof charged !== 'string' || !/^(0|[1-9][0-9]{0,19})$/.test(charged)) { window.unknown = true; return; }
+      window.charged += BigInt(charged);
+      window.completed++;
+    } else if (refunds.length === 1 && receipts.length === 0) {
+      window.completed++;
+    } else if (receipts.length || refunds.length || output.stopReason === 'error' || output.stopReason === 'aborted') {
+      window.unknown = true;
+    }
+    if (output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_billing_unknown')) window.unknown = true;
   }
 
   async refreshModels(context: Parameters<NonNullable<Provider['refreshModels']>>[0]): Promise<void> {
@@ -317,8 +409,8 @@ export class PossumsProvider implements Provider {
     return this.perform(selected as Model<typeof API>, context, options);
   }
 
-  // Native compaction is separate from run authorization: it must not consume a
-  // ready run or a receipted tool continuation, even when its second call fails.
+  // Native compaction has a separate scope and no retry policy. It must not
+  // alter ordinary conversation state, even when its second call fails.
   async compact(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<SessionBeforeCompactResult> {
     const selected = ctx.model;
     const epoch = this.epoch;
@@ -386,6 +478,7 @@ export class PossumsProvider implements Provider {
     const events = createAssistantMessageEventStream();
     const output = blank(selected);
     const epoch = this.epoch;
+    const reconciliation = this.reconciliation;
     const args = new Map<number, { block: ToolCall; contentIndex: number; json: string }>();
     let started = false;
     let textIndex: number | undefined;
@@ -398,7 +491,6 @@ export class PossumsProvider implements Provider {
     void (async () => {
       try {
         if (summary) summary();
-        else this.guard.claim(selected.id, context.messages);
         if (!this.client || options.signal?.aborted) throw new Error('possums_session_unavailable');
         if (selected.provider !== PROVIDER_ID || selected.api !== API || selected.baseUrl !== ORIGIN || options.fetch || options.maxTokens !== undefined || options.samplingParams || options.temperature !== undefined || options.reasoning !== undefined || options.reasoningEffort !== undefined) {
           throw new Error('possums_request_options_unsupported');
@@ -486,12 +578,13 @@ export class PossumsProvider implements Provider {
           output.stopReason = 'error';
           output.errorMessage = 'Possums: partial answer; charge settled. Not automatically continued. A deliberate new request may incur another charge.';
         }
-        if (!summary && epoch === this.epoch) this.guard.complete(selected.id, toolUse ? 'tool_calls' : receipt.finish, [...args.values()].map(call => ({ id: call.block.id, name: call.block.name })));
         if (output.stopReason === 'error') events.push({ type: 'error', reason: 'error', error: output });
         else events.push({ type: 'done', reason: output.stopReason, message: output });
       } catch (error) {
-        if (!summary && epoch === this.epoch) this.guard.close();
         output.stopReason = options.signal?.aborted ? 'aborted' : 'error';
+        if (!output.diagnostics && error instanceof GatewayError && error.billing === 'refunded') {
+          output.diagnostics = [{ type: 'possums_reservation_refunded', timestamp: Date.now(), details: { outcome: 'refunded' } }];
+        }
         if (!output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_settled_receipt') &&
           ((error instanceof GatewayError && error.billing === 'unknown') ||
             (!(error instanceof GatewayError) && (options.signal?.aborted || (error instanceof ChannelError && error.code === 'uncertain'))))) {
@@ -499,9 +592,13 @@ export class PossumsProvider implements Provider {
         }
         output.errorMessage = output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_settled_receipt') ?
           safeFailure(error) : options.signal?.aborted && !(error instanceof GatewayError) ?
-          'Possums: interrupted; charge unknown. Not replayed. A new request may incur another charge.' : safeFailure(error);
+          'Possums: interrupted; charge unknown. Not replayed. A new request may incur another charge.' :
+          safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted);
         events.push({ type: 'error', reason: output.stopReason, error: output });
-      } finally { events.end(); }
+      } finally {
+        if (reconciliation && reconciliation === this.reconciliation) this.observeReconciliation(output);
+        events.end();
+      }
     })();
     return events;
   }
