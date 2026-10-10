@@ -72,7 +72,6 @@ export default function possums(pi: ExtensionAPI): void {
   pi.on('before_agent_start', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) provider.beginRun();
   });
-  pi.on('agent_settled', () => provider.endRun());
   pi.on('cache_warming_decision', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) return { action: 'stop' as const };
   });

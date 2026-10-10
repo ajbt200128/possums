@@ -11,7 +11,6 @@ import { Channel } from '../../examples/phase01/transport.js';
 import { ReferenceClient, CatalogFailure, GatewayError, gatewayDetailLabel, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
 import { ChannelError, JSONDepthError, LIMITS, Operation } from '../../examples/phase01/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure } from './diagnostics.js';
-import { ReplayGuard } from './replay.js';
 import { invocation } from './wire.js';
 
 export const PROVIDER_ID = 'possums';
@@ -67,7 +66,6 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_session_unavailable: 'Session unavailable. Use /login to authenticate.',
   possums_tools_unsupported: 'Selected model is not qualified for tools. Use /possums-text-only or select a qualified model. No inference request sent.',
   possums_automatic_replay_blocked: 'Automatic replay blocked. Submit a deliberate new request if needed.',
-  possums_invalid_tool_receipt: 'Tool receipt invalid; no tool executed.',
   possums_constrained_sampling_unsupported: 'Constrained sampling unsupported; remove the option.',
   possums_custom_tools_unsupported: 'Custom tools unsupported; remove the option.',
   possums_duplicate_tool_call: 'Duplicate tool call in history; correct the history.',
@@ -76,9 +74,15 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_orphan_tool_result: 'Tool result has no matching call; correct the history.',
   possums_unresolved_tool_calls: 'Tool calls lack results; complete the history.',
 });
-function safeFailure(error: unknown): string {
+// Pi 1.0.4 classifies errorMessage, with no provider classifier hook. Only these
+// closed gateway operational failures opt into its native bounded retry policy.
+// HTTP details do not expose upstream status; this is not a claim of HTTP 503.
+const transientDetails = new Set(['tokenizer_send_failed', 'tokenizer_http_failed',
+  'generation_send_failed', 'generation_http_failed', 'stream_transport_failed',
+  'stream_idle_timeout', 'stream_deadline_exceeded']);
+function safeFailure(error: unknown, nativeRetry = false): string {
   if (error instanceof JSONDepthError) return '[possums_request_json_depth] Request encoding exceeds the JSON nesting limit. Simplify tool schemas or history. No inference request sent. Not replayed.';
-  if (error instanceof ConnectionFailure) return error.message;
+  if (error instanceof ConnectionFailure) return `${error.message} No automatic retry for this connection/billing check.`;
   if (error instanceof GatewayError) {
     const reason: Readonly<Record<string, string>> = {
       insufficient_credit: 'Insufficient credit for this model’s maximum reservation.',
@@ -88,7 +92,16 @@ function safeFailure(error: unknown): string {
       generation_failed: 'Generation failed.',
     };
     const label = gatewayDetailLabel(error.detail);
-    return `Possums: ${reason[error.reason] ?? 'Gateway request failed.'}${label ? ` ${label}.` : ''} ` +
+    const description = `${Object.hasOwn(reason, error.reason) ? `[${error.reason}] ${reason[error.reason]}` : 'Gateway request failed.'}${label ? ` ${label}.` : ''}`;
+    const transient = (error.reason === 'unavailable' && (error.detail === undefined || error.detail === 'inference_unavailable')) ||
+      (error.reason === 'generation_failed' && error.detail !== undefined && transientDetails.has(error.detail));
+    if (nativeRetry && transient) {
+      return `Possums: Transient service unavailable. ${description} ` +
+        (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown.') + ' Native automatic retry may incur another charge.';
+    }
+    // "Billing" explicitly excludes terminal gateway diagnostics from Pi's broad
+    // classifier, even if a detail contains e.g. "timeout". Summaries never retry.
+    return `Possums: ${description} Billing status: ` +
       (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown. A new request may incur another charge.') + ' Not replayed.';
   }
   if (error instanceof ChannelError && error.code === 'uncertain') return 'Possums: request interrupted; charge unknown. Not replayed. A new request may incur another charge.';
@@ -104,7 +117,6 @@ export class PossumsProvider implements Provider {
   private client: ReferenceClient | undefined;
   private catalog: readonly LiveModel[] = [];
   private listed: readonly Model<typeof API>[] = [];
-  private readonly guard = new ReplayGuard();
   private newConversation = true;
   private epoch = 0;
   private authEpoch = 0;
@@ -249,8 +261,7 @@ export class PossumsProvider implements Provider {
   }
 
   getModels(): readonly Model<typeof API>[] { return this.listed; }
-  beginRun(): void { this.epoch++; this.guard.beginRun(); }
-  endRun(): void { this.guard.close(); }
+  beginRun(): void { this.epoch++; }
   newSession(): void {
     this.shutdown();
     this.sessionClosed = false;
@@ -266,7 +277,7 @@ export class PossumsProvider implements Provider {
     this.logout();
   }
   logout(): void {
-    this.epoch++; this.authEpoch++; this.guard.close();
+    this.epoch++; this.authEpoch++;
     this.client = undefined; this.catalog = []; this.listed = [];
     this.recoveryKey = undefined; this.restoring = undefined;
     this.newConversation = true;
@@ -317,8 +328,8 @@ export class PossumsProvider implements Provider {
     return this.perform(selected as Model<typeof API>, context, options);
   }
 
-  // Native compaction is separate from run authorization: it must not consume a
-  // ready run or a receipted tool continuation, even when its second call fails.
+  // Native compaction has a separate scope and no retry policy. It must not
+  // alter ordinary conversation state, even when its second call fails.
   async compact(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<SessionBeforeCompactResult> {
     const selected = ctx.model;
     const epoch = this.epoch;
@@ -398,7 +409,6 @@ export class PossumsProvider implements Provider {
     void (async () => {
       try {
         if (summary) summary();
-        else this.guard.claim(selected.id, context.messages);
         if (!this.client || options.signal?.aborted) throw new Error('possums_session_unavailable');
         if (selected.provider !== PROVIDER_ID || selected.api !== API || selected.baseUrl !== ORIGIN || options.fetch || options.maxTokens !== undefined || options.samplingParams || options.temperature !== undefined || options.reasoning !== undefined || options.reasoningEffort !== undefined) {
           throw new Error('possums_request_options_unsupported');
@@ -486,12 +496,13 @@ export class PossumsProvider implements Provider {
           output.stopReason = 'error';
           output.errorMessage = 'Possums: partial answer; charge settled. Not automatically continued. A deliberate new request may incur another charge.';
         }
-        if (!summary && epoch === this.epoch) this.guard.complete(selected.id, toolUse ? 'tool_calls' : receipt.finish, [...args.values()].map(call => ({ id: call.block.id, name: call.block.name })));
         if (output.stopReason === 'error') events.push({ type: 'error', reason: 'error', error: output });
         else events.push({ type: 'done', reason: output.stopReason, message: output });
       } catch (error) {
-        if (!summary && epoch === this.epoch) this.guard.close();
         output.stopReason = options.signal?.aborted ? 'aborted' : 'error';
+        if (!output.diagnostics && error instanceof GatewayError && error.billing === 'refunded') {
+          output.diagnostics = [{ type: 'possums_reservation_refunded', timestamp: Date.now(), details: { outcome: 'refunded' } }];
+        }
         if (!output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_settled_receipt') &&
           ((error instanceof GatewayError && error.billing === 'unknown') ||
             (!(error instanceof GatewayError) && (options.signal?.aborted || (error instanceof ChannelError && error.code === 'uncertain'))))) {
@@ -499,7 +510,8 @@ export class PossumsProvider implements Provider {
         }
         output.errorMessage = output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_settled_receipt') ?
           safeFailure(error) : options.signal?.aborted && !(error instanceof GatewayError) ?
-          'Possums: interrupted; charge unknown. Not replayed. A new request may incur another charge.' : safeFailure(error);
+          'Possums: interrupted; charge unknown. Not replayed. A new request may incur another charge.' :
+          safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted);
         events.push({ type: 'error', reason: output.stopReason, error: output });
       } finally { events.end(); }
     })();

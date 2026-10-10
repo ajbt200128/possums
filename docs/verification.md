@@ -4,6 +4,10 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
+## Pi native steering/retry source candidate
+
+The operator-approved client-only relaxation and its local qualification status are recorded in [Pi steering/retry verification](pi-steering-retry-verification.md). It does not change gateway idempotency/settlement, establish live balance reconciliation, or update historical no-replay evidence. Installation and live qualification remain separate.
+
 ## Evidence checklist
 
 | Claim | Status | Required evidence |

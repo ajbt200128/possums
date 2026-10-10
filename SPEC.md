@@ -16,7 +16,7 @@ Possums Phase 0 is a single attested clearnet gateway for manually provisioned d
 - no-JavaScript HTML that streams escaped plain text in a `<pre>` and emits the next-turn form on completion; optional safe JavaScript Markdown rendering is deferred
 - in-memory maximum-cost reservation before inference; a selected model whose maximum quote exceeds available credit stays visible but returns an explicit insufficient-credit error without upstream prompt transmission, model substitution, or an artificial output cap
 - authenticated-usage settlement and unused-credit refund even when the client disconnects; upstream error or missing/invalid final usage refunds the reservation and leaves upstream cost with the operator
-- concurrency, quota, and idempotency state; no automatic replay of an uncertain generation
+- concurrency, quota, and idempotency state; no gateway automatic replay of an uncertain generation. The operator-approved Pi client exception permits native bounded transient retries and steering/follow-up; retries are new submissions and may incur additional charges when earlier billing is unknown
 - aggregate, locally sanitized operational metrics, disabled by default
 
 ## Not in Phase 0
