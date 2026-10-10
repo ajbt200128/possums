@@ -369,6 +369,27 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
   finally { op.close(); await cleanup(reader.cancel()); }
 }
 
+type PreparedState = {
+  payload?: Invocation; options?: ResponseOptions & Pick<CompletionOptions, 'onEvent'>; onDelta?: (text: string) => void;
+  model: string; newConversation: boolean; dispatched: boolean; busy: boolean; closed: boolean;
+};
+const preparedStates = new WeakMap<PreparedChat, PreparedState>();
+const preparedAuthority = Symbol('prepared chat authority');
+// Only preparation creates this handle. Close it when recovery is abandoned;
+// dispatch and ordinary chat close it automatically, releasing prompt references.
+export class PreparedChat {
+  constructor(authority: symbol, state: PreparedState) {
+    requireThat(authority === preparedAuthority);
+    preparedStates.set(this, state);
+    Object.freeze(this);
+  }
+  get dispatched(): boolean { return preparedStates.get(this)?.dispatched ?? false; }
+  close(): void {
+    const state = preparedStates.get(this);
+    if (state) { state.closed = true; state.payload = undefined; state.options = undefined; state.onDelta = undefined; }
+  }
+}
+
 export class ReferenceClient {
   #bearer: string | undefined;
   #authExpiresAt: number | undefined;
@@ -440,6 +461,12 @@ export class ReferenceClient {
   }
   async chat(model: string, messages: Chat['messages'], onDelta: (text: string) => void, newConversation = false,
     options: ChatOptions = {}): Promise<Receipt> {
+    const prepared = await this.prepareChat(model, messages, onDelta, newConversation, options);
+    try { return await this.chatPrepared(prepared); }
+    finally { prepared.close(); }
+  }
+  async prepareChat(model: string, messages: Chat['messages'], onDelta: (text: string) => void, newConversation = false,
+    options: ChatOptions = {}): Promise<PreparedChat> {
     let opts: ChatOptions, op: Operation;
     try {
       requireThat(this.#bearer && typeof newConversation === 'boolean' && typeof onDelta === 'function');
@@ -448,9 +475,7 @@ export class ReferenceClient {
       for (const key of ['onPayload', 'onResponse', 'onEvent'] as const) requireThat(opts[key] === undefined || typeof opts[key] === 'function');
       op = new Operation(null, opts.signal);
     } catch { throw new DiagnosticFailure('request', 'schema'); }
-    const bearer = this.#bearer;
-    let issued = false, hookThrown = false, stage: FailureStage = 'request', constraint: FailureConstraint = 'encoding';
-    let status: number | undefined;
+    let stage: FailureStage = 'request', constraint: FailureConstraint = 'encoding';
     try {
       op.check();
       let payload = snapshotInvocation({ model, messages, stream: true,
@@ -466,6 +491,29 @@ export class ReferenceClient {
         payload = snapshotInvocation(replacement === undefined ? payload : replacement);
         requireThat(payload.model === model);
       }
+      op.check();
+      return new PreparedChat(preparedAuthority, { payload,
+        options: Object.freeze({ signal: opts.signal, onResponse: opts.onResponse, onEvent: opts.onEvent }), onDelta,
+        model, newConversation, dispatched: false, busy: false, closed: false });
+    } catch (error) {
+      if (error instanceof DiagnosticFailure || error instanceof JSONDepthError) throw error;
+      if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint);
+      throw new DiagnosticFailure(stage, constraint);
+    } finally { op.close(); }
+  }
+  async chatPrepared(prepared: PreparedChat): Promise<Receipt> {
+    // Acquire synchronously, before any await. The state is module-owned rather
+    // than a mutable caller-supplied boolean, including across client rotations.
+    const state = preparedStates.get(prepared);
+    if (!state || state.closed || state.dispatched || state.busy) throw new DiagnosticFailure('request', 'schema');
+    state.busy = true;
+    let op: Operation;
+    try { requireThat(this.#bearer); op = new Operation(null, state.options!.signal); }
+    catch { state.busy = false; throw new DiagnosticFailure('request', 'schema'); }
+    const bearer = this.#bearer, { payload, options: opts, onDelta, model, newConversation } = state;
+    let issued = false, hookThrown = false, stage: FailureStage = 'request', constraint: FailureConstraint = 'encoding';
+    let status: number | undefined;
+    try {
       op.check(); stage = 'catalog'; constraint = 'fetch';
       // Refresh, never cache a usable offline catalog or substitute a cheaper model.
       // One invocation uses one in-memory session even if another login overlaps.
@@ -473,27 +521,28 @@ export class ReferenceClient {
       constraint = 'schema';
       const entry = validateModels(catalog).find(entry => entry.id === model);
       requireThat(entry);
-      const usesTools = payload.tools !== undefined || payload.messages.some(message => message.role === 'tool' || (message.role === 'assistant' && message.tool_calls !== undefined));
+      const usesTools = payload!.tools !== undefined || payload!.messages.some(message => message.role === 'tool' || (message.role === 'assistant' && message.tool_calls !== undefined));
       requireThat(!usesTools || entry.tool_protocol === 'openai-functions-v1');
-      op.check(); issued = true; stage = 'submission'; constraint = 'fetch';
+      op.check(); requireThat(!state.closed); issued = true; stage = 'submission'; constraint = 'fetch';
       const issuance: any = await this.channel.control('/v1/submissions', { model, new_conversation: newConversation }, bearer, op.controller.signal);
       constraint = 'schema';
       keys(issuance, ['submission']); requireThat(token(issuance.submission));
-      op.check(); stage = 'transport'; constraint = 'fetch';
-      const body = await this.channel.chat({ ...payload, submission: issuance.submission }, bearer,
+      op.check(); requireThat(!state.closed); stage = 'transport'; constraint = 'fetch';
+      state.dispatched = true;
+      const body = await this.channel.chat({ ...payload!, submission: issuance.submission }, bearer,
         { signal: op.controller.signal, onResponse: async info => {
           if (Number.isInteger(info.status) && info.status >= 100 && info.status <= 599) status = info.status;
-          if (!opts.onResponse) return;
-          try { await opts.onResponse(info); }
+          if (!opts!.onResponse) return;
+          try { await opts!.onResponse!(info); }
           catch { hookThrown = true; throw new DiagnosticFailure('hook', 'unexpected', 'uncertain', status); }
         } });
       // A forced function constrains generation; 'none' never permits live calls.
-      let tools = payload.tool_choice === 'none' ? undefined : payload.tools;
-      if (typeof payload.tool_choice === 'object') {
-        const name = payload.tool_choice.function.name; tools = tools?.filter(tool => tool.function.name === name);
+      let tools = payload!.tool_choice === 'none' ? undefined : payload!.tools;
+      if (typeof payload!.tool_choice === 'object') {
+        const name = payload!.tool_choice.function.name; tools = tools?.filter(tool => tool.function.name === name);
       }
       stage = 'stream';
-      return await consumeCompletion(body, entry, onDelta, { signal: op.controller.signal, tools, onEvent: opts.onEvent }, status);
+      return await consumeCompletion(body, entry, onDelta!, { signal: op.controller.signal, tools, onEvent: opts!.onEvent }, status);
     } catch (error) {
       if (error instanceof GatewayError) {
         // Preserve the same authenticated refund carrier; copying would lose its evidence.
@@ -512,6 +561,6 @@ export class ReferenceClient {
       if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint, issued ? 'uncertain' : 'rejected');
       throw new DiagnosticFailure(stage, constraint,
         issued || (error instanceof ChannelError && error.code === 'uncertain') ? 'uncertain' : 'rejected');
-    } finally { op.close(); }
+    } finally { op.close(); state.busy = false; if (state.dispatched) prepared.close(); }
   }
 }

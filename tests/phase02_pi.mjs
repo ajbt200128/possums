@@ -329,6 +329,101 @@ async function catalogFixture() {
  channel.control=async()=>({token:'b'.repeat(43),token_type:'Bearer',expires_in:43200});
  return new m.ReferenceClient(channel);
 }
+await check('prepared invocation freezes hooks and payload across setup and verified-client replacement',async()=>{
+ const client=await catalogFixture(), second=await catalogFixture();
+ await client.login(recoveryKey);await second.login(recoveryKey);
+ const messages=[{role:'user',content:'Synthetic input'}], calls=[], deltas=[];
+ let hooks=0, first=true;
+ client.channel.models=async()=>{calls.push('catalog1');if(first){first=false;throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});}return {object:'list',data:[entry()]};};
+ second.channel.models=async()=>{calls.push('catalog2');return {object:'list',data:[entry()]};};
+ second.channel.control=async path=>{calls.push(path);return {submission:'s'.repeat(43)};};
+ second.channel.chat=async (payload,_bearer,options)=>{
+  calls.push('chat');assert.equal(payload.messages[0].content,'Frozen synthetic');
+  await options.onResponse({status:200,contentType:'text/event-stream'});
+  const frame=value=>'data: '+JSON.stringify(value)+'\n\n';
+  const text=frame(event({role:'assistant'}))+frame(event({content:'safe'}))+
+   frame({object:'chat.completion.chunk',model:'synthetic',choices:[{index:0,delta:{},finish_reason:'stop'}]})+
+   frame({object:'chat.completion.chunk',model:'synthetic',choices:[],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2},possums:{outcome:'settled',charged_microunits:'2',refunded_microunits:'50'}})+'data: [DONE]\n\n';
+  return new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(text));controller.close();}});
+ };
+ const options={onPayload:()=>{hooks++;return {model:'synthetic',stream:true,messages:[{role:'user',content:'Frozen synthetic'}]};}};
+ const prepared=await client.prepareChat('synthetic',messages,text=>deltas.push(text),false,options);
+ messages[0].content='mutated';options.onPayload=()=>{throw Error(hostileConnection);};
+ assert(Object.isFrozen(prepared));assert.equal(prepared.dispatched,false);
+ await assert.rejects(client.chatPrepared(prepared),error=>error instanceof m.CatalogFailure && error.stage==='http' && error.reason==='unauthorized');
+ assert.equal(prepared.dispatched,false);
+ assert.equal((await second.chatPrepared(prepared)).finish,'stop');
+ assert.deepEqual(calls,['catalog1','catalog2','/v1/submissions','chat']);assert.deepEqual(deltas,['safe']);assert.equal(hooks,1);
+ assert.equal(prepared.dispatched,true);
+ await assert.rejects(second.chatPrepared(prepared),error=>error instanceof m.DiagnosticFailure && error.stage==='request');
+ assert.equal(calls.length,4);
+ assert.equal((await second.chat('synthetic',[{role:'user',content:'Frozen synthetic'}],()=>{},false,{onPayload:()=>{hooks++;}})).finish,'stop');
+ assert.equal(hooks,2);assert.deepEqual(calls.slice(4),['catalog2','/v1/submissions','chat']);
+});
+await check('prepared setup failures, abort and concurrent use never double dispatch',async()=>{
+ const client=await catalogFixture();await client.login(recoveryKey);
+ const invocation=[{role:'user',content:'Synthetic input'}];let calls=0, hold=deferred();
+ client.channel.models=async()=>{calls++;await hold.promise;return {object:'list',data:[entry()]};};
+ client.channel.control=async()=>{calls++;return {submission:'s'.repeat(43)};};
+ client.channel.chat=()=>{calls++;throw Error(hostileConnection);};
+ const prepared=await client.prepareChat('synthetic',invocation,()=>{});
+ const first=client.chatPrepared(prepared);
+ await assert.rejects(client.chatPrepared(prepared),error=>error instanceof m.DiagnosticFailure && error.stage==='request');
+ hold.resolve();await assert.rejects(first,error=>error instanceof m.DiagnosticFailure && error.stage==='transport' && error.code==='uncertain' && !error.message.includes(hostileConnection));
+ assert.equal(calls,3);assert.equal(prepared.dispatched,true);
+ await assert.rejects(client.chatPrepared(prepared));assert.equal(calls,3);
+ const abort=new AbortController();abort.abort();
+ await assert.rejects(client.prepareChat('synthetic',invocation,()=>{},false,{signal:abort.signal}),error=>error instanceof m.DiagnosticFailure);
+ const during= new AbortController();
+ const blocked=await client.prepareChat('synthetic',invocation,()=>{},false,{signal:during.signal});during.abort();
+ await assert.rejects(client.chatPrepared(blocked),error=>error instanceof m.DiagnosticFailure && error.constraint==='interrupted');
+ assert.equal(blocked.dispatched,false);blocked.close();assert.equal(calls,3);
+ for(const bad of [{get signal(){throw Error(hostileConnection);}}, {onPayload:()=>({model:'other',stream:true,messages:invocation})},
+  {onPayload:()=>({model:'synthetic',stream:true,messages:invocation,headers:{secret:hostileConnection}})}])
+  await assert.rejects(client.prepareChat('synthetic',invocation,()=>{},false,bad),error=>error instanceof m.DiagnosticFailure && !error.message.includes(hostileConnection));
+ assert.equal(calls,3);
+});
+await check('abort during payload hook or catalog cannot dispatch and leaves no active operation',async()=>{
+ const client=await catalogFixture();await client.login(recoveryKey);
+ const invocation=[{role:'user',content:'Synthetic input'}],enter=deferred(),release=deferred(),abort=new AbortController();
+ let calls=0;
+ const pending=client.prepareChat('synthetic',invocation,()=>{},false,{signal:abort.signal,onPayload:async()=>{enter.resolve();await release.promise;return undefined;}});
+ await enter.promise;abort.abort();
+ await assert.rejects(pending,error=>error instanceof m.DiagnosticFailure && error.stage==='hook' && error.constraint==='interrupted');
+ release.resolve();assert.equal(calls,0);
+ const waiting=deferred(),inside=deferred(),during=new AbortController();
+ client.channel.models=async()=>{calls++;inside.resolve();await waiting.promise;return {object:'list',data:[entry()]};};
+ client.channel.control=async()=>{calls++;return {submission:'s'.repeat(43)};};
+ client.channel.chat=()=>{calls++;throw Error(hostileConnection);};
+ const prepared=await client.prepareChat('synthetic',invocation,()=>{},false,{signal:during.signal});
+ const attempt=client.chatPrepared(prepared);await inside.promise;during.abort();waiting.resolve();
+ await assert.rejects(attempt,error=>error instanceof m.DiagnosticFailure && error.constraint==='interrupted');
+ assert.equal(calls,1);assert.equal(prepared.dispatched,false);prepared.close();
+});
+await check('prepared control uncertainty is not dispatch; post-dispatch failures preserve receipt evidence',async()=>{
+ const client=await catalogFixture();await client.login(recoveryKey);
+ let catalogs=0,controls=0,chats=0;
+ client.channel.models=async()=>{catalogs++;return {object:'list',data:[entry()]};};
+ client.channel.control=async()=>{controls++;if(controls===1)throw new m.DiagnosticFailure('submission','fetch','uncertain',503);return {submission:'s'.repeat(43)};};
+ client.channel.chat=()=>{chats++;throw Error(hostileConnection);};
+ const invocation=[{role:'user',content:'Synthetic input'}];const prepared=await client.prepareChat('synthetic',invocation,()=>{});
+ await assert.rejects(client.chatPrepared(prepared),error=>error instanceof m.DiagnosticFailure && error.stage==='submission' && error.code==='uncertain' && error.status===503);
+ assert.equal(prepared.dispatched,false);assert.equal(chats,0);
+ await assert.rejects(client.chatPrepared(prepared),error=>error instanceof m.DiagnosticFailure && error.stage==='transport' && error.code==='uncertain');
+ assert.equal(prepared.dispatched,true);assert.deepEqual([catalogs,controls,chats],[2,2,1]);
+ const refunded=await terminalGatewayError('generation_failed','stream_usage_missing','refunded');
+ client.channel.chat=async()=>{chats++;return new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({error:{code:'generation_failed',detail:'stream_usage_missing',billing:'refunded',message:hostileConnection}})+'\n\n'));controller.close();}});};
+ const again=await client.prepareChat('synthetic',invocation,()=>{});
+ await assert.rejects(client.chatPrepared(again),error=>error instanceof m.GatewayError && error.billing==='refunded' && error.reason===refunded.reason && !error.message.includes(hostileConnection));
+ assert.equal(again.dispatched,true);assert.equal(chats,2);
+ client.channel.chat=async(_payload,_bearer,options)=>{chats++;await options.onResponse({status:200,contentType:'text/event-stream'});return new ReadableStream({start(controller){controller.close();}});};
+ const response=await client.prepareChat('synthetic',invocation,()=>{},false,{onResponse:()=>{throw Error(hostileConnection);}});
+ await assert.rejects(client.chatPrepared(response),error=>error instanceof m.DiagnosticFailure && error.stage==='hook' && error.code==='uncertain' && !error.message.includes(hostileConnection));
+ assert.equal(response.dispatched,true);assert.equal(chats,3);
+ const missing=await client.prepareChat('synthetic',invocation,()=>{});
+ await assert.rejects(client.chatPrepared(missing),error=>error instanceof m.DiagnosticFailure && error.stage==='stream' && error.constraint==='finish_missing' && error.code==='uncertain');
+ assert.equal(missing.dispatched,true);assert.equal(chats,4);
+});
 await check('quiescing HTTP 503 reaches catalog and challenge presentations only after exact bounded EOF',async()=>{
  const wire={error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}};
  const key=new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
@@ -1397,6 +1492,37 @@ await check('encrypted balance HTTP 503 body and EOF failures reach actual Pi re
    assert.equal(paths.length,interrupted?2:1,'presentation cannot issue additional requests');
   }
   assert.deepEqual(paths,['/v1/balance','/v1/balance']);
+ }finally{globalThis.fetch=originalFetch;}
+});
+await check('only authenticated complete submission 422 has the narrow binding observation',async()=>{
+ const ehbp=await import(pathToFileURL(path.resolve(path.dirname(file),'../../source/clients/pi/node_modules/ehbp/dist/esm/index.js')).href);
+ const server=await ehbp.Identity.generate(),encoder=new TextEncoder();
+ const channel=await m.Channel.fixture('https://localhost:18443',await server.marshalConfig(),await server.getPublicKeyHex());
+ const originalFetch=globalThis.fetch;let calls=0;
+ try {
+  for(const mode of ['complete','malformed','wrong_envelope','interrupted','plaintext']){
+   globalThis.fetch=async request=>{
+    calls++;assert.equal(new URL(request.url).pathname,'/v1/submissions');
+    if(mode==='plaintext')return Response.json({error:{code:'unauthorized',message:hostileConnection}},{status:422});
+    const encapsulated=ehbp.hexToBytes(request.headers.get('Ehbp-Encapsulated-Key'));
+    const recipient=await server.suite.SetupRecipient(server.getPrivateKey(),encapsulated,{info:encoder.encode(ehbp.HPKE_REQUEST_INFO)});
+    const nonce=crypto.getRandomValues(new Uint8Array(32));
+    const secret=new Uint8Array(await recipient.Export(encoder.encode(ehbp.EXPORT_LABEL),ehbp.EXPORT_LENGTH));
+    const keys=await ehbp.deriveResponseKeys(secret,encapsulated,nonce);
+    const text=mode==='malformed'?'{':JSON.stringify(mode==='wrong_envelope'?{}:{error:{code:'unauthorized',message:hostileConnection}});
+    const cipher=await ehbp.encryptChunk(keys,0,encoder.encode(text));
+    const frame=new Uint8Array(4+cipher.length);new DataView(frame.buffer).setUint32(0,cipher.length,false);frame.set(cipher,4);
+    let once=false;
+    return new Response(new ReadableStream({pull(controller){if(!once){once=true;controller.enqueue(frame);}else if(mode==='interrupted')controller.error(Error(hostileConnection));else controller.close();}}, {highWaterMark:0}),
+     {status:422,headers:{'Ehbp-Response-Nonce':ehbp.bytesToHex(nonce)}});
+   };
+   await assert.rejects(channel.control('/v1/submissions',{model:'synthetic',new_conversation:false},'b'.repeat(43)),error=>{
+    assert(error instanceof m.DiagnosticFailure);assert.equal(error.stage,mode==='interrupted'?'transport':'submission');assert.equal(error.status,422);
+    assert.equal(error.constraint==='endpoint_binding',mode==='complete');
+    assert.equal(error.code,'uncertain');assert(!error.message.includes(hostileConnection));return true;
+   });
+  }
+  assert.equal(calls,5);
  }finally{globalThis.fetch=originalFetch;}
 });
 await check('actual Pi reconciliation commands compare exact receipts and balance without inference or persistent reports',async()=>{
