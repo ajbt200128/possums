@@ -183,20 +183,32 @@ class SafetyTest(StopTest):
         with patch.object(r, "api", side_effect=r.Stop("command")):
             self.stop("environment_unreadable", d.live_policy)
 
-    def test_no_environment_secret_fallback(self):
-        with patch.object(r, "api", side_effect=[environment(), branches(), {"total_count": 0, "secrets": []}]), \
+    def test_policy_needs_no_secret_or_variable_metadata(self):
+        with patch.object(r, "api", side_effect=[environment(), branches()]) as api, \
                 patch.object(r, "command", return_value=b'{"id":8}'):
-            self.stop("credential", d.live_policy)
+            self.assertEqual(d.live_policy(), "7")
+            self.assertEqual([call.args[0] for call in api.call_args_list], [
+                "environments/production", "environments/production/deployment-branch-policies?per_page=100"])
 
     def test_eligibility_before_and_after_approval(self):
         env = {"GITHUB_REPOSITORY": r.REPO, "GITHUB_REF": "refs/heads/main",
-               "GITHUB_EVENT_NAME": "workflow_dispatch", "PRODUCTION_DEPLOYMENT_ENABLED": "true"}
-        with patch.dict(os.environ, env, clear=True), patch.object(r, "api", return_value={"value": "true"}), \
+               "GITHUB_EVENT_NAME": "workflow_dispatch", "PRODUCTION_DEPLOYMENT_ENABLED": "true",
+               "RELEASE_AUTOMATION_ENABLED": "true"}
+        with patch.dict(os.environ, env, clear=True), patch.object(r, "api") as api, \
                 patch.object(d, "live_policy", return_value="7"), patch.object(r, "latest", side_effect=[None, r.Stop("stale")]):
             self.assertEqual(d.eligibility(S), "7")
             self.stop("stale", d.eligibility, S, "7")
-        with patch.dict(os.environ, env, clear=True), patch.object(r, "api", return_value={"value": "false"}):
-            self.stop("disabled", d.eligibility, S)
+            api.assert_not_called()
+        for name in ("PRODUCTION_DEPLOYMENT_ENABLED", "RELEASE_AUTOMATION_ENABLED"):
+            for value in (None, "false", "TRUE"):
+                changed = dict(env)
+                if value is None:
+                    del changed[name]
+                else:
+                    changed[name] = value
+                with patch.dict(os.environ, changed, clear=True), patch.object(d, "live_policy") as policy:
+                    self.stop("disabled", d.eligibility, S)
+                    policy.assert_not_called()
 
     def test_serving_tool_required_before_approval_without_serving_traffic(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
