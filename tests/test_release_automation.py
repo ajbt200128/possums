@@ -198,6 +198,46 @@ class SafetyTest(StopTest):
         with patch.dict(os.environ, env, clear=True), patch.object(r, "api", return_value={"value": "false"}):
             self.stop("disabled", d.eligibility, S)
 
+    def test_supplemental_reader_is_scoped_to_metadata_and_not_ambient_native_auth(self):
+        env = {"GITHUB_REPOSITORY": r.REPO, "GITHUB_REF": "refs/heads/main",
+               "GITHUB_EVENT_NAME": "workflow_dispatch", "PRODUCTION_DEPLOYMENT_ENABLED": "true",
+               "GH_TOKEN": "synthetic-native", "GH_PRODUCTION_GATE_READ_TOKEN": "synthetic-reader"}
+        def api(path, *, env=None):
+            metadata = path.startswith("actions/variables/") or path.endswith("/secrets?per_page=100")
+            if metadata:
+                assert env is not None
+                self.assertEqual(env["GH_TOKEN"], "synthetic-reader")
+            else:
+                self.assertIsNone(env)
+            if path.startswith("actions/variables/"):
+                return {"value": "true"}
+            if path.endswith("/secrets?per_page=100"):
+                return {"total_count": 1, "secrets": [{"name": "TINFOIL_PRODUCTION_ADMIN_KEY"}]}
+            return branches() if "deployment-branch-policies" in path else environment()
+        with patch.dict(os.environ, env, clear=True), patch.object(r, "api", side_effect=api), \
+                patch.object(r, "command", return_value=b'{"id":8}'), patch.object(r, "latest"):
+            self.assertEqual(d.eligibility(S), "7")
+            self.assertEqual(os.environ["GH_TOKEN"], "synthetic-native")
+
+    def test_metadata_failure_is_closed_and_preserves_only_known_status(self):
+        for error in (r.Stop("command", 403), ValueError("SYNTHETIC-SECRET")):
+            with patch.dict(os.environ, {"GH_PRODUCTION_GATE_READ_TOKEN": "synthetic-reader"}), \
+                    patch.object(r, "api", side_effect=error):
+                with self.assertRaises(r.Stop) as caught:
+                    d.metadata_api("actions/variables/PRODUCTION_DEPLOYMENT_ENABLED")
+                self.assertEqual(caught.exception.code, "metadata_unreadable")
+                self.assertEqual(caught.exception.status, 403 if isinstance(error, r.Stop) else None)
+                self.assertNotIn("SYNTHETIC-SECRET", json.dumps(r.diagnostic(caught.exception.code)))
+        with patch.object(r, "api", side_effect=r.Stop("disabled")):
+            self.stop("disabled", d.metadata_api, "synthetic")
+
+    def test_api_reader_env_is_passed_only_to_the_supported_client(self):
+        env = {"GH_TOKEN": "synthetic-reader"}
+        with patch.object(r, "command", return_value=b'{"value":"true"}') as command:
+            self.assertEqual(r.api("actions/variables/PRODUCTION_DEPLOYMENT_ENABLED", env=env), {"value": "true"})
+            self.assertEqual(command.call_args.kwargs["env"], env)
+            self.assertNotIn("synthetic-reader", json.dumps(command.call_args.args))
+
     def test_serving_tool_required_before_approval_without_serving_traffic(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
                 "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": directory, "SERVING_VERIFIED": "true"}), \
@@ -231,11 +271,13 @@ class SafetyTest(StopTest):
         good = subprocess.CompletedProcess([], 0, b'{"stage":"serving","passed":true}', b"")
         failure = subprocess.CompletedProcess([], 1, b"", b'{"code":"SERVING_HTTP_STATUS","status":503}')
         hostile = subprocess.CompletedProcess([], 1, b"", b'{"code":"SYNTHETIC-SECRET","status":503}')
-        with patch.dict(os.environ, {"RUNNER_TEMP": "/synthetic", "TINFOIL_ADMIN_KEY": "must-not-leak", "GH_TOKEN": "must-not-leak"}), \
+        with patch.dict(os.environ, {"RUNNER_TEMP": "/synthetic", "TINFOIL_ADMIN_KEY": "must-not-leak", "GH_TOKEN": "must-not-leak",
+                                     "GH_PRODUCTION_GATE_READ_TOKEN": "must-not-leak"}), \
                 patch.object(d, "serving_tool", return_value="synthetic-tool"), patch.object(r, "capture", return_value=good) as capture:
             d.verify_serving(V, "d" * 64)
             self.assertNotIn("TINFOIL_ADMIN_KEY", capture.call_args.kwargs["env"])
             self.assertNotIn("GH_TOKEN", capture.call_args.kwargs["env"])
+            self.assertNotIn("GH_PRODUCTION_GATE_READ_TOKEN", capture.call_args.kwargs["env"])
             capture.return_value = failure
             with self.assertRaises(r.Stop) as caught:
                 d.verify_serving(V, "d" * 64)
@@ -435,8 +477,9 @@ class MutationTest(StopTest):
 
     def test_cli_closed_stdin_output_bound_and_admin_env_only(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"RUNNER_TEMP": directory,
-                "TINFOIL_API_KEY": "must-not-inherit", "TINFOIL_CONTROLPLANE_URL": "must-not-inherit"}):
-            program = "import os,sys; assert sys.stdin.read()==''; assert 'TINFOIL_API_KEY' not in os.environ; assert 'TINFOIL_CONTROLPLANE_URL' not in os.environ; print('ok')"
+                "TINFOIL_API_KEY": "must-not-inherit", "TINFOIL_CONTROLPLANE_URL": "must-not-inherit",
+                "GH_PRODUCTION_GATE_READ_TOKEN": "must-not-inherit"}):
+            program = "import os,sys; assert sys.stdin.read()==''; assert 'TINFOIL_API_KEY' not in os.environ; assert 'TINFOIL_CONTROLPLANE_URL' not in os.environ; assert 'GH_PRODUCTION_GATE_READ_TOKEN' not in os.environ; print('ok')"
             result = d.call(sys.executable, ["-c", program])
             self.assertEqual(result.returncode, 0)
             with patch.object(d, "LIMIT", 32):
@@ -456,6 +499,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("environment: production", preflight)
         self.assertNotIn("secrets.TINFOIL", preflight)
         self.assertIn("environment: production", production)
+        for job in (preflight, production):
+            self.assertIn("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}", job)
+            self.assertIn("GH_PRODUCTION_GATE_READ_TOKEN: ${{ secrets.PRODUCTION_GATE_READ_TOKEN }}", job)
         self.assertIn("cancel-in-progress: false", production)
         self.assertNotIn("cancel-in-progress: true", image + deployment)
         self.assertNotIn("pending_deployments", image + deployment)

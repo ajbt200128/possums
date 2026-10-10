@@ -117,11 +117,11 @@ def command(args, *, data=None, env=None, timeout=120):
     return result.stdout
 
 
-def api(path, data=None):
+def api(path, data=None, *, env=None):
     args = ["gh", "api", f"repos/{REPO}/{path}"]
     if data is not None:
         args += ["--method", "POST", "--input", "-"]
-    raw = command(args, data=json.dumps(data).encode() if data is not None else None)
+    raw = command(args, data=json.dumps(data).encode() if data is not None else None, env=env)
     return parse_json(raw) if raw.strip() else {}
 
 

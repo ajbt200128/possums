@@ -25,6 +25,7 @@ STABLE = ("id", "name", "repo", "project_id", "cpus", "gpus", "memory_mb", "vari
           "host_gpu_type", "host_cpu_type")
 r.CODES.update({
     "environment_unreadable": ("approval-policy", "Provision and expose read access to the existing production policy; no environment was created."),
+    "metadata_unreadable": ("approval-metadata", "Required metadata is unreadable; the underlying cause is unknown. Check the gate reader's Variables/Environments read access and repository scope; no production update was requested."),
     "environment_identity": ("approval-policy", "Restore the separately approved existing production environment."),
     "reviewer": ("approval-policy", "Require only the approved operator account as reviewer, with self-review permitted."),
     "approval": ("approval-policy", "Require the operator's authenticated production review on this exact run; bypassing a gate is not approval."),
@@ -81,6 +82,21 @@ def policy(view, branches, reviewer_id, expected_id=None):
     return str(view["id"])
 
 
+def metadata_api(path):
+    # Only variable and environment-secret metadata use the supplemental reader.
+    # All provenance, policy and approval reads retain the native Actions token.
+    token = os.environ.get("GH_PRODUCTION_GATE_READ_TOKEN")
+    env = dict(os.environ, GH_TOKEN=token) if token else None
+    try:
+        return r.api(path, env=env) if env is not None else r.api(path)
+    except r.Stop as error:
+        if error.code == "command":
+            raise r.Stop("metadata_unreadable", error.status) from None
+        raise
+    except Exception:
+        raise r.Stop("metadata_unreadable") from None
+
+
 def live_policy(expected_id=None):
     try:
         view = r.api("environments/production")
@@ -89,7 +105,7 @@ def live_policy(expected_id=None):
         environment_id = policy(view, branches, reviewer["id"], expected_id)
         # Verify scope from metadata, never read a secret value. This also avoids
         # accidentally accepting a same-named repository/org secret fallback.
-        secrets = r.api("environments/production/secrets?per_page=100")
+        secrets = metadata_api("environments/production/secrets?per_page=100")
         r.require(secrets["total_count"] <= 100 and sum(
             item["name"] == "TINFOIL_PRODUCTION_ADMIN_KEY" for item in secrets["secrets"]) == 1, "credential")
         return environment_id
@@ -108,7 +124,7 @@ def eligibility(source, expected_id=None):
     r.require(os.environ.get("PRODUCTION_DEPLOYMENT_ENABLED") == "true", "disabled")
     # Re-read activation, not merely the queued run's expression snapshot.
     for name in ("PRODUCTION_DEPLOYMENT_ENABLED", "RELEASE_AUTOMATION_ENABLED"):
-        r.require(r.api(f"actions/variables/{name}")["value"] == "true", "disabled")
+        r.require(metadata_api(f"actions/variables/{name}")["value"] == "true", "disabled")
     environment_id = live_policy(expected_id)
     r.latest(source)
     return environment_id

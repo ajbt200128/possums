@@ -63,6 +63,7 @@ jobs:
         name: Verify candidate, existing policy and serving tool
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_PRODUCTION_GATE_READ_TOKEN: ${{ secrets.PRODUCTION_GATE_READ_TOKEN }}
         run: python3 scripts/deploy.py preflight "$SOURCE" "$RELEASE" "$TAG" "$IMAGE" "$MANIFEST"
   production:
     needs: preflight
@@ -91,6 +92,7 @@ jobs:
       - name: Reverify after approval; admit at most one update
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_PRODUCTION_GATE_READ_TOKEN: ${{ secrets.PRODUCTION_GATE_READ_TOKEN }}
           TINFOIL_ADMIN_KEY: ${{ secrets.TINFOIL_PRODUCTION_ADMIN_KEY }}
           ENVIRONMENT_ID: ${{ needs.preflight.outputs.environment_id }}
         run: python3 scripts/deploy.py protected "$SOURCE" "$RELEASE" "$TAG" "$IMAGE" "$MANIFEST" "$ENVIRONMENT_ID"
