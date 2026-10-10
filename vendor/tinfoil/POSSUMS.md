@@ -28,3 +28,11 @@ cross-origin target. Reqwest custom redirect policies do not inherit its default
 hop limit; unbounded same-origin redirect history otherwise grows before the
 gateway can validate a catalog response. Local HTTP/1 loopback tests exercise the
 policy; authenticated provider compatibility remains unverified.
+
+The shared pinned reqwest builder now uses its supported five-second connection
+establishment timeout (including the transport's TLS setup), alongside the
+existing verifier and origin checks. The gateway, not a replacement TLS adapter,
+owns the 600-second send/header and rolling HTTP-read inactivity waits. There is
+no whole-generation deadline. These are application settings inspired by the
+OpenAI/Tinfoil clients, not proven platform availability or drain guarantees. See
+[scoped timeout verification](../../docs/provider-timeout-alignment.md).

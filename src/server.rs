@@ -37,12 +37,13 @@ use tower_http::catch_panic::CatchPanicLayer;
 #[cfg(test)]
 mod admission_tests;
 #[cfg(test)]
+mod timeout_tests;
+#[cfg(test)]
 pub(crate) mod resource_streaming_tests;
 
 pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const BODY_DEADLINE: Duration = Duration::from_secs(30);
 const HEADER_DEADLINE: Duration = Duration::from_secs(10);
-const CONNECTION_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const MAX_CONNECTIONS: usize = 64;
 const MAX_HEADERS: usize = 64;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
@@ -175,6 +176,19 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
         .with_state(state)
 }
 
+fn connection_builder(header_deadline: Duration) -> http1::Builder {
+    let mut builder = http1::Builder::new();
+    builder
+        // No absolute connection age may truncate accepted generation.
+        // One request per connection avoids unbounded idle keepalive sockets.
+        .keep_alive(false)
+        .timer(TokioTimer::new())
+        .header_read_timeout(header_deadline)
+        .max_headers(MAX_HEADERS)
+        .max_buf_size(MAX_HEADER_BYTES);
+    builder
+}
+
 pub async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()> {
     serve_with_header_deadline(listener, state, HEADER_DEADLINE).await
 }
@@ -212,23 +226,17 @@ pub async fn serve_with_header_deadline(
         });
         let metrics = telemetry.clone();
         tokio::spawn(async move {
-            let mut builder = http1::Builder::new();
-            builder
-                .timer(TokioTimer::new())
-                .header_read_timeout(header_deadline)
-                .max_headers(MAX_HEADERS)
-                .max_buf_size(MAX_HEADER_BYTES);
+            let builder = connection_builder(header_deadline);
             let connection = builder.serve_connection(TokioIo::new(stream), service);
-            let result = tokio::time::timeout(CONNECTION_DEADLINE, connection).await;
+            let result = connection.await;
             if !entered.load(std::sync::atomic::Ordering::Acquire) {
                 let reason = match result {
-                    Err(_) => Some(MetricRejection::ConnectionDeadline),
-                    Ok(Err(error)) if error.is_timeout() => {
+                    Err(error) if error.is_timeout() => {
                         Some(MetricRejection::ConnectionDeadline)
                     }
-                    Ok(Err(error)) if error.is_parse() => Some(MetricRejection::HeaderProtocol),
-                    Ok(Err(_)) => Some(MetricRejection::TransportUnknown),
-                    Ok(Ok(())) => None, // clean idle close is not a rejection
+                    Err(error) if error.is_parse() => Some(MetricRejection::HeaderProtocol),
+                    Err(_) => Some(MetricRejection::TransportUnknown),
+                    Ok(()) => None, // clean idle close is not a rejection
                 };
                 if let (Some(metrics), Some(reason)) = (&metrics, reason) {
                     metrics.reject(None, AdmissionModel::NotApplicable, reason);

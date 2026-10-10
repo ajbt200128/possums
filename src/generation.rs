@@ -28,7 +28,7 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-const PREFLIGHT_DEADLINE: Duration = Duration::from_secs(30);
+const PREFLIGHT_DEADLINE: Duration = crate::inference::stream::RESPONSE_TIMEOUT;
 
 /// Borrowed shared services; no transport or response state.
 pub(crate) struct Generation<'a> {
