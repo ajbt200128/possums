@@ -97,16 +97,11 @@ pub(super) async fn consume_completion_response(
     idle_timeout: Duration,
     mut on_delta: impl FnMut(&str),
 ) -> Result<StreamCompletion, InferenceError> {
-    consume_with_parser(
-        response,
-        idle_timeout,
-        ProtocolParser::default(),
-        |event| {
-            if let CompletionDelta::Text(text) = event {
-                on_delta(text);
-            }
-        },
-    )
+    consume_with_parser(response, idle_timeout, ProtocolParser::default(), |event| {
+        if let CompletionDelta::Text(text) = event {
+            on_delta(text);
+        }
+    })
     .await
 }
 
@@ -1296,14 +1291,10 @@ mod tests {
         let seen = Arc::new(tokio::sync::Notify::new());
         let notified = seen.clone();
         let mut task = tokio::spawn(async move {
-            consume_response(
-                response,
-                Duration::from_secs(1),
-                |delta| {
-                    assert_eq!(delta, "é🐾");
-                    notified.notify_one();
-                },
-            )
+            consume_response(response, Duration::from_secs(1), |delta| {
+                assert_eq!(delta, "é🐾");
+                notified.notify_one();
+            })
             .await
         });
         let progress = event(choice(Some("é🐾"), None));
@@ -1421,7 +1412,12 @@ mod tests {
             let bytes =
                 futures_util::stream::unfold(chunks.into_iter(), move |mut chunks| async move {
                     let chunk = chunks.next()?;
-                    tokio::time::sleep(Duration::from_millis(if stall { 650_000 } else { 100_000 })).await;
+                    tokio::time::sleep(Duration::from_millis(if stall {
+                        650_000
+                    } else {
+                        100_000
+                    }))
+                    .await;
                     Some((Ok::<_, std::io::Error>(chunk), chunks))
                 });
             let response = reqwest::Response::from(
@@ -1454,8 +1450,16 @@ mod tests {
         });
         let response = http::Response::builder()
             .header("content-type", "text/event-stream")
-            .body(reqwest::Body::wrap_stream(bytes)).unwrap().into();
-        assert_eq!(consume_response(response, STREAM_IDLE_TIMEOUT, |_| panic!()).await.unwrap().total_tokens, 5);
+            .body(reqwest::Body::wrap_stream(bytes))
+            .unwrap()
+            .into();
+        assert_eq!(
+            consume_response(response, STREAM_IDLE_TIMEOUT, |_| panic!())
+                .await
+                .unwrap()
+                .total_tokens,
+            5
+        );
         assert!(started.elapsed() > Duration::from_secs(600));
     }
 
@@ -1558,9 +1562,7 @@ mod tests {
             } else {
                 Duration::from_secs(1)
             };
-            let task = tokio::spawn(async move {
-                consume_response(response, idle, |_| {}).await
-            });
+            let task = tokio::spawn(async move { consume_response(response, idle, |_| {}).await });
             if ["usage", "missing_done"].contains(&fault) {
                 peer.send(&event(choice(None, Some("stop"))), 10).await;
                 peer.send(&event(usage(2, 3)), 10).await;
@@ -1654,13 +1656,11 @@ mod tests {
                     .body(body)
                     .unwrap(),
             );
-            assert!(consume_response(
-                response,
-                STREAM_IDLE_TIMEOUT,
-                |_| panic!()
-            )
-            .await
-            .is_err());
+            assert!(
+                consume_response(response, STREAM_IDLE_TIMEOUT, |_| panic!())
+                    .await
+                    .is_err()
+            );
         }
         for size in [
             MAX_TRANSPORT_BUFFER_BYTES,
@@ -1677,12 +1677,7 @@ mod tests {
                     .body(body)
                     .unwrap(),
             );
-            let result = consume_response(
-                response,
-                STREAM_IDLE_TIMEOUT,
-                |_| {},
-            )
-            .await;
+            let result = consume_response(response, STREAM_IDLE_TIMEOUT, |_| {}).await;
             assert!(
                 result.is_ok(),
                 "a valid stream must not depend on DATA fragmentation"
@@ -1698,14 +1693,11 @@ mod tests {
                 .body(oversized_line)
                 .unwrap(),
         );
-        assert!(consume_response(
-            response,
-            STREAM_IDLE_TIMEOUT,
-            |_| panic!("oversized line must not emit content")
-        )
+        assert!(consume_response(response, STREAM_IDLE_TIMEOUT, |_| panic!(
+            "oversized line must not emit content"
+        ))
         .await
         .is_err());
-
     }
 
     #[test]

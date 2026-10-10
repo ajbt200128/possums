@@ -93,11 +93,9 @@ async fn early_413_keeps_both_production_uploads_charged_after_worker_returns() 
             if let Some(receipt) = receipt {
                 assert!(finish_tokenizer(response, receipt, deadline).await.is_err());
             } else {
-                assert!(
-                    stream::consume_response(response, TIMEOUT, |_| panic!())
-                        .await
-                        .is_err()
-                );
+                assert!(stream::consume_response(response, TIMEOUT, |_| panic!())
+                    .await
+                    .is_err());
             }
         });
         tokio::time::timeout(TIMEOUT, worker)

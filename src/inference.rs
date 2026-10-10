@@ -209,12 +209,7 @@ impl TinfoilInference {
                 InferenceFailure::EndpointBindingFailed,
             ));
         }
-        stream::consume_completion_response(
-            response,
-            stream::STREAM_IDLE_TIMEOUT,
-            on_delta,
-        )
-        .await
+        stream::consume_completion_response(response, stream::STREAM_IDLE_TIMEOUT, on_delta).await
     }
 
     /// Funded diagnostic only: fixed non-user input, no gateway accounting or route.

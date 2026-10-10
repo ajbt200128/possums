@@ -419,16 +419,13 @@ async fn proof_seams_use_real_serializers_and_consumer() {
         ))
         .unwrap();
     let mut deltas = 0;
-    let usage = resource_fixtures::consume_response(
-        response.into(),
-        Duration::from_secs(1),
-        |delta| {
+    let usage =
+        resource_fixtures::consume_response(response.into(), Duration::from_secs(1), |delta| {
             assert_eq!(delta, "x");
             deltas += 1;
-        },
-    )
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
     assert_eq!(deltas, 1);
     assert_eq!(usage.total_tokens, 5);
 }

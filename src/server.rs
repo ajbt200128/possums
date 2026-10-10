@@ -37,9 +37,9 @@ use tower_http::catch_panic::CatchPanicLayer;
 #[cfg(test)]
 mod admission_tests;
 #[cfg(test)]
-mod timeout_tests;
-#[cfg(test)]
 pub(crate) mod resource_streaming_tests;
+#[cfg(test)]
+mod timeout_tests;
 
 pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const BODY_DEADLINE: Duration = Duration::from_secs(30);
@@ -231,9 +231,7 @@ pub async fn serve_with_header_deadline(
             let result = connection.await;
             if !entered.load(std::sync::atomic::Ordering::Acquire) {
                 let reason = match result {
-                    Err(error) if error.is_timeout() => {
-                        Some(MetricRejection::ConnectionDeadline)
-                    }
+                    Err(error) if error.is_timeout() => Some(MetricRejection::ConnectionDeadline),
                     Err(error) if error.is_parse() => Some(MetricRejection::HeaderProtocol),
                     Err(_) => Some(MetricRejection::TransportUnknown),
                     Ok(()) => None, // clean idle close is not a rejection
