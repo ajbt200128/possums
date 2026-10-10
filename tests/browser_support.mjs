@@ -17,8 +17,10 @@ export function fixtureOrigin(bytes) {
 }
 
 export async function startStreamingFixture({ progressive = false } = {}) {
+  // CI runs the cached Nix fixture directly; local development retains cargo run.
   // A process group ensures cargo AND the example die on failure, not just cargo.
-  const server = spawn("cargo", ["run", "--quiet", "--example", "browser_fixture"], {
+  const executable = process.env.POSSUMS_BROWSER_FIXTURE;
+  const server = spawn(executable || "cargo", executable ? [] : ["run", "--quiet", "--example", "browser_fixture"], {
     detached: true,
     env: { ...process.env, POSSUMS_BROWSER_PROGRESSIVE: progressive ? "1" : "0" },
     stdio: ["pipe", "pipe", "inherit"],
@@ -39,6 +41,7 @@ export async function startStreamingFixture({ progressive = false } = {}) {
     }
   };
   const terminate = () => {
+    if (killTimer) return;
     killGroup("SIGTERM");
     killTimer ??= setTimeout(() => killGroup("SIGKILL"), 2_000);
   };

@@ -39,7 +39,8 @@ Inside the shell:
 - `possums-test-go` — only the Go helper tests, with read-only module resolution.
 - `possums-browser-setup` — explicitly install locked root npm dependencies and
   Playwright Chromium. On Linux, install Playwright's host system dependencies
-  separately, as CI does; this command does not run sudo or mutate the host.
+  separately; this command does not run sudo or mutate the host. CI instead uses
+  a version-matched, digest-pinned Playwright image with those dependencies.
 - `possums-test-browser` — build the synthetic fixture and run the progressive
   no-JavaScript browser acceptance suite. Run browser setup first.
 
@@ -55,6 +56,42 @@ Client dependencies remain explicit and local to each client, for example:
 `devenv shell npm --prefix clients/pi ci`
 
 `devenv shell npm --prefix clients/pi run build`
+
+## Incremental builds and worktrees
+
+Use Cargo inside `devenv shell` for the edit/test loop. For example:
+
+`devenv shell cargo test --locked --test privacy`
+
+The shell defaults `CARGO_TARGET_DIR` to
+`${XDG_CACHE_HOME:-$HOME/.cache}/possums/target/<Rust host>/<Rust version>`.
+Compatible worktrees reuse dependency compilation without sharing their source
+files or credentials. Cargo still fingerprints source changes; simultaneous
+builds using the same target directory may wait on Cargo's build lock. The first
+build in this new directory is cold. `cargo clean` clears shared artifacts for
+all worktrees in that compiler/host namespace. An explicit `CARGO_TARGET_DIR`
+is preserved if you prefer an isolated directory. The build flake does not use
+this mutable cache.
+
+Run full reproducible checks/images at checkpoints, rather than after every edit:
+
+`nix flake check --print-build-logs`
+
+`nix build .#gateway-image --print-build-logs`
+
+Images require Linux. Linux binary-cache outputs do not accelerate native macOS
+builds; Magic Nix Cache is CI-only. We do not add Cachix or linker/profile changes.
+
+For browser acceptance using an already-built Nix fixture:
+
+`nix build .#browser-fixture --out-link result-browser-fixture`
+
+`POSSUMS_BROWSER_FIXTURE="$PWD/result-browser-fixture/bin/browser_fixture" devenv shell npm run test:browser`
+
+Run browser setup first. Without that override, `possums-test-browser` retains
+its normal incremental Cargo build/run path. The direct-fixture path preserves
+the same synthetic IPC, process-group cleanup and no-JavaScript acceptance suite.
+See [CI and release builds](ci-builds.md) for cache and reproduction boundaries.
 
 ## Secrets and local state
 
