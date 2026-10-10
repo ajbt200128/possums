@@ -380,8 +380,12 @@ def verify_manifest(raw, hash_bytes, config, image):
     require(decoded_config == config and transform(config, image) == config, "manifest")
     config_hash = hashlib.sha256(config).hexdigest()
     require(manifest["hashes"]["version"] == "v0.14.12"
-            and f"tinfoil-config-hash={config_hash}" in manifest["cmdline"].split()
-            and manifest["vm_shape"] == {"cpus": 2, "memory_mb": 8192, "gpus": 0}, "manifest")
+            and f"tinfoil-config-hash={config_hash}" in manifest["cmdline"].split(), "manifest")
+    # The canonical SDK shape includes root, config and external-config disks.
+    shape = manifest["vm_shape"]
+    require(isinstance(shape, dict)
+            and shape == {"cpus": 2, "memory_mb": 8192, "gpus": 0, "disks": 3}
+            and all(type(value) is int for value in shape.values()), "manifest")
     return manifest, digest
 
 
