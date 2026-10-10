@@ -6,7 +6,9 @@ Branch `feat/blue-green-deployments`, based on local main including free-endpoin
 
 Policy references: [data boundaries](../PRIVACY.md#data-handling-boundaries), [forbidden exports](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [processor/shutdown boundary](../PRIVACY.md#processors-retention-access-and-shutdown), [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change). This packet adds no telemetry. Local synthetic sentinel tests below qualify only the new offline tool's output privacy; previous telemetry source/wire evidence remains in [the MVP record](telemetry-mvp-five-minute.md), not a new whole-runtime privacy pass.
 
-## Actual source observations
+## Preparation-time source observations (historical)
+
+The following observations describe the initial preparation packet, before the separately authorized local runtime implementation recorded below; they are not current shutdown-code claims.
 
 - `tinfoil-config.yml`: CPU 2, memory 8192, CVM 0.14.12, read-only gateway, tmpfs, three secret references, no persistent volume declaration. No checked-in update strategy and no readback of effective platform strategy.
 - `src/main.rs::run` / `shutdown_signal`: SIGTERM selects out of serving, disposes telemetry, returns. No generation-owner join or accounting-drain rendezvous. `src/generation.rs` detaches charged preflight and transfers its sole owner independently of delivery; zero sockets is not terminal accounting.
@@ -20,7 +22,7 @@ Existing native CLI v3 platform-signer mismatch and approved JS legacy-v2 freshn
 
 Bounded parallel research inspected public docs and CLI/Admin API source. Parent independently fetched the [CLI source at v0.19.2 commit `d227ddb6f398e5cd2071cb7e87815e156d84e157`](https://github.com/tinfoilsh/tinfoil-cli/blob/d227ddb6f398e5cd2071cb7e87815e156d84e157/container.go), [Admin API](https://docs.tinfoil.sh/admin/admin-api.md) and [updates contract](https://docs.tinfoil.sh/containers/updates.md). CLI flags confirm explicit tag/hold and `mark-latest=false`; promote posts no body/candidate precondition. API documentation establishes the non-deploying update-plan POST, target-strategy override, unavailable hold on replacement, readiness states, review URL/repository/tag and latest default true. These are supported contract names, not tested control-plane behavior. The [runbook](blue-green-deployments.md#supported-public-contracts-not-live-qualification) records exact shapes and fail-closed checks without executing them.
 
-Research also inspected public CVM shim/PID1 revision `be74c3395921a9b1fe2347dd2af47cc496fa354c`, which contains graceful-drain code. No mapping of that source to the deployed CVM was qualified. Published contracts do not establish drain duration, old endpoint retention, forced-stop deadline or effective `stop_timeout`; gateway SIGTERM still lacks owner waiting. No local CLI version was installed/upgraded or adopted for native v3 verification. No live admin credential or platform metadata was read.
+Research also inspected public CVM shim/PID1 revision `be74c3395921a9b1fe2347dd2af47cc496fa354c`, which contains graceful-drain code. No mapping of that source to the deployed CVM was qualified. Published contracts do not establish drain duration, old endpoint retention, forced-stop deadline or effective `stop_timeout`; at preparation time, gateway SIGTERM lacked owner waiting. No local CLI version was installed/upgraded or adopted for native v3 verification. No live admin credential or platform metadata was read.
 
 ## Local synthetic qualification
 
@@ -31,6 +33,25 @@ Tool: `scripts/plan-held-update.py`, commit `431ba31`. Standard-library-only std
 Independent bounded read-only review found no concrete defect in the planner, tests or initial runbook and independently ran all seven tests successfully. The later public-contract section was parent-checked against the fetched CLI/API excerpts, not separately agent-reviewed. This review did not qualify platform behavior or cryptography.
 
 Active LSP checks on both changed Python paths: two files clean, zero error diagnostics. `git diff --check` passed. No gateway/Pi source changed, no full runtime test suite run, and no real artifact/candidate/hardware key qualification performed.
+
+## Authorized local runtime implementation — acceptance pending
+
+Local implementation was subsequently authorized on base `ca24b869`, without merge, deployment, installation, platform mutation, release publication or live inference authorization. The original preparation-only test and source statements above remain historical.
+
+- `db48720`: process-local lifecycle fence/count and cleanup-drain primitive.
+- `04cdf0a`: admitted handler, whole-preflight and original accounting-owner tracking; actual terminal-accounting failures latch before owner retirement.
+- `6f6ce2e`: retained voluntary-shutdown connections and independent owner drain; credential-free readiness route and fixed-loopback binary probe. Root health configuration and image definition remain unchanged.
+- Sol reported 187/187 library tests, offline integration tests, strict Clippy and package formatting passing. Parent confirmed the commit/clean worktree and read main/server/health implementation.
+- T3 Astra actual-diff review R1 independently passed 187/187 library tests and 46/46 focused API auth/chat, lifecycle, privacy and transport integration tests, including the early-413 upload-retention regression. Whitespace checks passed. The previously intermittent telemetry handoff test passed these runs; historical intermittency is not resolved.
+
+**R1 decision: revise for missing required local evidence**, not a demonstrated incorrect-drain implementation path. Parent checked the cited tests and confirmed the gaps:
+
+1. Fatal listener failure with accepted ownership held is untested. Dropping a client socket in the detached-worker test does not prove server connection completion; its held preflight also prevents isolating the owner-vs-connection distinction. A deterministic accepted-connection/sticky-shutdown race is missing.
+2. The health test has telemetry disabled and counts only generation calls, so it does not establish absence of application observations or all forbidden dependencies. Private probe tests do not exercise the actual binary's early configuration-bypass/output contract.
+
+A T3 Sol correction packet is closing these test gaps with narrowly scoped test-only checkpoints and isolated synthetic binary tests; it does not authorize a production accept framework, telemetry changes or configurable probe destinations. A separate T3 Sol client packet is integrating the closed `service_quiescing`/`admission`/HTTP 503 diagnostic. Until both packets and actual-diff review finish, local product-boundary acceptance is incomplete. Server `billing=not_submitted` does not establish an earlier request's outcome or authorize replay.
+
+[Pi permission qualification](blue-green-pi-qualification.md) passed 111/111 offline groups and independently confirmed native/nested ambiguity at the tested boundary. Recovery E remains disabled; the existing expiry-permission limitation was documented, not silently repaired. These tests are not live billing, runtime attestation, generated-image or platform qualification. Successful local drain covers tracked envelopes and accounting, not all Hyper-owned upload buffers, delivery, preserved sessions or balances.
 
 ## Release decision
 
