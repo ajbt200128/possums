@@ -1,6 +1,6 @@
 # Free waiting-room experiment
 
-**Status: approved design; implementation and deployment verification pending.** This is a separate executable/image/instance targeting `free.possums.dev`, not a change to paid accounts or a claim that the endpoint is live.
+**Status: implemented and independently reviewed; `free-v0.0.1` artifacts published and provenance verified; live deployment/E2E verification pending.** This is a separate executable/image/instance targeting `free.possums.dev`, not a change to paid accounts or a claim that the endpoint is live.
 
 ## Operator-approved contract
 
@@ -38,7 +38,7 @@ The static source is part of the measured artifact. The appended info snapshot i
 5. Read back and privately retain the original deployment's exact release/settings/secret bindings and supported restoration procedure. Do not dump secrets, request data or memory. Deploy and verify the second instance before stopping—not deleting—the original. Confirm stopped state independently.
 6. Rollback stops free and redeploys the retained exact original release/settings with renewed verification. Original balances are memory-only demo credit: restart recreates configured balances, not exact pre-stop remaining credit. Do not promise memory suspension.
 
-No platform operation, custom-domain setup, release publication, public E2E or pause is verified by this design document. Record actual evidence in `docs/verification.md` without usable keys or request content.
+The custom domain is registered but DNS verification is pending. Published artifact qualification is recorded in [verification](verification.md#free-v001--native-and-published-artifact-qualification-2026-10-10); it is not proof of live deployment, public E2E or pause. Record subsequent runtime evidence separately without usable keys or request content.
 
 ## Privacy scope
 

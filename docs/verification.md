@@ -1572,3 +1572,23 @@ Authenticated control-plane readback found one running original instance and no 
 Outstanding release gates: exact-source Linux image/startup and independent image digest/provenance, DNS/TLS, free-client verified transport, public physical connection/disconnect/long-hold semantics, whole-platform restart-stop qualification, and actual production pause/rollback readback. Backend loopback closure is not proof of public socket closure through the platform shim. Memory-only budget and original demo balances do not survive stop; a fresh budget requires an explicit operator decision. Native-v3 signer, legacy-v2 freshness, provider invoice/cache/logging and runtime privacy unknowns remain unresolved at their existing scopes.
 
 Applicable privacy policy: [data handling boundaries](../PRIVACY.md#data-handling-boundaries), [free-instance public-info exception](../PRIVACY.md#free-instance-experiment-boundary), [forbidden telemetry data](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [reviewed MVP scope](../PRIVACY.md#reviewed-mvp-release-scope), [processors/access/shutdown](../PRIVACY.md#processors-retention-access-and-shutdown), and [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change). Runtime info deliberately discloses live aggregate count/known spend publicly; it establishes neither anonymity nor new permission for observability export. The free binary does not initialize the telemetry runtime/exporter, but platform collection remains outside that claim.
+
+## Free v0.0.1 — native and published artifact qualification (2026-10-10)
+
+This qualifies artifacts, **not deployment or public live E2E**. API-only PR #42 merged as `461f97e78bdbe906c60ac3fd8ac6f67ba73ee7ae`; free PR #43 merged as `90cdaaadabc14f7cb913e465c0964ecea63ffdae`. Parent confirmed the prospective free merge tree exactly matched the reviewed/tested source tree before merge.
+
+Native qualification at clean `bf32edc069a729afb94b005eeb0e118d5e9ebb30`: `nix build .#free-gateway --no-link` and native `nix flake check` passed. Binary inspection found the full built source revision/link and `free-v0.0.1`, not an unavailable-source link. Six isolated missing/malformed-configuration startup probes exited 1 with zero stdout/stderr before upstream connection, using no real upstream key or prompt.
+
+Hosted exact-source checks `38027758317` and `38027758050` passed at `90cdaaa`. Publication `38027786903` independently built two free OCI archives whose digests matched public unauthenticated GHCR inspection:
+
+`ghcr.io/ajbt200128/possums-free@sha256:20d04b3b1ba79f669bac66345f6a80fdaa88365e835718004459b7f3bda3e709`
+
+PR #44 changed only that image line in `deploy/free/tinfoil-config.yml`; checks `38028573201`, `38028595608`, `38028574650` and `38028574683` passed before merge. Its merge and `free-v0.0.1` tag point to `18de2bdbbc22cc91b474da2bbdc580d8d7ee5e5f`; main checks `38029180637` and `38029180646` passed. The image's embedded source link intentionally identifies build source `90cdaaa`, not the later digest-only release commit.
+
+Release preparation `38029209823` and publication `38029218968/attempts/1` passed using official `tinfoilsh/measure-image-action@f2ec2fdf4510459730f0a5158c5817f5361e9461` with non-latest publication. Both worker and parent independently used supported `gh attestation verify` to enforce the exact free publication workflow/tag, GitHub OIDC issuer/hosted runner, source/signer commit and Tinfoil predicate. The worker additionally verified invocation/predicate equality and decoded configuration against tagged bytes. Parent independently checked artifact/configuration SHA-256 values:
+
+- [Deployment manifest](https://github.com/ajbt200128/possums/releases/download/free-v0.0.1/tinfoil-deployment.json): `1647ac7594b76eecb3292d1726d34310a4c0766f43715c37d5471c9aec1c8df0`.
+- [Published tinfoil.hash](https://github.com/ajbt200128/possums/releases/download/free-v0.0.1/tinfoil.hash): the same manifest digest.
+- Embedded measured configuration: `8d6f891c938fc214280e29756c9c5b61a69c39b3381968cb3b32d32ee58a99a8`.
+
+The free release is not latest; parent readback confirmed paid latest remains `v0.0.18`. Paid configuration was unchanged. At this artifact checkpoint no second instance, live canary or original-instance pause is verified. DNS/TLS, live verified free transport, public physical socket/long-hold/disconnect behavior and whole-platform restart-stop remain open gates. Native-v3 signer, legacy-v2 freshness, provider invoice/cache/logging and privacy unknowns remain unresolved. Scoped privacy references are the experiment boundary, data handling and required-evidence sections linked above; no keys or request content are part of this record.
