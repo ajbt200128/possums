@@ -1532,3 +1532,11 @@ a statistically controlled comparison or a Rust-source-edit benchmark. Initial
 seeding and outages/eviction can still be much slower. Release dependency roots
 remain release-only, and fresh two-runner reconstruction/publication is still
 unrun. No gateway deployment, inference or Honeycomb export was performed.
+
+## 2026-10-10 — v0.0.18 private receipt reconciliation live acceptance
+
+[The separately scoped reconciliation record](pi-reconciliation-verification.md#v0018-release-installation-and-real-reconciliation--2026-10-10) records all four exact-source/pin/tagged-source CI jobs, two actual fresh image reconstructions with matching published digest, exact signed release/configuration provenance, stop-confirm-deploy readbacks, paired-client installation and verified startup. A fresh real shim→Rust balance/receipt gate passed with Node and Chromium; its dependency/setup and full-transport gaps remain explicit.
+
+One real installed-extension/native-Pi submission then produced a successful response and authenticated settled receipt, with exact private balance-debit and completed-attempt reconciliation. It used an in-memory session with retries/compaction disabled and no additional inference or persistent command report. No credential, prompt/output, account balance, exact charge/token count or raw error was exported into the qualification output. This is one gateway-ledger agreement, not provider-invoice reconciliation, durable credit or general model/retry/compaction/privacy acceptance. Prior receipts are not retrospectively reconciled.
+
+The default public-latest discovery mismatch was resolved by explicitly aligning the approved v0.0.18 release metadata; intermediate closed catalog verification failures subsequently ceased, without an established root cause or relaxed verification policy. All preceding startup attempts had inference blocked. Legacy-v2 freshness, native CLI v3 platform-signer qualification, processor retention/platform behavior and whole-runtime privacy remain unresolved. Applicable first-party accounting, forbidden-export, complete-window and runtime/processor policy sections plus scoped privacy tests are linked in the full record. Shared-checkout changes concurrent with this rollout were not included in the released tag; this evidence was committed from an isolated worktree based on that tag.
