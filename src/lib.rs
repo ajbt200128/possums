@@ -13,6 +13,7 @@ mod generation;
 #[allow(dead_code)]
 mod generation_owner;
 pub mod inference;
+pub mod lifecycle;
 pub mod server;
 // Bounded delivery owners retain the shared heavy admission.
 #[allow(dead_code)]
