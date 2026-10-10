@@ -6,19 +6,6 @@ import { X509Certificate, AllOf, Identity as SignerIdentity, GitHubWorkflowSHA,
   OIDCBuildSignerDigest } from '@freedomofpress/sigstore-browser';
 import { LIMITS, Operation, base64, boundedReport, decode, digest, parseJSON, requireThat, ChannelError } from './limits.js';
 
-// Independent v0.0.8 WEB-only approval, never authorization for changed API code.
-export const WEB_APPROVAL = Object.freeze({
-  origin: 'https://possum-phase0.possums.containers.tinfoil.dev',
-  repository: 'ajbt200128/possums', tag: 'v0.0.8',
-  manifest: '7363e7637ccbb84c2b243baee91ad08a65245feef1483e8b39d1111e5f65daae',
-  image: 'sha256:2a4694aa952e9102eb1786a5f7940633ba8b9cd6c5ecb8983797db1268c4a51e',
-  commit: '2af94f852d9467db33f473ae38b6333412342571',
-  config: '483d8cf1d9aa2491fbb0c57926bc24ae3e7cf9a62f0c51fac1d6bf0acb15102c',
-  workflow: 'https://github.com/ajbt200128/possums/.github/workflows/tinfoil-release-publish.yml@refs/tags/v0.0.8',
-  invocation: 'https://github.com/ajbt200128/possums/actions/runs/36822521244/attempts/1',
-  // Administrative qualification expiry, NOT v2 quote freshness.
-  expires: Date.parse('2026-10-08T00:00:00Z'),
-});
 export type Approval = { origin: string; repository: string; tag: string; manifest: string;
   image: string; commit: string; config: string; workflow: string; invocation: string; expires: number };
 // Independently checked release provenance and directly promoted production endpoint.
@@ -68,12 +55,7 @@ function canonical(value: any): string {
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}';
   return JSON.stringify(value);
 }
-export type WebQualification = Readonly<{ scope: 'web-observation-only'; hpkeKey: string; tlsFingerprint: string }>;
 // Bytes, not caller-supplied verified flags. All library input is locally bounded first.
-export async function qualifyWeb(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array): Promise<WebQualification> {
-  const keys = await qualifyApproved(bundleBytes, manifestBytes, keyConfig, WEB_APPROVAL);
-  return Object.freeze({ scope: 'web-observation-only', hpkeKey: keys.hpkeKey, tlsFingerprint: keys.tlsFingerprint });
-}
 export async function qualifyApi(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array) {
   const keys = await qualifyApproved(bundleBytes, manifestBytes, keyConfig, requireApiApproval());
   return Object.freeze({ hpkeKey: keys.hpkeKey, tlsFingerprint: keys.tlsFingerprint });
