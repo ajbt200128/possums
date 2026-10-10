@@ -92,6 +92,8 @@ pub struct AppState {
     telemetry: Option<Arc<crate::telemetry::AggregateMetrics>>,
     #[cfg(test)]
     preflight_hooks: Arc<resource_streaming_tests::PreflightHooks>,
+    #[cfg(test)]
+    server_hooks: Arc<lifecycle_tests::ServerHooks>,
 }
 
 impl AppState {
@@ -155,6 +157,8 @@ impl AppState {
             telemetry: None,
             #[cfg(test)]
             preflight_hooks: Arc::default(),
+            #[cfg(test)]
+            server_hooks: Arc::default(),
         }
     }
 }
@@ -243,6 +247,10 @@ async fn serve_until_with_header_deadline(
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let telemetry = state.telemetry.clone();
     let lifecycle = state.lifecycle.clone();
+    #[cfg(test)]
+    let hooks = state.server_hooks.clone();
+    #[cfg(test)]
+    let mut injected_accept_failure = hooks.accept_failure.lock().unwrap().take();
     let app = router(state);
     let (stop, _) = watch::channel(false);
     let mut tasks = JoinSet::new();
@@ -256,7 +264,20 @@ async fn serve_until_with_header_deadline(
                     break Err(std::io::Error::other("gateway connection task failed"));
                 }
             }
-            result = listener.accept() => {
+            result = async {
+                #[cfg(test)]
+                if let Some(failure) = &mut injected_accept_failure {
+                    tokio::select! {
+                        biased;
+                        _ = failure => Err(std::io::Error::other("injected listener failure")),
+                        result = listener.accept() => result,
+                    }
+                } else {
+                    listener.accept().await
+                }
+                #[cfg(not(test))]
+                listener.accept().await
+            } => {
                 let (stream, _) = match result {
                     Ok(accepted) => accepted,
                     Err(error) => break Err(error),
@@ -279,7 +300,15 @@ async fn serve_until_with_header_deadline(
                 });
                 let metrics = telemetry.clone();
                 let mut closing = stop.subscribe();
+                #[cfg(test)]
+                let hooks = hooks.clone();
                 tasks.spawn(async move {
+                    #[cfg(test)]
+                    let pause = hooks.connection_start.lock().unwrap().take();
+                    #[cfg(test)]
+                    if let Some(pause) = pause {
+                        pause.wait().await;
+                    }
                     let builder = connection_builder(header_deadline);
                     let connection = builder.serve_connection(TokioIo::new(stream), service);
                     tokio::pin!(connection);
@@ -308,6 +337,10 @@ async fn serve_until_with_header_deadline(
                         }
                     }
                     drop(permit);
+                    #[cfg(test)]
+                    if let Some(done) = hooks.connection_finished.lock().unwrap().take() {
+                        let _ = done.send(());
+                    }
                 });
             }
         }
@@ -315,6 +348,10 @@ async fn serve_until_with_header_deadline(
     lifecycle.quiesce();
     drop(listener);
     stop.send_replace(true);
+    #[cfg(test)]
+    if let Some(done) = hooks.shutdown_published.lock().unwrap().take() {
+        let _ = done.send(());
+    }
     // A connection can finish before its detached generation owner. Neither
     // condition substitutes for the other; keep the runtime and tasks alive.
     let (drain, connections) = tokio::join!(lifecycle.wait_drained(), async {

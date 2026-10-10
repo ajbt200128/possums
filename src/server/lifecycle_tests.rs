@@ -16,6 +16,14 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::{atomic::Ordering, Mutex};
+
+#[derive(Default)]
+pub(super) struct ServerHooks {
+    pub(super) accept_failure: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub(super) connection_start: Mutex<Option<Pause>>,
+    pub(super) connection_finished: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    pub(super) shutdown_published: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
 
@@ -23,11 +31,17 @@ use tower::ServiceExt;
 struct Probe {
     evidence: Mutex<Option<Pause>>,
     tokenizer: Mutex<Option<Pause>>,
+    generation: Mutex<Option<Pause>>,
     calls: AtomicUsize,
+    verify_calls: AtomicUsize,
+    catalog_calls: AtomicUsize,
+    tokenize_calls: AtomicUsize,
+    document_calls: AtomicUsize,
 }
 #[async_trait]
 impl EvidenceVerifier for Probe {
     async fn verify(&self, _: &str, now: u64) -> Result<GatewayEvidence, EvidenceError> {
+        self.verify_calls.fetch_add(1, Ordering::SeqCst);
         let pause = self.evidence.lock().unwrap().take();
         if let Some(pause) = pause {
             pause.wait().await;
@@ -41,9 +55,20 @@ impl EvidenceVerifier for Probe {
         })
     }
 }
+impl Probe {
+    async fn complete_generation(&self) -> StreamCompletion {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let pause = self.generation.lock().unwrap().take();
+        if let Some(pause) = pause {
+            pause.wait().await;
+        }
+        completion()
+    }
+}
 #[async_trait]
 impl Inference for Probe {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
+        self.catalog_calls.fetch_add(1, Ordering::SeqCst);
         Ok(br#"{"object":"list","data":[{"id":"m","type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":1,"outputTokenPricePer1M":1,"requestPrice":0}}]}"#.to_vec())
     }
     async fn count_tokens(
@@ -52,6 +77,7 @@ impl Inference for Probe {
         _: &[Message],
         _: Arc<Lease>,
     ) -> Result<u64, InferenceError> {
+        self.tokenize_calls.fetch_add(1, Ordering::SeqCst);
         let pause = self.tokenizer.lock().unwrap().take();
         if let Some(pause) = pause {
             pause.wait().await;
@@ -76,8 +102,7 @@ impl Inference for Probe {
         _: Arc<Lease>,
         _: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<StreamCompletion, InferenceError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(completion())
+        Ok(self.complete_generation().await)
     }
     async fn generate_invocation_stream(
         &self,
@@ -86,10 +111,10 @@ impl Inference for Probe {
         _: Arc<Lease>,
         _: &mut (dyn for<'d> FnMut(CompletionDelta<'d>) + Send),
     ) -> Result<StreamCompletion, InferenceError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(completion())
+        Ok(self.complete_generation().await)
     }
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
+        self.document_calls.fetch_add(1, Ordering::SeqCst);
         Ok(json!({}))
     }
 }
@@ -266,6 +291,10 @@ async fn health_is_credential_free_unobserved_and_independent_of_control_capacit
         .to_bytes()
         .is_empty());
     assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.verify_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.catalog_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.tokenize_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.document_calls.load(Ordering::SeqCst), 0);
     drop(control);
     state.lifecycle.quiesce();
     let response = router(state.clone()).oneshot(request()).await.unwrap();
@@ -277,6 +306,10 @@ async fn health_is_credential_free_unobserved_and_independent_of_control_capacit
         .unwrap()
         .to_bytes()
         .is_empty());
+    assert_eq!(probe.verify_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.catalog_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.tokenize_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.document_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -325,10 +358,12 @@ async fn shutdown_before_accept_and_repeated_intent_is_idempotent() {
 }
 
 #[tokio::test]
-async fn shutdown_waits_for_detached_worker_after_connection_finishes() {
-    let (state, _, session) = fixture();
+async fn shutdown_waits_for_original_owner_after_connection_task_finishes() {
+    let (state, probe, session) = fixture();
     let (pause, gate) = checkpoint();
-    *state.preflight_hooks.after.lock().unwrap() = Some(pause);
+    *probe.generation.lock().unwrap() = Some(pause);
+    let (finished, connection_finished) = tokio::sync::oneshot::channel();
+    *state.server_hooks.connection_finished.lock().unwrap() = Some(finished);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (stop, stopping) = tokio::sync::oneshot::channel::<()>();
@@ -343,25 +378,85 @@ async fn shutdown_waits_for_detached_worker_after_connection_finishes() {
     bounded(gate.reached).await.unwrap();
     drop(client);
     stop.send(()).unwrap();
-    bounded(async {
-        while state.lifecycle.is_serving() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
+    bounded(connection_finished).await.unwrap(); // The retained connection future actually retired.
+    assert!(!state.lifecycle.is_serving());
+    assert!(state.lifecycle.try_admit().is_none());
+    let balance = state.accounting.snapshot("demo").unwrap();
+    assert_eq!(balance.in_flight, 1); // The original owner is still held in the adapter.
+    assert_eq!(balance.completed_requests, 0);
     assert!(!server.is_finished());
     state.lifecycle.quiesce(); // A repeated shutdown intent cannot skip owner cleanup.
-    assert!(!server.is_finished());
     gate.release.send(()).unwrap();
     assert!(bounded(server).await.unwrap().is_ok());
-    assert_eq!(
-        state
-            .accounting
-            .snapshot("demo")
-            .unwrap()
-            .completed_requests,
-        1
-    );
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    let balance = state.accounting.snapshot("demo").unwrap();
+    assert_eq!(balance.in_flight, 0);
+    assert_eq!(balance.completed_requests, 1);
+}
+
+#[tokio::test]
+async fn fatal_accept_failure_fences_but_waits_for_original_owner() {
+    let (state, probe, session) = fixture();
+    let (pause, gate) = checkpoint();
+    *probe.generation.lock().unwrap() = Some(pause);
+    let (fail, failure) = tokio::sync::oneshot::channel();
+    *state.server_hooks.accept_failure.lock().unwrap() = Some(failure);
+    let (published, shutdown_published) = tokio::sync::oneshot::channel();
+    *state.server_hooks.shutdown_published.lock().unwrap() = Some(published);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve_until(listener, state.clone(), std::future::pending()));
+    let request = chat(&state, &session, false);
+    let body = request.into_body().collect().await.unwrap().to_bytes();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {session}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+    client.write_all(&body).await.unwrap();
+    bounded(gate.reached).await.unwrap(); // Real accept, reserve, and adapter dispatch.
+    fail.send(()).unwrap();
+    bounded(shutdown_published).await.unwrap();
+    assert!(state.lifecycle.try_admit().is_none());
+    assert_eq!(state.accounting.snapshot("demo").unwrap().in_flight, 1);
+    assert!(!server.is_finished());
+    drop(client);
+    gate.release.send(()).unwrap();
+    let result = bounded(server).await.unwrap().unwrap_err();
+    assert_eq!(result.to_string(), "injected listener failure");
+    let balance = state.accounting.snapshot("demo").unwrap();
+    assert_eq!(balance.in_flight, 0);
+    assert_eq!(balance.completed_requests, 1);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn accepted_connection_observes_shutdown_before_its_first_poll() {
+    let (state, probe, session) = fixture();
+    let (pause, gate) = checkpoint();
+    *state.server_hooks.connection_start.lock().unwrap() = Some(pause);
+    let (published, shutdown_published) = tokio::sync::oneshot::channel();
+    *state.server_hooks.shutdown_published.lock().unwrap() = Some(published);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopping) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve_until(listener, state.clone(), async move {
+        let _ = stopping.await;
+    }));
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client.write_all(format!("GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {session}\r\n\r\n").as_bytes()).await.unwrap();
+    bounded(gate.reached).await.unwrap(); // Accepted, but no connection future was polled.
+    stop.send(()).unwrap();
+    bounded(shutdown_published).await.unwrap(); // Fence and sticky watch both published.
+    assert!(state.lifecycle.try_admit().is_none());
+    assert!(!server.is_finished());
+    gate.release.send(()).unwrap();
+    let mut received = Vec::new();
+    if let Err(error) = bounded(client.read_to_end(&mut received)).await {
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+    }
+    assert!(!received.starts_with(b"HTTP/1.1 200"));
+    assert!(bounded(server).await.unwrap().is_ok());
+    assert_eq!(probe.verify_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.catalog_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
