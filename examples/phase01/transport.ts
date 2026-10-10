@@ -53,7 +53,7 @@ function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation): Reada
     async pull(controller) {
       try {
         op.check();
-        const { done, value } = await op.wait(reader.read(), LIMITS.streamMs);
+        const { done, value } = await op.wait(reader.read(), LIMITS.idleMs);
         if (done) { requireThat(prefix === 0 && remaining === 0 && frames > 0); controller.close(); return; }
         total += value.length;
         requireThat(value.length <= LIMITS.chunk && total <= LIMITS.stream);
@@ -72,6 +72,10 @@ function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation): Reada
     }, cancel,
   }, { highWaterMark: 0 });
 }
+// Only these bodies already enforce inactivity at the HTTP byte boundary.
+// Higher layers must not time decrypted frames/events while fragments progress.
+const byteTimedBodies = new WeakSet<ReadableStream<Uint8Array>>();
+export const hasByteReadTimeout = (body: ReadableStream<Uint8Array>): boolean => byteTimedBodies.has(body);
 function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -80,7 +84,7 @@ function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean
     async pull(controller) {
       try {
         op.check();
-        const { done, value } = await op.wait(reader.read(), sse ? LIMITS.streamMs : LIMITS.idleMs);
+        const { done, value } = await op.wait(reader.read(), null);
         if (done) { if (sse) decoder.decode(); op.close(); controller.close(); return; }
         total += value.length;
         requireThat(value.length <= LIMITS.frame && total <= LIMITS.stream);
@@ -206,7 +210,7 @@ export class Channel {
   }
   async #encrypted(path: string, bytes: Uint8Array<ArrayBuffer>, bearer?: string, options: ResponseOptions = {}): Promise<ReadableStream<Uint8Array>> {
     this.#policyCheck();
-    const op = new Operation(LIMITS.streamMs, options.signal);
+    const op = new Operation(path === '/v1/chat/completions' ? null : LIMITS.operationMs, options.signal);
     let sent = false, res: Response | undefined;
     try {
       const encrypted = await op.wait<{ request: Request; context: RequestContext | null }>(this.#identity.encryptRequestWithContext(request(this.#origin + path, op, 'POST', bytes, bearer)));
@@ -218,13 +222,15 @@ export class Channel {
         // Never hand the Response, arbitrary header values, or EHBP diagnostics to hooks.
         const info: ResponseInfo = Object.freeze({ status: res.status,
           contentType: mime === 'text/event-stream' || mime === 'application/json' ? mime : null });
-        op.check(); await op.wait(Promise.resolve(options.onResponse(info)), LIMITS.streamMs);
+        op.check(); await op.wait(Promise.resolve(options.onResponse(info)), LIMITS.idleMs);
       }
       requireThat(res.body && /^[0-9a-f]{64}$/.test(res.headers.get('Ehbp-Response-Nonce') ?? ''));
       const bounded = new Response(encryptedFrames(res.body, op), { headers: res.headers });
-      const decrypted = await op.wait<Response>(this.#identity.decryptResponseWithContext(bounded, encrypted.context));
+      const decrypted = await op.wait<Response>(this.#identity.decryptResponseWithContext(bounded, encrypted.context), null);
       requireThat(decrypted.body);
-      return plaintext(decrypted.body, op, path === '/v1/chat/completions');
+      const body = plaintext(decrypted.body, op, path === '/v1/chat/completions');
+      byteTimedBodies.add(body);
+      return body;
     } catch {
       op.close();
       if (res?.body && !res.body.locked) await cleanup(res.body.cancel());

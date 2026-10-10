@@ -1558,3 +1558,18 @@ The Rust suite includes removed-route/non-HTML/no-inference checks, cookie rejec
 Linux OCI/image-startup CI, a newly measured release, deployed route/telemetry checks, external Honeycomb board mutation/readback and a new Pi installation are **not verified** by these local checks. No production pin, deployment, funded inference or live Honeycomb call was made. Native-v3 CLI signer, legacy-v2 freshness, provider invoice and platform privacy unknowns remain unchanged. The checked-in board is a proposal, not an external board update.
 
 Policy for this telemetry change: [permitted signals and forbidden data](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [aggregation is necessary not sufficient](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [reviewed MVP release scope](../PRIVACY.md#reviewed-mvp-release-scope), [required evidence for every telemetry change](../PRIVACY.md#required-evidence-for-every-telemetry-change). No metric, label, retention or release relaxation is authorized beyond removing Web labels and the New chat lane. The current CI graph is `flake` → `image` / `image-startup`; its isolated `api-smoke-fixture` replaces the browser fixture. Source and local checks are not hosted CI or deployed evidence; do not substitute historical browser passes.
+
+## Provider timeout alignment — local candidate
+
+[Scoped verification](provider-timeout-alignment.md): application 600-second
+response/header and rolling HTTP-read inactivity waits replace absolute inference
+lifetimes; HTTP/1 closes after one response instead of killing active connections
+by age. Parser/admission, detached exact-once accounting and native Pi retry policy
+remain. Rust: 302 passed, three live tests ignored; vendor TLS: 10 passed. Node
+24.13.0/Pi 1.0.4 scratch build and offline checks passed without installing anything.
+Lower-level fetch/SDK timeouts remain distinct. No deployed platform guarantee,
+new live billing/attestation/privacy evidence, installation or push is claimed.
+Applicable [data handling](../PRIVACY.md#data-handling-boundaries),
+[telemetry restrictions](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data)
+and [synthetic-test policy](../PRIVACY.md#synthetic-testing-exception) are unchanged;
+no new telemetry families or request-level diagnostics were introduced.

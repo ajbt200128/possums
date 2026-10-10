@@ -48,7 +48,7 @@ export async function connect(manifest: Uint8Array<ArrayBuffer>, signal?: AbortS
   try { approval = requireApiApproval(); }
   catch { throw new ConnectionFailure('approval_unavailable'); }
   if (manifest.length > LIMITS.provenance || await digest(manifest) !== approval.manifest) throw new ConnectionFailure('manifest_mismatch');
-  const op = new Operation(LIMITS.operationMs, signal);
+  const op = new Operation(LIMITS.bootstrapMs, signal);
   try { return await serving(approval, new Uint8Array(manifest), op, false); }
   catch (error) { throw connectionFailure(error); }
   finally { op.close(); }
@@ -57,7 +57,7 @@ export async function connect(manifest: Uint8Array<ArrayBuffer>, signal?: AbortS
 // Once per new Pi trust session. Latest is discovery, never approval; neither
 // target_commitish nor asset URLs nor any caller-supplied policy are consulted.
 export async function connectPublished(signal?: AbortSignal): Promise<ReferenceClient> {
-  const op = new Operation(LIMITS.operationMs, signal);
+  const op = new Operation(LIMITS.bootstrapMs, signal);
   try {
     const latest = parseJSON(await acquire(`https://api.github.com/repos/${PUBLISHER.repository}/releases/latest`, LIMITS.provenance, op), LIMITS.provenance);
     const tag = latest.tag_name;

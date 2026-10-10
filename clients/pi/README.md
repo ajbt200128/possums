@@ -47,6 +47,20 @@ After the initial installed extension replacement, fully restart Pi: `/reload` a
 
 Version wording comes from the verified context, not a hard-coded latest-version message or remote advertisement. Discovery uses public GitHub metadata and an exact artifact download with one bounded GitHub-to-asset-CDN redirect; authenticity comes from the existing Sigstore and hardware checks, not HTTPS/download metadata alone. Ordinary HTTPS still protects headers/bodyless GETs; EHBP binds encrypted bodies/replies to the endorsed HPKE key, without Node TLS socket pinning. These connection attempts send no inference and verify the channel before prompting for or transmitting a recovery credential. They do not establish earlier billing. Notifications/status do not log, export telemetry or append session entries; native Pi error handling and persistence remain separate. No automatic code installer or updater is introduced.
 
+## Timeout alignment candidate
+
+The source candidate removes the five-minute **total** chat/stream timer at every
+reference-client layer. Application send/header waits and rolling HTTP-byte
+inactivity waits are 600 seconds; healthy encrypted fragments/heartbeats do not
+need to produce a visible model event to stay active. Control/bootstrap operations
+remain finite, and Stop still aborts the client operation without promising remote
+cancellation or a refund. Parser/memory limits and native retry policy are unchanged.
+
+These are application settings, not a Tinfoil platform guarantee. Lower-level
+fetch/SDK limits remain separate (including Node 24.13.0's default Undici
+300-second header/body timers). This candidate is not installed or deployed.
+See [scope and local checks](../../docs/provider-timeout-alignment.md).
+
 ## Safety and billing
 
 - The recovery credential is saved by ordinary Pi authentication, normally in `~/.pi/agent/auth.json` (or the configured Pi agent directory). It is **plaintext at rest**, accessible to local tools/extensions with your permissions. Pi creates new auth files with mode `0600` and parent directories with `0700`; existing modes/ACLs are preserved. Bearer/catalog state remains memory-only, and request hooks receive a non-secret marker rather than the recovery key or bearer.

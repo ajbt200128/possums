@@ -253,6 +253,8 @@ const client = new f.ReferenceClient(channel);
 const nativeFetch = globalThis.fetch;
 let sent = [], decoded = [], responsePulls = 0, holdPath, held, catalogModel = model, chatText = valid, corrupt = false;
 let observedAbort = false, balanceStatus = 200;
+let fragmentMode;
+const realTimer = globalThis.setTimeout;
 let balanceText = '{"available_microunits":"18446744073709551615","in_flight":4294967295,"completed_requests":"18446744073709551615"}';
 globalThis.fetch = async req => {
   check(req instanceof Request && req.credentials === 'omit' && req.redirect === 'error' && req.cache === 'no-store');
@@ -277,8 +279,19 @@ globalThis.fetch = async req => {
   const cipher = await ehbp.encryptChunk(keys, 0, enc.encode(response));
   if (corrupt && route === '/v1/chat/completions') cipher[cipher.length - 1] ^= 1;
   const frame = new Uint8Array(4 + cipher.length); new DataView(frame.buffer).setUint32(0, cipher.length, false); frame.set(cipher, 4);
-  let emitted = false;
+  let emitted = false, offset = 0;
   responsePulls = 0;
+  if (route === '/v1/chat/completions' && fragmentMode) {
+    const mode = fragmentMode;
+    return new Response(new ReadableStream({ async pull(c) {
+      await new Promise(resolve => realTimer(resolve, mode === 'stall' ? 750 : 100));
+      if (offset === frame.length) { c.close(); return; }
+      const next = Math.min(frame.length, offset + Math.ceil(frame.length / 12));
+      c.enqueue(frame.slice(offset, next)); offset = next;
+    } }, { highWaterMark: 0 }), { headers: {
+      'Ehbp-Response-Nonce': ehbp.bytesToHex(nonce), 'Content-Type': 'text/event-stream',
+    } });
+  }
   return new Response(new ReadableStream({ pull(c) { responsePulls++; if (!emitted) { emitted = true; c.enqueue(frame); } else c.close(); } }, { highWaterMark: 0 }),
     { status: route === '/v1/balance' ? balanceStatus : 200, headers: { 'Ehbp-Response-Nonce': ehbp.bytesToHex(nonce), 'Content-Type': route === '/v1/chat/completions' ? 'text/event-stream; fixture=hidden' : 'application/json', 'X-Private': 'not-for-hook' } });
 };
@@ -406,6 +419,20 @@ try {
     holdPath = undefined;
     await client.login('c'.repeat(43));
   }
+  // Shortened application timers, real EHBP: one frame takes longer than
+  // a full idle interval to decrypt, but every underlying HTTP read progresses.
+  globalThis.setTimeout = (fn, ms, ...args) => realTimer(fn,
+    ms === 600000 ? 500 : ms === 300000 ? 250 : ms, ...args);
+  try {
+    fragmentMode = 'progress'; initial = sent.length;
+    check((await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] })).finish === 'tool_calls');
+    check(sent.slice(initial).filter(p => p === '/v1/chat/completions').length === 1);
+    fragmentMode = 'stall';
+    await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }));
+    fragmentMode = undefined; holdPath = '/v1/chat/completions'; observedAbort = false; initial = sent.length;
+    await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }));
+    assert(observedAbort, 'header abort: ' + JSON.stringify(sent.slice(initial))); checks++;
+  } finally { globalThis.setTimeout = realTimer; fragmentMode = undefined; holdPath = undefined; }
   const controller = new AbortController(); let payloadEntered;
   const reached = new Promise(resolve => { payloadEntered = resolve; }); initial = sent.length;
   const waitingHook = client.chat('fixture', chat.messages, () => {}, false, { signal: controller.signal, onPayload() { payloadEntered(); return new Promise(() => {}); } });

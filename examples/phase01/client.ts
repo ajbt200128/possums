@@ -1,4 +1,4 @@
-import { Channel, type ResponseOptions } from './transport.js';
+import { Channel, hasByteReadTimeout, type ResponseOptions } from './transport.js';
 import { ChannelError, JSONDepthError, LIMITS, Operation, cleanup, parseJSON, requireThat, serialize, utf8 } from './limits.js';
 import { admitTools, fields, freezeJSON, objectArguments, snapshotInvocation, toolID, toolName,
   type Chat, type Invocation, type Tool, type ToolChoice } from './tools.js';
@@ -141,7 +141,7 @@ export class CatalogFailure extends ChannelError {
 // No answer is accumulated; interruption is uncertain and never causes a resend.
 export async function consumeCompletion(body: ReadableStream<Uint8Array>, model: string | LiveModel,
   onDelta: (text: string) => void, options: CompletionOptions = {}): Promise<Receipt> {
-  const reader = body.getReader(), decoder = new TextDecoder('utf-8', { fatal: true }), op = new Operation(LIMITS.streamMs, options.signal);
+  const reader = body.getReader(), decoder = new TextDecoder('utf-8', { fatal: true }), op = new Operation(null, options.signal);
   let pending = '', data: string | undefined, state: 'role' | 'text' | 'usage' | 'done' | 'eof' | 'error' = 'role';
   let finish: Receipt['finish'] | undefined, receipt: Receipt | undefined, events = 0, total = 0, controlError = false;
   let failure: GatewayError | undefined, terminal = false;
@@ -244,8 +244,8 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     // mutate parser state, and awaiting them bounds queueing/backpressure.
     freezeJSON(value);
     op.check();
-    if (textDelta !== undefined) await op.wait(Promise.resolve(onDelta(textDelta)), LIMITS.streamMs);
-    if (options.onEvent) { op.check(); await op.wait(Promise.resolve(options.onEvent(value)), LIMITS.streamMs); }
+    if (textDelta !== undefined) await op.wait(Promise.resolve(onDelta(textDelta)), LIMITS.idleMs);
+    if (options.onEvent) { op.check(); await op.wait(Promise.resolve(options.onEvent(value)), LIMITS.idleMs); }
   }
   async function line(value: string): Promise<void> {
     if (value.endsWith('\r')) value = value.slice(0, -1);
@@ -272,8 +272,8 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     requireThat(options.tools === undefined || names);
     for (;;) {
       op.check();
-      // Reasoning can pause visible output; the absolute stream deadline stays bounded.
-      const next = await op.wait(reader.read(), LIMITS.streamMs);
+      // Channel bodies time HTTP bytes, not decrypted frames or visible text.
+      const next = await op.wait(reader.read(), hasByteReadTimeout(body) ? null : LIMITS.idleMs);
       if (next.done) {
         requireThat(decoder.decode() === '');
         if (controlError) failure = gatewayError(parseJSON(utf8.encode(pending), LIMITS.error));
@@ -322,7 +322,7 @@ export class ReferenceClient {
   freshSession(): ReferenceClient { return new ReferenceClient(this.channel); }
   async login(credential: string, signal?: AbortSignal): Promise<void> {
     this.#bearer = undefined;
-    const op = new Operation(LIMITS.operationMs, signal);
+    const op = new Operation(2 * LIMITS.operationMs, signal);
     let started = false;
     try {
       op.check(); started = true;
@@ -371,14 +371,14 @@ export class ReferenceClient {
     // Copy option descriptors once. No arbitrary request options / fetch / headers.
     const opts = fields(options, [], ['signal', 'tools', 'tool_choice', 'onPayload', 'onResponse', 'onEvent']);
     for (const key of ['onPayload', 'onResponse', 'onEvent']) requireThat(opts[key] === undefined || typeof opts[key] === 'function');
-    const bearer = this.#bearer, op = new Operation(LIMITS.streamMs, opts.signal);
+    const bearer = this.#bearer, op = new Operation(null, opts.signal);
     let issued = false, consuming = false;
     try {
       op.check();
       let payload = snapshotInvocation({ model, messages, stream: true,
         ...(opts.tools !== undefined ? { tools: opts.tools } : {}), ...(opts.tool_choice !== undefined ? { tool_choice: opts.tool_choice } : {}) });
       if (opts.onPayload) {
-        const replacement = await op.wait(Promise.resolve(opts.onPayload(payload)), LIMITS.streamMs);
+        const replacement = await op.wait(Promise.resolve(opts.onPayload(payload)), LIMITS.idleMs);
         // Returning undefined keeps the immutable original; replacements are
         // re-admitted with the same model and cannot smuggle transport options.
         payload = snapshotInvocation(replacement === undefined ? payload : replacement);

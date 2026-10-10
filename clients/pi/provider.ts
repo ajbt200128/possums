@@ -178,9 +178,9 @@ export class PossumsProvider implements Provider {
   }
 
   private async establishVerified(signal: AbortSignal, epoch: number): Promise<ReferenceClient> {
-    const op = new Operation(LIMITS.operationMs, signal);
+    const op = new Operation(LIMITS.bootstrapMs, signal);
     try {
-      const template = await op.wait(this.trustedTemplate(), LIMITS.operationMs);
+      const template = await op.wait(this.trustedTemplate(), LIMITS.bootstrapMs);
       this.requireCurrent(epoch, signal);
       // Public trust is shared; mutable bearer state is never shared between accounts.
       return template.freshSession();
