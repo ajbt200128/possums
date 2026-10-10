@@ -311,6 +311,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
 
 export class ReferenceClient {
   #bearer: string | undefined;
+  #authExpiresAt: number | undefined;
   constructor(readonly channel: Channel) { Channel.requireVerified(channel); }
   static async verified(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array): Promise<ReferenceClient> {
     return new ReferenceClient(await Channel.api(bundle, manifest, keyConfig));
@@ -319,9 +320,11 @@ export class ReferenceClient {
     return new ReferenceClient(await Channel.published(bundle, manifest, keyConfig, signal));
   }
   get release() { return this.channel.release; }
+  get authExpiresAt(): number | undefined { return this.#authExpiresAt; }
   freshSession(): ReferenceClient { return new ReferenceClient(this.channel); }
   async login(credential: string, signal?: AbortSignal): Promise<void> {
     this.#bearer = undefined;
+    this.#authExpiresAt = undefined;
     const op = new Operation(2 * LIMITS.operationMs, signal);
     let started = false;
     try {
@@ -329,10 +332,13 @@ export class ReferenceClient {
       const challenge: any = await this.channel.challenge(op.controller.signal);
       keys(challenge, ['challenge', 'expires_in']); requireThat(token(challenge.challenge) && challenge.expires_in === 600);
       op.check();
+      // Conservative local bound: issuance cannot precede this send.
+      const issuedAfter = Date.now();
       const session: any = await this.channel.control('/v1/sessions', { challenge: challenge.challenge, credential }, undefined, op.controller.signal);
       keys(session, ['token', 'token_type', 'expires_in']);
       requireThat(token(session.token) && session.token_type === 'Bearer' && session.expires_in === 43200);
       op.check(); this.#bearer = session.token;
+      this.#authExpiresAt = issuedAfter + session.expires_in * 1000;
     } catch (error) {
       if (started && op.controller.signal.aborted) throw new ChannelError('uncertain');
       throw error;

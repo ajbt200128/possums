@@ -300,7 +300,13 @@ try {
   await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'request' && e.message === 'possums_balance_request_failed'); checks++;
   check(sent.length === 0);
   await rejects(() => client.login('c'.repeat(43), pre), 'rejected'); check(sent.length === 0);
+  const loginStarted=Date.now();
   await client.login('c'.repeat(43)); check(sent.join(',') === '/v1/auth/challenge,/v1/sessions');
+  check(client.authExpiresAt>=loginStarted+43200000 && client.authExpiresAt<=Date.now()+43200000);
+  check(client.freshSession().authExpiresAt===undefined);
+  await rejects(()=>client.login('c'.repeat(43),pre),'rejected');
+  check(client.authExpiresAt===undefined);
+  await client.login('c'.repeat(43));
   let initial = sent.length;
   const snapshot = await client.balance();
   assert.deepEqual(snapshot, { availableMicrounits: '18446744073709551615', inFlight: 4294967295, completedRequests: '18446744073709551615' }); checks++;
