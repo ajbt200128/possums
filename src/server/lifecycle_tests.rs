@@ -16,6 +16,7 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::{atomic::Ordering, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
 
 #[derive(Default)]
@@ -248,6 +249,119 @@ async fn lost_handler_and_finished_worker_still_wait_for_whole_preflight() {
         gate.release.send(()).unwrap();
         assert_eq!(bounded(drain).await, Ok(()));
     }
+}
+
+#[tokio::test]
+async fn health_is_credential_free_unobserved_and_independent_of_control_capacity() {
+    let (state, probe, _) = fixture();
+    let control = state.control_memory.clone().acquire_owned().await.unwrap();
+    let request = || Request::get("/healthz").body(Body::empty()).unwrap();
+    let response = router(state.clone()).oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .is_empty());
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    drop(control);
+    state.lifecycle.quiesce();
+    let response = router(state.clone()).oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn shutdown_retains_admitted_connection_and_fences_new_work() {
+    let (state, probe, session) = fixture();
+    let (pause, gate) = checkpoint();
+    *probe.evidence.lock().unwrap() = Some(pause);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopping) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve_until(listener, state.clone(), async move {
+        let _ = stopping.await;
+    }));
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client.write_all(format!("GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {session}\r\n\r\n").as_bytes()).await.unwrap();
+    bounded(gate.reached).await.unwrap();
+    stop.send(()).unwrap();
+    bounded(async {
+        while state.lifecycle.is_serving() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(!server.is_finished());
+    assert!(state.lifecycle.try_admit().is_none());
+    gate.release.send(()).unwrap();
+    let mut received = Vec::new();
+    bounded(client.read_to_end(&mut received)).await.unwrap();
+    assert!(received.starts_with(b"HTTP/1.1 200"));
+    assert!(bounded(server).await.unwrap().is_ok());
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn shutdown_before_accept_and_repeated_intent_is_idempotent() {
+    let (state, _, _) = fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    assert!(
+        bounded(serve_until(listener, state.clone(), std::future::ready(())))
+            .await
+            .is_ok()
+    );
+    state.lifecycle.quiesce();
+    assert!(state.lifecycle.try_admit().is_none());
+    assert_eq!(bounded(state.lifecycle.wait_drained()).await, Ok(()));
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_detached_worker_after_connection_finishes() {
+    let (state, _, session) = fixture();
+    let (pause, gate) = checkpoint();
+    *state.preflight_hooks.after.lock().unwrap() = Some(pause);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopping) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve_until(listener, state.clone(), async move {
+        let _ = stopping.await;
+    }));
+    let request = chat(&state, &session, false);
+    let body = request.into_body().collect().await.unwrap().to_bytes();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {session}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+    client.write_all(&body).await.unwrap();
+    bounded(gate.reached).await.unwrap();
+    drop(client);
+    stop.send(()).unwrap();
+    bounded(async {
+        while state.lifecycle.is_serving() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(!server.is_finished());
+    state.lifecycle.quiesce(); // A repeated shutdown intent cannot skip owner cleanup.
+    assert!(!server.is_finished());
+    gate.release.send(()).unwrap();
+    assert!(bounded(server).await.unwrap().is_ok());
+    assert_eq!(
+        state
+            .accounting
+            .snapshot("demo")
+            .unwrap()
+            .completed_requests,
+        1
+    );
 }
 
 #[tokio::test]

@@ -25,13 +25,17 @@ use hyper_util::{
 };
 use serde::Serialize;
 use std::{
-    future::poll_fn,
+    future::{poll_fn, Future},
     pin::Pin,
     sync::{atomic::AtomicUsize, Arc},
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::{net::TcpListener, sync::Semaphore};
+use tokio::{
+    net::TcpListener,
+    sync::{watch, Semaphore},
+    task::JoinSet,
+};
 use tower_http::catch_panic::CatchPanicLayer;
 
 #[cfg(test)]
@@ -161,7 +165,8 @@ pub fn router(state: AppState) -> Router {
 
 #[doc(hidden)]
 pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Router {
-    Router::new()
+    let health = state.lifecycle.clone();
+    let app = Router::new()
         .merge(crate::api::routes())
         .route("/attestation", get(attestation))
         .method_not_allowed_fallback(wrong_method)
@@ -177,7 +182,22 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
             request_admission,
         ))
         .layer(middleware::from_fn(security_headers))
-        .with_state(state)
+        .with_state(state);
+    // A credential-free process readiness check, outside application admission,
+    // evidence, authentication and request-observation middleware.
+    Router::new().merge(app).route(
+        "/healthz",
+        get(move || {
+            let health = health.clone();
+            async move {
+                if health.is_serving() {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }
+        }),
+    )
 }
 
 fn connection_builder(header_deadline: Duration) -> http1::Builder {
@@ -194,7 +214,15 @@ fn connection_builder(header_deadline: Duration) -> http1::Builder {
 }
 
 pub async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()> {
-    serve_with_header_deadline(listener, state, HEADER_DEADLINE).await
+    serve_until(listener, state, std::future::pending()).await
+}
+
+pub async fn serve_until(
+    listener: TcpListener,
+    state: AppState,
+    shutdown: impl Future<Output = ()>,
+) -> std::io::Result<()> {
+    serve_until_with_header_deadline(listener, state, HEADER_DEADLINE, shutdown).await
 }
 
 #[doc(hidden)]
@@ -203,50 +231,104 @@ pub async fn serve_with_header_deadline(
     state: AppState,
     header_deadline: Duration,
 ) -> std::io::Result<()> {
+    serve_until_with_header_deadline(listener, state, header_deadline, std::future::pending()).await
+}
+
+async fn serve_until_with_header_deadline(
+    listener: TcpListener,
+    state: AppState,
+    header_deadline: Duration,
+    shutdown: impl Future<Output = ()>,
+) -> std::io::Result<()> {
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let telemetry = state.telemetry.clone();
+    let lifecycle = state.lifecycle.clone();
     let app = router(state);
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let Ok(permit) = connections.clone().try_acquire_owned() else {
-            if let Some(metrics) = &telemetry {
-                metrics.reject(
-                    None,
-                    AdmissionModel::NotApplicable,
-                    MetricRejection::ConnectionCapacity,
-                );
-            }
-            drop(stream);
-            continue;
-        };
-        let permit = Lease::observed(permit, telemetry.as_ref(), Lane::Connection);
-        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let seen = entered.clone();
-        let service = TowerToHyperService::new(app.clone());
-        let service = hyper::service::service_fn(move |request| {
-            seen.store(true, std::sync::atomic::Ordering::Release);
-            let service = service.clone();
-            async move { hyper::service::Service::call(&service, request).await }
-        });
-        let metrics = telemetry.clone();
-        tokio::spawn(async move {
-            let builder = connection_builder(header_deadline);
-            let connection = builder.serve_connection(TokioIo::new(stream), service);
-            let result = connection.await;
-            if !entered.load(std::sync::atomic::Ordering::Acquire) {
-                let reason = match result {
-                    Err(error) if error.is_timeout() => Some(MetricRejection::ConnectionDeadline),
-                    Err(error) if error.is_parse() => Some(MetricRejection::HeaderProtocol),
-                    Err(_) => Some(MetricRejection::TransportUnknown),
-                    Ok(()) => None, // clean idle close is not a rejection
-                };
-                if let (Some(metrics), Some(reason)) = (&metrics, reason) {
-                    metrics.reject(None, AdmissionModel::NotApplicable, reason);
+    let (stop, _) = watch::channel(false);
+    let mut tasks = JoinSet::new();
+    tokio::pin!(shutdown);
+    let serving_result = loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => break Ok(()),
+            result = tasks.join_next(), if !tasks.is_empty() => {
+                if !matches!(result, Some(Ok(()))) {
+                    break Err(std::io::Error::other("gateway connection task failed"));
                 }
             }
-            drop(permit);
-        });
+            result = listener.accept() => {
+                let (stream, _) = match result {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(error),
+                };
+                let Ok(permit) = connections.clone().try_acquire_owned() else {
+                    if let Some(metrics) = &telemetry {
+                        metrics.reject(None, AdmissionModel::NotApplicable, MetricRejection::ConnectionCapacity);
+                    }
+                    drop(stream);
+                    continue;
+                };
+                let permit = Lease::observed(permit, telemetry.as_ref(), Lane::Connection);
+                let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let seen = entered.clone();
+                let service = TowerToHyperService::new(app.clone());
+                let service = hyper::service::service_fn(move |request| {
+                    seen.store(true, std::sync::atomic::Ordering::Release);
+                    let service = service.clone();
+                    async move { hyper::service::Service::call(&service, request).await }
+                });
+                let metrics = telemetry.clone();
+                let mut closing = stop.subscribe();
+                tasks.spawn(async move {
+                    let builder = connection_builder(header_deadline);
+                    let connection = builder.serve_connection(TokioIo::new(stream), service);
+                    tokio::pin!(connection);
+                    let result = if *closing.borrow_and_update() {
+                        connection.as_mut().graceful_shutdown();
+                        connection.await
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = closing.changed() => {
+                                connection.as_mut().graceful_shutdown();
+                                connection.await
+                            }
+                            result = &mut connection => result,
+                        }
+                    };
+                    if !entered.load(std::sync::atomic::Ordering::Acquire) {
+                        let reason = match result {
+                            Err(error) if error.is_timeout() => Some(MetricRejection::ConnectionDeadline),
+                            Err(error) if error.is_parse() => Some(MetricRejection::HeaderProtocol),
+                            Err(_) => Some(MetricRejection::TransportUnknown),
+                            Ok(()) => None,
+                        };
+                        if let (Some(metrics), Some(reason)) = (&metrics, reason) {
+                            metrics.reject(None, AdmissionModel::NotApplicable, reason);
+                        }
+                    }
+                    drop(permit);
+                });
+            }
+        }
+    };
+    lifecycle.quiesce();
+    drop(listener);
+    stop.send_replace(true);
+    // A connection can finish before its detached generation owner. Neither
+    // condition substitutes for the other; keep the runtime and tasks alive.
+    let (drain, connections) = tokio::join!(lifecycle.wait_drained(), async {
+        let mut failed = false;
+        while let Some(result) = tasks.join_next().await {
+            failed |= result.is_err();
+        }
+        failed
+    });
+    serving_result?;
+    if drain.is_err() || connections {
+        return Err(std::io::Error::other("gateway shutdown integrity failed"));
     }
+    Ok(())
 }
 
 async fn wrong_method(Extension(observation): Extension<RequestContext>) -> StatusCode {
