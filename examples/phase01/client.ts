@@ -1,4 +1,4 @@
-import { Channel, type ResponseOptions } from './transport.js';
+import { Channel, hasByteReadTimeout, type ResponseOptions } from './transport.js';
 import { ChannelError, DiagnosticFailure, JSONDepthError, LIMITS, Operation, OperationFailure, cleanup, parseJSON, requireThat, serialize, utf8,
   type FailureConstraint, type FailureStage } from './limits.js';
 import { admitTools, fields, freezeJSON, objectArguments, snapshotInvocation, toolID, toolName,
@@ -152,7 +152,7 @@ export class CatalogFailure extends ChannelError {
 export async function consumeCompletion(body: ReadableStream<Uint8Array>, model: string | LiveModel,
   onDelta: (text: string) => void, options: CompletionOptions = {}): Promise<Receipt> {
   let reader: ReadableStreamDefaultReader<Uint8Array>, op: Operation;
-  try { reader = body.getReader(); op = new Operation(LIMITS.streamMs, options.signal); }
+  try { reader = body.getReader(); op = new Operation(null, options.signal); }
   catch { throw new DiagnosticFailure('stream', 'envelope', 'uncertain'); }
   const decoder = new TextDecoder('utf-8', { fatal: true });
   let pending = '', data: string | undefined, state: 'role' | 'text' | 'usage' | 'done' | 'eof' | 'error' = 'role';
@@ -273,13 +273,13 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     op.check();
     if (textDelta !== undefined) {
       stage = 'hook'; constraint = 'unexpected';
-      try { await op.wait(Promise.resolve().then(() => onDelta(textDelta)), LIMITS.streamMs); }
+      try { await op.wait(Promise.resolve().then(() => onDelta(textDelta)), LIMITS.idleMs); }
       catch (error) { if (error instanceof OperationFailure) throw error; throw new DiagnosticFailure('hook', 'unexpected', 'uncertain'); }
       stage = 'stream';
     }
     if (options.onEvent) {
       op.check(); stage = 'hook'; constraint = 'unexpected';
-      try { await op.wait(Promise.resolve().then(() => options.onEvent!(value)), LIMITS.streamMs); }
+      try { await op.wait(Promise.resolve().then(() => options.onEvent!(value)), LIMITS.idleMs); }
       catch (error) { if (error instanceof OperationFailure) throw error; throw new DiagnosticFailure('hook', 'unexpected', 'uncertain'); }
       stage = 'stream';
     }
@@ -311,9 +311,9 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     stage = 'stream'; constraint = 'envelope';
     for (;;) {
       op.check();
-      // Reasoning can pause visible output; the absolute stream deadline stays bounded.
+      // Channel bodies time HTTP bytes, not decrypted frames or visible text.
       let next: ReadableStreamReadResult<Uint8Array>;
-      try { next = await op.wait(reader.read(), LIMITS.streamMs); }
+      try { next = await op.wait(reader.read(), hasByteReadTimeout(body) ? null : LIMITS.idleMs); }
       catch (error) {
         if (error instanceof OperationFailure || error instanceof DiagnosticFailure) throw error;
         throw new DiagnosticFailure(atEOF() ? 'stream' : 'transport', atEOF() ? 'eof' : 'fetch', 'uncertain');
@@ -361,6 +361,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
 
 export class ReferenceClient {
   #bearer: string | undefined;
+  #authExpiresAt: number | undefined;
   constructor(readonly channel: Channel) { Channel.requireVerified(channel); }
   static async verified(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array): Promise<ReferenceClient> {
     return new ReferenceClient(await Channel.api(bundle, manifest, keyConfig));
@@ -369,11 +370,13 @@ export class ReferenceClient {
     return new ReferenceClient(await Channel.published(bundle, manifest, keyConfig, signal));
   }
   get release() { return this.channel.release; }
+  get authExpiresAt(): number | undefined { return this.#authExpiresAt; }
   freshSession(): ReferenceClient { return new ReferenceClient(this.channel); }
   async login(credential: string, signal?: AbortSignal): Promise<void> {
     this.#bearer = undefined;
+    this.#authExpiresAt = undefined;
     let op: Operation;
-    try { op = new Operation(LIMITS.operationMs, signal); }
+    try { op = new Operation(2 * LIMITS.operationMs, signal); }
     catch { throw new DiagnosticFailure('challenge', 'schema'); }
     let stage: 'challenge' | 'authentication' = 'challenge', constraint: FailureConstraint = 'fetch';
     let started = false;
@@ -383,11 +386,14 @@ export class ReferenceClient {
       constraint = 'schema';
       keys(challenge, ['challenge', 'expires_in']); requireThat(token(challenge.challenge) && challenge.expires_in === 600);
       op.check(); stage = 'authentication'; constraint = 'fetch';
+      // Conservative local bound: issuance cannot precede this send.
+      const issuedAfter = Date.now();
       const session: any = await this.channel.control('/v1/sessions', { challenge: challenge.challenge, credential }, undefined, op.controller.signal);
       constraint = 'schema';
       keys(session, ['token', 'token_type', 'expires_in']);
       requireThat(token(session.token) && session.token_type === 'Bearer' && session.expires_in === 43200);
       op.check(); this.#bearer = session.token;
+      this.#authExpiresAt = issuedAfter + session.expires_in * 1000;
     } catch (error) {
       if (error instanceof DiagnosticFailure || error instanceof CatalogFailure) throw error;
       if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint, started ? 'uncertain' : 'rejected');
@@ -429,7 +435,7 @@ export class ReferenceClient {
       // Copy option descriptors once. No arbitrary request options / fetch / headers.
       opts = fields(options, [], ['signal', 'tools', 'tool_choice', 'onPayload', 'onResponse', 'onEvent']);
       for (const key of ['onPayload', 'onResponse', 'onEvent'] as const) requireThat(opts[key] === undefined || typeof opts[key] === 'function');
-      op = new Operation(LIMITS.streamMs, opts.signal);
+      op = new Operation(null, opts.signal);
     } catch { throw new DiagnosticFailure('request', 'schema'); }
     const bearer = this.#bearer;
     let issued = false, hookThrown = false, stage: FailureStage = 'request', constraint: FailureConstraint = 'encoding';
@@ -441,7 +447,7 @@ export class ReferenceClient {
       if (opts.onPayload) {
         stage = 'hook'; constraint = 'unexpected';
         let replacement: unknown;
-        try { replacement = await op.wait(Promise.resolve().then(() => opts.onPayload!(payload)), LIMITS.streamMs); }
+        try { replacement = await op.wait(Promise.resolve().then(() => opts.onPayload!(payload)), LIMITS.idleMs); }
         catch (error) { if (error instanceof OperationFailure) throw error; throw new DiagnosticFailure('hook', 'unexpected'); }
         stage = 'request'; constraint = 'encoding';
         // Returning undefined keeps the immutable original; replacements are

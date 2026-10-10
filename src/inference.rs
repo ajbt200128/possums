@@ -187,7 +187,7 @@ impl TinfoilInference {
     ) -> Result<stream::StreamCompletion, InferenceError> {
         let http = self.http()?;
         let url = format!("{}/v1/chat/completions", self.origin);
-        let deadline = Instant::now() + stream::STREAM_DEADLINE;
+        let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
         let request = self
             .authenticate(http.post(&url))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -211,7 +211,6 @@ impl TinfoilInference {
         }
         stream::consume_completion_response(
             response,
-            deadline,
             stream::STREAM_IDLE_TIMEOUT,
             on_delta,
         )
@@ -261,7 +260,7 @@ impl TinfoilInference {
         heavy: Option<Arc<crate::telemetry::hooks::Lease>>,
     ) -> Result<u64, InferenceError> {
         let (body, released) = tokenizer_request_body(model, messages, heavy)?;
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
         let url = format!("{}/v1/chat/completions/input_tokens", self.origin);
         let request = self
             .authenticate(self.http()?.post(&url))
@@ -282,7 +281,7 @@ impl TinfoilInference {
         request: tinfoil::verifier::tls::OriginBoundRequestBuilder,
         limit: usize,
     ) -> Result<Vec<u8>, InferenceError> {
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
             .map_err(|_| InferenceError::Detailed(InferenceFailure::CatalogFailed))?
@@ -893,7 +892,7 @@ async fn finish_tokenizer(
     }
     // An early 200/EOF is NOT an upload-release receipt. Avoid overlap between
     // the tokenizer allocation and generation serializer's growth peak. The
-    // route's existing 30-second preflight timeout also encloses this wait.
+    // route's bounded preflight timeout also encloses this wait.
     tokio::time::timeout_at(deadline, released.wait())
         .await
         .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerUploadIncomplete))?;
@@ -935,11 +934,10 @@ pub(crate) mod resource_fixtures {
 
     pub(crate) async fn consume_response(
         response: reqwest::Response,
-        deadline: Instant,
         idle_timeout: Duration,
         on_delta: impl FnMut(&str),
     ) -> Result<stream::StreamUsage, InferenceError> {
-        stream::consume_response(response, deadline, idle_timeout, on_delta).await
+        stream::consume_response(response, idle_timeout, on_delta).await
     }
 }
 
@@ -999,7 +997,7 @@ impl Inference for TinfoilInference {
         self.tool_profile(model)
             .ok_or(InferenceFailure::ToolProfileUnqualified)?;
         let (body, released) = invocation_tokenizer_body(model, invocation, heavy)?;
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
         let url = format!("{}/v1/chat/completions/input_tokens", self.origin);
         let request = self
             .authenticate(self.http()?.post(&url))
@@ -1028,7 +1026,7 @@ impl Inference for TinfoilInference {
             .tool_profile(&model.id)
             .ok_or(InferenceFailure::ToolProfileUnqualified)?;
         let url = format!("{}/v1/chat/completions", self.origin);
-        let deadline = Instant::now() + stream::STREAM_DEADLINE;
+        let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
         let request = self
             .authenticate(self.http()?.post(&url))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -1051,7 +1049,6 @@ impl Inference for TinfoilInference {
         }
         stream::consume_invocation_response(
             response,
-            deadline,
             stream::STREAM_IDLE_TIMEOUT,
             profile,
             invocation,

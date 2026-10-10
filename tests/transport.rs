@@ -342,7 +342,7 @@ async fn incomplete_headers_are_closed_at_the_total_header_deadline() {
 }
 
 #[tokio::test]
-async fn pipelined_http1_rejects_oversized_declared_body_without_reading_its_length() {
+async fn http1_closes_after_one_request_and_fresh_connection_rejects_oversized_body() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(serve_with_header_deadline(
@@ -359,23 +359,24 @@ async fn pipelined_http1_rejects_oversized_declared_body_without_reading_its_len
     );
     client.write_all(request.as_bytes()).await.unwrap();
     let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut response))
+        .await.unwrap().unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    assert!(String::from_utf8_lossy(&response).to_lowercase().contains("connection: close"));
+    assert_eq!(response.windows(8).filter(|part| *part == b"HTTP/1.1").count(), 1);
+
+    // Standard HTTP clients reconnect after Connection: close. The defensive
+    // body limit must still reject without waiting for the declared body length.
+    let mut client = TcpStream::connect(address).await.unwrap();
+    client.write_all(format!("POST /v1/sessions HTTP/1.1\r\nHost: local\r\nContent-Length: 8192\r\n\r\n{}", "x".repeat(4097)).as_bytes()).await.unwrap();
+    let mut response = Vec::new();
     let mut block = [0; 4096];
-    while !response
-        .windows(b"HTTP/1.1 413".len())
-        .any(|part| part == b"HTTP/1.1 413")
-    {
-        let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut block))
-            .await
-            .expect("pipelined response timed out")
-            .unwrap();
-        assert!(
-            read > 0,
-            "server closed before rejecting the oversized body"
-        );
+    while !response.windows(b"HTTP/1.1 413".len()).any(|part| part == b"HTTP/1.1 413") {
+        let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut block)).await.unwrap().unwrap();
+        assert!(read > 0);
         response.extend_from_slice(&block[..read]);
         assert!(response.len() <= 64 * 1024);
     }
-    assert!(response.starts_with(b"HTTP/1.1 200"));
     server.abort();
 }
 

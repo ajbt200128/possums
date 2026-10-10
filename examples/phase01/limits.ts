@@ -8,7 +8,8 @@ export const LIMITS = Object.freeze({
   tools: 64, toolArguments: 64 * 1024, totalToolArguments: 256 * 1024,
   chunk: 64 * 1024, frame: 256 * 1024, frames: 65536,
   stream: 64 * 1024 * 1024, sseEvent: 64 * 1024, sseEvents: 65536,
-  operationMs: 30000, streamMs: 300000, idleMs: 15000, cleanupMs: 100,
+  // Finite control/verification work; streams have no total lifetime.
+  operationMs: 600000, bootstrapMs: 10 * 600000, idleMs: 600000, cleanupMs: 100,
 });
 export class ChannelError extends Error {
   constructor(public readonly code: 'rejected' | 'uncertain' = 'rejected') { super(code); }
@@ -185,7 +186,7 @@ export async function cleanup(action: Promise<unknown>): Promise<void> {
 }
 export class Operation {
   readonly controller = new AbortController();
-  private timer: ReturnType<typeof setTimeout>;
+  private timer: ReturnType<typeof setTimeout> | undefined;
   private constraint: OperationFailure['constraint'] = 'interrupted';
   private readonly abort = () => {
     const reason = this.parent?.reason;
@@ -193,15 +194,15 @@ export class Operation {
     this.controller.abort(new OperationFailure(this.constraint));
   };
   private readonly deadline = () => { this.constraint = 'deadline'; this.abort(); };
-  constructor(ms: number = LIMITS.operationMs, private readonly parent?: AbortSignal) {
+  constructor(ms: number | null = LIMITS.operationMs, private readonly parent?: AbortSignal) {
     requireThat(parent === undefined || parent instanceof AbortSignal);
-    this.timer = setTimeout(this.deadline, ms);
+    if (ms !== null) this.timer = setTimeout(this.deadline, ms);
     parent?.addEventListener('abort', this.abort, { once: true });
     if (parent?.aborted) this.abort();
   }
   check(): void { if (this.controller.signal.aborted) throw new OperationFailure(this.constraint); }
   close(): void { clearTimeout(this.timer); this.parent?.removeEventListener('abort', this.abort); this.controller.abort(); }
-  async wait<T>(promise: Promise<T>, idle: number = LIMITS.idleMs): Promise<T> {
+  async wait<T>(promise: Promise<T>, idle: number | null = LIMITS.idleMs): Promise<T> {
     const signal = this.controller.signal;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let abort: () => void = () => {};
@@ -210,7 +211,7 @@ export class Operation {
       const result = await Promise.race([promise, new Promise<never>((_, reject) => {
         abort = () => reject(new OperationFailure(this.constraint));
         signal.addEventListener('abort', abort, { once: true });
-        timer = setTimeout(() => { this.constraint = 'idle'; this.abort(); }, idle);
+        if (idle !== null) timer = setTimeout(() => { this.constraint = 'idle'; this.abort(); }, idle);
       })]);
       this.check();
       return result;

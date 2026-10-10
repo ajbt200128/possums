@@ -421,7 +421,6 @@ async fn proof_seams_use_real_serializers_and_consumer() {
     let mut deltas = 0;
     let usage = resource_fixtures::consume_response(
         response.into(),
-        tokio::time::Instant::now() + Duration::from_secs(5),
         Duration::from_secs(1),
         |delta| {
             assert_eq!(delta, "x");

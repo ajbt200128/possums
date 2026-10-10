@@ -23,7 +23,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
@@ -258,7 +258,7 @@ struct SubmissionRequest {
 }
 
 async fn live_catalog(state: &AppState) -> Result<Catalog, InferenceFailure> {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(crate::inference::stream::RESPONSE_TIMEOUT, async {
         state
             .generation()
             .evidence()

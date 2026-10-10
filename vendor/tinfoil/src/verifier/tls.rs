@@ -444,6 +444,8 @@ fn build_pinned_client(
     let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls(config)
         .https_only(true)
+        // Match the Python SDK connection bound without replacing verified TLS.
+        .connect_timeout(std::time::Duration::from_secs(5))
         // Avoid Hyper's speculative/idle connections outliving request admission.
         .pool_max_idle_per_host(0);
     if let Some(policy) = redirect_policy {

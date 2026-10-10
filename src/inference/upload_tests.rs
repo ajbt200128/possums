@@ -94,7 +94,7 @@ async fn early_413_keeps_both_production_uploads_charged_after_worker_returns() 
                 assert!(finish_tokenizer(response, receipt, deadline).await.is_err());
             } else {
                 assert!(
-                    stream::consume_response(response, deadline, TIMEOUT, |_| panic!())
+                    stream::consume_response(response, TIMEOUT, |_| panic!())
                         .await
                         .is_err()
                 );

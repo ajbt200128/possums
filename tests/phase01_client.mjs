@@ -54,7 +54,24 @@ export async function clientCases(moduleURL) {
   };
   try { await m.consumeCompletion(stream(valid, 4096), 'org/model:v1', () => {}); }
   finally { globalThis.setTimeout = setTimer; }
-  check(deadlines.includes(m.LIMITS.streamMs) && !deadlines.includes(m.LIMITS.idleMs));
+  check(m.LIMITS.idleMs === 600000 && deadlines.includes(m.LIMITS.idleMs) &&
+    deadlines.every(ms => Number.isFinite(ms) && ms <= m.LIMITS.idleMs));
+  // Heartbeats and incomplete SSE lines are read activity, not model events.
+  globalThis.setTimeout = (fn, ms, ...args) => setTimer(fn,
+    ms === 600000 ? 80 : ms === 300000 ? 40 : ms, ...args);
+  try {
+    let part = 0;
+    const fragments = [': heartbeat', '\n\n', ...Array(8).fill(': progress\n\n'), valid];
+    const progressing = new ReadableStream({ async pull(c) {
+      await new Promise(resolve => setTimer(resolve, 20));
+      if (part === fragments.length) c.close(); else c.enqueue(new TextEncoder().encode(fragments[part++]));
+    } }, { highWaterMark: 0 });
+    check((await m.consumeCompletion(progressing, 'org/model:v1', () => {})).totalTokens === 5);
+    let closed = 0, rejected = false;
+    try { await m.consumeCompletion(new ReadableStream({ cancel() { closed++; } }), 'org/model:v1', () => {}); }
+    catch (error) { rejected = error.code === 'uncertain'; }
+    check(rejected && closed === 1);
+  } finally { globalThis.setTimeout = setTimer; }
   for (const bad of [
     delta + finish + usage + done, role + usage + done, role + delta, role + delta + finish + done,
     role + finish + usage, role + finish + usage + done + done, role + finish + usage + done + delta,

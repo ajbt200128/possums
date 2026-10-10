@@ -87,9 +87,22 @@ export default function possums(pi: ExtensionAPI): void {
       }
     },
   });
+  // Source belongs to input, not before_agent_start (extensions reach that too).
+  // These hooks only mark; all renewal I/O waits for native active-run auth.
+  pi.on('input', (event, ctx) => {
+    provider.markInput(ctx.model?.provider === PROVIDER_ID && ctx.isIdle() &&
+      event.streamingBehavior === undefined && (event.source === 'interactive' || event.source === 'rpc'), ctx.signal);
+  });
   pi.on('before_agent_start', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) provider.beginRun();
+    else provider.settleRun();
   });
+  pi.on('agent_start', (_event, ctx) => { provider.bindRun(ctx.model?.provider === PROVIDER_ID ? ctx.signal : undefined); });
+  pi.on('message_start', (event, ctx) => {
+    if (event.message.role !== 'system') provider.confirmRunInput(event.message.role === 'user', ctx.signal);
+  });
+  pi.on('agent_end', () => { provider.endRun(); });
+  pi.on('agent_settled', () => { provider.settleRun(); });
   pi.on('cache_warming_decision', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) return { action: 'stop' as const };
   });

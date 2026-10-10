@@ -32,8 +32,9 @@ pub const MAX_TRAILER_BYTES: usize = 64 * 1024;
 /// Producer/TLS allocations are separate from this parser limit.
 pub const MAX_TRANSPORT_BUFFER_BYTES: usize = 256 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
-pub const STREAM_DEADLINE: Duration = Duration::from_secs(300);
-pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Send/response-header bound only; never a generation lifetime.
+pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn generation_bytes(
     builder: tinfoil::relaxed::RelaxedChatRequestBuilder,
@@ -83,24 +84,21 @@ pub(super) fn invocation_body(
 #[cfg(test)]
 pub(super) async fn consume_response(
     response: reqwest::Response,
-    deadline: Instant,
     idle_timeout: Duration,
     on_delta: impl FnMut(&str),
 ) -> Result<StreamUsage, InferenceError> {
-    consume_completion_response(response, deadline, idle_timeout, on_delta)
+    consume_completion_response(response, idle_timeout, on_delta)
         .await
         .map(|completion| completion.usage)
 }
 
 pub(super) async fn consume_completion_response(
     response: reqwest::Response,
-    deadline: Instant,
     idle_timeout: Duration,
     mut on_delta: impl FnMut(&str),
 ) -> Result<StreamCompletion, InferenceError> {
     consume_with_parser(
         response,
-        deadline,
         idle_timeout,
         ProtocolParser::default(),
         |event| {
@@ -114,7 +112,6 @@ pub(super) async fn consume_completion_response(
 
 pub(super) async fn consume_invocation_response(
     response: reqwest::Response,
-    deadline: Instant,
     idle_timeout: Duration,
     _profile: ToolProfile,
     _invocation: &ToolInvocation,
@@ -144,14 +141,14 @@ pub(super) async fn consume_invocation_response(
     let bytes = futures_util::stream::unfold(response, move |mut response| {
         let byte_failure = byte_failure.clone();
         async move {
-            let next_deadline = deadline.min(Instant::now() + idle_timeout);
+            let next_deadline = Instant::now() + idle_timeout;
             let chunk = tokio::time::timeout_at(next_deadline, response.chunk()).await;
             let failure = match chunk {
                 Ok(Ok(chunk)) if Instant::now() < next_deadline => {
                     return chunk.map(|chunk| (Ok::<_, InferenceFailure>(chunk), response));
                 }
                 Ok(Err(_)) => InferenceFailure::StreamTransportFailed,
-                _ => timeout_failure(deadline),
+                _ => InferenceFailure::StreamIdleTimeout,
             };
             *byte_failure.lock().unwrap() = Some(failure);
             Some((Err(failure), response))
@@ -161,20 +158,8 @@ pub(super) async fn consume_invocation_response(
     let mut validator = SdkToolValidator::default();
     let mut on_delta = on_delta;
     loop {
-        // Also bound processing of events already buffered inside the SDK.
-        if Instant::now() >= deadline {
-            return Err(InferenceError::Detailed(
-                InferenceFailure::StreamDeadlineExceeded,
-            ));
-        }
-        let event = tokio::time::timeout_at(deadline, events.next())
-            .await
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::StreamDeadlineExceeded))?;
-        if Instant::now() >= deadline {
-            return Err(InferenceError::Detailed(
-                InferenceFailure::StreamDeadlineExceeded,
-            ));
-        }
+        // The byte source owns inactivity; SDK events may lag healthy reads.
+        let event = events.next().await;
         match event {
             Some(event) => {
                 // SDK errors can contain upstream payloads. Never display them.
@@ -199,17 +184,8 @@ pub(super) async fn consume_invocation_response(
     }
 }
 
-fn timeout_failure(deadline: Instant) -> InferenceFailure {
-    if Instant::now() >= deadline {
-        InferenceFailure::StreamDeadlineExceeded
-    } else {
-        InferenceFailure::StreamIdleTimeout
-    }
-}
-
 async fn consume_with_parser(
     mut response: reqwest::Response,
-    deadline: Instant,
     idle_timeout: Duration,
     mut parser: ProtocolParser,
     mut on_delta: impl FnMut(CompletionDelta<'_>),
@@ -230,13 +206,13 @@ async fn consume_with_parser(
         return Err(InferenceFailure::StreamContentTypeInvalid.into());
     }
     loop {
-        let next_deadline = deadline.min(Instant::now() + idle_timeout);
+        let next_deadline = Instant::now() + idle_timeout;
         let chunk = tokio::time::timeout_at(next_deadline, response.chunk())
             .await
-            .map_err(|_| timeout_failure(deadline))?
+            .map_err(|_| InferenceFailure::StreamIdleTimeout)?
             .map_err(|_| InferenceFailure::StreamTransportFailed)?;
         if Instant::now() >= next_deadline {
-            return Err(timeout_failure(deadline).into());
+            return Err(InferenceFailure::StreamIdleTimeout.into());
         }
         match chunk {
             Some(bytes) => {
@@ -1018,7 +994,6 @@ mod tests {
             peer.eof().await;
             let error = consume_invocation_response(
                 response,
-                Instant::now() + Duration::from_secs(2),
                 Duration::from_secs(1),
                 ToolProfile::OpenAiFunctionsV1,
                 &invocation,
@@ -1034,21 +1009,11 @@ mod tests {
             .contains("private-marker"));
             peer.finished().await;
         }
-        for failure in [
-            StreamTransportFailed,
-            StreamIdleTimeout,
-            StreamDeadlineExceeded,
-        ] {
+        for failure in [StreamTransportFailed, StreamIdleTimeout] {
             let (response, peer) = raw_response().await;
             if failure == StreamTransportFailed {
                 peer.fault().await;
             }
-            let deadline = Instant::now()
-                + if failure == StreamDeadlineExceeded {
-                    Duration::from_millis(20)
-                } else {
-                    Duration::from_secs(2)
-                };
             let idle = if failure == StreamIdleTimeout {
                 Duration::from_millis(20)
             } else {
@@ -1056,7 +1021,6 @@ mod tests {
             };
             let error = consume_invocation_response(
                 response,
-                deadline,
                 idle,
                 ToolProfile::OpenAiFunctionsV1,
                 &invocation,
@@ -1078,7 +1042,6 @@ mod tests {
                 .into();
             let error = consume_invocation_response(
                 response,
-                Instant::now() + Duration::from_secs(1),
                 Duration::from_secs(1),
                 ToolProfile::OpenAiFunctionsV1,
                 &invocation,
@@ -1128,7 +1091,6 @@ mod tests {
                 let mut delivered = 0;
                 let completion = consume_invocation_response(
                     response,
-                    Instant::now() + Duration::from_secs(1),
                     STREAM_IDLE_TIMEOUT,
                     ToolProfile::OpenAiFunctionsV1,
                     &invocation,
@@ -1336,7 +1298,6 @@ mod tests {
         let mut task = tokio::spawn(async move {
             consume_response(
                 response,
-                Instant::now() + Duration::from_secs(2),
                 Duration::from_secs(1),
                 |delta| {
                     assert_eq!(delta, "é🐾");
@@ -1382,7 +1343,6 @@ mod tests {
             );
             assert!(consume_invocation_response(
                 response,
-                Instant::now() + Duration::from_secs(1),
                 STREAM_IDLE_TIMEOUT,
                 ToolProfile::OpenAiFunctionsV1,
                 &tool_input(),
@@ -1432,7 +1392,6 @@ mod tests {
             );
             let result = consume_invocation_response(
                 response,
-                Instant::now() + Duration::from_secs(1),
                 STREAM_IDLE_TIMEOUT,
                 ToolProfile::OpenAiFunctionsV1,
                 &tool_input(),
@@ -1462,7 +1421,7 @@ mod tests {
             let bytes =
                 futures_util::stream::unfold(chunks.into_iter(), move |mut chunks| async move {
                     let chunk = chunks.next()?;
-                    tokio::time::sleep(Duration::from_millis(if stall { 50 } else { 30 })).await;
+                    tokio::time::sleep(Duration::from_millis(if stall { 650_000 } else { 100_000 })).await;
                     Some((Ok::<_, std::io::Error>(chunk), chunks))
                 });
             let response = reqwest::Response::from(
@@ -1473,8 +1432,7 @@ mod tests {
             );
             let result = consume_invocation_response(
                 response,
-                Instant::now() + Duration::from_secs(2),
-                Duration::from_millis(40),
+                STREAM_IDLE_TIMEOUT,
                 ToolProfile::OpenAiFunctionsV1,
                 &tool_input(),
                 |_| panic!(),
@@ -1482,65 +1440,23 @@ mod tests {
             .await;
             assert_eq!(result.is_ok(), !stall);
         }
-        // Frequent HTTP progress cannot extend the total deadline.
-        let bytes = futures_util::stream::unfold((), |_| async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            Some((Ok::<_, std::io::Error>(b": progress\n\n".to_vec()), ()))
-        });
-        let response = reqwest::Response::from(
-            http::Response::builder()
-                .header("content-type", "text/event-stream")
-                .body(reqwest::Body::wrap_stream(bytes))
-                .unwrap(),
-        );
-        assert!(consume_invocation_response(
-            response,
-            Instant::now() + Duration::from_millis(100),
-            Duration::from_millis(40),
-            ToolProfile::OpenAiFunctionsV1,
-            &tool_input(),
-            |_| panic!()
-        )
-        .await
-        .is_err());
     }
 
-    #[tokio::test]
-    async fn sdk_consumer_total_deadline_also_bounds_buffered_events() {
-        let bytes = [
-            event(choice(Some("first"), None)),
-            event(choice(Some("second"), Some("stop"))),
-            event(usage(2, 3)),
-        ]
-        .concat();
-        for expired in [false, true] {
-            let response = reqwest::Response::from(
-                http::Response::builder()
-                    .header("content-type", "text/event-stream")
-                    .body(bytes.clone())
-                    .unwrap(),
-            );
-            let deadline = if expired {
-                Instant::now() - Duration::from_secs(1)
-            } else {
-                Instant::now() + Duration::from_millis(10)
-            };
-            let mut count = 0;
-            let result = consume_invocation_response(
-                response,
-                deadline,
-                STREAM_IDLE_TIMEOUT,
-                ToolProfile::OpenAiFunctionsV1,
-                &tool_input(),
-                |_| {
-                    count += 1;
-                    std::thread::sleep(Duration::from_millis(20));
-                },
-            )
-            .await;
-            assert!(result.is_err());
-            assert_eq!(count, usize::from(!expired));
-        }
+    #[tokio::test(start_paused = true)]
+    async fn raw_consumer_progress_can_outlive_former_generation_deadlines() {
+        let started = Instant::now();
+        let mut chunks = vec![b": heartbeat\n\n".to_vec(); 7];
+        chunks.extend(successful("").chunks(10).map(<[u8]>::to_vec));
+        let bytes = futures_util::stream::unfold(chunks.into_iter(), |mut chunks| async {
+            let chunk = chunks.next()?;
+            tokio::time::sleep(Duration::from_secs(100)).await;
+            Some((Ok::<_, std::io::Error>(chunk), chunks))
+        });
+        let response = http::Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(reqwest::Body::wrap_stream(bytes)).unwrap().into();
+        assert_eq!(consume_response(response, STREAM_IDLE_TIMEOUT, |_| panic!()).await.unwrap().total_tokens, 5);
+        assert!(started.elapsed() > Duration::from_secs(600));
     }
 
     #[tokio::test]
@@ -1563,7 +1479,6 @@ mod tests {
             let mut task = tokio::spawn(async move {
                 consume_invocation_response(
                     response,
-                    Instant::now() + Duration::from_secs(2),
                     Duration::from_millis(if fault == "idle" { 100 } else { 1000 }),
                     ToolProfile::OpenAiFunctionsV1,
                     &invocation,
@@ -1632,25 +1547,19 @@ mod tests {
     async fn raw_adapter_refuses_faults_deadlines_and_invalid_final_usage_even_after_done() {
         for fault in [
             "transport",
-            "total_deadline",
             "idle_deadline",
             "protocol",
             "usage",
             "missing_done",
         ] {
             let (response, peer) = raw_response().await;
-            let deadline = if fault == "total_deadline" {
-                Duration::from_millis(40)
-            } else {
-                Duration::from_secs(2)
-            };
             let idle = if fault == "idle_deadline" {
                 Duration::from_millis(40)
             } else {
                 Duration::from_secs(1)
             };
             let task = tokio::spawn(async move {
-                consume_response(response, Instant::now() + deadline, idle, |_| {}).await
+                consume_response(response, idle, |_| {}).await
             });
             if ["usage", "missing_done"].contains(&fault) {
                 peer.send(&event(choice(None, Some("stop"))), 10).await;
@@ -1747,7 +1656,6 @@ mod tests {
             );
             assert!(consume_response(
                 response,
-                Instant::now() + Duration::from_secs(1),
                 STREAM_IDLE_TIMEOUT,
                 |_| panic!()
             )
@@ -1771,7 +1679,6 @@ mod tests {
             );
             let result = consume_response(
                 response,
-                Instant::now() + Duration::from_secs(1),
                 STREAM_IDLE_TIMEOUT,
                 |_| {},
             )
@@ -1793,27 +1700,12 @@ mod tests {
         );
         assert!(consume_response(
             response,
-            Instant::now() + Duration::from_secs(1),
             STREAM_IDLE_TIMEOUT,
             |_| panic!("oversized line must not emit content")
         )
         .await
         .is_err());
-        // An already expired total deadline rejects even an immediately ready EOF.
-        let response = reqwest::Response::from(
-            http::Response::builder()
-                .header("content-type", "text/event-stream")
-                .body(reqwest::Body::from(successful("")))
-                .unwrap(),
-        );
-        assert!(consume_response(
-            response,
-            Instant::now() - Duration::from_secs(1),
-            STREAM_IDLE_TIMEOUT,
-            |_| panic!()
-        )
-        .await
-        .is_err());
+
     }
 
     #[test]
