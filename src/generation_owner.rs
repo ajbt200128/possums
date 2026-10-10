@@ -29,6 +29,7 @@ struct Terminal {
     observation: Option<OwnedObservation>,
     failure: Option<GenerationTerminal>,
     model: Option<QualifiedModel>,
+    lifecycle: Option<crate::lifecycle::Lifecycle>,
 }
 
 impl Terminal {
@@ -37,6 +38,11 @@ impl Terminal {
         // Such errors indicate a broken reservation/ledger invariant, not retry.
         self.armed = false;
         let result = self.accounting.finish(self.id, usage);
+        if result.is_err() {
+            if let Some(lifecycle) = &self.lifecycle {
+                lifecycle.accounting_failed();
+            }
+        }
         // Accounting has returned and released its lock. Telemetry never retries it.
         let terminal = match (&result, usage.is_some(), self.failure) {
             (Ok(Outcome::Settled { .. }), true, None) => GenerationTerminal::Success,
@@ -136,6 +142,7 @@ pub(crate) struct ReservedGeneration {
     terminal: Terminal,
     _generation: Lease,
     _resources: Arc<crate::telemetry::hooks::Lease>,
+    _ticket: Option<crate::lifecycle::Ticket>,
 }
 
 /// Fixed, content-free supervision result. Never carry a JoinError/panic payload
@@ -164,10 +171,18 @@ impl ReservedGeneration {
                 observation: None,
                 failure: None,
                 model: None,
+                lifecycle: None,
             },
             _resources: resources.into(),
             _generation: generation.into(),
+            _ticket: None,
         }
+    }
+
+    pub(crate) fn tracked(mut self, ticket: crate::lifecycle::Ticket) -> Self {
+        self.terminal.lifecycle = Some(ticket.lifecycle());
+        self._ticket = Some(ticket);
+        self
     }
 
     pub(crate) fn observed(
@@ -267,6 +282,7 @@ impl ReservedGeneration {
             terminal,
             _resources,
             _generation,
+            _ticket,
         } = self;
         let settlement = Settlement {
             terminal,
@@ -277,6 +293,7 @@ impl ReservedGeneration {
             work: Box::pin(async move { work(delivery, settlement).await }),
             _resources,
             _generation,
+            _ticket,
         })
     }
 }
@@ -288,6 +305,7 @@ struct Worker<Fut> {
     work: Pin<Box<Fut>>,
     _generation: Lease,
     _resources: Arc<crate::telemetry::hooks::Lease>,
+    _ticket: Option<crate::lifecycle::Ticket>,
 }
 
 impl<Fut> Future for Worker<Fut>

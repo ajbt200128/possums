@@ -2,7 +2,7 @@ use possums::{
     attestation::TinfoilEvidenceVerifier,
     auth::Auth,
     inference::TinfoilInference,
-    server::{serve, AppState},
+    server::{serve_until, AppState},
     telemetry::runtime::{Config as TelemetryConfig, Runtime as TelemetryRuntime},
 };
 use std::{env, process::ExitCode, sync::Arc};
@@ -10,6 +10,13 @@ use std::{env, process::ExitCode, sync::Arc};
 #[tokio::main]
 async fn main() -> ExitCode {
     std::panic::set_hook(Box::new(|_| {}));
+    if env::args_os().skip(1).collect::<Vec<_>>() == ["--healthcheck"] {
+        if possums::health::healthcheck().await {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("healthcheck_failed: local readiness unavailable");
+        return ExitCode::FAILURE;
+    }
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(()) => ExitCode::FAILURE,
@@ -39,32 +46,39 @@ async fn run() -> Result<(), ()> {
         )),
     );
     let listener = tokio::net::TcpListener::bind(bind).await.map_err(|_| ())?;
+    // Register both handlers before the first accept. Never serve without a
+    // working termination signal subscription.
+    #[cfg(unix)]
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|_| ())?;
+    #[cfg(unix)]
+    let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|_| ())?;
     let telemetry = TelemetryRuntime::start(
         TelemetryConfig::from_env(),
         possums::server::admission_capacities(),
     );
     let state = state.with_telemetry(telemetry.metrics());
-    let result = tokio::select! {
-        result = serve(listener, state) => result.map_err(|_| ()),
-        _ = shutdown_signal() => Ok(()),
-    };
+    #[cfg(unix)]
+    let result = serve_until(listener, state, shutdown_signal(terminate, interrupt))
+        .await
+        .map_err(|_| ());
+    #[cfg(not(unix))]
+    let result = serve_until(listener, state, tokio::signal::ctrl_c())
+        .await
+        .map_err(|_| ());
     // Telemetry disposal failure must not replace the serving outcome.
     let _ = telemetry.shutdown().await;
     result
 }
 
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        if let Ok(mut terminate) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
-            tokio::select! {
-                _ = terminate.recv() => {},
-                _ = tokio::signal::ctrl_c() => {},
-            }
-            return;
-        }
+#[cfg(unix)]
+async fn shutdown_signal(
+    mut terminate: tokio::signal::unix::Signal,
+    mut interrupt: tokio::signal::unix::Signal,
+) {
+    tokio::select! {
+        _ = terminate.recv() => {},
+        _ = interrupt.recv() => {},
     }
-    let _ = tokio::signal::ctrl_c().await;
 }

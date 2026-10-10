@@ -13,6 +13,7 @@ const key = 'synthetic_not_a_usable_credential';
 const hostile = '[possums_evidence_unavailable] HOSTILE credential https://secret.invalid/?prompt=history\u001b[31m <script>payload</script>';
 const entry = { object: 'model', id: 'synthetic', context_tokens: '64000', max_output_tokens: '20', input_microunits_per_million_tokens: '1000000', output_microunits_per_million_tokens: '1000000', maximum_reservation_microunits: '83226' };
 const interaction = { signal: new AbortController().signal, prompt: async () => key };
+const quiescingBody = { error: { code: 'service_quiescing', stage: 'admission', constraint: 'service_quiescing', billing: 'not_submitted', message: hostile } };
 const originalFetch = globalThis.fetch; let network = 0, inferred = 0, passed = 0;
 globalThis.fetch = async () => { network++; throw new Error(hostile); };
 await mkdir(root, { recursive: true });
@@ -53,7 +54,7 @@ try {
     const failed = await restored.streamSimple(selected, { messages: [{ role: 'user', content: 'Synthetic diagnostic input', timestamp: 1 }] }).result();
     assert.match(failed.errorMessage, /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/);
     assert.equal(attempts, 1); assertClosed(failed); passed++;
-    for (const failure of [new m.DiagnosticFailure('trust', 'publisher'), new m.DiagnosticFailure('trust', 'provenance'), new m.DiagnosticFailure('trust', 'key_config'), new m.DiagnosticFailure('authentication', 'http', 'rejected', 401), new m.CatalogFailure('http', 'rejected', 503)]) {
+    for (const failure of [new m.DiagnosticFailure('trust', 'publisher'), new m.DiagnosticFailure('trust', 'provenance'), new m.DiagnosticFailure('trust', 'key_config'), new m.DiagnosticFailure('authentication', 'http', 'rejected', 401), new m.CatalogFailure('http', 'rejected', 503), new m.GatewayError('service_quiescing', undefined, 'unknown', 503), new m.CatalogFailure('http', 'rejected', 503, quiescingBody)]) {
       const client = await candidate(); let setups = 0;
       const p = new m.PossumsProvider(async () => {
         setups++;
@@ -67,7 +68,8 @@ try {
       const before = setups, signal = new AbortController().signal;
       p.beginRun(); p.bindRun(signal);
       const result = await r.streamSimple((await r.getAvailable('possums'))[0], { messages: [] }, { signal }).result();
-      assert.match(result.errorMessage, failure.stage === 'trust' ? new RegExp('possums_trust_' + failure.constraint) : failure instanceof m.CatalogFailure ? /possums_catalog_http_rejected.*HTTP status: 503/ : /possums_authentication_http.*HTTP status: 401/);
+      assert.match(result.errorMessage, failure.reason === 'service_quiescing' ? /possums_service_quiescing.*HTTP status: 503/ : failure.stage === 'trust' ? new RegExp('possums_trust_' + failure.constraint) : failure instanceof m.CatalogFailure ? /possums_catalog_http_rejected.*HTTP status: 503/ : /possums_authentication_http.*HTTP status: 401/);
+      if (failure.reason === 'service_quiescing') assert.match(result.errorMessage, /admission; constraint: service_quiescing/);
       assert.equal(setups, before); assertClosed(result); passed++;
     }
     // Restore is untrusted; arbitrary endpoint/header/name data is never used.
@@ -116,7 +118,7 @@ try {
   // fresh processes with the genuine extension factory + synthetic establishment.
   const fixture = path.join(root, 'rpc-fixture.mjs');
   await writeFile(fixture, `
-import { extension, Channel, ReferenceClient, ConnectionFailure, EvidenceObservation, DiagnosticFailure, CatalogFailure, validateModels } from ${JSON.stringify(pathToFileURL(file).href)};
+import { extension, Channel, ReferenceClient, ConnectionFailure, EvidenceObservation, DiagnosticFailure, CatalogFailure, GatewayError, validateModels } from ${JSON.stringify(pathToFileURL(file).href)};
 globalThis.fetch = async () => { throw new Error('HOSTILE forbidden public network'); };
 export default function(pi) {
  let setup=0, login=0, catalog=0, inference=0;
@@ -130,15 +132,15 @@ export default function(pi) {
    if(mode==='hostile')throw new Error(${JSON.stringify(hostile)},{cause:new Error(${JSON.stringify(hostile)})});
    const config=new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
    const client=new ReferenceClient(await Channel.fixture('https://localhost:18443',config,'07'.repeat(32)));
-   client.login=async()=>{login++;if(mode==='auth')throw new DiagnosticFailure('authentication','http','rejected',401);};
-   client.models=async()=>{catalog++;if(mode==='catalog')throw new CatalogFailure('http','rejected',503);return validateModels({object:'list',data:[${JSON.stringify(entry)}]});};
+   client.login=async()=>{login++;if(mode==='auth')throw new DiagnosticFailure('authentication','http','rejected',401);if(mode==='quiescing-challenge')throw new GatewayError('service_quiescing',undefined,'unknown',503);};
+   client.models=async()=>{catalog++;if(mode==='catalog')throw new CatalogFailure('http','rejected',503);if(mode==='quiescing-catalog')throw new CatalogFailure('http','rejected',503,${JSON.stringify(quiescingBody)});return validateModels({object:'list',data:[${JSON.stringify(entry)}]});};
    client.chat=async()=>{inference++;throw new Error('HOSTILE forbidden inference');};client.freshSession=()=>client;return client;
   }; pi.registerProvider(provider);
  }});
  pi.registerCommand('fixture-counts',{description:'Synthetic offline counts',handler:async(_args,ctx)=>ctx.ui.notify(JSON.stringify({setup,login,catalog,inference}),'info')});
 }
 `);
-  for (const mode of process.env.DISCOVERY_BASELINE ? ['evidence'] : ['evidence', 'auth', 'catalog', 'key', 'provenance', 'hostile', 'ui-failure', 'first-use', 'deleted-credential']) {
+  for (const mode of process.env.DISCOVERY_BASELINE ? ['evidence'] : ['evidence', 'auth', 'catalog', 'quiescing-challenge', 'quiescing-catalog', 'key', 'provenance', 'hostile', 'ui-failure', 'first-use', 'deleted-credential']) {
     const cwd = path.join(root, 'rpc-' + mode), agentDir = path.join(cwd, 'agent'); await mkdir(agentDir, { recursive: true });
     await writeFile(path.join(agentDir, 'settings.json'), JSON.stringify({ defaultTools: [], compaction: { enabled: false }, retry: { enabled: true, baseDelayMs: 1 }, cacheWarming: 'off', enableInstallTelemetry: false }));
     if (mode !== 'deleted-credential') await writeFile(path.join(agentDir, 'auth.json'), JSON.stringify({ possums: { type: 'api_key', key } }), { mode: 0o600 });
@@ -159,8 +161,12 @@ export default function(pi) {
       assert.equal(selected.id, 'synthetic'); assert.match(selected.name, /last-known/);
       await rpc.promptAndWait('Synthetic diagnostic input', undefined, 5000);
       const message = (await rpc.getMessages()).findLast(e => e.role === 'assistant');
-      const expected = { evidence: /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/, auth: /possums_authentication_http.*HTTP status: 401/, catalog: /possums_catalog_http_rejected.*HTTP status: 503/, key: /possums_trust_key_config/, provenance: /possums_trust_provenance/, hostile: /possums_verification_failed/, 'ui-failure': /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/ };
+      const expected = { evidence: /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/, auth: /possums_authentication_http.*HTTP status: 401/, catalog: /possums_catalog_http_rejected.*HTTP status: 503/, 'quiescing-challenge': /possums_service_quiescing.*HTTP status: 503/, 'quiescing-catalog': /possums_service_quiescing.*HTTP status: 503/, key: /possums_trust_key_config/, provenance: /possums_trust_provenance/, hostile: /possums_verification_failed/, 'ui-failure': /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/ };
       assert.match(message.errorMessage, expected[mode]); assert.equal(message.stopReason, 'error'); assertClosed(message);
+      if (mode.startsWith('quiescing-')) {
+        assert.match(message.errorMessage, /admission; constraint: service_quiescing/);
+        assert.match(message.errorMessage, /Prior billing outcomes are not established/);
+      }
       assert(!events.some(e => e.type === 'auto_retry_start'));
       assert(events.some(e => e.type === 'message_end' && e.message.role === 'assistant' && e.message.errorMessage === message.errorMessage));
       await rpc.prompt('/possums-status'); await rpc.getState();
@@ -170,8 +176,9 @@ export default function(pi) {
       const countNotice = events.findLast(e => e.type === 'extension_ui_request' && e.method === 'notify' && e.message.startsWith('{'));
       const counts = JSON.parse(countNotice.message);
       assert.equal(counts.inference, 0); assert.equal(counts.setup, 1);
-      if (mode === 'auth') assert.equal(counts.login, 1);
-      if (mode === 'catalog') assert.equal(counts.catalog, 1);
+      if (mode === 'auth' || mode === 'quiescing-challenge') assert.equal(counts.login, 1);
+      if (mode === 'quiescing-challenge') assert.equal(counts.catalog, 0);
+      if (mode === 'catalog' || mode === 'quiescing-catalog') assert.equal(counts.catalog, 1);
       assert(!rpc.getStderr().includes('HOSTILE')); passed++;
     } finally { unsubscribe(); await rpc.stop(); }
   }

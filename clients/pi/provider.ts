@@ -123,7 +123,7 @@ function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 
       unauthorized: 'Gateway rejected authentication; use /login again. Expiry is not established.',
       invalid_request: 'Request rejected by gateway.', account_limit: 'Account limit reached.',
       duplicate_request: 'Duplicate submission rejected.', unavailable: 'Gateway unavailable.',
-      generation_failed: 'Generation failed.',
+      generation_failed: 'Generation failed.', service_quiescing: 'Gateway is quiescing; wait for service availability before making a new request.',
     };
     const label = gatewayDetailLabel(error.detail);
     const known = Object.hasOwn(reason, error.reason);
@@ -133,7 +133,7 @@ function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 
       catalog_failed: 'gateway_catalog', request_encoding_failed: 'gateway_request_encoding',
     };
     const detail = label ? error.detail! : '';
-    const gatewayStage = error.reason === 'unauthorized' ? 'gateway_authentication' :
+    const gatewayStage = error.reason === 'service_quiescing' ? 'admission' : error.reason === 'unauthorized' ? 'gateway_authentication' :
       Object.hasOwn(detailStages, detail) ? detailStages[detail] :
       detail.startsWith('stream_') || detail.startsWith('tool_') ? 'gateway_stream' : 'gateway_admission';
     const action = error.reason === 'insufficient_credit' ? 'Add credit before submitting this model again.' : error.reason === 'invalid_request' ? 'Review supported request options and context limits.' : error.reason === 'account_limit' ? 'Wait for pending requests before submitting again.' : error.reason === 'unauthorized' ? 'Check authentication, not trust pins.' : 'If this persists, share only the content-free code/stage/constraint for support.';
@@ -373,7 +373,7 @@ export class PossumsProvider implements Provider {
       try { this.observeFailure(undefined); } catch { /* UI reporting cannot change authentication. */ }
     } catch (error) {
       this.requireCurrent(epoch, signal);
-      const failure = stage === 'catalog_unavailable' ? catalogConnectionFailure(error) : error instanceof DiagnosticFailure ? connectionFailure(error) : new ConnectionFailure(stage);
+      const failure = stage === 'catalog_unavailable' ? catalogConnectionFailure(error) : error instanceof DiagnosticFailure || error instanceof GatewayError ? connectionFailure(error) : new ConnectionFailure(stage);
       try { this.observeFailure(failure); } catch { /* UI reporting cannot change authentication. */ }
       throw failure;
     }

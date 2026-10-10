@@ -49,6 +49,7 @@ struct Fixture {
     generations: Arc<Semaphore>,
     resources: Arc<Semaphore>,
     lanes: Arc<Semaphore>,
+    lifecycle: crate::lifecycle::Lifecycle,
 }
 
 impl Fixture {
@@ -58,6 +59,7 @@ impl Fixture {
             generations: Arc::new(Semaphore::new(4)),
             resources: Arc::new(Semaphore::new(4)),
             lanes: Arc::new(Semaphore::new(4)),
+            lifecycle: Default::default(),
         }
     }
 
@@ -81,6 +83,7 @@ impl Fixture {
             generation,
             Lease::from(resources),
         )
+        .tracked(self.lifecycle.try_admit().unwrap())
     }
 
     fn pending(&self, id: u8) -> ReservedGeneration {
@@ -171,6 +174,7 @@ fn generation_tracking_retires_before_memory_handoff_in_both_owner_envelopes() {
                 terminal,
                 _generation,
                 _resources,
+                _ticket,
             } = owner;
             let settlement = Settlement {
                 terminal,
@@ -183,6 +187,7 @@ fn generation_tracking_retires_before_memory_handoff_in_both_owner_envelopes() {
                 }),
                 _generation,
                 _resources,
+                _ticket,
             });
         } else {
             drop(owner);
@@ -194,6 +199,71 @@ fn generation_tracking_retires_before_memory_handoff_in_both_owner_envelopes() {
         assert!(next.as_mut().poll(&mut cx).is_ready());
         f.outcome(1, Outcome::Refunded, 1000);
     }
+}
+
+#[tokio::test]
+async fn drain_failure_uses_actual_accounting_error_and_waits_for_other_owner() {
+    use futures_util::poll;
+    for explicit in [false, true] {
+        let f = Fixture::new();
+        let mut failed = f.pending(1);
+        let other = f.pending(2);
+        // Missing reservation in this synthetic ledger forces a real finish Err,
+        // including the armed Drop refund path; no telemetry classification.
+        failed.terminal.accounting = Arc::new(Accounting::new([]));
+        f.lifecycle.quiesce();
+        if explicit {
+            assert_eq!(
+                failed.terminal.finish(Some(final_usage())),
+                Err(AccountingError::InvalidTransition)
+            );
+            assert!(!failed.terminal.armed);
+        }
+        drop(failed);
+        let drain = f.lifecycle.wait_drained();
+        tokio::pin!(drain);
+        assert!(poll!(&mut drain).is_pending());
+        drop(other);
+        assert_eq!(bounded(drain).await, Err(crate::lifecycle::DrainFailed));
+    }
+}
+
+#[tokio::test]
+async fn settlement_does_not_retire_worker_cleanup_ticket() {
+    use futures_util::poll;
+    let f = Fixture::new();
+    let owner = f.pending(1);
+    let (settled_tx, settled) = oneshot::channel();
+    let (release, held) = oneshot::channel();
+    let completion = owner.spawn_settling((), move |(), settlement| async move {
+        let receipt = settlement.finish(&Ok(usage()));
+        settled_tx.send(()).unwrap();
+        held.await.unwrap();
+        receipt
+    });
+    f.lifecycle.quiesce();
+    bounded(settled).await.unwrap();
+    let drain = f.lifecycle.wait_drained();
+    tokio::pin!(drain);
+    assert!(poll!(&mut drain).is_pending());
+    release.send(()).unwrap();
+    assert!(bounded(completion).await.unwrap().is_ok());
+    assert_eq!(bounded(drain).await, Ok(()));
+}
+
+#[tokio::test]
+async fn successful_refund_is_not_drain_failure() {
+    let f = Fixture::new();
+    let owner = f.pending(1);
+    f.lifecycle.quiesce();
+    let completion = owner.spawn_settling((), |(), settlement| async move {
+        settlement.finish(&Ok(StreamUsage {
+            total_tokens: 0,
+            ..usage()
+        }))
+    });
+    assert_eq!(bounded(completion).await.unwrap(), Ok(Outcome::Refunded));
+    assert_eq!(bounded(f.lifecycle.wait_drained()).await, Ok(()));
 }
 
 #[tokio::test]

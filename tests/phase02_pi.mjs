@@ -1,6 +1,7 @@
 // Offline, synthetic-credential SDK/provider checks. PHASE02_TEST_BUILD must be a separately
 // compiled test-entry.ts bundle with fixture capability, never the shipped package.
 import assert from 'node:assert/strict';
+import { isDeepStrictEqual } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -96,6 +97,7 @@ async function setup(plan, tools = true) {
     if (mode === 'uncertain') throw new m.ChannelError('uncertain');
     if (mode === 'refund') throw await terminalGatewayError('generation_failed', 'stream_idle_timeout', 'refunded');
     if (mode === 'unknown_bill') throw await terminalGatewayError('unavailable', 'inference_unavailable', 'unknown');
+    if (mode === 'quiescing') throw new m.GatewayError('service_quiescing', undefined, 'unknown', 503);
     if (mode && typeof mode === 'object') throw await terminalGatewayError(mode.code, mode.detail, mode.billing ?? 'unknown');
     if (mode === 'sdk_decode') throw new m.GatewayError('generation_failed', 'sdk_stream_decode_failed', 'unknown');
     if (mode === 'hostile') throw new Error('possums_secret_key_PRIVATE_PROMPT');
@@ -327,6 +329,53 @@ async function catalogFixture() {
  channel.control=async()=>({token:'b'.repeat(43),token_type:'Bearer',expires_in:43200});
  return new m.ReferenceClient(channel);
 }
+await check('quiescing HTTP 503 reaches catalog and challenge presentations only after exact bounded EOF',async()=>{
+ const wire={error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}};
+ const key=new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
+ const channel=await m.Channel.fixture('https://localhost:18443',key,'07'.repeat(32));
+ const originalFetch=globalThis.fetch;let calls=[];
+ try {
+  globalThis.fetch=async request=>{calls.push(new URL(request.url).pathname);return Response.json(wire,{status:503});};
+  const client=new m.ReferenceClient(channel);
+  await assert.rejects(client.login(recoveryKey),error=>{
+   assert(error instanceof m.GatewayError);assert.equal(error.reason,'service_quiescing');assert.equal(error.status,503);
+   assert.equal(error.billing,'unknown');assert(!error.message.includes(hostileConnection));
+   const shown=m.connectionFailure(error);assertConnectionFailure(shown,'service_quiescing');
+   assert.match(shown.message,/Stage: admission; constraint: service_quiescing.*Observed HTTP status: 503/);
+   return true;
+  });
+  assert.deepEqual(calls,['/v1/auth/challenge']);
+  const catalog=await catalogFixture();await catalog.login(recoveryKey);calls=[];
+  await assert.rejects(catalog.models(),error=>{
+   assert(error instanceof m.CatalogFailure);assert.equal(error.reason,'service_quiescing');assert.equal(error.status,503);
+   const shown=m.catalogConnectionFailure(error);assertConnectionFailure(shown,'service_quiescing');
+   assert.match(shown.message,/Stage: catalog; constraint: http.*Gateway stage: admission; constraint: service_quiescing/);
+   assert.match(shown.message,/Observed HTTP status: 503/);assert(!shown.message.includes('refunded'));
+   return true;
+  });
+  assert.deepEqual(calls,['/v1/models']);
+  for(const response of [
+   new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(JSON.stringify(wire)));controller.error(new Error(hostileConnection));}}),{status:503}),
+   Response.json({error:{...wire.error,stage:'transport'}},{status:503}),
+   Response.json(wire,{status:502}),
+   Response.json({error:{...wire.error,extra:hostileConnection}},{status:503}),
+  ]) {
+   globalThis.fetch=async request=>{calls.push(new URL(request.url).pathname);return response;};
+   await assert.rejects(catalog.models(),error=>error instanceof m.CatalogFailure && error.reason===undefined && !error.message.includes(hostileConnection));
+  }
+  assert.equal(calls.length,5,'one catalog GET per deliberate attempt, no diagnostic replay');
+  globalThis.fetch=async request=>{calls.push(new URL(request.url).pathname);return Response.json(wire,{status:503});};
+  // Plaintext HTTP bodies cannot be promoted through the encrypted EHBP boundary.
+  calls=[];
+  await assert.rejects(channel.control('/v1/sessions',{challenge:'c'.repeat(43),credential:'c'.repeat(43)}),error=>
+   error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
+  await assert.rejects(channel.balance('b'.repeat(43)),error=>
+   error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
+  await assert.rejects(channel.chat({model:'synthetic',stream:true,submission:'s'.repeat(43),messages:[{role:'user',content:'synthetic'}]},'b'.repeat(43)),error=>
+   error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
+  assert.deepEqual(calls,['/v1/sessions','/v1/balance','/v1/chat/completions']);
+ } finally {globalThis.fetch=originalFetch;}
+});
 await check('catalog diagnostics preserve bounded HTTP rejection details without hostile text or billing claims',async()=>{
  const originalFetch=globalThis.fetch,client=await catalogFixture();let calls=0;
  await client.login(recoveryKey);
@@ -408,6 +457,41 @@ await check('native catalog HTTP rejection reaches transient status with observe
   globalThis.fetch=async request=>{assert.equal(request.method,'GET');calls++;return Response.json({object:'list',data:[entry(true)]});};
   await registry.refresh({providers:['possums'],allowNetwork:true});await extension.commands.get('possums-status').handler('',ctx);
   assert.equal(notices.at(-1),m.approvalSummary());assert.equal(extension.provider.getModels().length,1);
+ } finally {globalThis.fetch=originalFetch;}
+});
+await check('native challenge quiescing warning preserves admission without catalog or inference',async()=>{
+ const originalFetch=globalThis.fetch,key=new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
+ const channel=await m.Channel.fixture('https://localhost:18443',key,'07'.repeat(32));
+ const extension=fixtureExtension(async()=>new m.ReferenceClient(channel));extension.provider.newSession();
+ const routes=[];
+ try {
+  globalThis.fetch=async request=>{routes.push(new URL(request.url).pathname);return Response.json({error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}},{status:503});};
+  await assert.rejects(extension.provider.auth.apiKey.login(interaction()),error=>{
+   assertConnectionFailure(error,'service_quiescing');assert.match(error.message,/Stage: admission; constraint: service_quiescing.*Observed HTTP status: 503/);return true;
+  });
+  assert.deepEqual(routes,['/v1/auth/challenge']);
+  assert.deepEqual(extension.provider.getModels(),[]);
+ } finally {globalThis.fetch=originalFetch;}
+});
+await check('native quiescing catalog warning is offline on status and sends no inference',async()=>{
+ const originalFetch=globalThis.fetch,client=await catalogFixture(),routes=[];
+ const extension=fixtureExtension(async()=>client),credentials=new ai.InMemoryCredentialStore();
+ await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+ const runtime=await nativeRuntime(extension.provider,credentials),registry=new coding.ModelRegistry(runtime),notices=[];
+ const ctx={hasUI:true,ui:{notify:text=>notices.push(text)},modelRegistry:registry};
+ try {
+  globalThis.fetch=async request=>{
+   routes.push(new URL(request.url).pathname);
+   return Response.json({error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}},{status:503});
+  };
+  await extension.handlers.get('session_start')({},ctx);
+  assert.equal(notices.length,1);assert.match(notices[0],/possums_service_quiescing/);
+  assert.match(notices[0],/Gateway stage: admission; constraint: service_quiescing/);
+  assert(!notices[0].includes(hostileConnection));assert(!notices[0].includes('refunded'));
+  const before=routes.length;
+  await extension.commands.get('possums-status').handler('',ctx);
+  assert.equal(routes.length,before);assert(routes.every(route=>route==='/v1/models'));
+  assert.deepEqual(extension.provider.getModels(),[]);
  } finally {globalThis.fetch=originalFetch;}
 });
 await check('native later catalog failures clear usable models, deduplicate, and clear status on accepted recovery',async()=>{
@@ -769,7 +853,7 @@ await check('pinned Pi classifier admits only closed gateway operational failure
   assert.equal(isRetryableAssistantError(message),false);assert(!JSON.stringify(message).includes('PRIVATE_PROMPT'));
  }
 });
-async function sdkSetup(name, plan, tools, compaction=false, qualified=true, restoreTools=false, retry={baseDelayMs:1,maxAgentDelayMs:8}, extraExtensions=[]) {
+async function sdkSetup(name, plan, tools, compaction=false, qualified=true, restoreTools=false, retry={baseDelayMs:1,maxAgentDelayMs:8}, extraExtensions=[], toolHook=async()=>{}) {
  const s=await setup(plan,qualified);let toolRuns=0,provider,textOnlyCommand;const notices=[],compactions=[];
  // Keep native physical-model lookup and the selected host model consistent.
  const models=s.client.models;s.client.models=async()=> (await models()).map(model=>({...model,context_tokens:'64000'}));
@@ -788,7 +872,7 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  // tested gateway context budget; the fake ReferenceClient has no tokenizer.
  const selected={...s.selected,contextWindow:64000};
  const {session}=await coding.createAgentSession({cwd,agentDir:cwd,modelRuntime:runtime,model:selected,resourceLoader:loader,settingsManager:settings,
-  thinkingLevel:'off',sessionManager:coding.SessionManager.inMemory(cwd),tools:tools?['echo']:[],customTools:[{...tool,label:'Echo',execute:async()=>{toolRuns++;return {content:[{type:'text',text:'ok'}],details:undefined};}}]});
+  thinkingLevel:'off',sessionManager:coding.SessionManager.inMemory(cwd),tools:tools?['echo']:[],customTools:[{...tool,label:'Echo',execute:async(...args)=>{toolRuns++;await toolHook(...args);return {content:[{type:'text',text:'ok'}],details:undefined};}}]});
  await session.bindExtensions({mode:'print'});
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
  return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
@@ -1052,6 +1136,100 @@ await check('an earlier nested auth request on the active signal consumes the ca
   assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
  } finally {f.session.dispose();}
 });
+// Qualification only: these probes record a BLOCKER, not deployment-recovery
+// permission. Pi is unmodified; only the synthetic provider instance is observed.
+// The fixture's `nested` label is test scheduling, never a provider capability.
+for(const [hook,round] of [
+  ['message_start',0],['turn_start',0],['turn_start',1],
+  ['context',0],['context',1],['context_with_system',0],['context_with_system',1],
+  ['before_provider_request',0],['before_provider_request',1],['tool_execute',0],
+]) {
+ await check('permission qualification BLOCKED: same-signal '+hook+' round '+round,async()=>{
+  let f,preparedMessages,nested=false,injected=false,nestedResult,hookFailure=false,turn=-1,starts=0,ends=0,hookCalls=0;
+  const requests=[],auth=[];
+  const inject=async(event,ctx,toolSignal)=>{
+   if(injected)return;
+   injected=true;hookCalls++;nested=true;
+   try {
+    // Use supported transcript projection, not transcript-text matching or IDs.
+    // During execution, reuse the real preceding request captured by a
+    // supported hook; an unfinished tool batch is not a valid model input.
+    const messages=hook==='tool_execute'?preparedMessages:hook==='context_with_system'?event.messages:
+     hook==='message_start'?[...f.session.messages,event.message]:f.session.messages;
+    // The first turn_start precedes user-message delivery; it is a signal-only
+    // control. Later boundaries use the actual native transcript projection.
+    const transcript=hook==='turn_start'&&round===0?context(true):
+     ai.normalizeContext({messages:coding.convertToLlm(messages)});
+    const signal=toolSignal??ctx.signal;
+    if(!(signal instanceof AbortSignal)||signal!==ctx.signal)throw new Error('qualification_signal_mismatch');
+    nestedResult=await ctx.modelRegistry.streamSimple(ctx.model,transcript,{signal}).result();
+   } catch {hookFailure=true;} finally {nested=false;}
+  };
+  const extensions=[pi=>{
+   pi.on('context_with_system',event=>{preparedMessages=structuredClone(event.messages);});
+   pi.on('agent_start',()=>{starts++;});
+   pi.on('turn_end',()=>{ends++;});
+   pi.on('turn_start',async(event,ctx)=>{turn++;if(hook==='turn_start'&&turn===round)await inject(event,ctx);});
+   if(!['turn_start','tool_execute'].includes(hook))pi.on(hook,async(event,ctx)=>{
+    if(turn===round&&(hook!=='message_start'||event.message.role==='user'))await inject(event,ctx);
+   });
+  }];
+  const beforeInitial=round===0&&!['before_provider_request','tool_execute'].includes(hook);
+  f=await sdkSetup('sdk-permission-'+hook+'-'+round,
+   beforeInitial?['stop','tool_calls','stop']:['tool_calls','stop','stop'],true,false,true,false,{enabled:false},extensions,
+   async(_id,_params,signal,_update,ctx)=>{if(hook==='tool_execute')await inject(undefined,ctx,signal);});
+  const resolve=f.provider.auth.apiKey.resolve,stream=f.provider.streamSimple.bind(f.provider);
+  f.provider.auth.apiKey.resolve=input=>{auth.push({nested,input});return resolve(input);};
+  f.provider.streamSimple=(model,transcript,options)=>{
+   requests.push({nested,model,transcript:structuredClone(transcript),signal:options.signal});
+   return stream(model,transcript,options);
+  };
+  try {
+   await f.session.prompt('Synthetic permission qualification');
+   assert(!hookFailure,'qualification hook failed');assert(injected);assert.equal(hookCalls,1);
+   assert.equal(nestedResult?.stopReason,'stop');assert.equal(f.session.messages.at(-1).stopReason,'stop');
+   assert.equal(starts,1);assert.equal(ends,2);assert.equal(turn,1);
+   assert.equal(f.toolRuns(),1);assert.equal(f.s.sends(),3);
+   assert.equal(requests.length,3);assert.equal(auth.length,3);
+   const nestedRequest=requests.find(request=>request.nested),native=requests.filter(request=>!request.nested);
+   assert.equal(native.length,2);
+   assert(requests.every(request=>request.signal===native[0].signal),'signal does not identify native requests');
+   assert(auth.every(request=>request.input.signal===native[0].signal),'auth shares the active signal');
+   // Full auth inputs, including context and stored synthetic credential, are
+   // identical. No extra native-origin field arrives at this boundary.
+   assert(auth.every(request=>isDeepStrictEqual(request.input,auth[0].input)),'auth boundary changed; requalify provenance');
+   assert(native[1].transcript.messages.some(message=>message.role==='toolResult'));
+   if(!(hook==='turn_start'&&round===0)) {
+    assert(isDeepStrictEqual(nestedRequest.transcript,native[round].transcript),'matching transcript probe changed');
+    assert(isDeepStrictEqual(nestedRequest.model,native[round].model),'matching model probe changed');
+   }
+   if(round===1)assert(nestedRequest.transcript.messages.some(message=>message.role==='toolResult'),
+    'preceding tool result is also available to nested work');
+  } finally {f.session.dispose();}
+ });
+}
+await check('permission qualification BLOCKED: post-confirmation nested auth can consume existing expiry renewal',async()=>{
+ for(const hook of ['message_start','context_with_system']) {
+  let f,injected=false,nested=false,renewedByNested=false,hookFailure=false,result;
+  f=await renewalFixture('post-confirmation-'+hook,['stop','stop'],[pi=>pi.on(hook,async(event,ctx)=>{
+   if(injected||(hook==='message_start'&&event.message.role!=='user'))return;
+   injected=true;nested=true;
+   try {
+    const messages=hook==='message_start'?[...f.session.messages,event.message]:event.messages;
+    result=await ctx.modelRegistry.streamSimple(ctx.model,
+     ai.normalizeContext({messages:coding.convertToLlm(messages)}),{signal:ctx.signal}).result();
+   } catch {hookFailure=true;} finally {nested=false;}
+  })]);
+  f.expire();f.verifyHook(async()=>{renewedByNested=nested;});
+  try {
+   await f.session.prompt('Synthetic post-confirmation qualification');
+   assert(!hookFailure);assert(injected);assert(renewedByNested,'pinned permission behavior changed; requalify');
+   assert.equal(result?.stopReason,'stop');assert.deepEqual(f.trace.verified,['A','B']);
+   assert.equal(f.trace.credentials.length,2);assert.equal(f.s.sends(),2);
+   assert.equal(f.session.messages.at(-1).stopReason,'stop');
+  } finally {f.session.dispose();}
+ }
+});
 await check('late public verification after logout or session replacement cannot publish or send a credential',async()=>{
  for(const action of ['logout','session']) {
   const f=await renewalFixture('public-race-'+action),entered=deferred(),release=deferred();let oldSignal;
@@ -1169,6 +1347,57 @@ await check('actual SDK retry backoff abort drops errorMessage at retryAssistant
  assert.equal(final.stopReason,'aborted');assert.equal(final.errorMessage,undefined);
  assert.match(observed,/\[unavailable\].*Stage: gateway_admission.*Charge unknown.*another charge/);
  assert.equal(s.sends(),1);
+});
+await check('encrypted balance HTTP 503 body and EOF failures reach actual Pi reconciliation presentation',async()=>{
+ const ehbp=await import(pathToFileURL(path.resolve(path.dirname(file),'../../source/clients/pi/node_modules/ehbp/dist/esm/index.js')).href);
+ const server=await ehbp.Identity.generate(),encoder=new TextEncoder();
+ const channel=await m.Channel.fixture('https://localhost:18443',await server.marshalConfig(),await server.getPublicKeyHex());
+ channel.challenge=async()=>({challenge:'c'.repeat(43),expires_in:600});
+ channel.control=async()=>({token:'b'.repeat(43),token_type:'Bearer',expires_in:43200});
+ const client=new m.ReferenceClient(channel),provider=new m.PossumsProvider(async()=>client);
+ await client.login(recoveryKey);
+ const originalFetch=globalThis.fetch,paths=[];
+ const wire={error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}};
+ try {
+  for(const [body,interrupted,stage,constraint] of [
+   ['{"error":"'+hostileConnection+'"',false,'balance','json'],
+   [JSON.stringify(wire),true,'transport','fetch'],
+  ]) {
+   globalThis.fetch=async request=>{
+    paths.push(new URL(request.url).pathname);
+    assert.equal(request.method,'POST');assert.equal(request.headers.get('authorization'),'Bearer '+'b'.repeat(43));
+    const encapsulated=ehbp.hexToBytes(request.headers.get('Ehbp-Encapsulated-Key'));
+    const recipient=await server.suite.SetupRecipient(server.getPrivateKey(),encapsulated,{info:encoder.encode(ehbp.HPKE_REQUEST_INFO)});
+    const sent=new Uint8Array(await request.arrayBuffer());
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(await recipient.Open(sent.slice(4)))),{});
+    const nonce=crypto.getRandomValues(new Uint8Array(32));
+    const secret=new Uint8Array(await recipient.Export(encoder.encode(ehbp.EXPORT_LABEL),ehbp.EXPORT_LENGTH));
+    const keys=await ehbp.deriveResponseKeys(secret,encapsulated,nonce);
+    const cipher=await ehbp.encryptChunk(keys,0,encoder.encode(body));
+    const frame=new Uint8Array(4+cipher.length);new DataView(frame.buffer).setUint32(0,cipher.length,false);frame.set(cipher,4);
+    let sentFrame=false;
+    return new Response(new ReadableStream({pull(controller){
+     if(!sentFrame){sentFrame=true;controller.enqueue(frame);}
+     else if(interrupted)controller.error(new Error(hostileConnection));else controller.close();
+    }},{highWaterMark:0}),{status:503,headers:{'Ehbp-Response-Nonce':ehbp.bytesToHex(nonce)}});
+   };
+   await assert.rejects(client.balance(),error=>{
+    assert(error instanceof m.BalanceFailure);assert.equal(error.code,'uncertain');
+    assert(error.observation instanceof m.DiagnosticFailure);
+    assert.equal(error.observation.stage,stage);assert.equal(error.observation.constraint,constraint);
+    assert.equal(error.observation.status,503);assert.equal(error.reason,undefined);
+    assert.equal(error.billing,undefined);assert.equal(error.cause,undefined);
+    const shown=provider.reconciliationFailure(error);
+    assert.match(shown,new RegExp(`possums_${stage}_${constraint}.*Stage: ${stage}; constraint: ${constraint}.*Observed HTTP status: 503`));
+    assert.match(shown,/prior billing is unchanged or unknown/);
+    assert.doesNotMatch(shown,/PRIVATE_URL_CREDENTIAL_PROMPT|synthetic_not_a_usable|service_quiescing|Reservation refunded|not_submitted|\x1b|stack/i);
+    assert(!JSON.stringify(error).includes(hostileConnection));
+    return true;
+   });
+   assert.equal(paths.length,interrupted?2:1,'presentation cannot issue additional requests');
+  }
+  assert.deepEqual(paths,['/v1/balance','/v1/balance']);
+ }finally{globalThis.fetch=originalFetch;}
 });
 await check('actual Pi reconciliation commands compare exact receipts and balance without inference or persistent reports',async()=>{
  for(const [name,plan,tools,completed] of [['tools',['tool_calls','stop'],true,'2'],['refund-retry',['refund','stop'],false,'2']]) {
@@ -1331,6 +1560,19 @@ await check('actual Pi SDK accepts steering during held text and tool responses,
  }
 });
 const rawAssistants = session => session.sessionManager.getEntries().filter(entry=>entry.type==='message'&&entry.message.role==='assistant').map(entry=>entry.message);
+await check('Pi presents quiescing without refund or native retry',async()=>{
+ const f=await sdkSetup('sdk-quiescing',['quiescing','stop'],false);
+ const events=[];const unsubscribe=f.session.subscribe(event=>{if(event.type.startsWith('auto_retry_'))events.push(event);});
+ try {
+  await f.session.prompt('Synthetic quiescing request');
+  assert.equal(f.s.sends(),1);assert.deepEqual(events,[]);
+  const message=f.session.messages.at(-1);
+  assert.match(message.errorMessage,/\[service_quiescing\].*Stage: admission; constraint: service_quiescing.*Charge unknown.*Not replayed/);
+  assert(!message.errorMessage.includes('PRIVATE_PROMPT'));
+  assert(!message.errorMessage.includes('Reservation refunded'));
+  assert.equal(message.diagnostics?.some(d=>d.type==='possums_reservation_refunded')??false,false);
+ } finally {unsubscribe();f.session.dispose();}
+});
 await check('actual Pi SDK retries validated transient failures with native events and retains raw diagnostics',async()=>{
  for(const mode of ['refund','unknown_bill']) {
   const f=await sdkSetup('sdk-retry-'+mode,[mode,'stop'],false);const events=[];

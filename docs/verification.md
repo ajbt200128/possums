@@ -1659,3 +1659,88 @@ retained diagnostic predecessor, all source/runtime hash checks and offline
 versioned/stable-path checks with zero fetch attempts. No settings, credentials,
 runtime, current session or gateway deployment changed; no push or live inference
 occurred. Full user-controlled restart/activation remains separate and unverified.
+
+## Approved-main release automation — local branch qualification
+
+Branch `feat/approved-main-releases` implements the simplified operator decision:
+verified paid releases may be automatic, production requires an explicit GitHub
+Environment review, and only current main is eligible at update admission.
+Older approval requests may remain visible. Neither publication nor admitted
+production mutations are automatically canceled. No CAS/supersession store or
+inference replay was added. [Design, activation and approval procedure](approved-main-releases.md)
+records immutable S/R/tag/image identity and separate verification results.
+
+After the historical [restart checkpoint](approved-main-releases-checkpoint.md),
+parent inspection corrected workflow-run source binding, replaced an unavailable
+REST administrator-bypass field with actual authenticated operator review
+history, and bounded subprocess pipes during collection. The source-bearing
+immutable run title plus successful admission/build jobs bind source S even
+when GitHub records a different default-branch workflow implementation SHA.
+Release-only R changes only the config image line and never feeds back into main.
+
+A standalone command uses the existing pinned Tinfoil Go SDK's V3 appraisal and
+TLS-key-bound HTTP client for public serving verification. It checks the exact
+release/manifest, witness expiry, fixed origin, no redirects/cookies/credentials,
+HTTP 200 and post-request verification state. Its sources live under `scripts`,
+not the gateway helper package; no module pins, shipped helper binary, Pi client
+approval or gateway runtime behavior changed. Native CLI V3 signer mismatch and
+legacy-V2 freshness limitations remain historical unresolved boundaries; this
+is a separate SDK path, not a claim that those paths now pass.
+
+Local checks after resumption: **42 release/cache Python tests passed**; offline
+standalone Go serving-control-flow tests and existing helper tests passed with
+cached pinned Go 1.27.2 (`GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local`, readonly
+module mode). `actionlint` and `git diff --check` passed. A separate small
+smoke-test commit replaces the existing shell-negation statement with an explicit
+failure when the synthetic account appears in logs; it resolves baseline SC2251
+without changing the fixture workload. Fresh Nix evaluation of an unreferenced
+snapshot of the current patch and its synthetic config-only R confirmed equal
+x86_64-linux gateway-image derivation paths, without changing refs/tags/index.
+The existing helper package and exposed pinned compiler also built successfully
+locally. These are source/derivation and local package checks, not fresh Linux
+image reproduction or a deployed artifact check.
+
+Tests are synthetic/offline. They cover source/ref/attempt confusion, deterministic
+release trees, version/collision handling, partial publisher refusal, digest and
+signature substitutions, environment/reviewer/branch policy, actual-review vs
+bypass rejection, stale admission, one update/no rerun replay, unchanged opaque
+configuration, bounded output/timeouts, credential-free serving requests,
+hostile error/panic text, redirects/status and post-request digest/freshness.
+SDK/HTTP mocks verify local control flow, not authentic hardware evidence or a
+real deployed TLS binding.
+
+Independent Astra implementation review reran the then-40 Python tests plus Go,
+workflow lint and whitespace checks and found one parser defect: CLI 0.19.0
+omits empty volume fields. The parent normalized only those omissions while
+preserving nonempty before/after comparisons, and added two parser-through-update
+regressions. Follow-up Astra review closed the P1 after three focused repository
+tests and 33 additional in-memory cases, including preservation/removal of both
+volume fields and rejection of non-integer run/artifact IDs. It found no remaining
+blocker within that focused scope. The parent reran all 42 Python tests afterward.
+The initial Luna implementation review was canceled without findings; it is not
+accepted review evidence.
+
+Both repository activation switches remain off/unconfigured. No environment,
+reviewer, secret, hosted invocation, public serving check, live CI/image build,
+push, approval or deployment was performed for this change. GitHub policy/secret
+metadata/variable/review-history access and the full hosted graph still require
+qualification. Until then, failing API evidence blocks production rather than
+assuming safe defaults. A successful control-plane update and subsequent serving
+failure remain separate outcomes; no automatic retry or rollback is authorized.
+
+Privacy references: [data boundaries](../PRIVACY.md#data-handling-boundaries),
+[forbidden content/identifiers/raw errors](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data),
+[processors/history](../PRIVACY.md#processors-retention-access-and-shutdown),
+[synthetic testing](../PRIVACY.md#synthetic-testing-exception), and
+[required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).
+Only validated public pins go to workflow outputs. Deployment configuration and
+raw diagnostics are transient in-process; GitHub's native workflow history and
+public release artifacts persist. No telemetry destination, family, retention or
+runtime privacy policy changed; no inference, credential-value inspection,
+request-level export or support bundle was used.
+
+Subsequent hosted runs, operator-authorized setup, the public SDK serving check,
+and the first publication qualification/canonical-shape correction are recorded
+chronologically in [approved-main release qualification](approved-main-release-qualification.md).
+The local-branch statements above describe their historical phase, not the later
+activation or deployment state.

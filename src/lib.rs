@@ -12,7 +12,9 @@ mod generation;
 // Reservation ownership is independent of HTTP delivery.
 #[allow(dead_code)]
 mod generation_owner;
+pub mod health;
 pub mod inference;
+pub mod lifecycle;
 pub mod server;
 // Bounded delivery owners retain the shared heavy admission.
 #[allow(dead_code)]

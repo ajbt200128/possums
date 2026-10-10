@@ -1,5 +1,5 @@
 import { Identity, type RequestContext } from 'ehbp';
-import { CatalogFailure } from './client.js';
+import { CatalogFailure, GatewayError, gatewayError } from './client.js';
 import { PUBLISHER, qualifyApi, qualifyPublished, requireApiApproval, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';
 import { LIMITS, ChannelError, DiagnosticFailure, OperationFailure, type FailureConstraint, Operation, cleanup, collect, parseJSON, requireThat, serialize } from './limits.js';
 import { admitInvocation, fields, type Chat } from './tools.js';
@@ -185,10 +185,15 @@ export class Channel {
       const req = request(this.#origin + path, op, 'GET', undefined, bearer);
       constraint = 'fetch';
       sent = true; res = await send(req, op, value => { status = value; constraint = 'http'; });
-      if (catalog && !res.ok) {
+      if (!res.ok && (catalog || status === 503)) {
         let value: unknown;
         try { value = parseJSON(await collect(res.body, LIMITS.error, op), LIMITS.error); }
         catch { /* Keep the observed HTTP rejection even if its bounded body fails. */ }
+        if (!catalog && (value as any)?.error?.code === 'service_quiescing') {
+          let failure: GatewayError | undefined;
+          try { failure = gatewayError(value, status); } catch { /* Reject malformed envelopes as ordinary HTTP failures. */ }
+          if (failure) throw failure;
+        }
         throw new CatalogFailure('http', sent && op.controller.signal.aborted ? 'uncertain' : 'rejected', status, value);
       }
       requireThat(res.ok);
@@ -196,7 +201,7 @@ export class Channel {
       return parseJSON(await collect(res.body, cap, op), cap);
     } catch (error) {
       const code = sent && op.controller.signal.aborted ? 'uncertain' : 'rejected';
-      if (error instanceof DiagnosticFailure) throw error;
+      if (error instanceof DiagnosticFailure || error instanceof GatewayError) throw error;
       if (catalog) {
         if (error instanceof CatalogFailure) throw error;
         throw new CatalogFailure(status === undefined ? 'request' : status >= 200 && status < 300 ? 'body' : 'http', code, status);
@@ -218,11 +223,17 @@ export class Channel {
       const value = parseJSON(await collect(body, LIMITS.control, op), LIMITS.control);
       // Only classify a rejection envelope here; successful control admission remains unchanged.
       if (status !== undefined && (status < 200 || status >= 300) && value && Object.hasOwn(value, 'error')) {
+        if (status === 503 && value.error?.code === 'service_quiescing') {
+          let failure: GatewayError | undefined;
+          try { failure = gatewayError(value, status); } catch { /* Malformed envelope remains an HTTP rejection. */ }
+          if (failure) throw failure;
+        }
         throw new DiagnosticFailure(path === '/v1/sessions' ? 'authentication' : 'submission', 'http', 'uncertain', status);
       }
       return value;
     }
     catch (error) {
+      if (error instanceof GatewayError) throw error;
       if (error instanceof DiagnosticFailure) throw new DiagnosticFailure(error.stage, error.constraint, error.code, error.status ?? status);
       throw new DiagnosticFailure(path === '/v1/sessions' ? 'authentication' : 'submission', error instanceof OperationFailure ? error.constraint : 'body', 'uncertain', status);
     } finally { op.close(); }
@@ -230,11 +241,27 @@ export class Channel {
   async balance(bearer: string, signal?: AbortSignal): Promise<unknown> {
     // Reject missing/invalid authority before asking EHBP to encrypt anything.
     requireThat(typeof bearer === 'string' && /^[A-Za-z0-9_-]{43}$/.test(bearer));
+    let status: number | undefined;
     const body = await this.#encrypted('/v1/balance', serialize({}, LIMITS.control), bearer,
-      { signal, onResponse: response => { requireThat(response.status === 200); } });
+      { signal, onResponse: response => { status = response.status; } });
     const op = new Operation(LIMITS.operationMs, signal);
-    try { return parseJSON(await collect(body, LIMITS.control, op), LIMITS.control); }
-    catch { throw new ChannelError('uncertain'); } finally { op.close(); }
+    let constraint: FailureConstraint = 'body';
+    try {
+      const bytes = await collect(body, LIMITS.control, op);
+      constraint = 'json';
+      const value = parseJSON(bytes, LIMITS.control);
+      if (status === 503 && value?.error?.code === 'service_quiescing') {
+        let failure: GatewayError | undefined;
+        try { failure = gatewayError(value, status); } catch { /* Malformed envelope remains an HTTP rejection. */ }
+        if (failure) throw failure;
+      }
+      if (status !== 200) throw new DiagnosticFailure('balance', 'http', 'uncertain', status);
+      return value;
+    } catch (error) {
+      if (error instanceof GatewayError) throw error;
+      if (error instanceof DiagnosticFailure) throw new DiagnosticFailure(error.stage, error.constraint, error.code, error.status ?? status);
+      throw new DiagnosticFailure('balance', error instanceof OperationFailure ? error.constraint : constraint, 'uncertain', status);
+    } finally { op.close(); }
   }
   async chat(chat: Chat, bearer: string, options: ResponseOptions = {}): Promise<ReadableStream<Uint8Array>> {
     return this.#encrypted('/v1/chat/completions', encodeChat(chat), bearer, options);
