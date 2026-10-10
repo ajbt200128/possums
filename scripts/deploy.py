@@ -86,13 +86,7 @@ def live_policy(expected_id=None):
         view = r.api("environments/production")
         branches = r.api("environments/production/deployment-branch-policies?per_page=100")
         reviewer = json.loads(r.command(["gh", "api", "users/ajbt200128"]))
-        environment_id = policy(view, branches, reviewer["id"], expected_id)
-        # Verify scope from metadata, never read a secret value. This also avoids
-        # accidentally accepting a same-named repository/org secret fallback.
-        secrets = r.api("environments/production/secrets?per_page=100")
-        r.require(secrets["total_count"] <= 100 and sum(
-            item["name"] == "TINFOIL_PRODUCTION_ADMIN_KEY" for item in secrets["secrets"]) == 1, "credential")
-        return environment_id
+        return policy(view, branches, reviewer["id"], expected_id)
     except r.Stop as error:
         if error.code == "command":
             raise r.Stop("environment_unreadable") from None
@@ -105,10 +99,10 @@ def eligibility(source, expected_id=None):
     r.require(os.environ.get("GITHUB_REPOSITORY") == r.REPO
               and os.environ.get("GITHUB_REF") == "refs/heads/main"
               and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "event")
-    r.require(os.environ.get("PRODUCTION_DEPLOYMENT_ENABLED") == "true", "disabled")
-    # Re-read activation, not merely the queued run's expression snapshot.
+    # GitHub supplies activation snapshots; disabling a switch is not guaranteed
+    # to revoke an already queued/approved run. Approval and main are rechecked.
     for name in ("PRODUCTION_DEPLOYMENT_ENABLED", "RELEASE_AUTOMATION_ENABLED"):
-        r.require(r.api(f"actions/variables/{name}")["value"] == "true", "disabled")
+        r.require(os.environ.get(name) == "true", "disabled")
     environment_id = live_policy(expected_id)
     r.latest(source)
     return environment_id

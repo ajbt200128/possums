@@ -35,6 +35,7 @@ env:
   IMAGE: ${{ inputs.image }}
   MANIFEST: ${{ inputs.manifest }}
   PRODUCTION_DEPLOYMENT_ENABLED: ${{ vars.PRODUCTION_DEPLOYMENT_ENABLED }}
+  RELEASE_AUTOMATION_ENABLED: ${{ vars.RELEASE_AUTOMATION_ENABLED }}
 jobs:
   preflight:
     # No environment reference and no deployment credential: a missing environment
