@@ -1,6 +1,6 @@
 # Paid blue/green preparation — scoped verification
 
-## Scope and authorization
+## Initial preparation scope and authorization (historical)
 
 Branch `feat/blue-green-deployments`, based on local main including free-endpoint reverts `23792a1` / `1358856`. Paid-only offline preparation. No production deployment/update/promote/cancel/stop, secrets/settings/DNS mutation, inference, merge, installation or release publication occurred in this packet. No live platform status was acquired; live strategy, readiness, endpoint retention and secret binding behavior remain unknown. Independent timeout/client-lifecycle and diagnostics efforts were not edited.
 
@@ -34,7 +34,7 @@ Independent bounded read-only review found no concrete defect in the planner, te
 
 Active LSP checks on both changed Python paths: two files clean, zero error diagnostics. `git diff --check` passed. No gateway/Pi source changed, no full runtime test suite run, and no real artifact/candidate/hardware key qualification performed.
 
-## Authorized local runtime implementation — server accepted, client pending
+## Authorized local runtime implementation — accepted local scope
 
 Local implementation was subsequently authorized on base `ca24b869`, without merge, deployment, installation, platform mutation, release publication or live inference authorization. The original preparation-only test and source statements above remain historical.
 
@@ -55,7 +55,13 @@ Astra independently ran `cargo test --offline --locked --lib` (189 passed), `--t
 
 The health telemetry fixture bypasses warmup only under `#[cfg(test)]`, proves a normal API request records observations, and then checks health leaves application aggregates, dependency calls and checked auth/accounting state unchanged. It does not qualify network connection occupancy, complete-window release or whole-runtime telemetry privacy. Test checkpoints are not production instrumentation or a new orchestration framework.
 
-Client packet `32ae099` preserves the exact closed GET catalog/challenge diagnostic. Its Sol-reported 116 Pi groups, 537 reference-client checks and scratch TypeScript check passed. Parent inspection and T3 Astra client R1 independently identified category loss for **authenticated encrypted** quiescing responses on chat, session/submission and balance paths; SDK-backed reproduction confirmed EHBP supports encrypted non-200 responses. The remaining gap is source-client integration, not demonstrated SDK incompatibility. Sol is correcting status plumbing and EOF-gated classification without accepting plaintext at encrypted endpoints. Deployed shim behavior remains unknown. Client actual-diff acceptance is pending; server approval does not cover it. Server `billing=not_submitted` does not establish an earlier request's outcome or authorize replay.
+Client packet `32ae099` added exact closed GET catalog/challenge diagnostics. Parent inspection and T3 Astra client R1 reproduced category loss for **authenticated encrypted** quiescing responses; EHBP supports encrypted non-200 responses, so this was source-client integration rather than SDK incompatibility. Sol corrected status plumbing and EOF-gated classification in `754432d`. Astra R2 confirmed those fixes but reproduced loss of known HTTP status/body constraints for malformed or interrupted balance responses. Sol's `fea263e` preserves those closed observations; parent inspected each actual source/test diff.
+
+**T3 Astra client actual-diff R3 approved the local packet through `fea263e`**, resolving all R1/R2 objections with no new concrete defect. Independently rebuilt current-source cached-dependency bundles passed 638 SDK-backed reference-client checks and 117 native Pi groups, including actual reconciliation presentation of encrypted HTTP 503 malformed-JSON and interrupted-EOF failures. Scratch TypeScript and scoped whitespace checks passed; the scratch source snapshot matched repository source. Checkout LSP lacks the dependency installation, so this is not a clean checkout-LSP claim. No dependency installation occurred.
+
+Only the exact bounded envelope at the qualified response boundary acquires the quiescing category. Encrypted routes retain SDK nonce/context/framing/decryption checks and complete EOF; plaintext errors fail closed, incomplete/malformed bodies do not establish quiescing or refunds, and known safe status/constraints survive. The existing native retry policy and authenticated refund/receipt rules are unchanged. Diagnostics initiate no additional requests, inference or recovery. Server `billing=not_submitted` does not establish an earlier request's outcome or authorize replay. Deployed shim behavior remains unknown.
+
+Parent reran the seven offline planner tests and base-to-head whitespace checks. Final local acceptance covers implemented A–D and these closed client diagnostics, **not conditional recovery E or deployment**. No merge, publication, installation, platform mutation, image healthcheck activation or live inference occurred. The final runbook distinguishes accepted local source/binary evidence from remaining generated-image, public-candidate-verifier, platform retention, overlapping accounting and discovery-ordering gates.
 
 [Pi permission qualification](blue-green-pi-qualification.md) passed 111/111 offline groups and independently confirmed native/nested ambiguity at the tested boundary. Recovery E remains disabled; the existing expiry-permission limitation was documented, not silently repaired. These tests are not live billing, runtime attestation, generated-image or platform qualification. Successful local drain covers tracked envelopes and accounting, not all Hyper-owned upload buffers, delivery, preserved sessions or balances.
 
