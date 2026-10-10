@@ -76,9 +76,9 @@ fn compose_core(
         },
     );
     let body = body.observed(owner.delivery_observation());
-    let observer = owner.spawn_settling(tx, move |tx, mut settlement| async move {
+    let observer = owner.spawn_settling(tx, move |mut tx, mut settlement| async move {
         let mut output = Output {
-            tx,
+            tx: &mut tx,
             model: &model.id,
         };
         output.event(
@@ -132,13 +132,13 @@ fn compose_core(
     body
 }
 
-struct Output<'a> {
-    tx: DeliveryTx,
-    model: &'a str,
+pub(crate) struct Output<'a> {
+    pub(crate) tx: &'a mut DeliveryTx,
+    pub(crate) model: &'a str,
 }
 
 impl Output<'_> {
-    fn event(&mut self, mut value: Value) {
+    pub(crate) fn event(&mut self, mut value: Value) {
         if self.tx.failure().is_some() {
             return;
         }
@@ -189,7 +189,7 @@ impl Output<'_> {
         }
     }
 
-    fn delta(&mut self, mut delta: &str) {
+    pub(crate) fn delta(&mut self, mut delta: &str) {
         // JSON may expand one byte to six; split on UTF-8 boundaries before escaping.
         while !delta.is_empty() && self.tx.failure().is_none() {
             let mut end = delta.len().min(1024);
@@ -204,7 +204,7 @@ impl Output<'_> {
         }
     }
 
-    fn structured_delta(&mut self, delta: CompletionDelta<'_>) {
+    pub(crate) fn structured_delta(&mut self, delta: CompletionDelta<'_>) {
         match delta {
             CompletionDelta::Text(text) => self.delta(text),
             CompletionDelta::ToolCall {
@@ -251,7 +251,7 @@ impl Output<'_> {
         }
     }
 
-    fn finish(&mut self, reason: FinishReason) {
+    pub(crate) fn finish(&mut self, reason: FinishReason) {
         self.event(json!({"choices":[{"index":0,"delta":{},"finish_reason":reason}]}));
     }
 }

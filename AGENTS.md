@@ -22,6 +22,10 @@ For the API-only target, follow this file first, then `SPEC.md`. `docs/phase0.md
 - Initial payment policy is a $5 minimum and a 30% markup over upstream inference cost.
 - Tor identity, Monero, additional CLI/SDK integrations, replicas, and an external audit are deferred. A gateway `/app` or no-JavaScript Web UI is not a future feature.
 
+## Free-instance experiment exception
+
+The operator-approved separate `free.possums.dev` experiment follows [docs/free-experiment.md](docs/free-experiment.md). Its shared-key admission, live FIFO queue, canonical static HTML context and deployment-scoped $10 soft budget replace individual accounts/reservations/markup only in the experimental executable. The paid API remains unchanged. Bots and multiple connections are permitted; resource ceilings are not per-person fairness controls. No balance endpoint, payment integration or gateway web UI is added. Telemetry export stays disabled. Deployment, restart-stop behavior and public connection semantics require scoped verification before cutover.
+
 ## Security model
 
 Preserve these trust boundaries:
