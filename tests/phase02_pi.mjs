@@ -1,6 +1,7 @@
 // Offline, synthetic-credential SDK/provider checks. PHASE02_TEST_BUILD must be a separately
 // compiled test-entry.ts bundle with fixture capability, never the shipped package.
 import assert from 'node:assert/strict';
+import { isDeepStrictEqual } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -769,7 +770,7 @@ await check('pinned Pi classifier admits only closed gateway operational failure
   assert.equal(isRetryableAssistantError(message),false);assert(!JSON.stringify(message).includes('PRIVATE_PROMPT'));
  }
 });
-async function sdkSetup(name, plan, tools, compaction=false, qualified=true, restoreTools=false, retry={baseDelayMs:1,maxAgentDelayMs:8}, extraExtensions=[]) {
+async function sdkSetup(name, plan, tools, compaction=false, qualified=true, restoreTools=false, retry={baseDelayMs:1,maxAgentDelayMs:8}, extraExtensions=[], toolHook=async()=>{}) {
  const s=await setup(plan,qualified);let toolRuns=0,provider,textOnlyCommand;const notices=[],compactions=[];
  // Keep native physical-model lookup and the selected host model consistent.
  const models=s.client.models;s.client.models=async()=> (await models()).map(model=>({...model,context_tokens:'64000'}));
@@ -788,7 +789,7 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  // tested gateway context budget; the fake ReferenceClient has no tokenizer.
  const selected={...s.selected,contextWindow:64000};
  const {session}=await coding.createAgentSession({cwd,agentDir:cwd,modelRuntime:runtime,model:selected,resourceLoader:loader,settingsManager:settings,
-  thinkingLevel:'off',sessionManager:coding.SessionManager.inMemory(cwd),tools:tools?['echo']:[],customTools:[{...tool,label:'Echo',execute:async()=>{toolRuns++;return {content:[{type:'text',text:'ok'}],details:undefined};}}]});
+  thinkingLevel:'off',sessionManager:coding.SessionManager.inMemory(cwd),tools:tools?['echo']:[],customTools:[{...tool,label:'Echo',execute:async(...args)=>{toolRuns++;await toolHook(...args);return {content:[{type:'text',text:'ok'}],details:undefined};}}]});
  await session.bindExtensions({mode:'print'});
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
  return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
@@ -1051,6 +1052,100 @@ await check('an earlier nested auth request on the active signal consumes the ca
   await f.session.prompt('Synthetic next explicit');
   assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
  } finally {f.session.dispose();}
+});
+// Qualification only: these probes record a BLOCKER, not deployment-recovery
+// permission. Pi is unmodified; only the synthetic provider instance is observed.
+// The fixture's `nested` label is test scheduling, never a provider capability.
+for(const [hook,round] of [
+  ['message_start',0],['turn_start',0],['turn_start',1],
+  ['context',0],['context',1],['context_with_system',0],['context_with_system',1],
+  ['before_provider_request',0],['before_provider_request',1],['tool_execute',0],
+]) {
+ await check('permission qualification BLOCKED: same-signal '+hook+' round '+round,async()=>{
+  let f,preparedMessages,nested=false,injected=false,nestedResult,hookFailure=false,turn=-1,starts=0,ends=0,hookCalls=0;
+  const requests=[],auth=[];
+  const inject=async(event,ctx,toolSignal)=>{
+   if(injected)return;
+   injected=true;hookCalls++;nested=true;
+   try {
+    // Use supported transcript projection, not transcript-text matching or IDs.
+    // During execution, reuse the real preceding request captured by a
+    // supported hook; an unfinished tool batch is not a valid model input.
+    const messages=hook==='tool_execute'?preparedMessages:hook==='context_with_system'?event.messages:
+     hook==='message_start'?[...f.session.messages,event.message]:f.session.messages;
+    // The first turn_start precedes user-message delivery; it is a signal-only
+    // control. Later boundaries use the actual native transcript projection.
+    const transcript=hook==='turn_start'&&round===0?context(true):
+     ai.normalizeContext({messages:coding.convertToLlm(messages)});
+    const signal=toolSignal??ctx.signal;
+    if(!(signal instanceof AbortSignal)||signal!==ctx.signal)throw new Error('qualification_signal_mismatch');
+    nestedResult=await ctx.modelRegistry.streamSimple(ctx.model,transcript,{signal}).result();
+   } catch {hookFailure=true;} finally {nested=false;}
+  };
+  const extensions=[pi=>{
+   pi.on('context_with_system',event=>{preparedMessages=structuredClone(event.messages);});
+   pi.on('agent_start',()=>{starts++;});
+   pi.on('turn_end',()=>{ends++;});
+   pi.on('turn_start',async(event,ctx)=>{turn++;if(hook==='turn_start'&&turn===round)await inject(event,ctx);});
+   if(!['turn_start','tool_execute'].includes(hook))pi.on(hook,async(event,ctx)=>{
+    if(turn===round&&(hook!=='message_start'||event.message.role==='user'))await inject(event,ctx);
+   });
+  }];
+  const beforeInitial=round===0&&!['before_provider_request','tool_execute'].includes(hook);
+  f=await sdkSetup('sdk-permission-'+hook+'-'+round,
+   beforeInitial?['stop','tool_calls','stop']:['tool_calls','stop','stop'],true,false,true,false,{enabled:false},extensions,
+   async(_id,_params,signal,_update,ctx)=>{if(hook==='tool_execute')await inject(undefined,ctx,signal);});
+  const resolve=f.provider.auth.apiKey.resolve,stream=f.provider.streamSimple.bind(f.provider);
+  f.provider.auth.apiKey.resolve=input=>{auth.push({nested,input});return resolve(input);};
+  f.provider.streamSimple=(model,transcript,options)=>{
+   requests.push({nested,model,transcript:structuredClone(transcript),signal:options.signal});
+   return stream(model,transcript,options);
+  };
+  try {
+   await f.session.prompt('Synthetic permission qualification');
+   assert(!hookFailure,'qualification hook failed');assert(injected);assert.equal(hookCalls,1);
+   assert.equal(nestedResult?.stopReason,'stop');assert.equal(f.session.messages.at(-1).stopReason,'stop');
+   assert.equal(starts,1);assert.equal(ends,2);assert.equal(turn,1);
+   assert.equal(f.toolRuns(),1);assert.equal(f.s.sends(),3);
+   assert.equal(requests.length,3);assert.equal(auth.length,3);
+   const nestedRequest=requests.find(request=>request.nested),native=requests.filter(request=>!request.nested);
+   assert.equal(native.length,2);
+   assert(requests.every(request=>request.signal===native[0].signal),'signal does not identify native requests');
+   assert(auth.every(request=>request.input.signal===native[0].signal),'auth shares the active signal');
+   // Full auth inputs, including context and stored synthetic credential, are
+   // identical. No extra native-origin field arrives at this boundary.
+   assert(auth.every(request=>isDeepStrictEqual(request.input,auth[0].input)),'auth boundary changed; requalify provenance');
+   assert(native[1].transcript.messages.some(message=>message.role==='toolResult'));
+   if(!(hook==='turn_start'&&round===0)) {
+    assert(isDeepStrictEqual(nestedRequest.transcript,native[round].transcript),'matching transcript probe changed');
+    assert(isDeepStrictEqual(nestedRequest.model,native[round].model),'matching model probe changed');
+   }
+   if(round===1)assert(nestedRequest.transcript.messages.some(message=>message.role==='toolResult'),
+    'preceding tool result is also available to nested work');
+  } finally {f.session.dispose();}
+ });
+}
+await check('permission qualification BLOCKED: post-confirmation nested auth can consume existing expiry renewal',async()=>{
+ for(const hook of ['message_start','context_with_system']) {
+  let f,injected=false,nested=false,renewedByNested=false,hookFailure=false,result;
+  f=await renewalFixture('post-confirmation-'+hook,['stop','stop'],[pi=>pi.on(hook,async(event,ctx)=>{
+   if(injected||(hook==='message_start'&&event.message.role!=='user'))return;
+   injected=true;nested=true;
+   try {
+    const messages=hook==='message_start'?[...f.session.messages,event.message]:event.messages;
+    result=await ctx.modelRegistry.streamSimple(ctx.model,
+     ai.normalizeContext({messages:coding.convertToLlm(messages)}),{signal:ctx.signal}).result();
+   } catch {hookFailure=true;} finally {nested=false;}
+  })]);
+  f.expire();f.verifyHook(async()=>{renewedByNested=nested;});
+  try {
+   await f.session.prompt('Synthetic post-confirmation qualification');
+   assert(!hookFailure);assert(injected);assert(renewedByNested,'pinned permission behavior changed; requalify');
+   assert.equal(result?.stopReason,'stop');assert.deepEqual(f.trace.verified,['A','B']);
+   assert.equal(f.trace.credentials.length,2);assert.equal(f.s.sends(),2);
+   assert.equal(f.session.messages.at(-1).stopReason,'stop');
+  } finally {f.session.dispose();}
+ }
 });
 await check('late public verification after logout or session replacement cannot publish or send a credential',async()=>{
  for(const action of ['logout','session']) {
