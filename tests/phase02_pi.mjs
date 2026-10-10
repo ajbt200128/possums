@@ -331,14 +331,15 @@ async function catalogFixture() {
 }
 await check('prepared invocation freezes hooks and payload across setup and verified-client replacement',async()=>{
  const client=await catalogFixture(), second=await catalogFixture();
- await client.login(recoveryKey);await second.login(recoveryKey);
+ second.channel.control=async()=>({token:'z'.repeat(43),token_type:'Bearer',expires_in:43200});
+ await client.login(recoveryKey);await second.login(envKey);
  const messages=[{role:'user',content:'Synthetic input'}], calls=[], deltas=[];
  let hooks=0, first=true;
  client.channel.models=async()=>{calls.push('catalog1');if(first){first=false;throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});}return {object:'list',data:[entry()]};};
- second.channel.models=async()=>{calls.push('catalog2');return {object:'list',data:[entry()]};};
- second.channel.control=async path=>{calls.push(path);return {submission:'s'.repeat(43)};};
- second.channel.chat=async (payload,_bearer,options)=>{
-  calls.push('chat');assert.equal(payload.messages[0].content,'Frozen synthetic');
+ second.channel.models=async bearer=>{assert.equal(bearer,'z'.repeat(43));calls.push('catalog2');return {object:'list',data:[entry()]};};
+ second.channel.control=async (path,_payload,bearer)=>{assert.equal(bearer,'z'.repeat(43));calls.push(path);return {submission:'s'.repeat(43)};};
+ second.channel.chat=async (payload,bearer,options)=>{
+  assert.equal(bearer,'z'.repeat(43));calls.push('chat');assert.equal(payload.messages[0].content,'Frozen synthetic');
   await options.onResponse({status:200,contentType:'text/event-stream'});
   const frame=value=>'data: '+JSON.stringify(value)+'\n\n';
   const text=frame(event({role:'assistant'}))+frame(event({content:'safe'}))+
@@ -359,6 +360,34 @@ await check('prepared invocation freezes hooks and payload across setup and veri
  assert.equal(calls.length,4);
  assert.equal((await second.chat('synthetic',[{role:'user',content:'Frozen synthetic'}],()=>{},false,{onPayload:()=>{hooks++;}})).finish,'stop');
  assert.equal(hooks,2);assert.deepEqual(calls.slice(4),['catalog2','/v1/submissions','chat']);
+});
+await check('ordinary chat retains original bearer when payload hook switches or overlaps login',async()=>{
+ for(const switchInsideHook of [true,false]){
+  const client=await catalogFixture(),trace=[],entered=deferred(),release=deferred();let sessions=0;
+  client.channel.control=async (path,_payload,bearer)=>{
+   if(path==='/v1/sessions')return {token:(++sessions===1?'a':'z').repeat(43),token_type:'Bearer',expires_in:43200};
+   trace.push(['submission',bearer]);return {submission:'s'.repeat(43)};
+  };
+  await client.login(recoveryKey);
+  client.channel.models=async bearer=>{trace.push(['catalog',bearer]);return {object:'list',data:[entry()]};};
+  client.channel.chat=async (_payload,bearer)=>{
+   trace.push(['chat',bearer]);
+   const frame=value=>'data: '+JSON.stringify(value)+'\n\n';
+   const text=frame(event({role:'assistant'}))+frame({object:'chat.completion.chunk',model:'synthetic',choices:[{index:0,delta:{},finish_reason:'stop'}]})+
+    frame({object:'chat.completion.chunk',model:'synthetic',choices:[],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2},
+     possums:{outcome:'settled',charged_microunits:'2',refunded_microunits:'50'}})+'data: [DONE]\n\n';
+   return new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(text));controller.close();}});
+  };
+  const pending=client.chat('synthetic',[{role:'user',content:'Synthetic input'}],()=>{},false,{onPayload:async()=>{
+   if(switchInsideHook)await client.login(envKey);
+   else {entered.resolve();await release.promise;}
+  }});
+  if(!switchInsideHook){await entered.promise;assert.deepEqual(trace,[]);await client.login(envKey);release.resolve();}
+  try {
+   assert.equal((await pending).finish,'stop');assert.equal(sessions,2);
+   assert.deepEqual(trace,[['catalog','a'.repeat(43)],['submission','a'.repeat(43)],['chat','a'.repeat(43)]]);
+  }finally{release.resolve();}
+ }
 });
 await check('prepared setup failures, abort and concurrent use never double dispatch',async()=>{
  const client=await catalogFixture();await client.login(recoveryKey);

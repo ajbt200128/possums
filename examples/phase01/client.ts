@@ -461,8 +461,9 @@ export class ReferenceClient {
   }
   async chat(model: string, messages: Chat['messages'], onDelta: (text: string) => void, newConversation = false,
     options: ChatOptions = {}): Promise<Receipt> {
+    const bearer = this.#bearer;
     const prepared = await this.prepareChat(model, messages, onDelta, newConversation, options);
-    try { return await this.chatPrepared(prepared); }
+    try { return await this.#chatPrepared(prepared, bearer); }
     finally { prepared.close(); }
   }
   async prepareChat(model: string, messages: Chat['messages'], onDelta: (text: string) => void, newConversation = false,
@@ -502,15 +503,18 @@ export class ReferenceClient {
     } finally { op.close(); }
   }
   async chatPrepared(prepared: PreparedChat): Promise<Receipt> {
+    return this.#chatPrepared(prepared, this.#bearer);
+  }
+  async #chatPrepared(prepared: PreparedChat, bearer: string | undefined): Promise<Receipt> {
     // Acquire synchronously, before any await. The state is module-owned rather
     // than a mutable caller-supplied boolean, including across client rotations.
     const state = preparedStates.get(prepared);
     if (!state || state.closed || state.dispatched || state.busy) throw new DiagnosticFailure('request', 'schema');
     state.busy = true;
     let op: Operation;
-    try { requireThat(this.#bearer); op = new Operation(null, state.options!.signal); }
+    try { requireThat(bearer); op = new Operation(null, state.options!.signal); }
     catch { state.busy = false; throw new DiagnosticFailure('request', 'schema'); }
-    const bearer = this.#bearer, { payload, options: opts, onDelta, model, newConversation } = state;
+    const { payload, options: opts, onDelta, model, newConversation } = state;
     let issued = false, hookThrown = false, stage: FailureStage = 'request', constraint: FailureConstraint = 'encoding';
     let status: number | undefined;
     try {
