@@ -43,6 +43,15 @@ Startup and model refresh show a transient, content-free warning when public ver
 - `possums_catalog_body_invalid` / `possums_catalog_validation_failed` / `possums_catalog_conversion_failed`: response reading/JSON decoding, catalog schema/quote validation, or conversion to Pi metadata failed, respectively. Refresh models and share only the closed diagnostic if it persists.
 - `possums_catalog_unavailable`: fallback for an unexpected catalog-stage failure. A previously authenticated session is not proof that it remains valid now. None of these catalog errors establishes an inference charge or refund.
 
+**Renewal status:** the approved goal is indefinite conversation continuity with
+fresh verification/authentication at an explicit submission boundary—not a
+12-hour conversation lifetime. Automatic expiry renewal is **not implemented**:
+actual Pi 1.0.4 testing found that Stop does not cancel an awaited
+`before_agent_start` hook. The current fail-closed trust behavior below remains;
+expiry does not erase the transcript. See the [renewal blocker and required
+boundary decision](../../docs/pi-renewal-boundary-blocker.md). No expired
+certificate or administrative approval is extended.
+
 After the initial installed extension replacement, fully restart Pi: `/reload` alone did not activate an earlier replacement in the operator's session. Subsequent compatible gateway updates use `/new` in the running Pi process. Public trust is fixed within each session, including failures; login/logout/account changes and catalog refresh never silently select a new release. Local checks reject requests after the published trust deadline: at most **12 hours**, capped by the serving certificate expiry. This is a local validity bound, not quote freshness, immediate revocation, anti-rollback or newestness. Explicit compiled approvals keep their administrative expiry; incompatible verifier/CVM changes still require a client update.
 
 Version wording comes from the verified context, not a hard-coded latest-version message or remote advertisement. Discovery uses public GitHub metadata and an exact artifact download with one bounded GitHub-to-asset-CDN redirect; authenticity comes from the existing Sigstore and hardware checks, not HTTPS/download metadata alone. Ordinary HTTPS still protects headers/bodyless GETs; EHBP binds encrypted bodies/replies to the endorsed HPKE key, without Node TLS socket pinning. These connection attempts send no inference and verify the channel before prompting for or transmitting a recovery credential. They do not establish earlier billing. Notifications/status do not log, export telemetry or append session entries; native Pi error handling and persistence remain separate. No automatic code installer or updater is introduced.

@@ -77,6 +77,9 @@ PATH=/nix/store/89rqzskr6m71aqpxrglhyifrszxf3a54-rust-minimal-1.88.0/bin:$PATH \
 ```
 
 Results: **302 passed, three live tests ignored**; **10 vendor TLS tests passed**.
+`cargo clippy --offline --all-targets -- -D warnings` also passed with the same
+Nix toolchain; the existing vendored `CheckpointSignature::encode` dead-code
+warning remains outside the root package.
 The root `cargo test -p tinfoil` shortcut cannot run the non-workspace package's
 dev-dependencies, so the standalone manifest command above was used.
 
@@ -127,3 +130,8 @@ than an absolute connection-age timeout; metric vocabulary and release gates are
 unchanged. These source tests are not renewed live privacy, billing, retention,
 attestation or platform-limit evidence. Existing legacy-v2 freshness and native
 v3 CLI platform-signer limitations remain unresolved.
+
+Trust/auth renewal is a separate **blocked** packet, not a side effect of these
+timers. See the [actual Pi 1.0.4 cancellation-boundary evidence](pi-renewal-boundary-blocker.md).
+No conversation lifetime is intentionally added; indefinite continuity through
+expiry is still unimplemented and must not be claimed from these checks.

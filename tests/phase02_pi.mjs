@@ -767,7 +767,7 @@ await check('pinned Pi classifier admits only closed gateway operational failure
   assert.equal(isRetryableAssistantError(message),false);assert(!JSON.stringify(message).includes('PRIVATE_PROMPT'));
  }
 });
-async function sdkSetup(name, plan, tools, compaction=false, qualified=true, restoreTools=false, retry={baseDelayMs:1,maxAgentDelayMs:8}) {
+async function sdkSetup(name, plan, tools, compaction=false, qualified=true, restoreTools=false, retry={baseDelayMs:1,maxAgentDelayMs:8}, extraExtensions=[]) {
  const s=await setup(plan,qualified);let toolRuns=0,provider,textOnlyCommand;const notices=[],compactions=[];
  // Keep native physical-model lookup and the selected host model consistent.
  const models=s.client.models;s.client.models=async()=> (await models()).map(model=>({...model,context_tokens:'64000'}));
@@ -777,7 +777,7 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  const runtime=await coding.ModelRuntime.create({credentials,modelsStore:new ai.InMemoryModelsStore(),modelsPath:null,allowModelNetwork:false,refreshOnCreate:false});
  const cwd=path.join(root,name);fs.mkdirSync(cwd,{recursive:true});
  const loader=new coding.DefaultResourceLoader({cwd,agentDir:cwd,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,systemPrompt:'Synthetic test',
-  extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;if(name==='possums-reconcile'){const original=command;command={...original,handler:(args,ctx)=>original.handler(args,{...ctx,hasUI:true,ui:{...ctx.ui,notify:text=>notices.push(text)}})};}pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[])]});
+  extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;if(name==='possums-reconcile'){const original=command;command={...original,handler:(args,ctx)=>original.handler(args,{...ctx,hasUI:true,ui:{...ctx.ui,notify:text=>notices.push(text)}})};}pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[]),...extraExtensions]});
  await loader.reload();assert.deepEqual(loader.getExtensions().errors,[]);
  runtime.registerNativeProvider(provider);
  await runtime.refresh({providers:['possums'],allowNetwork:false});
@@ -791,6 +791,21 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
  return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
 }
+await check('renewal blocker: Pi 1.0.4 Stop does not cancel an awaited before_agent_start hook',async()=>{
+ const entered=deferred(),release=deferred();let signal,idle;
+ const f=await sdkSetup('sdk-renewal-boundary-probe',['stop'],false,false,true,false,
+  {enabled:false},[pi=>pi.on('before_agent_start',async(_event,ctx)=>{
+   signal=ctx.signal;idle=ctx.isIdle();entered.resolve();await release.promise;
+  })]);
+ try {
+  const pending=f.session.prompt('Synthetic boundary probe');await entered.promise;
+  assert.equal(signal,undefined);assert.equal(idle,true);assert.equal(f.s.sends(),0);
+  await f.session.abort();assert.equal(f.s.sends(),0);
+  release.resolve();await pending;
+  // This is pinned runtime behavior, NOT permission for renewal to revive work.
+  assert.equal(f.s.sends(),1);
+ } finally {release.resolve();f.session.dispose();}
+});
 function balancePlan(client, snapshots) {
  let reads=0;client.balance=async()=>{assert(reads<snapshots.length,'unexpected balance read');return snapshots[reads++];};return ()=>reads;
 }

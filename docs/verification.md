@@ -1573,3 +1573,11 @@ Applicable [data handling](../PRIVACY.md#data-handling-boundaries),
 [telemetry restrictions](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data)
 and [synthetic-test policy](../PRIVACY.md#synthetic-testing-exception) are unchanged;
 no new telemetry families or request-level diagnostics were introduced.
+
+Trust/auth expiry renewal was stopped before lifecycle integration. The actual
+Pi 1.0.4 SDK [boundary reproducer](pi-renewal-boundary-blocker.md) demonstrates
+that Stop during an awaited `before_agent_start` hook does not cancel the pending
+prompt. All 71 offline Pi cases pass, including that blocker probe. Automatic
+renewal, known-auth-expiry tracking and their new race tests remain unimplemented;
+existing trust/certificate/compiled-approval checks are unchanged. A cancellable
+explicit-submission boundary or deliberately reconnect-only UX needs agreement.
