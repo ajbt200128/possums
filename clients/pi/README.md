@@ -106,6 +106,14 @@ For example: `[possums_stream_usage_missing] Stage: stream; constraint: usage_mi
 
 Pi 1.0.4 preserves authored authentication causes and assistant errors in the offline SDK fixtures. Its retry-backoff abort does drop the final `errorMessage`; the prior retry callback/session assistant still retains the diagnostic. T3's inspected source forwards provider errors/retry messages, but installed T3 rendering and extension-load/process-loss paths are external, unqualified boundaries. No whole-app “never generic” guarantee is claimed. No diagnostic logger, telemetry export or support bundler is added. Connection/status/compaction notices are transient; ordinary assistant `errorMessage` persistence still follows native Pi/T3 history settings, which this patch does not change. See [scoped verification and failure map](../../docs/pi-diagnostic-verification.md).
 
+### Last-known selection metadata (uninstalled source candidate)
+
+After successful verified login/catalog validation, this candidate stores bounded public model metadata in Pi's existing `models-store.json`. When startup fails, a previously known ID remains selectable with the name **last-known metadata · prices/limits not current · inference unavailable**. Historical numeric costs/limits are not current quotes or authorization; only a current verified connection and live authenticated catalog can authorize a submission. Catalog contents remain outside the gateway measurement. No IDs are fabricated and no model is substituted.
+
+Selecting that known model lets Pi's native auth/assistant-error path report the current closed setup failure rather than a secondary `Model not found`. Reporting/status sends no inference and does not repeat failed setup. Successful recovery replaces discovery with the live catalog; a removed selected ID fails closed. First use, missing metadata or deleted credentials can still fail before the provider reports. Ordinary assistant errors may enter native Pi/T3 saved history; no diagnostic journal, telemetry or new credential store is added.
+
+Actual offline SDK/RPC discovery tests and SDK regression groups passed on Pi **1.0.4 and 1.1.0**; the production build remains pinned to **1.0.4**. This is not installed-client activation, T3 UI, deployed trust, live catalog or billing qualification. See [baseline reproduction, exact evidence and limits](../../docs/possums-only-diagnostics-verification.md). This source candidate has not been installed.
+
 ## Timeout alignment (client installed; gateway pending)
 
 The client removes the five-minute **total** chat/stream timer at every

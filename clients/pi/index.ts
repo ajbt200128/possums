@@ -25,7 +25,7 @@ async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
 export default function possums(pi: ExtensionAPI): void {
   pi.registerFlag('possums-manifest', { type: 'string', description: 'Independently hash-approved Possums release manifest (public file, never a credential)' });
   let ui: ExtensionContext['ui'] | undefined;
-  let lastFailure: ConnectionFailure | undefined;
+  let sessionEpoch = 0;
   const notifiedCodes = new Set<ConnectionFailure['code']>();
   const provider = new PossumsProvider(async signal => {
     const pinnedManifest = pi.getFlag('possums-manifest');
@@ -33,7 +33,6 @@ export default function possums(pi: ExtensionAPI): void {
       ? connectPublished(signal)
       : connect(await manifest(pinnedManifest), signal);
   }, failure => {
-    lastFailure = failure;
     if (!failure) { notifiedCodes.clear(); return; }
     if (!ui || notifiedCodes.has(failure.code)) return;
     notifiedCodes.add(failure.code);
@@ -41,23 +40,27 @@ export default function possums(pi: ExtensionAPI): void {
   });
   pi.registerProvider(provider);
   pi.on('session_start', async (_event, ctx) => {
+    const epoch = ++sessionEpoch;
+    notifiedCodes.clear();
     ui = ctx.hasUI ? ctx.ui : undefined;
     provider.newSession();
     try { await provider.verifySession(); }
     catch { return; } // Already reported as a closed, transient connection diagnostic.
+    if (epoch !== sessionEpoch) return;
     try { await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], allowNetwork: true }); }
     catch (error) {
-      const failure = catalogConnectionFailure(error);
-      lastFailure = failure;
+      if (epoch !== sessionEpoch) return;
+      const failure = provider.currentFailure ?? catalogConnectionFailure(error);
       try { ui?.notify(failure.message, 'warning'); } catch { /* Transient UI only. */ }
     }
   });
-  pi.on('session_shutdown', () => { ui = undefined; provider.shutdown(); });
+  pi.on('session_shutdown', () => { sessionEpoch++; ui = undefined; provider.shutdown(); });
   pi.registerCommand('possums-status', {
     description: 'Show the last safe connection failure or session-pinned release (offline)',
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return;
-      try { ctx.ui.notify(lastFailure?.message ?? approvalSummary(provider.release), lastFailure ? 'warning' : 'info'); }
+      const failure = provider.currentFailure;
+      try { ctx.ui.notify(failure?.message ?? approvalSummary(provider.release), failure ? 'warning' : 'info'); }
       catch { /* Transient UI only. */ }
     },
   });

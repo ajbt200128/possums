@@ -96,7 +96,7 @@ export class ConnectionFailure extends Error {
     const evidence = catalog instanceof EvidenceObservation
       ? ` Stage: ${catalog.stage} (${evidenceStages[catalog.stage]}); constraint: ${catalog.constraint} (${evidenceConstraints[catalog.constraint]}).${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}${catalog.constraint === 'rate_limited' ? ' Wait before starting a new Pi session; re-entering credentials will not fix this.' : ''}` :
       ` Stage: ${catalog instanceof CatalogFailure ? 'catalog' : 'connection'}; constraint: ${catalog instanceof CatalogFailure ? catalog.stage : code}.`;
-    super(`${catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} No inference request was sent by this connection attempt. Cached models do not authorize inference.`);
+    super(`${catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} No inference request was sent by this connection attempt. Cached models do not authorize inference. Prior billing outcomes are not established by this check.`);
     Object.freeze(this);
   }
 }
