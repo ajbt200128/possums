@@ -97,6 +97,7 @@ async function setup(plan, tools = true) {
     if (mode === 'uncertain') throw new m.ChannelError('uncertain');
     if (mode === 'refund') throw await terminalGatewayError('generation_failed', 'stream_idle_timeout', 'refunded');
     if (mode === 'unknown_bill') throw await terminalGatewayError('unavailable', 'inference_unavailable', 'unknown');
+    if (mode === 'quiescing') throw new m.GatewayError('service_quiescing', undefined, 'unknown', 503);
     if (mode && typeof mode === 'object') throw await terminalGatewayError(mode.code, mode.detail, mode.billing ?? 'unknown');
     if (mode === 'sdk_decode') throw new m.GatewayError('generation_failed', 'sdk_stream_decode_failed', 'unknown');
     if (mode === 'hostile') throw new Error('possums_secret_key_PRIVATE_PROMPT');
@@ -328,6 +329,53 @@ async function catalogFixture() {
  channel.control=async()=>({token:'b'.repeat(43),token_type:'Bearer',expires_in:43200});
  return new m.ReferenceClient(channel);
 }
+await check('quiescing HTTP 503 reaches catalog and challenge presentations only after exact bounded EOF',async()=>{
+ const wire={error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}};
+ const key=new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
+ const channel=await m.Channel.fixture('https://localhost:18443',key,'07'.repeat(32));
+ const originalFetch=globalThis.fetch;let calls=[];
+ try {
+  globalThis.fetch=async request=>{calls.push(new URL(request.url).pathname);return Response.json(wire,{status:503});};
+  const client=new m.ReferenceClient(channel);
+  await assert.rejects(client.login(recoveryKey),error=>{
+   assert(error instanceof m.GatewayError);assert.equal(error.reason,'service_quiescing');assert.equal(error.status,503);
+   assert.equal(error.billing,'unknown');assert(!error.message.includes(hostileConnection));
+   const shown=m.connectionFailure(error);assertConnectionFailure(shown,'service_quiescing');
+   assert.match(shown.message,/Stage: challenge; constraint: http.*Gateway stage: admission; constraint: service_quiescing.*Observed HTTP status: 503/);
+   return true;
+  });
+  assert.deepEqual(calls,['/v1/auth/challenge']);
+  const catalog=await catalogFixture();await catalog.login(recoveryKey);calls=[];
+  await assert.rejects(catalog.models(),error=>{
+   assert(error instanceof m.CatalogFailure);assert.equal(error.reason,'service_quiescing');assert.equal(error.status,503);
+   const shown=m.catalogConnectionFailure(error);assertConnectionFailure(shown,'service_quiescing');
+   assert.match(shown.message,/Stage: catalog; constraint: http.*Gateway stage: admission; constraint: service_quiescing/);
+   assert.match(shown.message,/Observed HTTP status: 503/);assert(!shown.message.includes('refunded'));
+   return true;
+  });
+  assert.deepEqual(calls,['/v1/models']);
+  for(const response of [
+   new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(JSON.stringify(wire)));controller.error(new Error(hostileConnection));}}),{status:503}),
+   Response.json({error:{...wire.error,stage:'transport'}},{status:503}),
+   Response.json(wire,{status:502}),
+   Response.json({error:{...wire.error,extra:hostileConnection}},{status:503}),
+  ]) {
+   globalThis.fetch=async request=>{calls.push(new URL(request.url).pathname);return response;};
+   await assert.rejects(catalog.models(),error=>error instanceof m.CatalogFailure && error.reason===undefined && !error.message.includes(hostileConnection));
+  }
+  assert.equal(calls.length,5,'one catalog GET per deliberate attempt, no diagnostic replay');
+  globalThis.fetch=async request=>{calls.push(new URL(request.url).pathname);return Response.json(wire,{status:503});};
+  // Plaintext HTTP bodies cannot be promoted through the encrypted EHBP boundary.
+  calls=[];
+  await assert.rejects(channel.control('/v1/sessions',{challenge:'c'.repeat(43),credential:'c'.repeat(43)}),error=>
+   error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
+  await assert.rejects(channel.balance('b'.repeat(43)),error=>
+   error instanceof m.DiagnosticFailure && error.stage==='hook' && error.constraint==='unexpected' && error.status===503);
+  await assert.rejects(channel.chat({model:'synthetic',stream:true,submission:'s'.repeat(43),messages:[{role:'user',content:'synthetic'}]},'b'.repeat(43)),error=>
+   error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
+  assert.deepEqual(calls,['/v1/sessions','/v1/balance','/v1/chat/completions']);
+ } finally {globalThis.fetch=originalFetch;}
+});
 await check('catalog diagnostics preserve bounded HTTP rejection details without hostile text or billing claims',async()=>{
  const originalFetch=globalThis.fetch,client=await catalogFixture();let calls=0;
  await client.login(recoveryKey);
@@ -409,6 +457,41 @@ await check('native catalog HTTP rejection reaches transient status with observe
   globalThis.fetch=async request=>{assert.equal(request.method,'GET');calls++;return Response.json({object:'list',data:[entry(true)]});};
   await registry.refresh({providers:['possums'],allowNetwork:true});await extension.commands.get('possums-status').handler('',ctx);
   assert.equal(notices.at(-1),m.approvalSummary());assert.equal(extension.provider.getModels().length,1);
+ } finally {globalThis.fetch=originalFetch;}
+});
+await check('native challenge quiescing warning preserves admission without catalog or inference',async()=>{
+ const originalFetch=globalThis.fetch,key=new Uint8Array([0,0,32,...Array(32).fill(7),0,4,0,1,0,2]);
+ const channel=await m.Channel.fixture('https://localhost:18443',key,'07'.repeat(32));
+ const extension=fixtureExtension(async()=>new m.ReferenceClient(channel));extension.provider.newSession();
+ const routes=[];
+ try {
+  globalThis.fetch=async request=>{routes.push(new URL(request.url).pathname);return Response.json({error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}},{status:503});};
+  await assert.rejects(extension.provider.auth.apiKey.login(interaction()),error=>{
+   assertConnectionFailure(error,'service_quiescing');assert.match(error.message,/Stage: challenge; constraint: http.*Observed HTTP status: 503/);return true;
+  });
+  assert.deepEqual(routes,['/v1/auth/challenge']);
+  assert.deepEqual(extension.provider.getModels(),[]);
+ } finally {globalThis.fetch=originalFetch;}
+});
+await check('native quiescing catalog warning is offline on status and sends no inference',async()=>{
+ const originalFetch=globalThis.fetch,client=await catalogFixture(),routes=[];
+ const extension=fixtureExtension(async()=>client),credentials=new ai.InMemoryCredentialStore();
+ await credentials.modify('possums',async()=>({type:'api_key',key:recoveryKey}));
+ const runtime=await nativeRuntime(extension.provider,credentials),registry=new coding.ModelRegistry(runtime),notices=[];
+ const ctx={hasUI:true,ui:{notify:text=>notices.push(text)},modelRegistry:registry};
+ try {
+  globalThis.fetch=async request=>{
+   routes.push(new URL(request.url).pathname);
+   return Response.json({error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}},{status:503});
+  };
+  await extension.handlers.get('session_start')({},ctx);
+  assert.equal(notices.length,1);assert.match(notices[0],/possums_service_quiescing/);
+  assert.match(notices[0],/Gateway stage: admission; constraint: service_quiescing/);
+  assert(!notices[0].includes(hostileConnection));assert(!notices[0].includes('refunded'));
+  const before=routes.length;
+  await extension.commands.get('possums-status').handler('',ctx);
+  assert.equal(routes.length,before);assert(routes.every(route=>route==='/v1/models'));
+  assert.deepEqual(extension.provider.getModels(),[]);
  } finally {globalThis.fetch=originalFetch;}
 });
 await check('native later catalog failures clear usable models, deduplicate, and clear status on accepted recovery',async()=>{
@@ -1426,6 +1509,19 @@ await check('actual Pi SDK accepts steering during held text and tool responses,
  }
 });
 const rawAssistants = session => session.sessionManager.getEntries().filter(entry=>entry.type==='message'&&entry.message.role==='assistant').map(entry=>entry.message);
+await check('Pi presents quiescing without refund or native retry',async()=>{
+ const f=await sdkSetup('sdk-quiescing',['quiescing','stop'],false);
+ const events=[];const unsubscribe=f.session.subscribe(event=>{if(event.type.startsWith('auto_retry_'))events.push(event);});
+ try {
+  await f.session.prompt('Synthetic quiescing request');
+  assert.equal(f.s.sends(),1);assert.deepEqual(events,[]);
+  const message=f.session.messages.at(-1);
+  assert.match(message.errorMessage,/\[service_quiescing\].*Stage: admission; constraint: service_quiescing.*Charge unknown.*Not replayed/);
+  assert(!message.errorMessage.includes('PRIVATE_PROMPT'));
+  assert(!message.errorMessage.includes('Reservation refunded'));
+  assert.equal(message.diagnostics?.some(d=>d.type==='possums_reservation_refunded')??false,false);
+ } finally {unsubscribe();f.session.dispose();}
+});
 await check('actual Pi SDK retries validated transient failures with native events and retains raw diagnostics',async()=>{
  for(const mode of ['refund','unknown_bill']) {
   const f=await sdkSetup('sdk-retry-'+mode,[mode,'stop'],false);const events=[];

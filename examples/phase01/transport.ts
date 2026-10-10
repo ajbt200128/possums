@@ -1,5 +1,5 @@
 import { Identity, type RequestContext } from 'ehbp';
-import { CatalogFailure } from './client.js';
+import { CatalogFailure, GatewayError, gatewayError } from './client.js';
 import { PUBLISHER, qualifyApi, qualifyPublished, requireApiApproval, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';
 import { LIMITS, ChannelError, DiagnosticFailure, OperationFailure, type FailureConstraint, Operation, cleanup, collect, parseJSON, requireThat, serialize } from './limits.js';
 import { admitInvocation, fields, type Chat } from './tools.js';
@@ -185,10 +185,15 @@ export class Channel {
       const req = request(this.#origin + path, op, 'GET', undefined, bearer);
       constraint = 'fetch';
       sent = true; res = await send(req, op, value => { status = value; constraint = 'http'; });
-      if (catalog && !res.ok) {
+      if (!res.ok && (catalog || status === 503)) {
         let value: unknown;
         try { value = parseJSON(await collect(res.body, LIMITS.error, op), LIMITS.error); }
         catch { /* Keep the observed HTTP rejection even if its bounded body fails. */ }
+        if (!catalog && (value as any)?.error?.code === 'service_quiescing') {
+          let failure: GatewayError | undefined;
+          try { failure = gatewayError(value, status); } catch { /* Reject malformed envelopes as ordinary HTTP failures. */ }
+          if (failure) throw failure;
+        }
         throw new CatalogFailure('http', sent && op.controller.signal.aborted ? 'uncertain' : 'rejected', status, value);
       }
       requireThat(res.ok);
@@ -196,7 +201,7 @@ export class Channel {
       return parseJSON(await collect(res.body, cap, op), cap);
     } catch (error) {
       const code = sent && op.controller.signal.aborted ? 'uncertain' : 'rejected';
-      if (error instanceof DiagnosticFailure) throw error;
+      if (error instanceof DiagnosticFailure || error instanceof GatewayError) throw error;
       if (catalog) {
         if (error instanceof CatalogFailure) throw error;
         throw new CatalogFailure(status === undefined ? 'request' : status >= 200 && status < 300 ? 'body' : 'http', code, status);

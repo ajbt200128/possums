@@ -79,7 +79,7 @@ const details = new Set(`inference_unavailable upstream_response_invalid verific
 export function gatewayDetailLabel(detail: string | undefined): string | undefined {
   return detail !== undefined && details.has(detail) ? `[${detail}] ${detail.replaceAll('_', ' ')}` : undefined;
 }
-const gatewayReasons = new Set(['insufficient_credit', 'unauthorized', 'invalid_request', 'account_limit', 'duplicate_request', 'unavailable', 'generation_failed']);
+const gatewayReasons = new Set(['insufficient_credit', 'unauthorized', 'invalid_request', 'account_limit', 'duplicate_request', 'unavailable', 'generation_failed', 'service_quiescing']);
 const claimedRefunds = new WeakSet<GatewayError>();
 const confirmedRefunds = new WeakSet<GatewayError>();
 function gatewayDescription(reason: string, detail: string | undefined, refunded: boolean): string {
@@ -88,12 +88,12 @@ function gatewayDescription(reason: string, detail: string | undefined, refunded
     unauthorized: 'Gateway rejected authentication; use /login to authenticate again.',
     invalid_request: 'Request rejected by gateway.', account_limit: 'Account limit reached.',
     duplicate_request: 'Duplicate submission rejected.', unavailable: 'Gateway unavailable.',
-    generation_failed: 'Generation failed.',
+    generation_failed: 'Generation failed.', service_quiescing: 'Gateway is quiescing; wait for service availability before making a new request.',
   };
   const label = gatewayDetailLabel(detail);
   const known = Object.hasOwn(reasons, reason);
   return `Possums: ${known ? `[${reason}] ${reasons[reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; cause unknown.'}` +
-    (label ? ` ${label}.` : '') + ` Stage: gateway; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (refunded ? ' Reservation refunded. Not replayed.' :
+    (label ? ` ${label}.` : '') + ` Stage: ${reason === 'service_quiescing' ? 'admission' : 'gateway'}; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (refunded ? ' Reservation refunded. Not replayed.' :
       ' Charge unknown. Not replayed. A new request may incur another charge.');
 }
 export class GatewayError extends ChannelError {
@@ -109,11 +109,20 @@ export class GatewayError extends ChannelError {
   }
   get billing(): 'refunded' | 'unknown' { return confirmedRefunds.has(this) ? 'refunded' : 'unknown'; }
 }
-function gatewayError(value: any): GatewayError {
+export function gatewayError(value: any, status?: number): GatewayError {
   keys(value, ['error']);
+  if (value.error?.code === 'service_quiescing') {
+    // The pre-admission wire envelope is distinct from ordinary gateway errors.
+    // Its billing field is not an accounting receipt.
+    keys(value.error, ['code', 'stage', 'constraint', 'billing', 'message']);
+    requireThat(status === 503 && value.error.stage === 'admission' &&
+      value.error.constraint === 'service_quiescing' && value.error.billing === 'not_submitted' &&
+      typeof value.error.message === 'string');
+    return new GatewayError('service_quiescing', undefined, 'unknown', status);
+  }
   fields(value.error, ['code'], ['detail', 'message', 'billing', 'outcome']);
   requireThat(typeof value.error.code === 'string' &&
-    gatewayReasons.has(value.error.code));
+    gatewayReasons.has(value.error.code) && value.error.code !== 'service_quiescing');
   requireThat(value.error.detail === undefined || (typeof value.error.detail === 'string' && details.has(value.error.detail)));
   requireThat(value.error.message === undefined || typeof value.error.message === 'string');
   requireThat(value.error.billing === undefined || value.error.billing === 'refunded' || value.error.billing === 'unknown');
@@ -139,7 +148,7 @@ export class CatalogFailure extends ChannelError {
     if (stage === 'http' && Number.isInteger(status) && status! >= 100 && status! <= 599) {
       this.status = status;
       try {
-        const failure = gatewayError(response);
+        const failure = gatewayError(response, status);
         this.reason = failure.reason; this.detail = failure.detail;
       } catch { /* An unreadable/unknown error body does not erase the HTTP status. */ }
     }
@@ -395,7 +404,7 @@ export class ReferenceClient {
       op.check(); this.#bearer = session.token;
       this.#authExpiresAt = issuedAfter + session.expires_in * 1000;
     } catch (error) {
-      if (error instanceof DiagnosticFailure || error instanceof CatalogFailure) throw error;
+      if (error instanceof DiagnosticFailure || error instanceof CatalogFailure || error instanceof GatewayError) throw error;
       if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint, started ? 'uncertain' : 'rejected');
       throw new DiagnosticFailure(stage, constraint, op.controller.signal.aborted || (error instanceof ChannelError && error.code === 'uncertain') ? 'uncertain' : 'rejected');
     } finally { op.close(); }
