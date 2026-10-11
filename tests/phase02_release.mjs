@@ -18,7 +18,7 @@ const { build } = await import(pathToFileURL(path.join(source, 'node_modules/esb
 const output = path.resolve(source, '../../../checks/release');
 await mkdir(output, { recursive: true });
 const entry = `
-export { connect, connectPublished } from './bootstrap.ts';
+export { connect, connectPublished, recoverPublished, recoverCompiled } from './bootstrap.ts';
 export { evidenceDirectory } from './evidence-cache.ts';
 export { Channel, ReferenceClient, API_APPROVALS } from '../../examples/phase01/transport.ts';
 export { PUBLISHER, qualifyPublished, requireReleaseTag } from '../../examples/phase01/approval.ts';
@@ -307,7 +307,7 @@ try {
   const discovery = `https://api.github.com/repos/${repo}/releases/latest`;
   const asset = `https://github.com/${repo}/releases/download/${tag}/tinfoil-deployment.json`;
   const cdn = 'https://release-assets.githubusercontent.com/synthetic-manifest';
-  let assetLocation = cdn, assetStatus = 302;
+  let assetLocation = cdn, assetStatus = 302, liveKey = key;
   globalThis.fetch = async request => {
     network++; seen.push(request.url);
     assert.equal(request.method, 'GET'); assert.equal(request.body, null);
@@ -324,7 +324,7 @@ try {
     else if (request.url.startsWith('https://kdsintf.amd.com/vcek/v1/Genoa/')) body = new Uint8Array([1]);
     else if (request.url === origin + '/.well-known/tinfoil-certificate') body = bytes({ certificate: payload.enclaveCert });
     else if (request.url === `https://api.github.com/repos/${repo}/attestations/sha256:${sha(manifestBody)}`) body = bytes({ attestations: [{ bundle: payload.sigstoreBundle }] });
-    else if (request.url === origin + '/.well-known/hpke-keys') body = key;
+    else if (request.url === origin + '/.well-known/hpke-keys') body = liveKey;
     else throw new Error('HOSTILE unapproved request');
     const response = new Response(body, { status: mode === 'redirect' || (mode === 'cdn-redirect' && request.url === cdn) ? 302 : request.url === asset ? assetStatus : 200,
       headers: request.url === asset ? { location: assetLocation } : {} });
@@ -337,6 +337,9 @@ try {
   assert.equal(new Set(seen).size, seen.length); assert(!seen.some(url => url.includes('HOSTILE'))); passed++;
   const attempts = network;
   assert.equal(connected.freshSession().release, connected.release); assert.equal(network, attempts);
+  const unchangedStart=seen.length;
+  await rejects('unchanged public report and keys',()=>test.recoverPublished(connected.freshSession()),'evidence_unchanged');
+  assert.deepEqual(seen.slice(unchangedStart),[origin+'/.well-known/tinfoil-attestation',origin+'/.well-known/hpke-keys']);
   const cacheFile = path.join(test.evidenceDirectory(), 'entry.json');
   const record = JSON.parse(await readFile(cacheFile, 'utf8'));
   assert.deepEqual(Object.keys(record).sort(), ['digest', 'hint', 'manifest', 'origin', 'provenance', 'repository', 'tag', 'vcek', 'version']);
@@ -384,8 +387,24 @@ try {
   await writeFile(cacheFile, JSON.stringify(record));
   payload.enclaveAttestationReport.extra = 'public serialization change';
   const changedStart = seen.length;
-  await test.connectPublished(); assert.equal(seen.length - changedStart, 8); passed++;
+  const recovered=await test.recoverPublished(connected.freshSession());
+  assert.equal(seen.length - changedStart, 9);
+  assert.equal(recovered.release.tag, connected.release.tag,'same tag may carry new fully verified report');
+  await rejects('verified replacement becomes new baseline',()=>test.recoverPublished(recovered.freshSession()),'evidence_unchanged');
+  passed++;
   payload = structuredClone(base);
+  // Same report, manifest, release and measurement: a fully verified key
+  // change still qualifies. The public key hint alone never authorizes it.
+  liveKey=new Uint8Array([0,0,32,...Array(32).fill(8),0,4,0,1,0,2]);
+  state.hpkeKey='08'.repeat(32);state.sanKey=Buffer.alloc(32,8);
+  const keyStart=seen.length;
+  const changedKey=await test.recoverPublished(connected.freshSession());
+  assert.equal(changedKey.release.tag,connected.release.tag);
+  assert.deepEqual(seen.slice(keyStart, keyStart+2),[origin+'/.well-known/tinfoil-attestation',origin+'/.well-known/hpke-keys']);
+  await rejects('verified key becomes new baseline',()=>test.recoverPublished(changedKey.freshSession()),'evidence_unchanged');
+  liveKey=key;
+  await rejects('mismatched key candidate cannot replace trust',()=>test.recoverPublished(changedKey.freshSession()),'verification_failed');
+  reset();passed++;
   const cold = async () => { await rm(test.evidenceDirectory(), { recursive: true, force: true }); return test.connectPublished(); };
   await rm(test.evidenceDirectory(), { recursive: true, force: true });
   latestTag = 'v1.2.3/../../HOSTILE';

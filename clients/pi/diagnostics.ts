@@ -39,6 +39,7 @@ const reasons = Object.freeze({
   manifest_unavailable: 'The public release manifest is missing, unreadable or exceeds local limits. ' + update,
   manifest_mismatch: 'The public release manifest does not match this extension’s approval. ' + update,
   evidence_unavailable: 'Public verification evidence could not be retrieved within connection limits. Check connectivity and start a new Pi session to verify again; do not change approval pins.',
+  evidence_unchanged: 'Public evidence did not establish a different fully verified endpoint. No credentials were sent by this probe; the previous request was not replayed. Check authentication deliberately; earlier billing remains unknown.',
   verification_failed: 'The published gateway release or serving channel could not be verified. Check connectivity and start a new Pi session to verify again. Do not bypass verification or replay an interrupted request.',
   session_unavailable: 'Gateway session setup (challenge/login) did not complete; the exact constraint is unknown. Start a new Pi session if none is active; otherwise check connectivity and try /login again. This does not establish that your credential is invalid.',
   catalog_unavailable: 'The session was authenticated, but an unexpected catalog-stage failure occurred; the underlying cause is unknown. Check connectivity and try refreshing models again; if this persists, share this content-free code for support.',
@@ -89,6 +90,7 @@ export function approvalSummary(release?: Readonly<{ tag: string; expires: numbe
 
 // Construct only locally authored messages; never retain the original error/cause.
 export class ConnectionFailure extends Error {
+  readonly observation?: EvidenceObservation;
   constructor(readonly code: ConnectionFailureCode, catalog?: CatalogFailure | GatewayError | DiagnosticFailure | EvidenceObservation) {
     if (!Object.hasOwn(reasons, code)) throw new Error('possums_connection_diagnostic_invalid');
     // The immutable carrier validates these fields; never use its error.message.
@@ -99,6 +101,7 @@ export class ConnectionFailure extends Error {
       catalog instanceof GatewayError ? ` Stage: admission; constraint: service_quiescing.${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}` :
       ` Stage: ${catalog instanceof CatalogFailure ? 'catalog' : 'connection'}; constraint: ${catalog instanceof CatalogFailure ? catalog.stage : code}.${catalog instanceof CatalogFailure && catalog.reason === 'service_quiescing' ? ' Gateway stage: admission; constraint: service_quiescing.' : ''}`;
     super(`${catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} No inference request was sent by this connection attempt. Cached models do not authorize inference. Prior billing outcomes are not established by this check.`);
+    if (catalog instanceof EvidenceObservation) this.observation = catalog;
     Object.freeze(this);
   }
 }
