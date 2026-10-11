@@ -49,7 +49,17 @@ Startup and model refresh show a transient, content-free warning when public ver
 - `possums_catalog_body_invalid` / `possums_catalog_validation_failed` / `possums_catalog_conversion_failed`: response reading/JSON decoding, catalog schema/quote validation, or conversion to Pi metadata failed, respectively. Refresh models and share only the closed diagnostic if it persists.
 - `possums_catalog_unavailable`: fallback for an unexpected catalog-stage failure. A previously authenticated session is not proof that it remains valid now. None of these catalog errors establishes an inference charge or refund.
 
-## Explicit-submit expiry renewal (locally installed)
+## Bounded deployment recovery (local source candidate; NOT installed)
+
+The operator replaced the historical native-only recovery permission with **caller-wide eligibility for otherwise authorized model requests**. Ordinary turns, native tool continuations and retry *setup*, trusted nested extensions, queued steering/follow-up and manual/automatic/split compaction *setup* can use one provider-owned memory-only scope: at most **three public deployment-recovery attempts total**, with delays 0/250/1000 ms. The scope starts with a new run and lasts through `agent_settled`; an idle compaction operation gets one scope shared by both native summaries. Concurrent eligible calls coalesce. Starting another auth callback, a model refresh or a later summary does not mint another budget. Logout, account/session/run replacement or Stop invalidates obsolete work. Cache warming remains stopped. Native transient **generation** retries are separate new submissions and can incur additional charges; E does not change that native policy or retry an already-dispatched generation.
+
+Healthy model calls use cached verified trust and bearer without extra public requests. Known local trust/bearer expiry is renewed only for an authorized model invocation using the existing approved authority, not on status/check/list/reconciliation. On a validated catalog HTTP 401/403 `unauthorized`, or a **locally observed** submission endpoint-binding HTTP 422 with affirmative proof that `Channel.chat` has not begun, recovery probes only the fixed public attestation and 41-byte EHBP wire configuration (one format byte plus 40 key-configuration bytes), without credentials. A plaintext/missing-nonce 422 establishes neither stale keys nor refund. If both hashes are unchanged, it stops before GitHub/AMD work. A changed hint requires the complete existing published or explicitly pinned manifest verifier—including publisher, hardware, certificate, key binding and expiry—then a fresh login and validated live catalog before an atomic replacement. The actual verified snapshot, not the hint, becomes the new baseline. A changed fully verified key can qualify even with the same version/measurement. An explicit manifest never changes authority or extends its administrative expiry.
+
+The prepared invocation and Pi payload hook run once. Immediately before dispatch, a synchronous provider-owned guard rechecks cancellation, current account/run/client and session. Only a pre-dispatch catalog or narrow local binding observation can retry setup; malformed/unauthenticated exceptions, service quiescing, other transport/crypto/stream failures, revoked credentials, removed models/tool profiles and any after-dispatch error are terminal. A failed/exhausted scope is latched; it cannot fall back to the old bearer/catalog. The selected model and output allowance are never substituted. An uncertain submission-control outcome remains **billing unknown**, even if a subsequent authenticated generation settles; the private reconciliation window becomes unavailable rather than claiming continuity. A new request may incur another charge. Status and diagnostics initiate no inference or recovery.
+
+This is offline synthetic source evidence, **not** an installed Pi client, a deployed gateway, a public candidate verifier, production health check, paid E2E or confirmation of upstream accounting. Actual Pi 1.0.4 lifecycle/native tool/compaction fixtures and the full SDK verification-orchestration fixture passed locally; AMD hardware crypto, DSSE/Rekor crypto, X509 parsing and public network are mocked in the isolated release fixture, never in the production build. See [current local E policy and historical distinctions](../../docs/blue-green-runtime-plan.md#packet-e--bounded-pi-deployment-recovery-before-inference), [native-permission historical finding](../../docs/blue-green-pi-qualification.md), [privacy data handling](../../PRIVACY.md#data-handling-boundaries), [forbidden exports](../../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data) and [synthetic testing](../../PRIVACY.md#synthetic-testing-exception). Pi/T3 may still persist normal history and assistant errors according to host settings; these checks add no logs, telemetry, evidence verdict cache or diagnostic bundle.
+
+## Explicit-submit expiry renewal (historically installed; superseded in E source)
 
 A fresh idle **interactive or RPC submission** can now renew expired published
 trust and known bearer expiry without `/new`, transcript loss or a conversation
@@ -64,9 +74,7 @@ its bearer/catalog or send its prompt. Credentials are sent only after fresh
 verification. Auth-only expiry can reuse valid trust. A renewed trust/auth context
 invalidates any open reconciliation window; start a new window deliberately.
 
-Trust stays fixed during a tool loop, native retry, queued steering/follow-up,
-compaction and extension-originated work. Those paths cannot trigger expiry
-renewal. Ambiguous overlapping/handled input or nested extension runs fail closed;
+In the *previously installed* expiry-only build, trust stayed fixed during a tool loop, native retry, queued steering/follow-up, compaction and extension-originated work. The local E source candidate above explicitly supersedes that eligibility rule; it has not been installed. Ambiguous overlapping/handled input or nested extension runs fail closed;
 a later unambiguous explicit submission can renew. Failed expiry renewal is not
 replayed: check the diagnostic and submit a **fresh explicit turn** to retry it.
 Initial startup verification failures still follow the existing cached-failure
@@ -76,8 +84,7 @@ Published validity remains **at most 12 hours, capped by certificate expiry**.
 Expiry is a verified-context bound, not transcript deletion, quote freshness,
 immediate revocation, anti-rollback or newestness. Explicit compiled approvals
 remain terminal at administrative expiry; no pins or expired certificates are
-extended. Server restart/revocation before known bearer expiry can still produce
-a terminal unauthorized response; it does not trigger automatic refresh/replay.
+extended. In that previously installed build, restart/revocation before known bearer expiry could produce a terminal unauthorized response. The local E source may probe narrowly observed pre-dispatch unauthorized setup without replaying generation; this does not guarantee recovery or prove that a credential is valid.
 
 The original Stop-in-an-awaited-`before_agent_start` finding remains true for that
 placement. Renewal uses a different, qualified signal-bearing path—not a host
