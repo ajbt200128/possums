@@ -104,12 +104,24 @@ core dumps disabled, environment sanitized and generated fixture material remove
   Active LSP batch: 12 integration paths confirmed, no primary-language diagnostics;
   auxiliary style hints/warnings remain, with no whole-checkout clean claim.
 
-Local stable Rust/Cargo are **1.99.0**; configured **1.88.0** still lacks Cargo.
-Strict stable clippy additionally reports existing main telemetry/tool lints and
-1.99-only deprecations/style changes. Only the two source-owned lints above were
-fixed; no unrelated telemetry cleanup, warning suppression or toolchain install.
-Pinned hosted CI is the release qualification gate; local stable clippy is **not**
-claimed clean and no pinned local Cargo pass is claimed.
+Local rustup stable Rust/Cargo are **1.99.0**; rustup's configured **1.88.0**
+still lacks Cargo. Strict stable clippy reports existing main telemetry/tool
+lints and 1.99-only deprecations/style changes; it is **not** claimed clean.
+Only the two source-owned lints above were fixed; no unrelated telemetry cleanup,
+warning suppression or toolchain installation.
+
+Initial exact-head PR CI [38174077439](https://github.com/ajbt200128/possums/actions/runs/38174077439)
+failed its pinned formatter on the candidate's newly added accounting/catalog
+lines. Tests/clippy were canceled by that failure, not established as failing;
+image jobs were skipped. A formatting-only follow-up applies Rust **1.88**'s
+formatter to those two files, with no policy/accounting changes. Investigation
+found an **already-cached Nix 1.88.0** toolchain independent of broken rustup.
+Using its explicit Cargo/Rustc/Rustdoc paths, offline root tests reproduced
+**356 passed / 3 ignored**, strict `clippy --all-targets --all-features -- -D warnings`
+passed, and root `cargo fmt -- --check` passed. SDK's existing unused-method
+warning remains dependency-scoped. No download/install or toolchain-policy
+change was needed. These cached pinned local passes supersede the earlier lack
+of local pinned qualification; hosted final-head CI remains separately required.
 
 ## Sizing and release boundary
 
