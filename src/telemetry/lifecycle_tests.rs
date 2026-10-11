@@ -178,7 +178,7 @@ impl Fixture {
     }
     async fn quiescent(&self) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while self.state.available_lanes() != [4, 4, 4, 1] {
+            while self.state.available_lanes() != [4, 4, 4] {
                 tokio::task::yield_now().await;
             }
         })
@@ -248,7 +248,7 @@ async fn api_terminal_hooks_preserve_accounting_and_duplicate_disposition() {
             .await
             .expect("fixture startup drain and output");
             assert_eq!(totals(&metrics), (1, 0, 1, 0));
-            assert_eq!(f.state.available_lanes(), [3, 3, 4, 1]);
+            assert_eq!(f.state.available_lanes(), [3, 3, 4]);
             f.provider.finish.notify_one();
         }
         consumer.await.unwrap();
@@ -320,7 +320,7 @@ async fn body_disconnect_does_not_finish_generation_or_release_its_permits() {
     drop(frame);
     drop(body);
     assert_eq!(totals(&metrics), (1, 1, 1, 0));
-    assert_eq!(f.state.available_lanes(), [3, 3, 4, 1]);
+    assert_eq!(f.state.available_lanes(), [3, 3, 4]);
     f.provider.finish.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while f.state.available_lanes()[0] != 4 {
@@ -487,7 +487,7 @@ async fn http_empty_error_and_drop_are_distinct_from_handler_return() {
 }
 
 #[tokio::test]
-async fn pre_reserve_rejections_and_control_leases_use_closed_labels() {
+async fn pre_reserve_rejections_and_unleased_controls_use_closed_labels() {
     let metrics = metrics(Deployment::IsolatedSynthetic);
     let f = Fixture::new(true, Failure::None, Some(metrics.clone()));
     let response = router(f.state.clone())
@@ -510,12 +510,12 @@ async fn pre_reserve_rejections_and_control_leases_use_closed_labels() {
         )
         .await
         .unwrap();
-    assert_eq!(f.state.available_lanes()[3], 0);
+    assert_eq!(control.status(), 400);
     let rejected = router(f.state.clone())
         .oneshot(Request::get("/v1/models").body(Body::empty()).unwrap())
         .await
         .unwrap();
-    assert_eq!(rejected.status(), 503);
+    assert_eq!(rejected.status(), 401);
     drain(rejected.into_body()).await;
     drop(control);
     f.quiescent().await;
@@ -534,10 +534,10 @@ async fn pre_reserve_rejections_and_control_leases_use_closed_labels() {
     );
     assert_eq!(
         t.rejected[(Endpoint::Models as usize * 5 + AdmissionModel::NotApplicable.index()) * 14
-            + Rejection::RequestCapacity as usize],
+            + Rejection::Auth as usize],
         1
     );
-    assert_eq!(t.contributors[Lane::Control as usize], 1);
+    assert_eq!(t.contributors[Lane::Control as usize], 0);
     assert_eq!(
         t.dispositions
             .iter()
@@ -645,7 +645,7 @@ async fn production_router_releases_sparse_complete_windows_to_local_tls() {
                 table.http_terminal(endpoint, terminal_status, HttpTerminal::Eof),
                 Some(n)
             );
-            assert_eq!(table.contributors[Lane::Control as usize], n);
+            assert_eq!(table.contributors[Lane::Control as usize], 0);
             if let Some(reason) = rejection {
                 assert_eq!(
                     table.rejected(Some(endpoint), AdmissionModel::NotApplicable, reason),
@@ -686,7 +686,6 @@ async fn production_router_releases_sparse_complete_windows_to_local_tls() {
             let mut names: Vec<_> = wire.iter().map(|metric| metric.name.as_str()).collect();
             names.sort_unstable();
             let mut expected_names = vec![
-                "possums.admission.occupancy.bucket",
                 "possums.http.completed",
                 "possums.http.duration.bucket",
                 "possums.http.requests",
@@ -712,14 +711,7 @@ async fn production_router_releases_sparse_complete_windows_to_local_tls() {
                         value
                     })
                     .sum();
-                assert_eq!(
-                    total,
-                    if metric.name == "possums.admission.occupancy.bucket" {
-                        300
-                    } else {
-                        i64::try_from(n).unwrap()
-                    }
-                );
+                assert_eq!(total, i64::try_from(n).unwrap());
             }
             assert!(metrics.take_window().is_none());
         }

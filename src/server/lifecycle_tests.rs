@@ -163,6 +163,51 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 #[tokio::test]
+async fn unread_model_and_submission_responses_do_not_admit_or_block_controls() {
+    let (state, probe, session) = fixture();
+    let heavy = state
+        .chat_memory
+        .clone()
+        .try_acquire_many_owned(CHAT_LANES as u32)
+        .unwrap();
+    let mut unread = Vec::new();
+    for _ in 0..3 {
+        for (method, path, body) in [
+            (Method::GET, "/v1/models", ""),
+            (
+                Method::POST,
+                "/v1/submissions",
+                r#"{"model":"m","new_conversation":false}"#,
+            ),
+        ] {
+            let mut request = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {session}"));
+            if method == Method::POST {
+                request = request.header(header::CONTENT_TYPE, "application/json");
+            }
+            let response = router(state.clone())
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            unread.push(response);
+        }
+    }
+    assert_eq!(state.chat_memory.available_permits(), 0);
+    let rejected = router(state.clone())
+        .oneshot(chat(&state, &session, false))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    drop(unread);
+    drop(heavy);
+    assert_eq!(state.available_lanes(), [4, 4, 4]);
+}
+
+#[tokio::test]
 async fn accepted_before_evidence_fence_can_reserve_but_new_chat_cannot() {
     for structured in [false, true] {
         let (state, probe, session) = fixture();
@@ -318,7 +363,6 @@ async fn health_is_credential_free_unobserved_and_independent_of_control_capacit
     let dependencies = dependency_calls();
     let balance = state.accounting.snapshot("demo").unwrap();
     let auth = state.auth.api_session(&session).unwrap();
-    let control = state.control_memory.clone().acquire_owned().await.unwrap();
     for status in [StatusCode::NO_CONTENT, StatusCode::SERVICE_UNAVAILABLE] {
         if status == StatusCode::SERVICE_UNAVAILABLE {
             state.lifecycle.quiesce();
@@ -355,7 +399,6 @@ async fn health_is_credential_free_unobserved_and_independent_of_control_capacit
         }
     }
     // oneshot does not exercise the real network connection lease.
-    drop(control);
 }
 
 #[tokio::test]
