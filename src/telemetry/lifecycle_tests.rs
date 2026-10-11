@@ -178,7 +178,7 @@ impl Fixture {
     }
     async fn quiescent(&self) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while self.state.available_lanes() != [4, 4, 4] {
+            while self.state.active_lanes() != [0, 0, 0] {
                 tokio::task::yield_now().await;
             }
         })
@@ -248,7 +248,7 @@ async fn api_terminal_hooks_preserve_accounting_and_duplicate_disposition() {
             .await
             .expect("fixture startup drain and output");
             assert_eq!(totals(&metrics), (1, 0, 1, 0));
-            assert_eq!(f.state.available_lanes(), [3, 3, 4]);
+            assert_eq!(f.state.active_lanes(), [1, 1, 0]);
             f.provider.finish.notify_one();
         }
         consumer.await.unwrap();
@@ -295,7 +295,7 @@ async fn api_terminal_hooks_preserve_accounting_and_duplicate_disposition() {
         );
         assert_eq!(t.contributors[Lane::Heavy as usize], 2);
         assert_eq!(t.contributors[Lane::Ingress as usize], 2);
-        assert_eq!(t.contributors[Lane::Generation as usize], 2); // duplicate briefly acquires the real slot
+        assert_eq!(t.contributors[Lane::Generation as usize], 2); // duplicate briefly creates a lifetime marker
         let formatted = format!("{t:?}");
         for forbidden in [
             "hostile-output-canary",
@@ -310,7 +310,7 @@ async fn api_terminal_hooks_preserve_accounting_and_duplicate_disposition() {
 }
 
 #[tokio::test]
-async fn body_disconnect_does_not_finish_generation_or_release_its_permits() {
+async fn body_disconnect_does_not_finish_generation_or_release_its_markers() {
     let metrics = metrics(Deployment::IsolatedSynthetic);
     let f = Fixture::new(true, Failure::None, Some(metrics.clone()));
     let mut body = f.send().await.into_body();
@@ -320,17 +320,17 @@ async fn body_disconnect_does_not_finish_generation_or_release_its_permits() {
     drop(frame);
     drop(body);
     assert_eq!(totals(&metrics), (1, 1, 1, 0));
-    assert_eq!(f.state.available_lanes(), [3, 3, 4]);
+    assert_eq!(f.state.active_lanes(), [1, 1, 0]);
     f.provider.finish.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while f.state.available_lanes()[0] != 4 {
+        while f.state.active_lanes()[0] != 0 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
     assert_eq!(totals(&metrics), (1, 1, 1, 1));
-    assert_eq!(f.state.available_lanes()[1], 3); // dequeued slice is still the real heavy owner
+    assert_eq!(f.state.active_lanes()[1], 1); // dequeued slice is still the real heavy owner
     assert_eq!(
         f.state.accounting.available("private-account-canary"),
         Some(97)

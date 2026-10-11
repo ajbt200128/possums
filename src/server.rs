@@ -54,25 +54,14 @@ const HEADER_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_CONNECTIONS: usize = 64;
 const MAX_HEADERS: usize = 64;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
-// Heavy is acquired BEFORE raw collection/decoding and covers decoded JSON,
-// tokenizer, streaming inference and delivery overlap. Ingress covers raw input
-// storage; it is NOT a standalone allowance for decoded history. The larger
-// chat body ceiling invalidates the former per-lane memory targets; finite
-// allocation fixtures do not establish a whole-process or SDK/TLS memory bound.
-const CHAT_LANES: usize = 4;
+// Chat lifetimes are tracked passively, without a shared admission bound.
 // Control requests and unknown routes have bounded bodies.
 const CONTROL_BODY_LIMIT: usize = 4 * 1024;
 const MAX_ATTESTATION_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
-/// Fixed configured resource bounds, not currently available permits.
-/// Generation inherits the heavy-memory bound; it has no separate count quota.
-pub fn admission_capacities() -> [(Lane, u64); 4] {
-    [
-        (Lane::Connection, MAX_CONNECTIONS as u64),
-        (Lane::Generation, CHAT_LANES as u64),
-        (Lane::Heavy, CHAT_LANES as u64),
-        (Lane::Ingress, CHAT_LANES as u64),
-    ]
+/// Fixed configured admission bounds, not occupancy or disconnected work limits.
+pub fn admission_capacities() -> [(Lane, u64); 1] {
+    [(Lane::Connection, MAX_CONNECTIONS as u64)]
 }
 
 #[derive(Clone)]
@@ -83,8 +72,8 @@ pub struct AppState {
     pub inference: SharedInference,
     pub gateway_evidence_path: Arc<str>,
     gateway_evidence_verifier: Arc<dyn EvidenceVerifier>,
-    chat_memory: Arc<Semaphore>,
-    chat_ingress: Arc<Semaphore>,
+    heavy_activity: Arc<AtomicUsize>,
+    ingress_activity: Arc<AtomicUsize>,
     generation_activity: Arc<AtomicUsize>,
     telemetry: Option<Arc<crate::telemetry::AggregateMetrics>>,
     #[cfg(test)]
@@ -101,21 +90,15 @@ impl AppState {
         self.telemetry = metrics;
         self
     }
-    // Test-only observation of lifetime headroom, not an admission semaphore.
+    // Test-only actual lifetime counts, not headroom or admission capacity.
     #[cfg(test)]
-    pub(crate) fn generation_headroom(&self) -> usize {
-        CHAT_LANES.saturating_sub(
-            self.generation_activity
-                .load(std::sync::atomic::Ordering::Relaxed),
-        )
-    }
-    #[cfg(test)]
-    pub(crate) fn available_lanes(&self) -> [usize; 3] {
+    pub(crate) fn active_lanes(&self) -> [usize; 3] {
         [
-            self.generation_headroom(),
-            self.chat_memory.available_permits(),
-            self.chat_ingress.available_permits(),
+            &self.generation_activity,
+            &self.heavy_activity,
+            &self.ingress_activity,
         ]
+        .map(|activity| activity.load(std::sync::atomic::Ordering::Relaxed))
     }
     pub(crate) fn generation(&self) -> Generation<'_> {
         Generation {
@@ -146,8 +129,8 @@ impl AppState {
             inference,
             gateway_evidence_path: evidence_path.into(),
             gateway_evidence_verifier,
-            chat_memory: Arc::new(Semaphore::new(CHAT_LANES)),
-            chat_ingress: Arc::new(Semaphore::new(CHAT_LANES)),
+            heavy_activity: Arc::default(),
+            ingress_activity: Arc::default(),
             generation_activity: Arc::default(),
             telemetry: None,
             #[cfg(test)]
@@ -385,24 +368,19 @@ async fn request_admission(
 async fn admitted_request(state: AppState, mut request: Request<Body>, next: Next) -> Response {
     // Match the router's exact method/path semantics; query strings do not
     // affect routing. Wrong methods, trailing slashes and encoded aliases stay
-    // outside heavy admission and cannot reach a heavy handler.
+    // outside heavy tracking and cannot reach a heavy handler.
     let endpoint = Endpoint::route(request.method().as_str(), request.uri().path());
     let (observation, context) = HttpObservation::new(state.telemetry.as_ref(), endpoint);
     request.extensions_mut().insert(context.clone());
     let api = crate::api::is_api(request.uri().path());
     let lease =
         if request.method() == Method::POST && request.uri().path() == "/v1/chat/completions" {
-            let Ok(permit) = state.chat_memory.clone().try_acquire_owned() else {
-                context.reject(AdmissionModel::Unknown, MetricRejection::RequestCapacity);
-                let response = crate::api::error(StatusCode::SERVICE_UNAVAILABLE);
-                return observed_response(response, None, observation);
-            };
-            let lease = Arc::new(Lease::observed(
-                permit,
+            let lease = Arc::new(Lease::tracking(
+                state.heavy_activity.clone(),
                 state.telemetry.as_ref(),
                 Lane::Heavy,
             ));
-            // Detached preflight, generation and delivery share THIS heavy admission.
+            // Detached preflight, generation and delivery share THIS heavy marker.
             request.extensions_mut().insert(lease.clone());
             Some(lease)
         } else {
@@ -415,7 +393,7 @@ async fn admitted_request(state: AppState, mut request: Request<Body>, next: Nex
         next.run(request).await
     };
     // Normalize even framework, panic, header and body-limit failures, while
-    // retaining the SAME admission lease through the replacement response.
+    // retaining the SAME lifetime marker through the replacement response.
     let response = if api
         && !response.status().is_success()
         && response
@@ -519,20 +497,12 @@ async fn total_body_deadline(
         .cloned()
         .unwrap_or_default();
     let chat = request.method() == Method::POST && request.uri().path() == "/v1/chat/completions";
-    // The outer heavy permit is already owned. Failure here rolls it back
-    // through the bounded error response, with no waiter or body polling.
     let ingress = if chat {
-        match state.chat_ingress.clone().try_acquire_owned() {
-            Ok(permit) => Some(Arc::new(Lease::observed(
-                permit,
-                state.telemetry.as_ref(),
-                Lane::Ingress,
-            ))),
-            Err(_) => {
-                observation.reject(AdmissionModel::Unknown, MetricRejection::IngressCapacity);
-                return (StatusCode::SERVICE_UNAVAILABLE, "service busy").into_response();
-            }
-        }
+        Some(Arc::new(Lease::tracking(
+            state.ingress_activity.clone(),
+            state.telemetry.as_ref(),
+            Lane::Ingress,
+        )))
     } else {
         None
     };

@@ -27,12 +27,12 @@ impl Reading {
 }
 
 pub(super) struct Sampler {
-    capacities: [(Lane, u64); 4],
+    capacities: [(Lane, u64); 1],
     last: Option<u64>,
     previous: Option<(Instant, Duration)>,
 }
 impl Sampler {
-    pub(super) fn new(capacities: [(Lane, u64); 4]) -> Self {
+    pub(super) fn new(capacities: [(Lane, u64); 1]) -> Self {
         Self {
             capacities,
             last: None,

@@ -1,8 +1,7 @@
 //! Isolated API route allocation qualification. Requested bytes, not RSS or an
 //! SDK/TLS/helper-process bound; no real content or credentials enter this fixture.
-//! Control overlap is a finite fixture, not a shared control-memory bound.
-//! The 32-MiB chat ceiling invalidates the old 512-MiB fixture target; the
-//! 1-GiB test threshold below is only a finite synthetic regression guard.
+//! Chat/control overlap is finite; there is no shared workload-memory envelope.
+//! The 1-GiB test threshold below is only a finite synthetic regression guard.
 use super::*;
 use crate::{
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
@@ -369,38 +368,33 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
     let mut generation = Vec::new();
     let mut parser = Vec::new();
     let mut waiters = Vec::new();
-    for (n, shape) in [0, 1, 2, 3].into_iter().enumerate() {
+    for (n, shape) in [0, 1, 2, 3, 3, 3].into_iter().enumerate() {
         ingress.push(hooks.arm("ingress"));
         tokenizer.push(hooks.arm("tokenizer"));
         generation.push(hooks.arm("generation"));
         parser.push(hooks.arm("completion"));
-        let req = f.request(usize::from(n == 3), shape);
+        let req = f.request(usize::from(n >= 3), shape);
         phase("wire-built", baseline);
         waiters.push(tokio::spawn(router(f.state.clone()).oneshot(req)));
         bounded(&mut ingress.last_mut().unwrap().reached)
             .await
             .unwrap();
     }
-    assert_eq!(f.state.available_lanes()[1..3], [0, 0]);
-    let rejected = router(f.state.clone())
-        .oneshot(f.request(1, 3))
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(f.state.active_lanes()[1..3], [6, 6]);
     assert_eq!(f.probe.calls.load(Ordering::SeqCst), 0);
-    phase("four-ingress-reject-fifth", baseline);
+    phase("six-ingress-no-admission-gate", baseline);
     open(ingress);
     reached(&mut tokenizer).await;
-    assert_eq!(f.state.available_lanes()[1], 0);
-    assert_eq!(f.probe.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(f.state.active_lanes()[1], 6);
+    assert_eq!(f.probe.calls.load(Ordering::SeqCst), 6);
     let raw = std::mem::take(&mut *hooks.raw.lock().unwrap());
-    assert_eq!(raw.len(), 4);
+    assert_eq!(raw.len(), 6);
     let slices: Vec<_> = raw.iter().map(|b| b.slice(..1)).collect();
     drop(raw);
-    assert_eq!(f.state.available_lanes()[2], 0);
+    assert_eq!(f.state.active_lanes()[2], 6);
     drop(slices);
-    assert_eq!(f.state.available_lanes()[2], 4);
-    phase("four-tokenizers-with-raw-owners", baseline);
+    assert_eq!(f.state.active_lanes()[2], 0);
+    phase("six-tokenizers-with-raw-owners", baseline);
     let control = f.control("/v1/models").await;
     assert_eq!(control.status(), StatusCode::OK);
     let overlapping_control = f.control("/v1/models").await;
@@ -442,7 +436,7 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
         "completed_requests"
     ]
     .contains(&key.as_str())));
-    phase("prompt-free-balance-during-saturation", baseline);
+    phase("prompt-free-balance-during-overlap", baseline);
     let evidence = f.control("/attestation").await;
     assert_eq!(evidence.status(), StatusCode::SERVICE_UNAVAILABLE);
     drop(evidence);
@@ -473,10 +467,10 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
         bodies.push(response.into_body());
     }
     reached(&mut generation).await;
-    phase("four-generation-serializers", baseline);
+    phase("six-generation-serializers", baseline);
     open(generation);
     reached(&mut parser).await;
-    phase("four-completion-inputs", baseline);
+    phase("six-completion-inputs", baseline);
     open(parser);
     let mut retained = Vec::new();
     for mut body in bodies {
@@ -491,17 +485,17 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
         drop(body);
     }
     bounded(async {
-        while f.state.generation_headroom() != 4 {
+        while f.state.active_lanes()[0] != 0 {
             tokio::task::yield_now().await;
         }
     })
     .await;
-    assert_eq!(f.probe.generations.load(Ordering::SeqCst), 4);
-    assert_eq!(f.state.available_lanes()[1], 0);
+    assert_eq!(f.probe.generations.load(Ordering::SeqCst), 6);
+    assert_eq!(f.state.active_lanes()[1], 6);
     phase("terminal-with-held-sse-slices", baseline);
     drop(retained);
     bounded(async {
-        while f.state.available_lanes()[1] != 4 {
+        while f.state.active_lanes()[1] != 0 {
             tokio::task::yield_now().await;
         }
     })
@@ -510,7 +504,10 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
         f.state.accounting.available("account-0"),
         Some(CREDIT - 3 * 7)
     );
-    assert_eq!(f.state.accounting.available("account-1"), Some(CREDIT - 7));
+    assert_eq!(
+        f.state.accounting.available("account-1"),
+        Some(CREDIT - 3 * 7)
+    );
     phase("all-final-owners-released", baseline);
     for capacity in std::mem::take(&mut *hooks.capacities.lock().unwrap()) {
         println!(

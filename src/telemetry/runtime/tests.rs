@@ -230,8 +230,8 @@ async fn pending_export_keeps_sampling_and_polling_until_joined_stop() {
                 .unwrap()
                 .infrastructure
                 .active
-                .capacity(Lane::Heavy);
-            if complete == Some(4.) {
+                .capacity(Lane::Connection);
+            if complete == Some(64.) {
                 break;
             }
             tokio::task::yield_now().await;
