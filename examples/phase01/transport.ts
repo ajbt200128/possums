@@ -42,11 +42,12 @@ export type Control = { challenge: string; credential: string } | { model: strin
 export function encodeChat(chat: Chat): Uint8Array<ArrayBuffer> {
   return serialize(admitInvocation(chat, true), LIMITS.chat);
 }
-// Frame-size validation precedes the library's 64-MiB buffering boundary. This
-// parses framing only; authentication/decryption remains entirely published EHBP.
+// Frame-size validation precedes EHBP's 64-MiB per-ciphertext-chunk ceiling,
+// not a cumulative stream quota. This parses framing only; authentication and
+// decryption remain entirely published EHBP.
 function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation, onFailure: (failure: DiagnosticFailure) => void): ReadableStream<Uint8Array> {
   const reader = body.getReader();
-  let total = 0, frames = 0, length = 0, prefix = 0, remaining = 0;
+  let sawFrame = false, length = 0, prefix = 0, remaining = 0;
   const cancel = async () => { op.close(); await cleanup(reader.cancel()); };
   op.controller.signal.addEventListener('abort', () => { void cleanup(reader.cancel()); }, { once: true });
   return new ReadableStream({
@@ -54,15 +55,15 @@ function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation, onFail
       try {
         op.check();
         const { done, value } = await op.wait(reader.read(), LIMITS.idleMs);
-        if (done) { requireThat(prefix === 0 && remaining === 0 && frames > 0); controller.close(); return; }
-        total += value.length;
-        requireThat(value.length <= LIMITS.chunk && total <= LIMITS.stream);
+        if (done) { requireThat(prefix === 0 && remaining === 0 && sawFrame); controller.close(); return; }
+        requireThat(value.length <= LIMITS.chunk);
         for (let i = 0; i < value.length;) {
           if (remaining) { const consumed = Math.min(remaining, value.length - i); i += consumed; remaining -= consumed; }
           else {
             length = length * 256 + value[i++];
             if (++prefix === 4) {
-              requireThat(length >= 16 && length <= LIMITS.frame && ++frames <= LIMITS.frames);
+              requireThat(length >= 16 && length <= LIMITS.frame);
+              sawFrame = true;
               remaining = length; length = 0; prefix = 0;
             }
           }
@@ -84,7 +85,7 @@ export const hasByteReadTimeout = (body: ReadableStream<Uint8Array>): boolean =>
 function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean, frameFailure: () => DiagnosticFailure | undefined): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  let total = 0, eventBytes = 0, lineBytes = 0, events = 0;
+  let eventBytes = 0, lineBytes = 0;
   return new ReadableStream({
     async pull(controller) {
       let constraint: FailureConstraint = 'decryption';
@@ -93,9 +94,8 @@ function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean
         const { done, value } = await op.wait(reader.read(), null);
         constraint = 'utf8';
         if (done) { if (sse) decoder.decode(); op.close(); controller.close(); return; }
-        total += value.length;
         constraint = 'envelope';
-        requireThat(value.length <= LIMITS.frame && total <= LIMITS.stream);
+        requireThat(value.length <= LIMITS.frame);
         if (sse) {
           constraint = 'utf8';
           decoder.decode(value, { stream: true });
@@ -105,7 +105,7 @@ function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean
           for (const byte of value) {
             requireThat(++eventBytes <= LIMITS.sseEvent);
             if (byte === 10) {
-              if (lineBytes === 0) { requireThat(++events <= LIMITS.sseEvents); eventBytes = 0; }
+              if (lineBytes === 0) eventBytes = 0;
               lineBytes = 0;
             } else if (byte !== 13) lineBytes++;
           }

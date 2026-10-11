@@ -165,7 +165,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
   catch { throw new DiagnosticFailure('stream', 'envelope', 'uncertain'); }
   const decoder = new TextDecoder('utf-8', { fatal: true });
   let pending = '', data: string | undefined, state: 'role' | 'text' | 'usage' | 'done' | 'eof' | 'error' = 'role';
-  let finish: Receipt['finish'] | undefined, receipt: Receipt | undefined, events = 0, total = 0, controlError = false;
+  let finish: Receipt['finish'] | undefined, receipt: Receipt | undefined, sawEvent = false, controlError = false;
   let failure: GatewayError | undefined, terminal = false;
   let stage: FailureStage = 'stream', constraint: FailureConstraint = 'envelope';
   let modelID: string, names: Set<string> | undefined;
@@ -173,7 +173,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
   let argumentBytes = 0;
   async function event(payload: string): Promise<void> {
     constraint = 'envelope';
-    requireThat(++events <= LIMITS.sseEvents);
+    sawEvent = true;
     if (payload === '[DONE]') {
       constraint = state === 'role' || state === 'text' ? 'finish_missing' : 'usage_missing';
       requireThat(state === 'done'); state = 'eof'; return;
@@ -346,11 +346,10 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
         return Object.freeze(receipt);
       }
       constraint = 'envelope';
-      total += next.value.length;
-      requireThat(next.value.length <= LIMITS.frame && total <= LIMITS.stream);
+      requireThat(next.value.length <= LIMITS.frame);
       constraint = 'utf8'; pending += decoder.decode(next.value, { stream: true });
       constraint = 'envelope';
-      if (!events && !failure && pending.trimStart().startsWith('{')) controlError = true;
+      if (!sawEvent && !failure && pending.trimStart().startsWith('{')) controlError = true;
       if (controlError) { requireThat(pending.length <= LIMITS.error); continue; }
       let end: number;
       while ((end = pending.indexOf('\n')) !== -1) {

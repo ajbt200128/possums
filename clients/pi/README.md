@@ -136,6 +136,12 @@ fetch/SDK limits remain separate (including Node 24.13.0's default Undici
 gateway source changes are not deployed by this operation.
 See [scope and local checks](../../docs/provider-timeout-alignment.md).
 
+## Stream quota normalization (source candidate; not installed)
+
+The source candidate removes the cumulative 64-MiB response-byte and 65,536 frame/event quotas. Individual HTTP chunks, ciphertext frames, SSE events and unfinished parser state remain bounded; encrypted framing, SDK decryption, inactivity limits and ordered finish/receipt/DONE/authenticated EOF checks are unchanged. EHBP 0.3.2's separate 64-MiB **per-ciphertext-chunk** ceiling is not a cumulative response limit and remains unchanged. The inspected installed OpenAI SDK streaming path likewise has no cumulative byte/event quota; this is a comparison, not evidence of unlimited safe allocation.
+
+The separately requested [request alignment candidate](../../docs/request-limit-alignment.md) increases the history envelope to 32 MiB and total chat upload time to 600 seconds, with existing structural defenses retained independently of the selected model's context window. [Anthropic documents 32 MB](https://platform.claude.com/docs/en/api/errors#request-size-limits) for Messages and Token Counting requests; that provider-specific byte limit does not qualify a larger gateway envelope or prove Tinfoil equivalence. This stream packet itself changes no history limit. No client installation, gateway deployment or live inference occurred. The requested live-tool quota, chat admission and delivery-backpressure changes are not implemented in this packet. See [scoped verification](../../docs/verification.md#client-cumulative-stream-quota-removal-candidate).
+
 ## Safety and billing
 
 - The recovery credential is saved by ordinary Pi authentication, normally in `~/.pi/agent/auth.json` (or the configured Pi agent directory). It is **plaintext at rest**, accessible to local tools/extensions with your permissions. Pi creates new auth files with mode `0600` and parent directories with `0700`; existing modes/ACLs are preserved. Bearer/catalog state remains memory-only, and request hooks receive a non-secret marker rather than the recovery key or bearer.
