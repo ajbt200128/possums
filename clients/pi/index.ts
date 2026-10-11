@@ -27,17 +27,29 @@ export default function possums(pi: ExtensionAPI): void {
   let ui: ExtensionContext['ui'] | undefined;
   let sessionEpoch = 0;
   const notifiedCodes = new Set<ConnectionFailure['code']>();
-  // Keep the selected authority fixed for this trust session. An explicit
-  // manifest never silently falls through to published/latest recovery.
-  const pinnedManifest = pi.getFlag('possums-manifest');
-  const provider = new PossumsProvider(async signal => pinnedManifest === undefined
-    ? connectPublished(signal) : connect(await manifest(pinnedManifest), signal), failure => {
+  // Pi 1.0.4 applies CLI flag values after loading extension factories. Select
+  // at the first actual trust establishment, then lock the authority: a later
+  // flag change cannot silently switch a pinned session to latest or vice versa.
+  let pinnedManifest: unknown, selected = false;
+  const authority = () => {
+    const configured = pi.getFlag('possums-manifest');
+    if (!selected) { pinnedManifest = configured; selected = true; }
+    else if (configured !== pinnedManifest) throw new ConnectionFailure('manifest_mismatch');
+    return pinnedManifest;
+  };
+  const provider = new PossumsProvider(async signal => {
+    const pinned = authority();
+    return pinned === undefined ? connectPublished(signal) : connect(await manifest(pinned), signal);
+  }, failure => {
     if (!failure) { notifiedCodes.clear(); return; }
     if (!ui || notifiedCodes.has(failure.code)) return;
     notifiedCodes.add(failure.code);
     try { ui.notify(failure.message, 'warning'); } catch { /* Transient UI only. */ }
-  }, (previous, signal) => pinnedManifest === undefined
-    ? recoverPublished(previous, signal) : manifest(pinnedManifest).then(bytes => recoverCompiled(previous, bytes, signal)));
+  }, (previous, signal) => {
+    const pinned = authority();
+    return pinned === undefined ? recoverPublished(previous, signal)
+      : manifest(pinned).then(bytes => recoverCompiled(previous, bytes, signal));
+  });
   pi.registerProvider(provider);
   pi.on('session_start', async (_event, ctx) => {
     const epoch = ++sessionEpoch;

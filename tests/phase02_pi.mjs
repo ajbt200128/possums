@@ -237,6 +237,20 @@ await check('local approval expiry and mismatched manifest fail before any evide
   assert.equal(calls,0);
  } finally {Date.now=now;globalThis.fetch=fetch;}
 });
+await check('manifest authority is selected after Pi loads flags, never silently converted to public latest',async()=>{
+ let flag,provider,prompts=0,requests=0;
+ const fetch=globalThis.fetch;
+ globalThis.fetch=async()=>{requests++;throw Error(hostileConnection);};
+ try{
+  m.extension({registerFlag:()=>{},getFlag:()=>flag,registerProvider:value=>{provider=value;},on:()=>{},registerCommand:()=>{}});
+  flag=path.join(root,'PRIVATE_LATE_FLAG_missing.json');provider.newSession();
+  await assert.rejects(provider.auth.apiKey.login({...interaction(),prompt:async()=>{prompts++;return recoveryKey;}}),
+   error=>error.code==='manifest_unavailable'&&!error.message.includes('PRIVATE_LATE_FLAG'));
+  flag=undefined;provider.newSession();
+  await assert.rejects(provider.auth.apiKey.login(interaction()),error=>error.code==='manifest_mismatch');
+  assert.equal(prompts,0);assert.equal(requests,0);
+ }finally{globalThis.fetch=fetch;}
+});
 await check('extension reports missing or invalid manifest paths without revealing them or prompting',async()=>{
  for(const manifest of ['PRIVATE_PATH',path.join(root,'PRIVATE_PATH_missing.json')]) {
   let provider,prompts=0;
