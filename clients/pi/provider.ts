@@ -8,9 +8,9 @@ import {
   type TranscriptContext, type ToolCall,
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
-import { ReferenceClient, PreparedChat, BalanceFailure, CatalogFailure, GatewayError, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent } from '../../examples/phase01/client.js';
+import { ReferenceClient, PreparedChat, BalanceFailure, CatalogFailure, GatewayError, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent, type Receipt } from '../../examples/phase01/client.js';
 import { ChannelError, DiagnosticFailure, OperationFailure, JSONDepthError, LIMITS, Operation, parseJSON, serialize, requireThat, type FailureStage } from '../../examples/phase01/limits.js';
-import { ConnectionFailure, connectionFailure, catalogConnectionFailure, diagnosticDescription } from './diagnostics.js';
+import { ConnectionFailure, connectionFailure, catalogConnectionFailure, diagnosticDescription, settlementDescription } from './diagnostics.js';
 import { invocation } from './wire.js';
 
 export const PROVIDER_ID = 'possums';
@@ -38,6 +38,17 @@ function safeNumber(value: string, stage: 'catalog' | 'settlement' = 'catalog'):
   const result = Number(value);
   if (!Number.isSafeInteger(result) || result < 0) throw new DiagnosticFailure(stage, 'precision');
   return result;
+}
+function receiptUsage(receipt: Readonly<Receipt>): AssistantMessage['usage'] {
+  const charged = BigInt(receipt.chargedMicrounits), cached = receipt.cachedTokens ?? 0;
+  const quoted = receipt.quotedInputMicrounitsPerMillion !== undefined && receipt.quotedOutputMicrounitsPerMillion !== undefined;
+  const proposedInput = quoted ? BigInt(receipt.inputTokens - cached) * BigInt(receipt.quotedInputMicrounitsPerMillion!) * 130n / 100_000_000n : 0n;
+  const input = proposedInput < charged ? proposedInput : charged;
+  const proposedCache = quoted ? BigInt(cached) * BigInt(receipt.quotedCachedInputMicrounitsPerMillion ?? receipt.quotedInputMicrounitsPerMillion!) * 130n / 100_000_000n : 0n;
+  const cache = proposedCache < charged - input ? proposedCache : charged - input;
+  const usd = (value: bigint) => safeNumber(value.toString(), 'settlement') / 1_000_000;
+  return { input: receipt.inputTokens - cached, output: receipt.outputTokens, cacheRead: cached, cacheWrite: 0, totalTokens: receipt.totalTokens,
+    cost: { input: usd(input), cacheRead: usd(cache), cacheWrite: 0, output: quoted ? usd(charged - input - cache) : 0, total: usd(charged) } };
 }
 function dollars(microunits: string): string {
   const value = BigInt(microunits);
@@ -152,6 +163,7 @@ function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 
     const description = `${known ? `[${error.reason}] ${reason[error.reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; underlying cause unknown.'}${label ? ` ${label}.` : error.detail === 'unclassified' ? ' [possums_gateway_detail_unclassified] Gateway detail is unclassified; underlying cause unknown.' : ''} Stage: ${gatewayStage}; constraint: ${error.detail === 'unclassified' ? 'unclassified' : label ? error.detail : known ? error.reason : 'unclassified'}.${error.status === undefined ? '' : ` Observed HTTP status: ${error.status}.`} ${action}`;
     const transient = (error.reason === 'unavailable' && (error.detail === undefined || error.detail === 'inference_unavailable')) ||
       (error.reason === 'generation_failed' && error.detail !== undefined && transientDetails.has(error.detail));
+    if (error.settlement) return `Possums: ${nativeRetry && transient ? 'Transient service unavailable. ' : 'Billing status: '}${description} ${settlementDescription(error.settlement)} Settlement alone does not authorize tool execution. Not replayed.${nativeRetry && transient ? ' Native automatic retry may incur another charge.' : ''}`;
     if (nativeRetry && transient) {
       return `Possums: Transient service unavailable. ${description} ` +
         (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown.') + ' Native automatic retry may incur another charge.';
@@ -843,7 +855,7 @@ export class PossumsProvider implements Provider {
           }
         };
         const prepared: PreparedChat = await originalClient.prepareChat(selected.id, payload.messages, text => {
-          if (!started) throw new Error('possums_invalid_stream');
+          if (!started) { started = true; events.push({ type: 'start', partial: output }); }
           if (textIndex === undefined) {
             textIndex = output.content.length;
             output.content.push({ type: 'text', text: '' });
@@ -860,7 +872,7 @@ export class PossumsProvider implements Provider {
           onEvent: async (value: CompletionEvent) => {
             await options.onProviderStreamEvent?.(structuredClone(value), selected);
             const delta = value.choices?.[0]?.delta;
-            if (delta?.role === 'assistant' && !started) {
+            if (value.choices.length > 0 && !started) {
               started = true;
               events.push({ type: 'start', partial: output });
             }
@@ -873,8 +885,8 @@ export class PossumsProvider implements Provider {
                 args.set(call.index, pending); output.content.push(block);
                 if (!summary) events.push({ type: 'toolcall_start', contentIndex: pending.contentIndex, partial: output });
               }
-              if (call.id !== undefined) pending.block.id = call.id;
-              if (call.function?.name !== undefined) pending.block.name = call.function.name;
+              if (call.id) pending.block.id = call.id;
+              if (call.function?.name) pending.block.name = call.function.name;
               const fragment = call.function?.arguments ?? '';
               pending.json += fragment;
               pending.block.arguments = parseStreamingJson(pending.json);
@@ -917,14 +929,7 @@ export class PossumsProvider implements Provider {
         if (!summary && epoch === this.epoch) this.newConversation = false;
         if (!started) throw new Error('possums_invalid_stream');
         endText();
-        const charged = safeNumber(receipt.chargedMicrounits, 'settlement') / 1_000_000;
-        // The submitted rate is authoritative. Assign the sub-microunit rounding
-        // remainder to output so the displayed components equal the settled total.
-        const inputMicrounits = quoted ? BigInt(receipt.inputTokens) * BigInt(receipt.quotedInputMicrounitsPerMillion!) * 130n / 100_000_000n : 0n;
-        const inputCost = safeNumber(inputMicrounits.toString(), 'settlement') / 1_000_000;
-        output.usage = { input: receipt.inputTokens, output: receipt.outputTokens,
-          cacheRead: 0, cacheWrite: 0, totalTokens: receipt.totalTokens,
-          cost: { input: inputCost, output: quoted ? charged - inputCost : 0, cacheRead: 0, cacheWrite: 0, total: charged } };
+        output.usage = receiptUsage(receipt);
         if (epoch !== this.epoch || options.signal?.aborted) throw new Error('possums_run_replaced');
         if (summary) {
           summary();
@@ -951,6 +956,15 @@ export class PossumsProvider implements Provider {
         else events.push({ type: 'done', reason: output.stopReason, message: output });
       } catch (error) {
         output.stopReason = options.signal?.aborted ? 'aborted' : 'error';
+        if (!output.diagnostics && error instanceof GatewayError && error.settlement) {
+          const partial = error.settlement;
+          output.diagnostics = [{ type: 'possums_settled_receipt', timestamp: Date.now(), details: {
+            chargedMicrounits: partial.chargedMicrounits, refundedMicrounits: partial.refundedMicrounits,
+            complete: partial.complete !== false, evidence: partial.evidence ?? 'none',
+          } }, ...(uncertainControl ? [{ type: 'possums_billing_unknown' as const, timestamp: Date.now(),
+            details: { receipt: false, stage: 'submission' } }] : [])];
+          try { output.usage = receiptUsage(partial); } catch { /* Confirmed money survives local display failure. */ }
+        }
         if (!output.diagnostics && error instanceof GatewayError && error.billing === 'refunded') {
           output.diagnostics = [{ type: 'possums_reservation_refunded', timestamp: Date.now(), details: { outcome: 'refunded' } }];
         }
@@ -959,11 +973,13 @@ export class PossumsProvider implements Provider {
             (!(error instanceof GatewayError) && !(error instanceof ConnectionFailure) && ((submitted && !(error instanceof ChannelError && error.code === 'rejected')) || options.signal?.aborted || (error instanceof ChannelError && error.code === 'uncertain'))))) {
           output.diagnostics = [{ type: 'possums_billing_unknown', timestamp: Date.now(), details: { receipt: false } }];
         }
-        output.errorMessage = output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt') ?
+        output.errorMessage = error instanceof GatewayError && error.settlement ?
+          safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted, failureStage) :
+          output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt') ?
           `${safeFailure(error, false, failureStage).replace(/ Billing status: Charge unknown\..*$/, '')} Authenticated receipt: charge settled; not undone. Not replayed.` : options.signal?.aborted && !(error instanceof GatewayError) && !(error instanceof ConnectionFailure) ?
           'Possums: [possums_stream_interrupted] Stage: stream; constraint: interrupted. Delivery interrupted; charge unknown. Check connectivity and share only this code for support. Not replayed. A new request may incur another charge.' :
           safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted, failureStage);
-        if (uncertainControl && !output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt')) {
+        if (uncertainControl) {
           output.errorMessage += ' Earlier submission control outcome unknown; no inference request was replayed. A new request may incur another charge.';
         }
         events.push({ type: 'error', reason: output.stopReason, error: output });

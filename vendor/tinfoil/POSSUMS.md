@@ -36,3 +36,28 @@ owns the 600-second send/header and rolling HTTP-read inactivity waits. There is
 no whole-generation deadline. These are application settings inspired by the
 OpenAI/Tinfoil clients, not proven platform availability or drain guarantees. See
 [scoped timeout verification](../../docs/provider-timeout-alignment.md).
+
+The forwarding candidate adds `sse::parse_event_stream_checked`: the existing SDK
+SSE decoder accepts a captured `Fn(&[u8]) -> bool + Send + 'static` check before
+allocating a JSON `Value`. `parse_event_stream` retains its original API and
+unchecked behavior; SSE framing, split UTF-8/CRLF handling, `[DONE]` suppression
+and EOF consumption remain the SDK's responsibility. Rejected bytes produce a
+locally authored error without echoing their payload. This is an additive local
+patch to `src/sse.rs`, not another provider-protocol decoder or a change to trust.
+
+The gateway supplies the acceptance check: at most 256 KiB per payload, depth 16,
+8192 nodes, duplicate-key rejection, typed unsigned usage/cache/reasoning counts
+and the SDK's native choice types before `Value` conversion. This also rejects
+serde_json arbitrary-precision reserved-number-map substitutions in wire numeric
+fields. The SDK's existing 1-MiB event bound remains independent. Native DATA is
+fed in 16-KiB slices; a larger native HTTP backing may remain retained, so these
+limits are not a whole-process memory guarantee. Raw SDK exceptions are mapped
+immediately to closed gateway failures and are not user diagnostics or telemetry.
+
+Offline standalone SDK qualification selected 11 passing SSE-related tests,
+including a captured check that rejects before JSON decoding, suppresses hostile
+payload text and remains absorbing. Native-frame, gateway and paired-client
+results and external limits are recorded in
+[forwarding/accounting verification](../../docs/tinfoil-aligned-accounting.md).
+No installed client, provider endpoint, attestation release or invoice parity is
+qualified by this source patch.

@@ -40,6 +40,7 @@ pub(crate) struct Generation<'a> {
     pub metrics: Option<&'a Arc<telemetry::AggregateMetrics>>,
     pub observation: RequestContext,
     pub activity: &'a Arc<AtomicUsize>,
+    pub disconnect: crate::stream_owner::Disconnect,
     #[cfg(test)]
     pub hooks: &'a Arc<crate::server::resource_streaming_tests::PreflightHooks>,
 }
@@ -120,6 +121,10 @@ pub(crate) enum Rejection {
 }
 
 impl Generation<'_> {
+    pub(crate) fn disconnected(mut self, signal: crate::stream_owner::Disconnect) -> Self {
+        self.disconnect = signal;
+        self
+    }
     pub(crate) fn observed(mut self, observation: RequestContext) -> Self {
         self.observation = observation;
         self
@@ -150,10 +155,10 @@ impl Generation<'_> {
             .await
     }
 
-    /// The result observes accepted work; dropping this future after admission
-    /// cannot cancel preflight/inference. `handoff` MUST synchronously transfer
-    /// the same owner to the API detached settling worker, even when
-    /// delivery/observation has disappeared. Never spawn a second accounting owner.
+    /// The result observes the sole accounting owner. Losing this observer or
+    /// the downstream connection cancels prompt-bearing preflight work, not
+    /// settlement. Successful preflight synchronously transfers that same owner
+    /// to the API worker; never spawn a second accounting owner.
     pub(crate) async fn submit<T, F>(
         self,
         ticket: crate::lifecycle::Ticket,
@@ -284,6 +289,7 @@ impl Generation<'_> {
             permit,
             heavy.clone(),
         )
+        .disconnected(self.disconnect.clone())
         .tracked(ticket.clone())
         .observed(self.observation.generation(model), model);
         self.observation.disposition(Disposition::NewGeneration);
@@ -300,9 +306,14 @@ impl Generation<'_> {
         #[cfg(test)]
         let hooks = self.hooks.clone();
         let work_heavy = heavy.clone();
+        let disconnect = self.disconnect.clone();
         tokio::spawn(ChargedPreflight {
             work: Box::pin(async move {
-                let result = tokio::time::timeout(PREFLIGHT_DEADLINE, async {
+                let result = tokio::select! {
+                    biased;
+                    _ = disconnect.cancelled() => None,
+                    _ = job.sender.as_mut().expect("preflight observer").closed() => None,
+                    result = tokio::time::timeout(PREFLIGHT_DEADLINE, async {
                     let tokens = match &mut job.input {
                         RequestInput::Text(input) => {
                             input.history.push(Message {
@@ -332,13 +343,13 @@ impl Generation<'_> {
                     catalog
                         .quote(job.input.model(), tokens)
                         .map_err(|_| Rejection::Context)
-                })
-                .await;
+                    }) => Some(result),
+                };
                 let quote = match result {
-                    Ok(Ok(quote)) => quote,
+                    Some(Ok(Ok(quote))) => quote,
                     failure => {
                         let rejection = match failure {
-                            Ok(Err(error)) => error,
+                            Some(Ok(Err(error))) => error,
                             _ => Rejection::Unavailable,
                         };
                         let sender = job.sender.take().expect("preflight observer");
@@ -372,7 +383,7 @@ impl Generation<'_> {
                         })
                     }
                 };
-                // Unconditional synchronous transfer, never gated by sender state.
+                // Synchronous owner transfer; compose observes the same cancellation.
                 let output = (job.handoff)(owner, prepared);
                 #[cfg(test)]
                 hooks.after_compose().await;

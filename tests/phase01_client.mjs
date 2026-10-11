@@ -54,6 +54,10 @@ export async function clientCases(moduleURL) {
     const receipt = await m.consumeCompletion(stream(valid, size), 'org/model:v1', value => { text += value; });
     check(text === 'synthetic🐾<script>' && receipt.finish === 'length' && receipt.totalTokens === 5 && receipt.chargedMicrounits === '7');
   }
+  for (const grouped of [delta + finish + usage + done,
+    event({ choices: [{ index: 0, delta: { role: 'assistant', content: 'native' }, finish_reason: 'stop' }] }) + usage + done]) {
+    check((await m.consumeCompletion(stream(grouped, 7), 'org/model:v1', () => {})).totalTokens === 5);
+  }
   const setTimer = globalThis.setTimeout;
   const deadlines = [];
   globalThis.setTimeout = (callback, ms, ...args) => {
@@ -81,7 +85,7 @@ export async function clientCases(moduleURL) {
     check(rejected && closed === 1);
   } finally { globalThis.setTimeout = setTimer; }
   for (const bad of [
-    delta + finish + usage + done, role + usage + done, role + delta, role + delta + finish + done,
+    role + usage + done, role + delta, role + delta + finish + done,
     role + finish + usage, role + finish + usage + done + done, role + finish + usage + done + delta,
     role + finish + usage.replace('"total_tokens":5', '"total_tokens":6') + done,
     role + finish + usage.replace('"charged_microunits":"7"', '"charged_microunits":"7","charged_microunits":"0"') + done,

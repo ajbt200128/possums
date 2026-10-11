@@ -110,6 +110,7 @@ impl AppState {
             metrics: self.telemetry.as_ref(),
             observation: Default::default(),
             activity: &self.generation_activity,
+            disconnect: Default::default(),
             #[cfg(test)]
             hooks: &self.preflight_hooks,
         }
@@ -271,7 +272,10 @@ async fn serve_until_with_header_deadline(
                 let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let seen = entered.clone();
                 let service = TowerToHyperService::new(app.clone());
-                let service = hyper::service::service_fn(move |request| {
+                let disconnect = crate::stream_owner::Disconnect::default();
+                let request_disconnect = disconnect.clone();
+                let service = hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
+                    request.extensions_mut().insert(request_disconnect.clone());
                     seen.store(true, std::sync::atomic::Ordering::Release);
                     let service = service.clone();
                     async move { hyper::service::Service::call(&service, request).await }
@@ -288,7 +292,8 @@ async fn serve_until_with_header_deadline(
                         pause.wait().await;
                     }
                     let builder = connection_builder(header_deadline);
-                    let connection = builder.serve_connection(TokioIo::new(stream), service);
+                    let _disconnect_guard = crate::stream_owner::DisconnectGuard(Some(disconnect.clone()));
+                    let connection = builder.serve_connection(TokioIo::new(DisconnectIo { stream, disconnect }), service);
                     tokio::pin!(connection);
                     let result = if *closing.borrow_and_update() {
                         connection.as_mut().graceful_shutdown();
@@ -346,6 +351,53 @@ async fn serve_until_with_header_deadline(
     Ok(())
 }
 
+/// Notify request ownership on actual socket EOF/error as well as body drop.
+struct DisconnectIo {
+    stream: tokio::net::TcpStream,
+    disconnect: crate::stream_owner::Disconnect,
+}
+impl tokio::io::AsyncRead for DisconnectIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.stream).poll_read(cx, buf);
+        if matches!(result, Poll::Ready(Err(_)))
+            || matches!(result, Poll::Ready(Ok(())))
+                && buf.remaining() > 0
+                && buf.filled().len() == before
+        {
+            self.disconnect.cancel();
+        }
+        result
+    }
+}
+impl tokio::io::AsyncWrite for DisconnectIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.stream).poll_write(cx, bytes);
+        if matches!(result, Poll::Ready(Err(_)) | Poll::Ready(Ok(0))) && !bytes.is_empty() {
+            self.disconnect.cancel();
+        }
+        result
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let result = Pin::new(&mut self.stream).poll_flush(cx);
+        if matches!(result, Poll::Ready(Err(_))) {
+            self.disconnect.cancel();
+        }
+        result
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
 async fn wrong_method(Extension(observation): Extension<RequestContext>) -> StatusCode {
     observation.reject(AdmissionModel::NotApplicable, MetricRejection::Input);
     StatusCode::METHOD_NOT_ALLOWED
@@ -362,7 +414,16 @@ async fn request_admission(
     request.extensions_mut().insert(ticket.clone());
     // The independent middleware envelope outlives all handler captures, even
     // when an extractor consumes/drops the extension or the future is cancelled.
-    ticket.track(admitted_request(state, request, next)).await
+    let signal = request
+        .extensions()
+        .get::<crate::stream_owner::Disconnect>()
+        .cloned()
+        .unwrap_or_default();
+    request.extensions_mut().insert(signal.clone());
+    let mut guard = crate::stream_owner::DisconnectGuard(Some(signal));
+    let response = ticket.track(admitted_request(state, request, next)).await;
+    guard.0.take(); // API response body now owns cancellation.
+    response
 }
 
 async fn admitted_request(state: AppState, mut request: Request<Body>, next: Next) -> Response {

@@ -8,12 +8,12 @@ import { admitTools, fields, freezeJSON, objectArguments, snapshotInvocation, to
 // Execution needs caller policy checks AND a settled receipt + DONE + authenticated EOF.
 export type CompletionEvent = Readonly<{
   object: 'chat.completion.chunk'; model: string;
-  choices: readonly Readonly<{ index: 0; delta: Readonly<{ role?: 'assistant'; content?: string;
-    tool_calls?: readonly Readonly<{ index: number; id?: string; type?: 'function';
-      function?: Readonly<{ name?: string; arguments?: string }> }>[] }>;
-    finish_reason: Receipt['finish'] | null }>[];
+  choices: readonly Readonly<{ index: 0; delta: Readonly<{ role?: 'assistant' | null; content?: string | null;
+    tool_calls?: readonly Readonly<{ index: number; id?: string | null; type?: 'function' | null;
+      function?: Readonly<{ name?: string | null; arguments?: string | null }> | null }>[] | null }>;
+    finish_reason?: Receipt['finish'] | null }>[];
   usage?: Readonly<{ prompt_tokens: number; completion_tokens: number; total_tokens: number }>;
-  possums?: Readonly<{ outcome: 'settled'; charged_microunits: string; refunded_microunits: string;
+  possums?: Readonly<{ outcome: 'settled' | 'refunded'; status?: 'complete' | 'incomplete'; charged_microunits: string; refunded_microunits: string;
     quoted_input_microunits_per_million_tokens?: string; quoted_output_microunits_per_million_tokens?: string }>;
 }>;
 export type CompletionOptions = { signal?: AbortSignal; tools?: Tool[];
@@ -23,10 +23,11 @@ export type ChatOptions = ResponseOptions & CompletionOptions & { tool_choice?: 
 
 export type LiveModel = { object: 'model'; id: string; context_tokens: string; max_output_tokens: string;
   input_microunits_per_million_tokens: string; output_microunits_per_million_tokens: string; maximum_reservation_microunits: string;
-  tool_protocol?: 'openai-functions-v1' };
+  tool_protocol?: 'openai-functions-v1'; cached_input_microunits_per_million_tokens?: string | null };
 export type Receipt = { finish: 'stop' | 'length' | 'tool_calls'; inputTokens: number; outputTokens: number; totalTokens: number;
   chargedMicrounits: string; refundedMicrounits: string;
-  quotedInputMicrounitsPerMillion?: string; quotedOutputMicrounitsPerMillion?: string };
+  quotedInputMicrounitsPerMillion?: string; quotedOutputMicrounitsPerMillion?: string;
+  complete?: boolean; outcome?: 'settled' | 'refunded'; reservedMicrounits?: string; cachedTokens?: number; quotedCachedInputMicrounitsPerMillion?: string | null; evidence?: string };
 export type BalanceSnapshot = Readonly<{ availableMicrounits: string; inFlight: number; completedRequests: string }>;
 export class BalanceFailure extends ChannelError {
   constructor(readonly stage: 'request' | 'validation', code: ChannelError['code'] = 'rejected', readonly observation?: DiagnosticFailure) {
@@ -53,13 +54,14 @@ export function validateModels(value: any): readonly LiveModel[] {
   requireThat(value.object === 'list' && Array.isArray(value.data) && value.data.length > 0 && value.data.length <= LIMITS.models);
   const ids = new Set<string>();
   for (const model of value.data) {
-    fields(model, ['object', 'id', 'context_tokens', 'max_output_tokens', 'input_microunits_per_million_tokens', 'output_microunits_per_million_tokens', 'maximum_reservation_microunits'], ['tool_protocol']);
+    fields(model, ['object', 'id', 'context_tokens', 'max_output_tokens', 'input_microunits_per_million_tokens', 'output_microunits_per_million_tokens', 'maximum_reservation_microunits'], ['tool_protocol', 'cached_input_microunits_per_million_tokens']);
     if (Object.hasOwn(model, 'tool_protocol')) requireThat(model.tool_protocol === 'openai-functions-v1');
     requireThat(model.object === 'model' && typeof model.id === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(model.id) && !ids.has(model.id));
     ids.add(model.id);
     const context = amount(model.context_tokens), output = amount(model.max_output_tokens);
     const inputPrice = amount(model.input_microunits_per_million_tokens), outputPrice = amount(model.output_microunits_per_million_tokens);
     requireThat(context > 0n && output > 0n && output <= context && inputPrice > 0n && outputPrice > 0n);
+    if (model.cached_input_microunits_per_million_tokens != null) requireThat(amount(model.cached_input_microunits_per_million_tokens) <= inputPrice);
     const quote = (130n * (context * inputPrice + output * outputPrice) + 100_000_000n - 1n) / 100_000_000n;
     requireThat(amount(model.maximum_reservation_microunits) === quote);
     Object.freeze(model);
@@ -82,7 +84,8 @@ export function gatewayDetailLabel(detail: string | undefined): string | undefin
 const gatewayReasons = new Set(['insufficient_credit', 'unauthorized', 'invalid_request', 'account_limit', 'duplicate_request', 'unavailable', 'generation_failed', 'service_quiescing']);
 const claimedRefunds = new WeakSet<GatewayError>();
 const confirmedRefunds = new WeakSet<GatewayError>();
-function gatewayDescription(reason: string, detail: string | undefined, refunded: boolean): string {
+const confirmedSettlements = new WeakMap<GatewayError, Readonly<Receipt>>();
+function gatewayDescription(reason: string, detail: string | undefined, refunded: boolean, receipt?: Readonly<Receipt>): string {
   const reasons: Readonly<Record<string, string>> = {
     insufficient_credit: 'Insufficient credit for this model’s maximum reservation.',
     unauthorized: 'Gateway rejected authentication; use /login to authenticate again.',
@@ -93,7 +96,7 @@ function gatewayDescription(reason: string, detail: string | undefined, refunded
   const label = gatewayDetailLabel(detail);
   const known = Object.hasOwn(reasons, reason);
   return `Possums: ${known ? `[${reason}] ${reasons[reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; cause unknown.'}` +
-    (label ? ` ${label}.` : '') + ` Stage: ${reason === 'service_quiescing' ? 'admission' : 'gateway'}; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (refunded ? ' Reservation refunded. Not replayed.' :
+    (label ? ` ${label}.` : '') + ` Stage: ${reason === 'service_quiescing' ? 'admission' : 'gateway'}; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (receipt ? ` Authenticated ${receipt.complete === false ? 'incomplete' : 'complete'} settlement: charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits} microunits. Settlement alone does not authorize tool execution. Not replayed. A new request may incur another charge.` : refunded ? ' Reservation refunded. Not replayed.' :
       ' Charge unknown. Not replayed. A new request may incur another charge.');
 }
 export class GatewayError extends ChannelError {
@@ -107,7 +110,8 @@ export class GatewayError extends ChannelError {
     if (Number.isInteger(status) && status! >= 100 && status! <= 599) this.status = status;
     this.message = gatewayDescription(this.reason, this.detail, false);
   }
-  get billing(): 'refunded' | 'unknown' { return confirmedRefunds.has(this) ? 'refunded' : 'unknown'; }
+  get billing(): 'refunded' | 'settled' | 'unknown' { const receipt = confirmedSettlements.get(this); return receipt ? receipt.outcome ?? 'settled' : confirmedRefunds.has(this) ? 'refunded' : 'unknown'; }
+  get settlement(): Readonly<Receipt> | undefined { return confirmedSettlements.get(this); }
 }
 export function gatewayError(value: any, status?: number): GatewayError {
   keys(value, ['error']);
@@ -193,62 +197,78 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     const value = parseJSON(utf8.encode(payload), LIMITS.sseEvent);
     constraint = 'schema';
     requireThat(value && typeof value === 'object');
-    if (Object.hasOwn(value, 'error')) { requireThat(!receipt); failure = gatewayError(value); state = 'error'; return; }
+    if (Object.hasOwn(value, 'error')) { failure = gatewayError(value); state = receipt ? 'done' : 'error'; return; }
     requireThat(value.object === 'chat.completion.chunk' && value.model === modelID && Array.isArray(value.choices));
     let textDelta: string | undefined;
-    if (state === 'usage') {
+    fields(value, ['object', 'model', 'choices'], ['usage', 'possums']);
+    if (value.possums !== undefined) {
       constraint = 'usage';
-      keys(value, ['object', 'model', 'choices', 'usage', 'possums']);
-      requireThat(value.choices.length === 0 && finish);
-      keys(value.usage, ['prompt_tokens', 'completion_tokens', 'total_tokens']);
-      const { prompt_tokens: input, completion_tokens: output, total_tokens: sum } = value.usage;
+      requireThat(!receipt && value.choices.length === 0);
+      const counts = value.possums.usage ?? value.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+      fields(counts, ['prompt_tokens', 'completion_tokens', 'total_tokens'], ['cached_tokens', 'prompt_tokens_details', 'completion_tokens_details', 'cost_usd']);
+      const { prompt_tokens: input, completion_tokens: output, total_tokens: sum } = counts;
       requireThat([input, output, sum].every(n => Number.isSafeInteger(n) && n >= 0) && input + output === sum);
       constraint = 'receipt';
       fields(value.possums, ['outcome', 'charged_microunits', 'refunded_microunits'],
-        ['quoted_input_microunits_per_million_tokens', 'quoted_output_microunits_per_million_tokens']);
-      requireThat(value.possums.outcome === 'settled');
+        ['quoted_input_microunits_per_million_tokens', 'quoted_output_microunits_per_million_tokens', 'quoted_cached_input_microunits_per_million_tokens', 'status', 'reserved_microunits', 'markup_percent', 'evidence', 'usage', 'provider_cost_usd']);
+      requireThat(value.possums.outcome === 'settled' || value.possums.outcome === 'refunded');
+      const complete = value.possums.status === undefined || value.possums.status === 'complete';
+      requireThat(value.possums.status === undefined || complete || value.possums.status === 'incomplete');
+      requireThat(!complete || (finish && value.possums.outcome === 'settled'));
+      if (value.possums.status !== undefined) {
+        requireThat(value.possums.markup_percent === 130 && ['none', 'running_sse', 'final_sse', 'final_metrics'].includes(value.possums.evidence));
+        requireThat(amount(value.possums.reserved_microunits) === amount(value.possums.charged_microunits) + amount(value.possums.refunded_microunits));
+      }
+      if (value.possums.outcome === 'refunded') requireThat(amount(value.possums.charged_microunits) === 0n);
       amount(value.possums.charged_microunits); amount(value.possums.refunded_microunits);
-      receipt = { finish, inputTokens: input, outputTokens: output, totalTokens: sum,
-        chargedMicrounits: value.possums.charged_microunits, refundedMicrounits: value.possums.refunded_microunits };
+      const cached = counts.cached_tokens ?? counts.prompt_tokens_details?.cached_tokens ?? 0;
+      requireThat(Number.isSafeInteger(cached) && cached >= 0 && cached <= input);
+      receipt = { finish: finish ?? 'stop', inputTokens: input, outputTokens: output, totalTokens: sum,
+        chargedMicrounits: value.possums.charged_microunits, refundedMicrounits: value.possums.refunded_microunits,
+        complete, outcome: value.possums.outcome, reservedMicrounits: value.possums.reserved_microunits, cachedTokens: cached,
+        quotedCachedInputMicrounitsPerMillion: value.possums.quoted_cached_input_microunits_per_million_tokens, evidence: value.possums.evidence };
       const quotedInput = value.possums.quoted_input_microunits_per_million_tokens;
       const quotedOutput = value.possums.quoted_output_microunits_per_million_tokens;
       if (quotedInput !== undefined || quotedOutput !== undefined) {
         const inputRate = amount(quotedInput), outputRate = amount(quotedOutput);
         requireThat(inputRate > 0n && outputRate > 0n);
-        const charged = (130n * (BigInt(input) * inputRate + BigInt(output) * outputRate) + 100_000_000n - 1n) / 100_000_000n;
+        const cachedRate = value.possums.quoted_cached_input_microunits_per_million_tokens == null ? inputRate : amount(value.possums.quoted_cached_input_microunits_per_million_tokens);
+        requireThat(cachedRate <= inputRate);
+        const computed = (130n * (BigInt(input - cached) * inputRate + BigInt(cached) * cachedRate + BigInt(output) * outputRate) + 100_000_000n - 1n) / 100_000_000n;
+        const reserved = value.possums.reserved_microunits === undefined ? computed : amount(value.possums.reserved_microunits);
+        const charged = value.possums.outcome === 'refunded' ? 0n : computed < reserved ? computed : reserved;
         requireThat(amount(value.possums.charged_microunits) === charged);
         receipt.quotedInputMicrounitsPerMillion = quotedInput;
         receipt.quotedOutputMicrounitsPerMillion = quotedOutput;
       }
       state = 'done';
     } else {
-      keys(value, ['object', 'model', 'choices']);
-      requireThat(value.choices.length === 1 && (state === 'role' || state === 'text'));
       constraint = 'choice';
-      const choice = value.choices[0]; keys(choice, ['index', 'delta', 'finish_reason']);
+      requireThat(value.choices.length <= 1 && !receipt && state !== 'done');
+      if (value.usage != null) {
+        constraint = 'usage';
+        fields(value.usage, ['prompt_tokens', 'completion_tokens', 'total_tokens'], ['prompt_tokens_details', 'completion_tokens_details', 'cost_usd']);
+        const u = value.usage;
+        requireThat([u.prompt_tokens, u.completion_tokens, u.total_tokens].every(n => Number.isSafeInteger(n) && n >= 0) && u.prompt_tokens + u.completion_tokens === u.total_tokens);
+        if (u.prompt_tokens_details?.cached_tokens != null) requireThat(Number.isSafeInteger(u.prompt_tokens_details.cached_tokens) && u.prompt_tokens_details.cached_tokens >= 0 && u.prompt_tokens_details.cached_tokens <= u.prompt_tokens);
+      }
+      if (value.choices.length === 0) { requireThat(value.usage != null); return; }
+      constraint = 'choice';
+      requireThat(state === 'role' || state === 'text');
+      const choice = value.choices[0]; fields(choice, ['index', 'delta'], ['finish_reason']);
       requireThat(choice.index === 0);
-      if (state === 'role') {
-        keys(choice.delta, ['role']); requireThat(choice.delta.role === 'assistant' && choice.finish_reason === null);
-        state = 'text';
-      } else if (choice.finish_reason !== null) {
-        constraint = 'finish';
-        keys(choice.delta, []);
-        requireThat(choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop' || choice.finish_reason === 'length');
-        if (choice.finish_reason === 'tool_calls') { constraint = 'tool'; requireThat(names && calls.length > 0); }
-        if (calls.length && choice.finish_reason !== 'length') {
-          constraint = 'tool';
-          requireThat(names);
-          for (const call of calls) {
-            toolID(call.id); toolName(call.name); objectArguments(call.arguments);
-          }
-        }
-        finish = choice.finish_reason; state = 'usage';
-      } else if (Object.hasOwn(choice.delta, 'tool_calls')) {
+      constraint = 'delta';
+      fields(choice.delta, [], ['role', 'content', 'tool_calls', 'reasoning', 'reasoning_content']);
+      if (choice.delta.role != null) requireThat(choice.delta.role === 'assistant');
+      state = 'text';
+      if (choice.delta.content != null) { requireThat(typeof choice.delta.content === 'string'); textDelta = choice.delta.content; }
+      for (const key of ['reasoning', 'reasoning_content']) requireThat(choice.delta[key] == null || typeof choice.delta[key] === 'string');
+      if (Object.hasOwn(choice.delta, 'tool_calls') && choice.delta.tool_calls != null) {
         constraint = 'tool';
-        keys(choice.delta, ['tool_calls']);
-        requireThat(names && Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0);
+        requireThat(Array.isArray(choice.delta.tool_calls));
         const indexes = new Set<number>();
         for (const delta of choice.delta.tool_calls) {
+          requireThat(names);
           requireThat(delta && Number.isSafeInteger(delta.index) && delta.index >= 0 && !indexes.has(delta.index));
           indexes.add(delta.index);
           fields(delta, ['index'], ['id', 'type', 'function']);
@@ -260,31 +280,32 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
           }
           // The gateway preserves SDK fragments: identity and arguments can
           // arrive separately. Completeness is checked at the terminal finish.
-          if (Object.hasOwn(delta, 'type')) requireThat(delta.type === 'function');
-          if (Object.hasOwn(delta, 'id')) {
+          if (delta.type != null) requireThat(delta.type === 'function');
+          if (delta.id != null && delta.id !== '') {
             toolID(delta.id);
             requireThat((!call.id || call.id === delta.id) && (!ids.has(delta.id) || call.id === delta.id));
             if (!call.id) retain(toolStringRetainedBytesPerUnit * delta.id.length);
             call.id = delta.id; ids.add(delta.id);
           }
-          if (Object.hasOwn(delta, 'function')) {
+          if (delta.function != null) {
             fields(delta.function, [], ['name', 'arguments']);
-            if (Object.hasOwn(delta.function, 'name')) {
+            if (delta.function.name != null && delta.function.name !== '') {
               toolName(delta.function.name);
               requireThat(names.has(delta.function.name) && (!call.name || call.name === delta.function.name));
               if (!call.name) retain(toolStringRetainedBytesPerUnit * delta.function.name.length);
               call.name = delta.function.name;
             }
           }
-          const fragment = delta.function && Object.hasOwn(delta.function, 'arguments') ? delta.function.arguments : '';
+          const fragment = delta.function?.arguments ?? '';
           requireThat(typeof fragment === 'string');
           retain(toolStringRetainedBytesPerUnit * fragment.length);
           call.arguments += fragment;
         }
-      } else {
-        constraint = 'delta';
-        keys(choice.delta, ['content']); requireThat(typeof choice.delta.content === 'string');
-        textDelta = choice.delta.content;
+      }
+      if (choice.finish_reason != null) {
+        constraint = 'finish';
+        requireThat(choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop' || choice.finish_reason === 'length');
+        finish = choice.finish_reason; state = 'usage';
       }
     }
     // Validate the WHOLE event before exposing any of its deltas. Hooks cannot
@@ -343,9 +364,13 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
         // Only a Channel-produced, SDK-decrypted body may carry HTTP admission status.
         if (controlError) { constraint = 'json'; failure = gatewayError(parseJSON(utf8.encode(pending), LIMITS.error), hasByteReadTimeout(body) ? httpStatus : undefined); }
         else { constraint = 'envelope'; requireThat(pending === '' && data === undefined); }
+        if (receipt?.complete === false && !failure) failure = new GatewayError('generation_failed', 'stream_finish_missing');
         if (failure) {
           terminal = true;
-          if (claimedRefunds.has(failure)) {
+          if (receipt && atEOF()) {
+            confirmedSettlements.set(failure, Object.freeze(receipt));
+            failure.message = gatewayDescription(failure.reason, failure.detail, false, receipt);
+          } else if (claimedRefunds.has(failure)) {
             confirmedRefunds.add(failure);
             failure.message = gatewayDescription(failure.reason, failure.detail, true);
           }
@@ -353,7 +378,19 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
         }
         constraint = state === 'role' || state === 'text' ? 'finish_missing' :
           state === 'usage' ? 'usage_missing' : state === 'done' ? 'done_missing' : 'eof';
-        requireThat(atEOF() && receipt);
+        requireThat(atEOF() && receipt && receipt.complete !== false);
+        try {
+          if (finish === 'tool_calls') requireThat(names && calls.length > 0);
+          if (calls.length && finish !== 'length') {
+            requireThat(names);
+            for (const call of calls) { toolID(call.id); toolName(call.name); objectArguments(call.arguments); }
+          }
+        } catch {
+          failure = new GatewayError('generation_failed', 'tool_call_incomplete'); terminal = true;
+          confirmedSettlements.set(failure, Object.freeze(receipt));
+          failure.message = gatewayDescription(failure.reason, failure.detail, false, receipt);
+          throw failure;
+        }
         return Object.freeze(receipt);
       }
       constraint = 'envelope';

@@ -482,6 +482,10 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
             .unwrap();
         retained.push(frame.slice(..1));
         drop(frame);
+        // Final EOF wins before body drop; retained DATA still owns credit.
+        while let Some(frame) = bounded(body.frame()).await {
+            drop(frame.unwrap());
+        }
         drop(body);
     }
     bounded(async {

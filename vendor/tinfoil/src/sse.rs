@@ -34,6 +34,17 @@ where
     S: Stream<Item = std::result::Result<Bytes, E>> + Send + 'static,
     E: std::fmt::Display + Send + 'static,
 {
+    parse_event_stream_checked(byte_stream, |_| true)
+}
+
+/// Apply a caller's bounded JSON acceptance check before Value allocation.
+/// The SDK remains the sole SSE decoder; rejected bytes are never echoed.
+pub fn parse_event_stream_checked<S, E, F>(byte_stream: S, check: F) -> EventStream
+where
+    S: Stream<Item = std::result::Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+    F: Fn(&[u8]) -> bool + Send + 'static,
+{
     use async_stream::try_stream;
     use futures_util::StreamExt;
 
@@ -81,7 +92,7 @@ where
                 let event = buffer[..idx].to_string();
                 buffer.drain(..idx + separator_len);
 
-                for value in parse_event_block(&event)? {
+                for value in parse_event_block(&event, &check)? {
                     yield value;
                 }
             }
@@ -103,7 +114,7 @@ where
         // Drain whatever is left after the stream closes (servers don't always
         // emit a trailing `\n\n`).
         if !buffer.is_empty() {
-            for value in parse_event_block(&buffer)? {
+            for value in parse_event_block(&buffer, &check)? {
                 yield value;
             }
         }
@@ -122,7 +133,7 @@ fn find_event_boundary(buffer: &str) -> Option<(usize, usize)> {
     }
 }
 
-fn parse_event_block(event: &str) -> Result<Vec<Value>> {
+fn parse_event_block(event: &str, check: &impl Fn(&[u8]) -> bool) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     for line in event.lines() {
         let line = line.trim_start();
@@ -132,6 +143,11 @@ fn parse_event_block(event: &str) -> Result<Vec<Value>> {
         };
         if payload.is_empty() || payload == "[DONE]" {
             continue;
+        }
+        if !check(payload.as_bytes()) {
+            return Err(Error::Network(
+                "SSE payload rejected by acceptance check".to_owned(),
+            ));
         }
         let value = serde_json::from_str(payload).map_err(|e| {
             Error::Network(format!(
@@ -243,6 +259,30 @@ mod tests {
         let mut out = parse_event_stream(stream);
         let first = out.next().await.unwrap().unwrap();
         assert_eq!(first["x"], 1);
+    }
+
+    #[tokio::test]
+    async fn captured_acceptance_check_rejects_before_json_and_absorbs_failure() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = checks.clone();
+        let mut out = parse_event_stream_checked(
+            make_stream(vec![
+                "data: {\"a\":1}\n\n",
+                "data: PRIVATE_PROMPT_not_json\n\n",
+                "data: {\"a\":2}\n\n",
+            ]),
+            move |_| observed.fetch_add(1, Ordering::SeqCst) == 0,
+        );
+        assert_eq!(out.next().await.unwrap().unwrap()["a"], 1);
+        let error = out.next().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("acceptance check"));
+        assert!(!error.to_string().contains("PRIVATE_PROMPT"));
+        assert!(out.next().await.is_none());
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

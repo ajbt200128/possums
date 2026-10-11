@@ -12,7 +12,7 @@ use possums::{
     auth::Auth,
     catalog::Model,
     inference::{
-        stream::{ProtocolParser, SdkToolValidator, StreamCompletion},
+        stream::{SdkToolValidator, StreamCompletion},
         tools::{ToolInvocation, ToolProfile},
         Inference, InferenceError, InferenceFailure, Message,
     },
@@ -48,6 +48,9 @@ struct Provider {
     missing_final_usage: AtomicBool,
     overflow_delivery: AtomicBool,
     text_repeats: AtomicUsize,
+    running_usage: AtomicBool,
+    native_metrics: AtomicBool,
+    missing_finish: AtomicBool,
     hold_tokenizer: AtomicBool,
     tokenizer_error: AtomicBool,
     invalid_receipt: AtomicBool,
@@ -75,6 +78,96 @@ impl EvidenceVerifier for Provider {
 }
 #[async_trait]
 impl Inference for Provider {
+    async fn generate_forwarded_stream(
+        &self,
+        model: &Model,
+        _: &[Message],
+        invocation: Option<&ToolInvocation>,
+        _: Arc<possums::telemetry::hooks::Lease>,
+        sink: &mut dyn possums::inference::forward::ForwardSink,
+    ) -> Result<StreamCompletion, InferenceError> {
+        self.generation_calls.fetch_add(1, Ordering::SeqCst);
+        if self.panic_generation.load(Ordering::SeqCst) {
+            panic!("synthetic generation panic");
+        }
+        self.output_allowance
+            .store(model.max_output_tokens, Ordering::SeqCst);
+        let delta = if let Some(invocation) = invocation {
+            assert_eq!(
+                self.invocation.lock().unwrap().as_ref(),
+                Some(&serde_json::to_value(invocation).unwrap())
+            );
+            json!({"tool_calls":[{"index":0,"id":"generated_0","type":"function","function":{"name":"lookup","arguments":json!({"q":"🐾\n".repeat(260)}).to_string()}}]})
+        } else {
+            json!({"content":"<script>synthetic</script>🐾"})
+        };
+        // Native event groups are not split/reconstructed by the gateway.
+        if self.running_usage.load(Ordering::SeqCst) {
+            sink.evidence(possums::inference::forward::Evidence::sse(
+                possums::inference::stream::StreamUsage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    total_tokens: 3,
+                },
+            ));
+        }
+        self.started.notify_one();
+        for _ in 0..if self.overflow_delivery.load(Ordering::SeqCst) {
+            100
+        } else {
+            self.text_repeats.load(Ordering::SeqCst)
+        } {
+            sink.event(json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}))
+                .await?;
+        }
+        self.finish.notified().await;
+        if self.upstream_error.load(Ordering::SeqCst) {
+            self.completed.notify_one();
+            return Err(InferenceFailure::StreamTransportFailed.into());
+        }
+        if self.invalid_usage.load(Ordering::SeqCst) || self.invalid_receipt.load(Ordering::SeqCst)
+        {
+            self.completed.notify_one();
+            return Err(InferenceFailure::StreamUsageInvalid.into());
+        }
+        if self.missing_final_usage.load(Ordering::SeqCst) {
+            return Err(InferenceFailure::StreamUsageMissing.into());
+        }
+        let usage = possums::inference::stream::StreamUsage {
+            input_tokens: 2,
+            output_tokens: 3,
+            total_tokens: 5,
+        };
+        let finish_reason = if invocation.is_some() {
+            possums::inference::stream::FinishReason::Stop
+        } else {
+            possums::inference::stream::FinishReason::Length
+        };
+        if !self.missing_finish.load(Ordering::SeqCst) {
+            sink.event(json!({"choices":[{"index":0,"delta":{},"finish_reason":finish_reason}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}))
+                .await?;
+        } else {
+            sink.event(json!({"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}})).await?;
+        }
+        let mut evidence = possums::inference::forward::Evidence::sse(usage);
+        evidence.source = "final_sse";
+        if self.native_metrics.load(Ordering::SeqCst) {
+            let mut headers = http::HeaderMap::new();
+            headers.insert("x-tinfoil-usage-metrics", "prompt=2,completion=3,total=5,model=m,cost_usd=999.00,unknown=private-header-marker".parse().unwrap());
+            evidence = possums::inference::forward::metrics(&headers, "m")?.unwrap();
+        }
+        sink.evidence(evidence);
+        // Match consume's clean EOF with trustworthy native metrics but no
+        // finish: settlement evidence is committed before completion fails.
+        if self.missing_finish.load(Ordering::SeqCst) {
+            return Err(InferenceFailure::StreamFinishMissing.into());
+        }
+        self.completed.notify_one();
+        Ok(StreamCompletion {
+            usage,
+            finish_reason,
+        })
+    }
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
         if !self.valid_catalog.load(Ordering::SeqCst) {
             return Err(InferenceError::Unavailable);
@@ -102,60 +195,6 @@ impl Inference for Provider {
             return Err(InferenceFailure::TokenizerResponseInvalid.into());
         }
         Ok(self.tokens.load(Ordering::SeqCst))
-    }
-    async fn generate_completion_stream(
-        &self,
-        model: &Model,
-        _: &[Message],
-        _: Arc<possums::telemetry::hooks::Lease>,
-        on_delta: &mut dyn possums::inference::TextDeltaSink,
-    ) -> Result<StreamCompletion, InferenceError> {
-        self.generation_calls.fetch_add(1, Ordering::SeqCst);
-        if self.panic_generation.load(Ordering::SeqCst) {
-            panic!("synthetic generation panic; no request content");
-        }
-        self.output_allowance
-            .store(model.max_output_tokens, Ordering::SeqCst);
-        let mut parser = ProtocolParser::default();
-        let content = "<script>synthetic</script>🐾";
-        let event = format!(
-            "data: {}\n\n",
-            json!({"choices":[{"index":0,"delta":{"content":content},"finish_reason":null}]})
-        );
-        let repeats = if self.overflow_delivery.load(Ordering::SeqCst) {
-            100
-        } else {
-            self.text_repeats.load(Ordering::SeqCst)
-        };
-        for _ in 0..repeats {
-            parser
-                .feed_async(event.as_bytes(), &mut *on_delta)
-                .await
-                .map_err(|_| InferenceError::InvalidResponse)?;
-        }
-        self.started.notify_one();
-        self.finish.notified().await;
-        let result = if self.invalid_receipt.load(Ordering::SeqCst) {
-            Ok(StreamCompletion {
-                usage: possums::inference::stream::StreamUsage {
-                    input_tokens: 2,
-                    output_tokens: 3,
-                    total_tokens: 999,
-                },
-                finish_reason: possums::inference::stream::FinishReason::Stop,
-            })
-        } else if self.upstream_error.load(Ordering::SeqCst) {
-            Err(InferenceFailure::StreamTransportFailed.into())
-        } else if self.invalid_usage.load(Ordering::SeqCst) {
-            Err(InferenceError::InvalidResponse)
-        } else {
-            parser.feed_async(b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n", &mut *on_delta).await.map_err(|_| InferenceError::InvalidResponse)?;
-            parser
-                .eof_completion()
-                .map_err(|_| InferenceError::InvalidResponse)
-        };
-        self.completed.notify_one();
-        result
     }
     fn tool_profile(&self, model: &str) -> Option<ToolProfile> {
         let check = self.qualification_checks.fetch_add(1, Ordering::SeqCst);
@@ -303,6 +342,9 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         missing_final_usage: false.into(),
         overflow_delivery: false.into(),
         text_repeats: 1.into(),
+        running_usage: false.into(),
+        native_metrics: false.into(),
+        missing_finish: false.into(),
         hold_tokenizer: false.into(),
         tokenizer_error: false.into(),
         invalid_receipt: false.into(),
@@ -363,6 +405,161 @@ async fn duplicate(state: &AppState, bearer: &str, submission: &str, expected: &
 }
 
 #[tokio::test]
+async fn downstream_native_metrics_require_single_opt_in_and_final_evidence() {
+    for structured in [false, true] {
+        for native in [false, true] {
+            for failure in [false, true] {
+                for opt_in in [
+                    None,
+                    Some("true"),
+                    Some("false"),
+                    Some("TRUE"),
+                    Some("true,true"),
+                    Some("duplicate"),
+                ] {
+                    let (state, provider, bearer, submission) = fixture(5_000_000);
+                    provider.qualified.store(structured, Ordering::SeqCst);
+                    provider.native_metrics.store(native, Ordering::SeqCst);
+                    provider.upstream_error.store(failure, Ordering::SeqCst);
+                    let mut request = if structured {
+                        json_request(&bearer, structured_input(&submission))
+                    } else {
+                        request(&bearer, &submission)
+                    };
+                    if let Some(value) = opt_in {
+                        if value == "duplicate" {
+                            request
+                                .headers_mut()
+                                .append("x-tinfoil-request-usage-metrics", "true".parse().unwrap());
+                            request
+                                .headers_mut()
+                                .append("x-tinfoil-request-usage-metrics", "true".parse().unwrap());
+                        } else {
+                            request
+                                .headers_mut()
+                                .insert("x-tinfoil-request-usage-metrics", value.parse().unwrap());
+                        }
+                    }
+                    let response = router(state.clone()).oneshot(request).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::OK);
+                    assert_eq!(
+                        response
+                            .headers()
+                            .get(header::TRAILER)
+                            .map(|v| v.to_str().unwrap()),
+                        (opt_in == Some("true")).then_some("X-Tinfoil-Usage-Metrics")
+                    );
+                    provider.finish.notify_one();
+                    let mut body = response.into_body();
+                    let mut data = Vec::new();
+                    let mut trailer_seen = false;
+                    while let Some(frame) = body.frame().await {
+                        let frame = frame.unwrap();
+                        match frame.into_data() {
+                            Ok(bytes) => {
+                                assert!(!trailer_seen);
+                                data.extend_from_slice(&bytes);
+                            }
+                            Err(frame) => {
+                                assert!(!trailer_seen);
+                                assert!(data.ends_with(b"data: [DONE]\n\n"));
+                                let trailers = frame.into_trailers().unwrap();
+                                assert_eq!(trailers.len(), 1);
+                                assert_eq!(
+                                    trailers["x-tinfoil-usage-metrics"],
+                                    "prompt=2,completion=3,total=5,model=m,cost_usd=999.00"
+                                );
+                                trailer_seen = true;
+                            }
+                        }
+                    }
+                    assert_eq!(trailer_seen, native && !failure && opt_in == Some("true"));
+                    let text = std::str::from_utf8(&data).unwrap();
+                    assert!(!text.contains("private-header-marker"));
+                    assert!(text.contains(if failure {
+                        "\"charged_microunits\":\"0\""
+                    } else {
+                        "\"charged_microunits\":\"7\""
+                    }));
+                    terminal(&state, 5_000_000 - if failure { 0 } else { 7 }).await;
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn final_metrics_without_finish_settle_but_never_emit_downstream_trailer() {
+    for structured in [false, true] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        provider.qualified.store(structured, Ordering::SeqCst);
+        provider.native_metrics.store(true, Ordering::SeqCst);
+        provider.missing_finish.store(true, Ordering::SeqCst);
+        let mut request = if structured {
+            json_request(&bearer, structured_input(&submission))
+        } else {
+            request(&bearer, &submission)
+        };
+        request
+            .headers_mut()
+            .insert("x-tinfoil-request-usage-metrics", "true".parse().unwrap());
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::TRAILER],
+            "X-Tinfoil-Usage-Metrics"
+        );
+        provider.finish.notify_one();
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let frame = frame.unwrap();
+            assert!(
+                !frame.is_trailers(),
+                "incomplete receipt must withhold native metrics trailer"
+            );
+            bytes.extend_from_slice(&frame.into_data().unwrap());
+        }
+        assert!(bytes.ends_with(b"data: [DONE]\n\n"));
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let events: Vec<Value> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        let receipt = &events
+            .iter()
+            .find(|event| event.get("possums").is_some())
+            .unwrap()["possums"];
+        assert_eq!(receipt["status"], "incomplete");
+        assert_eq!(receipt["outcome"], "settled");
+        assert_eq!(receipt["evidence"], "final_metrics");
+        assert_eq!(
+            receipt["usage"],
+            json!({"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,"cached_tokens":0})
+        );
+        assert_eq!(receipt["provider_cost_usd"], "999.00");
+        assert_eq!(receipt["reserved_microunits"], "52");
+        assert_eq!(receipt["charged_microunits"], "7");
+        assert_eq!(receipt["refunded_microunits"], "45");
+        let error = &events
+            .iter()
+            .find(|event| event.get("error").is_some())
+            .unwrap()["error"];
+        assert_eq!(
+            error["detail"],
+            serde_json::to_value(InferenceFailure::StreamFinishMissing).unwrap()
+        );
+        assert!(!text.contains("private-header-marker"));
+        terminal(&state, 4_999_993).await;
+        assert_eq!(state.accounting.snapshot("demo").unwrap().in_flight, 0);
+        duplicate(&state, &bearer, &submission, "settled").await;
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
 async fn progressive_stream_preserves_finish_and_settles_before_success_markers_without_replay() {
     async fn balance(state: &AppState, bearer: &str) -> Value {
         let response = router(state.clone())
@@ -396,11 +593,9 @@ async fn progressive_stream_preserves_finish_and_settles_before_success_markers_
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let mut body = response.into_body();
     let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    assert!(std::str::from_utf8(&first).unwrap().contains("assistant"));
+    assert!(std::str::from_utf8(&first).unwrap().contains("synthetic"));
+    assert!(!std::str::from_utf8(&first).unwrap().contains("\"role\""));
     drop(first);
-    let next = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    assert!(std::str::from_utf8(&next).unwrap().contains("synthetic"));
-    drop(next);
     wait(&provider.started).await;
     assert_eq!(provider.output_allowance.load(Ordering::SeqCst), 18);
     assert_eq!(state.accounting.available("demo"), Some(5_000_000 - 52));
@@ -461,7 +656,7 @@ async fn detached_generation_panic_refunds_once_without_replay() {
 }
 
 #[tokio::test]
-async fn disconnect_and_backpressure_never_cancel_generation_or_change_settlement() {
+async fn disconnect_cancels_and_temporary_backpressure_resumes_without_detaching() {
     for overflow in [false, true] {
         let (state, provider, bearer, submission) = fixture(5_000_000);
         provider.overflow_delivery.store(overflow, Ordering::SeqCst);
@@ -469,38 +664,27 @@ async fn disconnect_and_backpressure_never_cancel_generation_or_change_settlemen
         if !overflow {
             wait(&provider.started).await;
             drop(response);
-            assert_eq!(state.accounting.available("demo"), Some(5_000_000 - 52));
-            provider.finish.notify_one();
+            terminal(&state, 5_000_000).await;
+            duplicate(&state, &bearer, &submission, "refunded").await;
         } else {
-            // A connected slow reader receives every delta, not a truncated EOF
-            // after eight frames. Releasing EOF does not bypass delivery waits.
+            assert_eq!(state.accounting.snapshot("demo").unwrap().in_flight, 1);
             provider.finish.notify_one();
             let mut body = response.into_body();
-            let mut text = String::new();
-            let mut done = false;
+            let mut bytes = Vec::new();
             while let Some(frame) = body.frame().await {
-                tokio::task::yield_now().await;
-                let bytes = frame.unwrap().into_data().unwrap();
-                let frame = std::str::from_utf8(&bytes).unwrap();
-                if frame == "data: [DONE]\n\n" {
-                    done = true;
-                    continue;
-                }
-                let value: Value =
-                    serde_json::from_str(frame.strip_prefix("data: ").unwrap().trim()).unwrap();
-                if let Some(delta) = value
-                    .pointer("/choices/0/delta/content")
-                    .and_then(Value::as_str)
-                {
-                    text.push_str(delta);
-                }
+                bytes.extend_from_slice(&frame.unwrap().into_data().unwrap());
             }
-            assert!(done);
-            assert_eq!(text, "<script>synthetic</script>🐾".repeat(100));
-            wait(&provider.started).await;
+            assert!(bytes.ends_with(b"data: [DONE]\n\n"));
+            assert_eq!(
+                std::str::from_utf8(&bytes)
+                    .unwrap()
+                    .matches("synthetic")
+                    .count(),
+                100
+            );
+            terminal(&state, 5_000_000 - 7).await;
+            duplicate(&state, &bearer, &submission, "settled").await;
         }
-        terminal(&state, 5_000_000 - 7).await;
-        duplicate(&state, &bearer, &submission, "settled").await;
         assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
     }
 }
@@ -509,8 +693,8 @@ async fn disconnect_and_backpressure_never_cancel_generation_or_change_settlemen
 async fn settlement_precedes_blocked_terminal_delivery_and_body_loss_cannot_change_it() {
     for failure in ["none", "upstream", "invalid_receipt"] {
         let (state, provider, bearer, submission) = fixture(5_000_000);
-        // The role plus seven content frames exhaust all eight credits. The
-        // first terminal frame must wait, but not the terminal ledger attempt.
+        // Seven native content events plus grouped finish/usage exhaust eight
+        // credits. The receipt must wait, but not the terminal ledger attempt.
         provider.text_repeats.store(7, Ordering::SeqCst);
         provider
             .upstream_error
@@ -564,7 +748,7 @@ async fn upstream_failure_or_missing_usage_refunds_once_after_disconnect() {
 }
 
 #[tokio::test]
-async fn cancelled_request_during_tokenization_keeps_accepted_work_and_refunds_context_failure() {
+async fn cancelled_request_during_tokenization_prevents_generation_and_refunds() {
     for context_failure in [false, true] {
         let (state, provider, bearer, submission) = fixture(5_000_000);
         provider.hold_tokenizer.store(true, Ordering::SeqCst);
@@ -576,17 +760,9 @@ async fn cancelled_request_during_tokenization_keeps_accepted_work_and_refunds_c
         wait(&provider.tokenizer_started).await;
         task.abort();
         let _ = task.await;
-        provider.tokenizer_release.notify_one();
-        if context_failure {
-            terminal(&state, 5_000_000).await;
-            assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
-            duplicate(&state, &bearer, &submission, "refunded").await;
-        } else {
-            wait(&provider.started).await;
-            provider.finish.notify_one();
-            terminal(&state, 5_000_000 - 7).await;
-            duplicate(&state, &bearer, &submission, "settled").await;
-        }
+        terminal(&state, 5_000_000).await;
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
+        duplicate(&state, &bearer, &submission, "refunded").await;
     }
 }
 
@@ -773,8 +949,8 @@ async fn near_thirty_two_mib_api_history_is_not_product_capped_or_replayed() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     wait(&provider.started).await;
-    drop(response);
     provider.finish.notify_one();
+    response.into_body().collect().await.unwrap();
     terminal(&state, 5_000_000 - 7).await;
     duplicate(&state, &bearer, &submission, "settled").await;
     assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 1);
@@ -892,7 +1068,7 @@ async fn structured_history_exact_preflight_bounded_sse_and_original_price_recei
                 receipt = true;
             }
         }
-        assert!(done && fragments > 1);
+        assert!(done && fragments == 1); // Preserve native grouping; no gateway fragment synthesis.
         assert_eq!(
             serde_json::from_str::<Value>(&arguments).unwrap(),
             json!({"q":"🐾\n".repeat(260)})
@@ -926,65 +1102,42 @@ async fn structured_disconnect_overflow_and_failure_keep_sole_settling_owner() {
             .missing_final_usage
             .store(mode == "missing_final_usage", Ordering::SeqCst);
         let failed = matches!(mode, "failure" | "invalid_usage" | "missing_final_usage");
+        provider.running_usage.store(true, Ordering::SeqCst);
         let response = router(state.clone())
             .oneshot(json_request(&bearer, structured_input(&submission)))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        if mode == "slow_reader" {
+        wait(&provider.started).await;
+        if mode == "disconnect" {
+            drop(response); // No release: actual body drop closes upstream work.
+        } else {
             provider.finish.notify_one();
             let mut body = response.into_body();
-            let mut arguments = String::new();
-            let mut done = false;
+            let mut bytes = Vec::new();
             while let Some(frame) = body.frame().await {
-                tokio::task::yield_now().await;
-                let bytes = frame.unwrap().into_data().unwrap();
-                let frame = std::str::from_utf8(&bytes).unwrap();
-                if frame == "data: [DONE]\n\n" {
-                    done = true;
-                    continue;
-                }
-                let value: Value =
-                    serde_json::from_str(frame.strip_prefix("data: ").unwrap().trim()).unwrap();
-                if let Some(fragment) = value
-                    .pointer("/choices/0/delta/tool_calls/0/function/arguments")
-                    .and_then(Value::as_str)
-                {
-                    arguments.push_str(fragment);
-                }
+                bytes.extend_from_slice(&frame.unwrap().into_data().unwrap());
             }
-            assert!(done);
-            assert_eq!(
-                arguments,
-                json!({"q":"🐾\n".repeat(260)}).to_string() + &" ".repeat(256 * 100)
-            );
-            wait(&provider.started).await;
-        } else {
-            // Drop during a blocked emission in the overflow case; the same SDK
-            // stream must then drain to the fixture's terminal result exactly once.
-            if mode != "overflow" {
-                wait(&provider.started).await;
-            }
-            drop(response);
-            if mode == "overflow" {
-                wait(&provider.started).await;
-            }
-            provider.finish.notify_one();
+            let text = std::str::from_utf8(&bytes).unwrap();
+            assert!(text.ends_with("data: [DONE]\n\n"));
+            assert!(text.contains(if failed {
+                "\"status\":\"incomplete\""
+            } else {
+                "\"status\":\"complete\""
+            }));
         }
-        terminal(&state, 5_000_000 - if failed { 0 } else { 7 }).await;
-        duplicate(
+        terminal(
             &state,
-            &bearer,
-            &submission,
-            if failed { "refunded" } else { "settled" },
+            5_000_000 - if failed || mode == "disconnect" { 4 } else { 7 },
         )
         .await;
+        duplicate(&state, &bearer, &submission, "settled").await;
         assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
     }
 }
 
 #[tokio::test]
-async fn structured_preflight_survives_request_cancellation_and_context_rejection() {
+async fn structured_preflight_cancellation_prevents_generation_and_refunds() {
     for context_failure in [false, true] {
         let (state, provider, bearer, submission) = fixture(5_000_000);
         provider.qualified.store(true, Ordering::SeqCst);
@@ -997,17 +1150,9 @@ async fn structured_preflight_survives_request_cancellation_and_context_rejectio
         wait(&provider.tokenizer_started).await;
         task.abort();
         let _ = task.await;
-        provider.tokenizer_release.notify_one();
-        if context_failure {
-            terminal(&state, 5_000_000).await;
-            assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
-            duplicate(&state, &bearer, &submission, "refunded").await;
-        } else {
-            wait(&provider.started).await;
-            provider.finish.notify_one();
-            terminal(&state, 5_000_000 - 7).await;
-            duplicate(&state, &bearer, &submission, "settled").await;
-        }
+        terminal(&state, 5_000_000).await;
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
+        duplicate(&state, &bearer, &submission, "refunded").await;
     }
 }
 
@@ -1101,27 +1246,22 @@ async fn safe_details_survive_middleware_and_only_actual_refunds_are_reported() 
         let text = std::str::from_utf8(&bytes).unwrap();
         let error = text
             .lines()
-            .find(|line| line.starts_with("data: {\"error\":{\"code\":\"generation_failed\""))
+            .find(|line| line.starts_with("data: {\"error\":"))
             .unwrap();
         let value: Value = serde_json::from_str(error.strip_prefix("data: ").unwrap()).unwrap();
         assert_eq!(
             value["error"]["detail"],
             if invalid_receipt {
-                "settlement_failed"
+                "stream_usage_invalid"
             } else {
                 "stream_transport_failed"
             }
         );
-        assert_eq!(
-            value["error"]["billing"],
-            if invalid_receipt {
-                "unknown"
-            } else {
-                "refunded"
-            }
-        );
+        assert_eq!(value["error"]["billing"], "unknown"); // Only the body receipt confirms money.
+        assert!(text.contains("\"outcome\":\"refunded\""));
+        assert!(text.contains("\"status\":\"incomplete\""));
         assert!(!error.contains("synthetic"));
-        assert!(!text.contains("[DONE]"));
+        assert!(text.ends_with("data: [DONE]\n\n"));
         terminal(&state, 5_000_000).await;
         duplicate(&state, &bearer, &submission, "refunded").await;
         assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);

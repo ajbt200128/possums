@@ -80,6 +80,7 @@ fn request() -> (Model, [Message; 1]) {
             max_output_tokens: 16,
             input_microunits_per_million_tokens: 1,
             output_microunits_per_million_tokens: 1,
+            cached_input_microunits_per_million_tokens: None,
         },
         [Message {
             role: "user".into(),

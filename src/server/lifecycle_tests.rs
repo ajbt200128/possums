@@ -33,6 +33,7 @@ struct Probe {
     tokenizer: Mutex<Option<Pause>>,
     generation: Mutex<Option<Pause>>,
     calls: AtomicUsize,
+    emit_progress: std::sync::atomic::AtomicBool,
     verify_calls: AtomicUsize,
     catalog_calls: AtomicUsize,
     tokenize_calls: AtomicUsize,
@@ -100,8 +101,11 @@ impl Inference for Probe {
         _: &Model,
         _: &[Message],
         _: Arc<Lease>,
-        _: &mut dyn crate::inference::TextDeltaSink,
+        on_delta: &mut dyn crate::inference::TextDeltaSink,
     ) -> Result<StreamCompletion, InferenceError> {
+        if self.emit_progress.load(Ordering::SeqCst) {
+            on_delta.emit("synthetic progress").await;
+        }
         Ok(self.complete_generation().await)
     }
     async fn generate_invocation_stream(
@@ -227,7 +231,14 @@ async fn accepted_before_evidence_fence_can_reserve_but_new_chat_cannot() {
         assert_eq!(value["error"]["billing"], "not_submitted");
         assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
         gate.release.send(()).unwrap();
-        drop(bounded(handler).await.unwrap().unwrap());
+        bounded(handler)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_body()
+            .collect()
+            .await
+            .unwrap();
         assert_eq!(bounded(drain).await, Ok(()));
         assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -430,6 +441,43 @@ async fn shutdown_retains_admitted_connection_and_fences_new_work() {
 }
 
 #[tokio::test]
+async fn actual_disconnect_during_tokenization_prevents_generation_and_refunds() {
+    let (state, probe, session) = fixture();
+    let (pause, gate) = checkpoint();
+    *probe.tokenizer.lock().unwrap() = Some(pause);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopping) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve_until(listener, state.clone(), async move {
+        let _ = stopping.await;
+    }));
+    let body = chat(&state, &session, false)
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {session}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+    client.write_all(&body).await.unwrap();
+    bounded(gate.reached).await.unwrap();
+    assert_eq!(state.accounting.snapshot("demo").unwrap().in_flight, 1);
+    drop(client);
+    bounded(async {
+        while state.accounting.snapshot("demo").unwrap().in_flight != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.tokenize_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(state.accounting.available("demo"), Some(1000));
+    assert!(gate.release.send(()).is_err());
+    stop.send(()).unwrap();
+    assert!(bounded(server).await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn shutdown_before_accept_and_repeated_intent_is_idempotent() {
     let (state, _, _) = fixture();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -444,7 +492,7 @@ async fn shutdown_before_accept_and_repeated_intent_is_idempotent() {
 }
 
 #[tokio::test]
-async fn shutdown_waits_for_original_owner_after_connection_task_finishes() {
+async fn disconnect_cancels_original_owner_before_shutdown_finishes() {
     let (state, probe, session) = fixture();
     let (pause, gate) = checkpoint();
     *probe.generation.lock().unwrap() = Some(pause);
@@ -467,17 +515,64 @@ async fn shutdown_waits_for_original_owner_after_connection_task_finishes() {
     bounded(connection_finished).await.unwrap(); // The retained connection future actually retired.
     assert!(!state.lifecycle.is_serving());
     assert!(state.lifecycle.try_admit().is_none());
-    let balance = state.accounting.snapshot("demo").unwrap();
-    assert_eq!(balance.in_flight, 1); // The original owner is still held in the adapter.
-    assert_eq!(balance.completed_requests, 0);
-    assert!(!server.is_finished());
-    state.lifecycle.quiesce(); // A repeated shutdown intent cannot skip owner cleanup.
-    gate.release.send(()).unwrap();
+    // No draining/releasing the fixture: connection closure cancels generation.
+    state.lifecycle.quiesce();
     assert!(bounded(server).await.unwrap().is_ok());
+    assert!(gate.release.send(()).is_err());
+    assert_eq!(state.accounting.available("demo"), Some(1000));
     assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
     let balance = state.accounting.snapshot("demo").unwrap();
     assert_eq!(balance.in_flight, 0);
     assert_eq!(balance.completed_requests, 1);
+}
+
+#[tokio::test]
+async fn disconnect_after_progress_cancels_without_shutdown_or_another_write() {
+    let (state, probe, session) = fixture();
+    probe.emit_progress.store(true, Ordering::SeqCst);
+    let (pause, gate) = checkpoint();
+    *probe.generation.lock().unwrap() = Some(pause);
+    let (finished, connection_finished) = tokio::sync::oneshot::channel();
+    *state.server_hooks.connection_finished.lock().unwrap() = Some(finished);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopping) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve_until(listener, state.clone(), async move {
+        let _ = stopping.await;
+    }));
+    let body = chat(&state, &session, false)
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {session}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+    client.write_all(&body).await.unwrap();
+    bounded(gate.reached).await.unwrap();
+    let mut received = Vec::new();
+    bounded(async {
+        while !received
+            .windows(b"synthetic progress".len())
+            .any(|window| window == b"synthetic progress")
+        {
+            let mut bytes = [0; 512];
+            let length = client.read(&mut bytes).await.unwrap();
+            assert!(length > 0);
+            received.extend_from_slice(&bytes[..length]);
+            assert!(received.len() < 4096);
+        }
+    })
+    .await;
+    drop(client);
+    bounded(connection_finished).await.unwrap();
+    assert!(state.lifecycle.is_serving());
+    assert!(gate.release.send(()).is_err());
+    stop.send(()).unwrap();
+    assert!(bounded(server).await.unwrap().is_ok());
+    assert_eq!(state.accounting.available("demo"), Some(1000));
+    let balance = state.accounting.snapshot("demo").unwrap();
+    assert_eq!((balance.in_flight, balance.completed_requests), (0, 1));
 }
 
 #[tokio::test]
@@ -581,10 +676,11 @@ async fn duplicate_does_not_add_an_accounting_owner() {
 }
 
 #[tokio::test]
-async fn disconnected_retained_workers_do_not_gate_new_chat_and_drain_original_owners() {
+async fn overlapping_chat_has_no_admission_gate_and_disconnect_drains_original_owners() {
     for structured in [false, true] {
         let (state, probe, session) = fixture();
         let mut gates = Vec::new();
+        let mut responses = Vec::new();
         for n in 1..=9 {
             let (pause, gate) = checkpoint();
             *probe.generation.lock().unwrap() = Some(pause);
@@ -594,7 +690,7 @@ async fn disconnected_retained_workers_do_not_gate_new_chat_and_drain_original_o
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             bounded(gate.reached).await.unwrap();
-            drop(response); // Detached original worker still owns its input and reservation.
+            responses.push(response); // Keep connected workers paused concurrently.
             gates.push(gate.release);
             assert_eq!(state.active_lanes(), [n, n, 0]);
             assert_eq!(
@@ -607,15 +703,16 @@ async fn disconnected_retained_workers_do_not_gate_new_chat_and_drain_original_o
         let drain = state.lifecycle.wait_drained();
         tokio::pin!(drain);
         assert!(poll!(&mut drain).is_pending());
-        for release in gates {
-            release.send(()).unwrap();
-        }
+        drop(responses); // Actual disconnect cancels, without releasing fixture gates.
         assert_eq!(bounded(drain).await, Ok(()));
+        for release in gates {
+            assert!(release.send(()).is_err());
+        }
         assert_eq!(state.active_lanes(), [0, 0, 0]);
         assert_eq!(probe.calls.load(Ordering::SeqCst), 9); // No replay.
         let balance = state.accounting.snapshot("demo").unwrap();
         assert_eq!(balance.in_flight, 0);
         assert_eq!(balance.completed_requests, 9);
-        assert_eq!(balance.available_microunits, 1000 - 9 * 7);
+        assert_eq!(balance.available_microunits, 1000); // No trustworthy usage.
     }
 }

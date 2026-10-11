@@ -107,11 +107,11 @@ impl Inference for Provider {
     ) -> Result<StreamCompletion, InferenceError> {
         heavy.dispatch_generation();
         self.startup_queued.notify_one();
+        delta.emit("").await; // Native callback grouping, not a gateway-invented role event.
         let ready = self.startup_drained.lock().unwrap().take();
         if let Some(ready) = ready {
             ready.notified().await;
         }
-        delta.emit("").await;
         delta.emit("hostile-output-canary").await;
         delta.emit("another fragment").await;
         self.entered.notify_one();
@@ -224,7 +224,7 @@ async fn api_terminal_hooks_preserve_accounting_and_duplicate_disposition() {
         }
         let consumer = tokio::spawn(async move {
             let mut body = response.into_body();
-            let marker = &b"\"role\":\"assistant\""[..];
+            let marker = &b"\"content\":\"\""[..];
             let mut gate = gate;
             while let Some(frame) = body.frame().await {
                 let frame = frame.unwrap();
@@ -310,7 +310,7 @@ async fn api_terminal_hooks_preserve_accounting_and_duplicate_disposition() {
 }
 
 #[tokio::test]
-async fn body_disconnect_does_not_finish_generation_or_release_its_markers() {
+async fn body_disconnect_cancels_generation_but_retained_slices_keep_memory_credit() {
     let metrics = metrics(Deployment::IsolatedSynthetic);
     let f = Fixture::new(true, Failure::None, Some(metrics.clone()));
     let mut body = f.send().await.into_body();
@@ -321,7 +321,7 @@ async fn body_disconnect_does_not_finish_generation_or_release_its_markers() {
     drop(body);
     assert_eq!(totals(&metrics), (1, 1, 1, 0));
     assert_eq!(f.state.active_lanes(), [1, 1, 0]);
-    f.provider.finish.notify_one();
+    // Do not release the upstream fixture: actual body drop must cancel it.
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while f.state.active_lanes()[0] != 0 {
             tokio::task::yield_now().await;
@@ -333,7 +333,7 @@ async fn body_disconnect_does_not_finish_generation_or_release_its_markers() {
     assert_eq!(f.state.active_lanes()[1], 1); // dequeued slice is still the real heavy owner
     assert_eq!(
         f.state.accounting.available("private-account-canary"),
-        Some(97)
+        Some(100)
     );
     drop(retained);
     f.quiescent().await;
@@ -375,11 +375,10 @@ async fn absent_off_and_lost_telemetry_never_gate_generation() {
             m.off();
         }
         drop(response);
-        f.provider.finish.notify_one();
         f.quiescent().await;
         assert_eq!(
             f.state.accounting.available("private-account-canary"),
-            Some(97)
+            Some(100)
         );
         if let Some(m) = metrics {
             assert_eq!(totals(&m), (0, 0, 0, 0));
@@ -405,6 +404,7 @@ fn owned_conversion_moves_the_key_and_armed_drop_remains_unknown() {
             max_output_tokens: 9,
             input_microunits_per_million_tokens: 1,
             output_microunits_per_million_tokens: 1,
+            cached_input_microunits_per_million_tokens: None,
         },
         input_tokens: 1,
         reserved_microunits: 10,
@@ -558,11 +558,10 @@ async fn exhausted_observation_pool_cannot_reject_or_cancel_a_generation() {
     f.provider.entered.notified().await;
     assert_eq!(metrics.epoch.load(Ordering::SeqCst) % 2, 0);
     drop(response);
-    f.provider.finish.notify_one();
     f.quiescent().await;
     assert_eq!(
         f.state.accounting.available("private-account-canary"),
-        Some(97)
+        Some(100)
     );
     drop(held);
     assert!(metrics.request().is_none());

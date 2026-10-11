@@ -6,6 +6,7 @@ import path from 'node:path';
 const { PHASE01_BUILD: build, PHASE01_FIXTURE_DIR: dir } = process.env;
 assert.ok(build && dir);
 const meta = JSON.parse(await readFile(path.join(dir, 'fixture.json'), 'utf8'));
+const controls = 'http://127.0.0.1:18445'; // Fixture counters/gate, never a gateway route.
 const module = await import(pathToFileURL(path.join(build, 'fixture-node.mjs')));
 const config = new Uint8Array(Buffer.from(meta.config, 'hex'));
 const channel = await module.Channel.fixture(meta.origin, config, meta.key);
@@ -22,7 +23,7 @@ const released = new Promise(resolve => { release = resolve; });
 const completion = client.chat('org/model:v1', [{ role: 'user', content: 'synthetic API qualification' }], delta => {
   assert.ok(delta.length > 0);
   progress = true;
-  fetch(meta.origin + '/fixture/release', { redirect: 'error', credentials: 'omit' }).then(() => release());
+  fetch(controls + '/fixture/release', { redirect: 'error', credentials: 'omit' }).then(() => release());
 });
 await released;
 const receipt = await completion;
@@ -34,7 +35,7 @@ const afterBalance = await client.balance();
 assert.equal(afterBalance.inFlight, 0);
 assert.equal(BigInt(beforeBalance.availableMicrounits) - BigInt(afterBalance.availableMicrounits), BigInt(receipt.chargedMicrounits));
 assert.equal(BigInt(afterBalance.completedRequests) - BigInt(beforeBalance.completedRequests), 1n);
-const stats = async () => (await fetch(meta.origin + '/fixture/stats', { redirect: 'error', credentials: 'omit' })).json();
+const stats = async () => (await fetch(controls + '/fixture/stats', { redirect: 'error', credentials: 'omit' })).json();
 let observed = await stats();
 assert.equal(observed.balance, '4999993');
 assert.equal(observed.generations, 1);
@@ -47,6 +48,22 @@ assert.equal(observed.generations, 1);
 assert.equal(observed.tokenizations, 1);
 assert.equal(observed.balance, '4999993');
 assert.deepEqual(await client.balance(), afterBalance);
+// Cancellation is a deliberate second submission, not a replay or paid probe.
+const abort = new AbortController();
+await assert.rejects(() => client.chat('org/model:v1', [{role:'user',content:'synthetic cancellation'}], () => abort.abort(), true, {signal:abort.signal}), error => error.code === 'uncertain');
+assert(abort.signal.aborted, 'fixture progress callback must initiate cancellation');
+const cancellationDeadline = Date.now() + 5000;
+do {
+  observed = await stats();
+  if (observed.cancelled === 1 && observed.in_flight === 0) break;
+  assert(Date.now() < cancellationDeadline, 'fixture cancellation deadline; synthetic counters '+JSON.stringify({cancelled:observed.cancelled,inFlight:observed.in_flight,completed:observed.completed,balance:observed.balance}));
+  await new Promise(resolve => setTimeout(resolve, 10));
+} while (true);
+assert.equal(observed.generations, 2);
+assert.equal(observed.completed, 1);
+assert.equal(observed.completed_requests, 2);
+assert.equal(observed.balance, '4999989'); // First completion 7 + last cumulative snapshot 4.
+assert.deepEqual(await client.balance(), {availableMicrounits:'4999989',inFlight:0,completedRequests:'2'});
 if (process.env.PHASE01_BROWSER) {
   const { createHash, X509Certificate } = await import('node:crypto');
   const { chromium } = await import('../examples/phase01/node_modules/playwright/index.mjs');
@@ -79,4 +96,4 @@ if (process.env.PHASE01_BROWSER) {
   } finally { await browser.close(); }
 }
 await fetch(meta.origin + '/fixture/stop', { redirect: 'error', credentials: 'omit' });
-console.log(JSON.stringify({ api: 'pass', actualShim: true, protectedProgress: true, noCreditPromptCalls: true, source: 'synthetic', physicalAndroid: 'not tested' }));
+console.log(JSON.stringify({ api: 'pass', actualShim: true, protectedProgress: true, noCreditPromptCalls: true, cancellationClosesSyntheticGeneration: true, lastSnapshotCharge: '4', source: 'synthetic', physicalAndroid: 'not tested' }));

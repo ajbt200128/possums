@@ -1,4 +1,4 @@
-//! Bounded delivery storage for streamed `/chat`.
+//! Bounded delivery storage for streamed `/v1/chat/completions`.
 //!
 //! Payload bytes and outstanding chunk owners (including dequeued frames) are
 //! bounded independently. This is not an RSS/allocator or whole-worker budget.
@@ -11,11 +11,39 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     task::{Context, Poll},
 };
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
+
+/// Shared through request preflight and response-body ownership.
+#[derive(Clone)]
+pub(crate) struct Disconnect(Arc<watch::Sender<bool>>);
+impl Default for Disconnect {
+    fn default() -> Self {
+        Self(Arc::new(watch::channel(false).0))
+    }
+}
+impl Disconnect {
+    pub(crate) fn cancel(&self) {
+        self.0.send_replace(true);
+    }
+    pub(crate) async fn cancelled(&self) {
+        let mut rx = self.0.subscribe();
+        if !*rx.borrow_and_update() {
+            let _ = rx.changed().await;
+        }
+    }
+}
+pub(crate) struct DisconnectGuard(pub(crate) Option<Disconnect>);
+impl Drop for DisconnectGuard {
+    fn drop(&mut self) {
+        if let Some(signal) = &self.0 {
+            signal.cancel();
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Limits {
@@ -76,6 +104,7 @@ pub(crate) fn delivery(
         high_frames: AtomicUsize::new(0),
         producer: AtomicUsize::new(0),
     });
+    let final_metrics = Arc::new(Mutex::new(None));
     (
         DeliveryTx {
             sender: Some(sender),
@@ -83,12 +112,15 @@ pub(crate) fn delivery(
             budget: budget.clone(),
             chunk_bytes: limits.chunk_bytes,
             failure: None,
+            final_metrics: final_metrics.clone(),
         },
         DeliveryBody {
             rx,
             _lease: lease,
             observation: None,
             budget,
+            disconnect: Disconnect::default(),
+            final_metrics,
         },
     )
 }
@@ -99,6 +131,7 @@ pub(crate) struct DeliveryTx {
     budget: Arc<Budget>,
     chunk_bytes: u32,
     failure: Option<DeliveryError>,
+    final_metrics: Arc<Mutex<Option<http::HeaderValue>>>,
 }
 
 // Field order matters: free payload BEFORE returning credit. Bytes::from_owner
@@ -183,8 +216,8 @@ impl DeliveryTx {
 
     /// Backpressure owns no copied payload until queue, frame and byte credit
     /// are available. Body closure wakes EVERY wait, even if a transport retains
-    /// slices (and their credits) after dropping the body. The caller then keeps
-    /// consuming the same upstream operation with delivery detached.
+    /// slices (and their credits) after dropping the body. The caller observes
+    /// closure and cancels upstream without cancelling its settlement owner.
     pub(crate) async fn send(&mut self, data: &[u8]) -> Result<(), DeliveryError> {
         let result = async {
             let size = self.size(data)?;
@@ -222,6 +255,15 @@ impl DeliveryTx {
         self.sender.take();
     }
 
+    /// One bounded first-party trailer, not queued payload or telemetry. It is
+    /// emitted only after all accepted DATA and normal producer termination.
+    pub(crate) fn finish_with_metrics(&mut self, metrics: Option<http::HeaderValue>) {
+        if self.failure.is_none() && self.sender.is_some() {
+            *self.final_metrics.lock().unwrap() = metrics.filter(|v| v.as_bytes().len() <= 4096);
+        }
+        self.finish();
+    }
+
     pub(crate) fn detach(&mut self) {
         let _ = self.detach_on_error(Err(DeliveryError::Closed));
     }
@@ -240,9 +282,15 @@ pub(crate) struct DeliveryBody {
     rx: mpsc::Receiver<Bytes>,
     _lease: Arc<crate::telemetry::hooks::Lease>,
     budget: Arc<Budget>,
+    disconnect: Disconnect,
+    final_metrics: Arc<Mutex<Option<http::HeaderValue>>>,
 }
 
 impl DeliveryBody {
+    pub(crate) fn disconnected(mut self, signal: Disconnect) -> Self {
+        self.disconnect = signal;
+        self
+    }
     pub(crate) fn observed(mut self, observation: Option<OwnedObservation>) -> Self {
         self.observation = observation;
         self
@@ -300,6 +348,14 @@ impl HttpBody for DeliveryBody {
                 _ => DeliveryTerminal::Unknown,
             };
             self.finish(terminal);
+            let metrics = self.final_metrics.lock().unwrap().take();
+            if self.budget.producer.load(Ordering::Acquire) == 1 {
+                if let Some(metrics) = metrics {
+                    let mut trailers = http::HeaderMap::new();
+                    trailers.insert("x-tinfoil-usage-metrics", metrics);
+                    return Poll::Ready(Some(Ok(http_body::Frame::trailers(trailers))));
+                }
+            }
         }
         Poll::Ready(part.map(|bytes| Ok(http_body::Frame::data(bytes))))
     }
@@ -307,6 +363,120 @@ impl HttpBody for DeliveryBody {
 
 impl Drop for DeliveryBody {
     fn drop(&mut self) {
+        self.disconnect.cancel();
         self.finish(DeliveryTerminal::Interrupted);
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    #[tokio::test]
+    async fn metrics_follow_data_once_only_on_normal_bounded_finish() {
+        for normal in [false, true] {
+            for oversized in [false, true] {
+                let heavy: crate::telemetry::hooks::Lease = Arc::new(Semaphore::new(1))
+                    .try_acquire_owned()
+                    .unwrap()
+                    .into();
+                let (mut tx, mut body) = delivery(
+                    heavy,
+                    Limits {
+                        frames: 1,
+                        payload_bytes: 4,
+                        chunk_bytes: 4,
+                    },
+                );
+                tx.send(b"data").await.unwrap();
+                if !normal {
+                    tx.detach();
+                }
+                let metrics = if oversized {
+                    "x".repeat(4097)
+                } else {
+                    "prompt=2,completion=1,total=3,model=m".into()
+                };
+                tx.finish_with_metrics(Some(metrics.parse().unwrap()));
+                assert_eq!(
+                    body.frame().await.unwrap().unwrap().into_data().unwrap(),
+                    b"data"[..]
+                );
+                if normal && !oversized {
+                    let trailers = body
+                        .frame()
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .into_trailers()
+                        .unwrap();
+                    assert_eq!(trailers.len(), 1);
+                    assert_eq!(trailers["x-tinfoil-usage-metrics"], metrics);
+                }
+                assert!(body.frame().await.is_none());
+                assert!(body.frame().await.is_none());
+                assert_eq!(body.usage().bytes, 0);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn full_capacity_waits_for_retained_credit_then_resumes() {
+        let heavy: crate::telemetry::hooks::Lease = Arc::new(Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap()
+            .into();
+        let (mut tx, mut body) = delivery(
+            heavy,
+            Limits {
+                frames: 1,
+                payload_bytes: 4,
+                chunk_bytes: 4,
+            },
+        );
+        tx.send(b"1234").await.unwrap();
+        let mut sending = Box::pin(tx.send(b"5678"));
+        assert!(futures_util::poll!(&mut sending).is_pending());
+        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let slice = frame.slice(..1);
+        drop(frame);
+        assert!(futures_util::poll!(&mut sending).is_pending());
+        drop(slice);
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut sending)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(sending);
+        assert_eq!(body.usage().high_frames, 1);
+        assert_eq!(body.usage().high_bytes, 4);
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            b"5678"[..]
+        );
+        assert!(tx.failure().is_none());
+    }
+    #[tokio::test]
+    async fn actual_body_drop_wakes_capacity_wait_without_drain() {
+        let heavy: crate::telemetry::hooks::Lease = Arc::new(Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap()
+            .into();
+        let (mut tx, body) = delivery(
+            heavy,
+            Limits {
+                frames: 1,
+                payload_bytes: 4,
+                chunk_bytes: 4,
+            },
+        );
+        tx.send(b"1234").await.unwrap();
+        let mut sending = Box::pin(tx.send(b"5678"));
+        assert!(futures_util::poll!(&mut sending).is_pending());
+        drop(body);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), sending)
+                .await
+                .unwrap(),
+            Err(DeliveryError::Closed)
+        );
     }
 }

@@ -87,6 +87,27 @@ async function setup(plan, tools = true) {
     if (mode === 'held' || mode === 'held_tools') release=deferred();
     if (options.onPayload) await options.onPayload({model:'synthetic',stream:true,messages,...(options.tools?{tools:options.tools}:{})});
     await options.onResponse?.({status:200,contentType:'text/event-stream'});
+    if (['paid_partial', 'paid_partial_transient', 'paid_partial_truncated', 'refunded_partial', 'capped_partial'].includes(mode)) {
+      const frame = value => 'data: '+JSON.stringify(value)+'\n\n';
+      const refund = mode === 'refunded_partial', cap = mode === 'capped_partial';
+      const charged = refund ? '0' : cap ? '2' : '4', reserved = cap ? '2' : '52';
+      const terminal = { object:'chat.completion.chunk',model:'synthetic',choices:[],possums:{
+        outcome:refund?'refunded':'settled',status:'incomplete',reserved_microunits:reserved,
+        charged_microunits:charged,refunded_microunits:(BigInt(reserved)-BigInt(charged)).toString(),markup_percent:130,
+        quoted_input_microunits_per_million_tokens:'1000000',quoted_output_microunits_per_million_tokens:'1000000',
+        quoted_cached_input_microunits_per_million_tokens:null,evidence:refund?'none':'running_sse',
+        usage:refund?null:{prompt_tokens:cap?20:2,completion_tokens:cap?0:1,total_tokens:cap?20:3,cached_tokens:0},provider_cost_usd:null,
+      }};
+      const text = frame(event({role:'assistant',tool_calls:[{index:0,id:'call_one',type:'function',function:{name:'echo',arguments:'{"value":'}}]})) +
+        frame(terminal) + frame({error:{code:'generation_failed',detail:mode==='paid_partial_transient'?'stream_transport_failed':'sdk_stream_decode_failed',billing:'unknown',message:'PRIVATE_PROMPT'}}) + 'data: [DONE]\n\n';
+      let sent = false;
+      const body = new ReadableStream({pull(controller) {
+        if (!sent) { sent=true;controller.enqueue(new TextEncoder().encode(text)); }
+        else if (mode === 'paid_partial_truncated') controller.error(new Error('PRIVATE_PROMPT'));
+        else controller.close();
+      }},{highWaterMark:0});
+      return m.consumeCompletion(body,entry(true),onDelta,{tools:options.tools,onEvent:options.onEvent,signal:options.signal});
+    }
     if(['fragmented_tools','late_fragmented_tools','fragmented_tools_uncertain','fragmented_tools_transient'].includes(mode)){
       const frame=value=>'data: '+JSON.stringify(value)+'\n\n';
       const identity=event({tool_calls:[{index:0,id:'call_one',type:'function',function:{name:'echo'}}]});
@@ -597,8 +618,9 @@ await check('unchanged evidence latches failed scope; no credential/catalog refr
  const later=await provider.streamSimple(provider.getModels()[0],context(false)).result();
  assert.match(later.errorMessage,/possums_evidence_unchanged/);assert.equal(probes,1);
 });
-await check('local pre-dispatch submission binding 422 alone can probe; uncertain control billing survives success',async()=>{
- const source=await setup(['stop']);const first=freshFixture(source.client),candidate=freshFixture(source.client);
+await check('local pre-dispatch submission binding 422 alone can probe; uncertain control survives successful and partial receipts',async()=>{
+ for (const mode of ['stop','paid_partial']) {
+ const source=await setup([mode]);const first=freshFixture(source.client),candidate=freshFixture(source.client);
  first.models=async()=>m.validateModels({object:'list',data:[entry(true)]});
  const oldPrepared=first.chatPrepared;let controls=0,probes=0;
  first.chatPrepared=async(prepared,guard)=>{
@@ -609,10 +631,16 @@ await check('local pre-dispatch submission binding 422 alone can probe; uncertai
  candidate.models=async()=>m.validateModels({object:'list',data:[entry(true)]});mockPreparation(candidate);candidate.freshSession=()=>freshFixture(candidate);
  const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;return candidate;});
  await provider.auth.apiKey.login(interaction());provider.beginRun();
- const result=await provider.streamSimple(provider.getModels()[0],context(false)).result();
- assert.equal(result.stopReason,'stop');assert.equal(probes,1);assert.equal(source.sends(),1);
+ const result=await provider.streamSimple(provider.getModels()[0],context(mode==='paid_partial')).result();
+ assert.equal(result.stopReason,mode==='stop'?'stop':'error');assert.equal(probes,1);assert.equal(source.sends(),1);
  assert.deepEqual(result.diagnostics.map(value=>value.type),['possums_settled_receipt','possums_billing_unknown']);
+ if(mode==='paid_partial') {
+  assert.equal(result.diagnostics[0].details.chargedMicrounits,'4');
+  assert.equal(result.diagnostics[0].details.complete,false);
+  assert.match(result.errorMessage,/Earlier submission control outcome unknown/);
+ }
  provider.settleRun();
+ }
 });
 await check('authenticated submission unauthorized 401/403 probes only before dispatch and retains unknown control billing',async()=>{
  for(const status of [401,403]){
@@ -2213,6 +2241,41 @@ await check('actual Pi SDK never executes incomplete tool fragments from a trans
   assert(!JSON.stringify(raw).includes('PRIVATE_PROMPT'));
  } finally {unsubscribe();f.session.dispose();}
 });
+await check('actual Pi SDK keeps incomplete money separate from tools, retries and unknown receipt delivery',async()=>{
+ for (const mode of ['paid_partial','refunded_partial','capped_partial','paid_partial_truncated','paid_partial_transient']) {
+  const f=await sdkSetup('sdk-forward-'+mode,[mode,'stop'],true);
+  const charged=mode==='refunded_partial'?0n:mode==='capped_partial'?2n:mode==='paid_partial_transient'?11n:4n;
+  const reads=balancePlan(f.s.client,[balanceSnapshot(),balanceSnapshot((5000000n-charged).toString(),mode==='paid_partial_transient'?'2':'1')]);
+  const retry=[];const unsubscribe=f.session.subscribe(event=>{if(event.type==='auto_retry_start')retry.push(event);});
+  try {
+   await f.session.prompt('/possums-reconcile start');assert.equal(reads(),1);assert.equal(f.s.sends(),0);
+   await f.session.prompt('Synthetic partial receipt task'); assert.equal(f.toolRuns(),0);
+   assert.equal(f.s.sends(),mode==='paid_partial_transient'?2:1);
+   assert.equal(retry.length,mode==='paid_partial_transient'?1:0);
+   const first=rawAssistants(f.session)[0];assert.equal(first.stopReason,'error');
+   assert(!JSON.stringify(first).includes('PRIVATE_PROMPT'));
+   if(mode==='paid_partial_truncated') {
+    assert(first.diagnostics.some(d=>d.type==='possums_billing_unknown'));
+    assert(!first.diagnostics.some(d=>d.type==='possums_settled_receipt'));
+   } else {
+    const receipt=first.diagnostics.find(d=>d.type==='possums_settled_receipt');assert(receipt);
+    assert.equal(receipt.details.complete,false);
+    assert.equal(receipt.details.chargedMicrounits,mode==='refunded_partial'?'0':mode==='capped_partial'?'2':'4');
+    assert.match(first.errorMessage,/Authenticated incomplete settlement/);
+    assert(Object.values(first.usage.cost).every(n=>n>=0));
+    if(mode==='capped_partial') assert.equal(first.usage.cost.total,2/1e6);
+   }
+   if(mode==='paid_partial_transient') {
+    assert.match(first.errorMessage,/Transient service unavailable.*Native automatic retry may incur another charge/);
+    assert.equal(f.s.requests[1].messages.some(message=>message.role==='tool'||message.tool_calls),false);
+   }
+   const messages=f.session.messages.length, sends=f.s.sends();
+   await f.session.prompt('/possums-reconcile finish');
+   assert.equal(reads(),2);assert.equal(f.s.sends(),sends);assert.equal(f.session.messages.length,messages);
+   assert.match(f.notices.at(-1),mode==='paid_partial_truncated'?/Reconciliation unavailable.*outcome is unknown/:/Reconciliation matched/);
+  } finally {unsubscribe();f.session.dispose();}
+ }
+});
 await check('actual Pi SDK completes split identity/arguments and late identity through the real client decoder',async()=>{
  for(const mode of ['fragmented_tools','late_fragmented_tools']){
   const {session,s,toolRuns}=await sdkSetup('sdk-'+mode,[mode,'stop'],true);
@@ -2339,7 +2402,7 @@ await check('native one/two-summary prompts, previous checkpoint, files, advisor
   const f=await compactionFixture(['stop','stop'],split,true),nativeRequests=[],hints=[];
   const expected=await coding.compact(f.event.preparation,f.ctx.model,requestMarker,{},f.event.customInstructions,f.event.signal,'off',async(model,context,options)=>{
    nativeRequests.push(structuredClone(m.invocation(model,context).messages));hints.push(options.maxTokens);
-   const stream=ai.createAssistantMessageEventStream(),message={...syntheticAssistant([{type:'text',text:'progressive'}]),usage:{...syntheticAssistant().usage,cost:{input:2/1e6,output:7/1e6-2/1e6,cacheRead:0,cacheWrite:0,total:7/1e6}}};
+   const stream=ai.createAssistantMessageEventStream(),message={...syntheticAssistant([{type:'text',text:'progressive'}]),usage:{...syntheticAssistant().usage,cost:{input:2/1e6,output:5/1e6,cacheRead:0,cacheWrite:0,total:7/1e6}}};
    stream.push({type:'done',reason:'stop',message});stream.end();return stream;
   });
   const result=await f.run();assert.deepEqual(result.compaction,expected);assert.equal(f.s.sends(),split?2:1);
