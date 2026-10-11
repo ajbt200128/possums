@@ -2,7 +2,7 @@ import { isAbsolute } from 'node:path';
 import { open, type FileHandle } from 'node:fs/promises';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { LIMITS } from '../../examples/phase01/limits.js';
-import { connect, connectPublished } from './bootstrap.js';
+import { connect, connectPublished, recoverCompiled, recoverPublished } from './bootstrap.js';
 import { ConnectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
 import { PossumsProvider, PROVIDER_ID } from './provider.js';
 
@@ -27,16 +27,28 @@ export default function possums(pi: ExtensionAPI): void {
   let ui: ExtensionContext['ui'] | undefined;
   let sessionEpoch = 0;
   const notifiedCodes = new Set<ConnectionFailure['code']>();
+  // Pi 1.0.4 applies CLI flag values after loading extension factories. Select
+  // at the first actual trust establishment, then lock the authority: a later
+  // flag change cannot silently switch a pinned session to latest or vice versa.
+  let pinnedManifest: unknown, selected = false;
+  const authority = () => {
+    const configured = pi.getFlag('possums-manifest');
+    if (!selected) { pinnedManifest = configured; selected = true; }
+    else if (configured !== pinnedManifest) throw new ConnectionFailure('manifest_mismatch');
+    return pinnedManifest;
+  };
   const provider = new PossumsProvider(async signal => {
-    const pinnedManifest = pi.getFlag('possums-manifest');
-    return pinnedManifest === undefined
-      ? connectPublished(signal)
-      : connect(await manifest(pinnedManifest), signal);
+    const pinned = authority();
+    return pinned === undefined ? connectPublished(signal) : connect(await manifest(pinned), signal);
   }, failure => {
     if (!failure) { notifiedCodes.clear(); return; }
     if (!ui || notifiedCodes.has(failure.code)) return;
     notifiedCodes.add(failure.code);
     try { ui.notify(failure.message, 'warning'); } catch { /* Transient UI only. */ }
+  }, (previous, signal) => {
+    const pinned = authority();
+    return pinned === undefined ? recoverPublished(previous, signal)
+      : manifest(pinned).then(bytes => recoverCompiled(previous, bytes, signal));
   });
   pi.registerProvider(provider);
   pi.on('session_start', async (_event, ctx) => {
@@ -77,20 +89,11 @@ export default function possums(pi: ExtensionAPI): void {
       }
     },
   });
-  // Source belongs to input, not before_agent_start (extensions reach that too).
-  // These hooks only mark; all renewal I/O waits for native active-run auth.
-  pi.on('input', (event, ctx) => {
-    provider.markInput(ctx.model?.provider === PROVIDER_ID && ctx.isIdle() &&
-      event.streamingBehavior === undefined && (event.source === 'interactive' || event.source === 'rpc'), ctx.signal);
-  });
   pi.on('before_agent_start', (_event, ctx) => {
     if (ctx.model?.provider === PROVIDER_ID) provider.beginRun();
     else provider.settleRun();
   });
   pi.on('agent_start', (_event, ctx) => { provider.bindRun(ctx.model?.provider === PROVIDER_ID ? ctx.signal : undefined); });
-  pi.on('message_start', (event, ctx) => {
-    if (event.message.role !== 'system') provider.confirmRunInput(event.message.role === 'user', ctx.signal);
-  });
   pi.on('agent_end', () => { provider.endRun(); });
   pi.on('agent_settled', () => { provider.settleRun(); });
   pi.on('cache_warming_decision', (_event, ctx) => {

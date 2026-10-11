@@ -41,6 +41,12 @@ impl EvidenceVerifier for Synthetic {
 #[tokio::main]
 async fn main() {
     std::panic::set_hook(Box::new(|_| {}));
+    let mode = match env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => None,
+        [mode] if mode == "--health-serving" => Some(false),
+        [mode] if mode == "--health-quiescing" => Some(true),
+        _ => std::process::exit(1),
+    };
     let Ok(accounts) = env::var("POSSUMS_ACCOUNTS_JSON") else {
         return;
     };
@@ -49,7 +55,15 @@ async fn main() {
     };
     let provider = Arc::new(Synthetic);
     let state = AppState::new(auth, provider.clone(), "synthetic-only", provider);
-    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await else {
+    if mode == Some(true) {
+        state.lifecycle.quiesce();
+    }
+    let address = if mode.is_some() {
+        "127.0.0.1:8080"
+    } else {
+        "127.0.0.1:0"
+    };
+    let Ok(listener) = tokio::net::TcpListener::bind(address).await else {
         return;
     };
     let Ok(address) = listener.local_addr() else {

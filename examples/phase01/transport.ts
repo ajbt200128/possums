@@ -9,7 +9,7 @@ export type ResponseInfo = Readonly<{ status: number; contentType: 'text/event-s
 export type ResponseOptions = { signal?: AbortSignal; onResponse?: (response: ResponseInfo) => void | Promise<void> };
 export { API_APPROVALS, validateKeyConfig, checkApproval } from './approval.js';
 export { LIMITS, serialize, parseJSON } from './limits.js';
-export { ReferenceClient, BalanceFailure, consumeCompletion, validateModels } from './client.js';
+export { ReferenceClient, PreparedChat, BalanceFailure, consumeCompletion, validateModels } from './client.js';
 declare const __PHASE01_FIXTURE__: boolean;
 
 // Fetch decodes HTTP compression. Consumers cap decoded bytes while reading;

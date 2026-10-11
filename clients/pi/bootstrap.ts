@@ -1,4 +1,4 @@
-import { API_APPROVALS, PUBLISHER, requireApiApproval, requireReleaseTag } from '../../examples/phase01/approval.js';
+import { API_APPROVALS, PUBLISHER, requireApiApproval, requireReleaseTag, provenanceForTag } from '../../examples/phase01/approval.js';
 import { ConnectionFailure, EvidenceObservation, connectionFailure, type EvidenceConstraint, type EvidenceStage } from './diagnostics.js';
 import { ReferenceClient } from '../../examples/phase01/client.js';
 import { publicEvidence } from './evidence-cache.js';
@@ -59,6 +59,24 @@ async function downloadManifest(tag: string, op: Operation): Promise<Uint8Array<
   finally { if (response?.body && !response.body.locked) await cleanup(response.body.cancel()); }
 }
 
+// Metadata is attached only after the same SDK has verified the serving channel.
+// The pinned EHBP 0.3.2 public configuration is 41 wire bytes (one format
+// byte plus the 40-byte key configuration); hash the exact verified wire value.
+const identities = new WeakMap<ReferenceClient['channel'], Readonly<{ report: string; config: string }>>();
+function changed(previous: ReferenceClient, candidate: ReferenceClient): boolean {
+  const old = identities.get(previous.channel), next = identities.get(candidate.channel);
+  if (!old || !next) throw new ConnectionFailure('verification_failed');
+  return old.report !== next.report || old.config !== next.config;
+}
+async function probe(origin: string, baseline: Readonly<{ report: string; config: string }>, op: Operation): Promise<Uint8Array<ArrayBuffer>> {
+  const report = await acquire(origin + '/.well-known/tinfoil-attestation', LIMITS.evidence, op, 'gateway_attestation');
+  const config = await acquire(origin + '/.well-known/hpke-keys', LIMITS.key, op, 'gateway_keys');
+  if (config.length !== LIMITS.key) throw new ConnectionFailure('verification_failed', new EvidenceObservation('gateway_keys', 'schema'));
+  if (await digest(report) === baseline.report && await digest(config) === baseline.config)
+    throw new ConnectionFailure('evidence_unchanged');
+  return report;
+}
+
 // Preserve the independent compiled/reference entry point and its admin expiry.
 export async function connect(manifest: Uint8Array<ArrayBuffer>, signal?: AbortSignal): Promise<ReferenceClient> {
   if (API_APPROVALS.length === 1 && Date.now() >= API_APPROVALS[0].expires) throw new ConnectionFailure('approval_expired');
@@ -72,6 +90,40 @@ export async function connect(manifest: Uint8Array<ArrayBuffer>, signal?: AbortS
   finally { op.close(); }
 }
 
+// An unchanged public hint is terminal; a changed hint is NEVER approval.
+// The full verifier may observe a different report from the probe, so compare
+// identities again only after it completes. No credential enters this function.
+export async function recoverPublished(previous: ReferenceClient, signal?: AbortSignal): Promise<ReferenceClient> {
+  const op = new Operation(LIMITS.bootstrapMs, signal);
+  try {
+    const baseline = identities.get(previous.channel);
+    if (!baseline) throw new ConnectionFailure('verification_failed');
+    const report = await probe(PUBLISHER.origin, baseline, op);
+    const candidate = await published(report, op);
+    if (!changed(previous, candidate)) throw new ConnectionFailure('evidence_unchanged');
+    return candidate;
+  } catch (error) { throw connectionFailure(error); }
+  finally { op.close(); }
+}
+
+export async function recoverCompiled(previous: ReferenceClient, manifest: Uint8Array<ArrayBuffer>, signal?: AbortSignal): Promise<ReferenceClient> {
+  if (API_APPROVALS.length === 1 && Date.now() >= API_APPROVALS[0].expires) throw new ConnectionFailure('approval_expired');
+  let approval;
+  try { approval = requireApiApproval(); }
+  catch { throw new ConnectionFailure('approval_unavailable'); }
+  if (manifest.length > LIMITS.provenance || await digest(manifest) !== approval.manifest) throw new ConnectionFailure('manifest_mismatch');
+  const op = new Operation(LIMITS.bootstrapMs, signal);
+  try {
+    const baseline = identities.get(previous.channel);
+    if (!baseline) throw new ConnectionFailure('verification_failed');
+    const report = await probe(approval.origin, baseline, op);
+    const candidate = await serving(approval, new Uint8Array(manifest), op, false, report);
+    if (!changed(previous, candidate)) throw new ConnectionFailure('evidence_unchanged');
+    return candidate;
+  } catch (error) { throw connectionFailure(error); }
+  finally { op.close(); }
+}
+
 // Once per new Pi trust session. Latest is discovery, never approval; neither
 // target_commitish nor asset URLs nor any caller-supplied policy are consulted.
 export async function connectPublished(signal?: AbortSignal): Promise<ReferenceClient> {
@@ -79,6 +131,12 @@ export async function connectPublished(signal?: AbortSignal): Promise<ReferenceC
   try {
     // Unauthenticated response bytes select evidence only; never trust/freshness.
     const report = await acquire(PUBLISHER.origin + '/.well-known/tinfoil-attestation', LIMITS.evidence, op, 'gateway_attestation');
+    return await published(report, op);
+  } catch (error) { throw connectionFailure(error); }
+  finally { op.close(); }
+}
+
+async function published(report: Uint8Array<ArrayBuffer>, op: Operation): Promise<ReferenceClient> {
     return await publicEvidence(await digest(report), op, async legacy => {
       if (legacy) return { ...legacy, vcek: await amdCertificate(report, op) };
       const bytes = await acquire(`https://api.github.com/repos/${PUBLISHER.repository}/releases/latest`, LIMITS.provenance, op, 'release_discovery');
@@ -91,8 +149,6 @@ export async function connectPublished(signal?: AbortSignal): Promise<ReferenceC
       const provenance = await acquire(`https://api.github.com/repos/${PUBLISHER.repository}/attestations/sha256:${await digest(manifest)}`, LIMITS.provenance, op, 'release_provenance');
       return { tag, manifest, provenance, vcek: await amdCertificate(report, op) };
     }, async entry => serving({ ...PUBLISHER, tag: entry.tag, manifest: await digest(entry.manifest) }, entry.manifest, op, true, report, entry.provenance, entry.vcek));
-  } catch (error) { throw connectionFailure(error); }
-  finally { op.close(); }
 }
 
 async function amdCertificate(report: Uint8Array<ArrayBuffer>, op: Operation): Promise<Uint8Array<ArrayBuffer>> {
@@ -125,20 +181,22 @@ async function serving(candidate: Candidate, manifest: Uint8Array<ArrayBuffer>, 
     const cert = parseJSON(await acquire(candidate.origin + '/.well-known/tinfoil-certificate', LIMITS.certificate, op, stage), LIMITS.certificate);
     stage = 'release_provenance';
     const provenance = parseJSON(publicProvenance ?? await acquire(`https://api.github.com/repos/${candidate.repository}/attestations/sha256:${candidate.manifest}`, LIMITS.provenance, op, stage), LIMITS.provenance);
-    requireThat(provenance.attestations?.length === 1);
+    const signatureBundle = await op.wait(provenanceForTag(provenance, candidate.tag), LIMITS.operationMs);
     stage = 'gateway_keys';
     const config = await acquire(candidate.origin + '/.well-known/hpke-keys', LIMITS.key, op, stage);
     const bundle = new TextEncoder().encode(JSON.stringify({
       domain: new URL(candidate.origin).hostname, enclaveAttestationReport: doc,
       enclaveCert: cert.certificate, vcek: btoa(String.fromCharCode(...vcek)),
       digest: candidate.manifest, releaseTag: candidate.tag,
-      sigstoreBundle: provenance.attestations[0].bundle,
+      sigstoreBundle: signatureBundle,
     }));
     requireThat(bundle.length <= LIMITS.bundle);
     op.check();
     const client = published
       ? await ReferenceClient.published(bundle, manifest, config, op.controller.signal)
       : await ReferenceClient.verified(bundle, manifest, config);
+    op.check();
+    identities.set(client.channel, Object.freeze({ report: await digest(currentReport), config: await digest(config) }));
     op.check();
     return client;
   } catch (error) {
