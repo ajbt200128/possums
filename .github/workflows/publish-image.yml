@@ -69,6 +69,12 @@ jobs:
           cp -L result gateway-image.tar.gz
           nix shell --inputs-from . nixpkgs#skopeo nixpkgs#jq --command sh -c \
             'skopeo inspect docker-archive:gateway-image.tar.gz | jq -r .Digest > digest'
+      - name: Build isolated synthetic fixture for fresh A image qualification
+        if: matrix.build == 'a'
+        run: nix build .#gateway-smoke-image --out-link "$RUNNER_TEMP/fixture-image" --print-build-logs
+      - name: Qualify exact fresh A archive before publication
+        if: matrix.build == 'a'
+        run: python3 tests/image_health.py gateway-image.tar.gz "$RUNNER_TEMP/fixture-image"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: image-digest-${{ github.run_id }}-${{ github.run_attempt }}-${{ needs.source-checks.outputs.source }}-${{ matrix.build }}
