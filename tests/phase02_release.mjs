@@ -307,7 +307,7 @@ try {
   const discovery = `https://api.github.com/repos/${repo}/releases/latest`;
   const asset = `https://github.com/${repo}/releases/download/${tag}/tinfoil-deployment.json`;
   const cdn = 'https://release-assets.githubusercontent.com/synthetic-manifest';
-  let assetLocation = cdn, assetStatus = 302, liveKey = key;
+  let assetLocation = cdn, assetStatus = 302, liveKey = key, provenanceBundles;
   globalThis.fetch = async request => {
     network++; seen.push(request.url);
     assert.equal(request.method, 'GET'); assert.equal(request.body, null);
@@ -323,7 +323,7 @@ try {
     else if (request.url === origin + '/.well-known/tinfoil-attestation') body = bytes(payload.enclaveAttestationReport);
     else if (request.url.startsWith('https://kdsintf.amd.com/vcek/v1/Genoa/')) body = new Uint8Array([1]);
     else if (request.url === origin + '/.well-known/tinfoil-certificate') body = bytes({ certificate: payload.enclaveCert });
-    else if (request.url === `https://api.github.com/repos/${repo}/attestations/sha256:${sha(manifestBody)}`) body = bytes({ attestations: [{ bundle: payload.sigstoreBundle }] });
+    else if (request.url === `https://api.github.com/repos/${repo}/attestations/sha256:${sha(manifestBody)}`) body = bytes({ attestations: (provenanceBundles ?? [payload.sigstoreBundle]).map(bundle => ({ bundle })) });
     else if (request.url === origin + '/.well-known/hpke-keys') body = liveKey;
     else throw new Error('HOSTILE unapproved request');
     const response = new Response(body, { status: mode === 'redirect' || (mode === 'cdn-redirect' && request.url === cdn) ? 302 : request.url === asset ? assetStatus : 200,
@@ -406,6 +406,30 @@ try {
   await rejects('mismatched key candidate cannot replace trust',()=>test.recoverPublished(changedKey.freshSession()),'verification_failed');
   reset();passed++;
   const cold = async () => { await rm(test.evidenceDirectory(), { recursive: true, force: true }); return test.connectPublished(); };
+  const fixtureParse = test.X509Certificate.parse;
+  test.X509Certificate.parse = value => {
+    if (typeof value !== 'string' && value.length === 1 && value[0] === 2) {
+      return { ...state.signer, extSubjectAltName: { ...state.signer.extSubjectAltName,
+        uri: workflow.replace(tag, 'v0.0.98') } };
+    }
+    return fixtureParse(value);
+  };
+  const older = structuredClone(payload.sigstoreBundle);
+  older.verificationMaterial.certificate.rawBytes = 'Ag==';
+  provenanceBundles = [older, payload.sigstoreBundle];
+  assert.equal((await cold()).release.tag, tag); passed++;
+  assert.equal((await test.connectPublished()).release.tag, tag); passed++;
+  provenanceBundles = [payload.sigstoreBundle, payload.sigstoreBundle];
+  await rejects('ambiguous current-tag provenance hints', cold, 'verification_failed');
+  provenanceBundles = [older];
+  await rejects('only another tag provenance', cold, 'verification_failed');
+  const forged = structuredClone(payload.sigstoreBundle);
+  forged.dsseEnvelope.signatures[0].sig = 'HOSTILE';
+  provenanceBundles = [older, forged];
+  await rejects('matching identity hint cannot bypass DSSE verification', cold, 'verification_failed');
+  provenanceBundles = Array(31).fill(older);
+  await rejects('bounded provenance candidate count', cold, 'verification_failed');
+  provenanceBundles = undefined; test.X509Certificate.parse = fixtureParse;
   await rm(test.evidenceDirectory(), { recursive: true, force: true });
   latestTag = 'v1.2.3/../../HOSTILE';
   await rejects('discovery path injection', () => test.connectPublished(), 'verification_failed');

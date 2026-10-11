@@ -61,6 +61,26 @@ export async function qualifyApi(bundleBytes: Uint8Array, manifestBytes: Uint8Ar
   const keys = await qualifyApproved(bundleBytes, manifestBytes, keyConfig, requireApiApproval());
   return Object.freeze({ hpkeKey: keys.hpkeKey, tlsFingerprint: keys.tlsFingerprint });
 }
+// Reissued identical manifests have multiple GitHub provenance candidates.
+// This SDK identity check selects a hint, not trust: qualifyApproved must still
+// verify its signature, Rekor inclusion, publisher, subject and serving binding.
+const MAX_PROVENANCE_CANDIDATES = 30;
+export async function provenanceForTag(provenance: any, tag: string): Promise<unknown> {
+  requireThat(Array.isArray(provenance.attestations) && provenance.attestations.length > 0 &&
+    provenance.attestations.length <= MAX_PROVENANCE_CANDIDATES);
+  const matches: unknown[] = [];
+  for (const candidate of provenance.attestations) {
+    try {
+      const signer = X509Certificate.parse(base64(candidate.bundle.verificationMaterial.certificate.rawBytes, LIMITS.certificate));
+      await new SignerIdentity({ identity: `${PUBLISHER.workflow}@refs/tags/${tag}`,
+        issuer: 'https://token.actions.githubusercontent.com' }).verify(signer);
+      matches.push(candidate.bundle);
+    } catch { /* Never expose untrusted certificate/parser errors. */ }
+  }
+  requireThat(matches.length === 1);
+  return matches[0];
+}
+
 export async function qualifyPublished(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal) {
   return qualifyApproved(bundleBytes, manifestBytes, keyConfig, undefined, signal);
 }

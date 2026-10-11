@@ -1,4 +1,4 @@
-import { API_APPROVALS, PUBLISHER, requireApiApproval, requireReleaseTag } from '../../examples/phase01/approval.js';
+import { API_APPROVALS, PUBLISHER, requireApiApproval, requireReleaseTag, provenanceForTag } from '../../examples/phase01/approval.js';
 import { ConnectionFailure, EvidenceObservation, connectionFailure, type EvidenceConstraint, type EvidenceStage } from './diagnostics.js';
 import { ReferenceClient } from '../../examples/phase01/client.js';
 import { publicEvidence } from './evidence-cache.js';
@@ -181,14 +181,14 @@ async function serving(candidate: Candidate, manifest: Uint8Array<ArrayBuffer>, 
     const cert = parseJSON(await acquire(candidate.origin + '/.well-known/tinfoil-certificate', LIMITS.certificate, op, stage), LIMITS.certificate);
     stage = 'release_provenance';
     const provenance = parseJSON(publicProvenance ?? await acquire(`https://api.github.com/repos/${candidate.repository}/attestations/sha256:${candidate.manifest}`, LIMITS.provenance, op, stage), LIMITS.provenance);
-    requireThat(provenance.attestations?.length === 1);
+    const signatureBundle = await op.wait(provenanceForTag(provenance, candidate.tag), LIMITS.operationMs);
     stage = 'gateway_keys';
     const config = await acquire(candidate.origin + '/.well-known/hpke-keys', LIMITS.key, op, stage);
     const bundle = new TextEncoder().encode(JSON.stringify({
       domain: new URL(candidate.origin).hostname, enclaveAttestationReport: doc,
       enclaveCert: cert.certificate, vcek: btoa(String.fromCharCode(...vcek)),
       digest: candidate.manifest, releaseTag: candidate.tag,
-      sigstoreBundle: provenance.attestations[0].bundle,
+      sigstoreBundle: signatureBundle,
     }));
     requireThat(bundle.length <= LIMITS.bundle);
     op.check();
