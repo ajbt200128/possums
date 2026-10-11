@@ -33,8 +33,7 @@ pub(crate) fn compose(
         heavy,
         input.model,
         input.reserved_microunits,
-        input.history,
-        None,
+        (input.history, None),
         inference,
         usage_metrics,
     )
@@ -51,8 +50,7 @@ pub(crate) fn compose_structured(
         heavy,
         input.model,
         input.reserved_microunits,
-        Vec::new(),
-        Some(input.invocation),
+        (Vec::new(), Some(input.invocation)),
         inference,
         usage_metrics,
     )
@@ -62,11 +60,11 @@ fn compose_core(
     heavy: Arc<crate::telemetry::hooks::Lease>,
     model: Model,
     reserved: u64,
-    messages: Vec<Message>,
-    invocation: Option<ToolInvocation>,
+    input: (Vec<Message>, Option<ToolInvocation>),
     inference: SharedInference,
     usage_metrics: bool,
 ) -> DeliveryBody {
+    let (messages, invocation) = input;
     let disconnect = owner.disconnect();
     let (tx, body) = delivery(
         heavy.clone(),

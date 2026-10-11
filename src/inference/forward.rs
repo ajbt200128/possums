@@ -114,10 +114,8 @@ pub fn metrics(headers: &http::HeaderMap, model: &str) -> Result<Option<Evidence
         })
         .transpose()?;
     // Auxiliary fees are provider metadata/operator liability, never debited.
-    for key in ["other_cost_usd"] {
-        if fields.get(key).is_some_and(|v| !money(v)) {
-            return Err(invalid());
-        }
+    if fields.get("other_cost_usd").is_some_and(|v| !money(v)) {
+        return Err(invalid());
     }
     if let Some(calls) = fields.get("web_search_calls") {
         count(calls)?;
@@ -436,16 +434,18 @@ impl ForwardSink for DeltaSinkAdapter<'_> {
                 self.0.emit(super::tools::CompletionDelta::Text(text)).await;
             }
             for call in choice.delta.tool_calls.as_deref().unwrap_or_default() {
-                self.0.emit(super::tools::CompletionDelta::ToolCall {
-                    index: call.index as usize,
-                    id: call.id.as_deref().filter(|v| !v.is_empty()),
-                    name: call
-                        .function
-                        .as_ref()
-                        .and_then(|f| f.name.as_deref())
-                        .filter(|v| !v.is_empty()),
-                    arguments: call.function.as_ref().and_then(|f| f.arguments.as_deref()),
-                }).await;
+                self.0
+                    .emit(super::tools::CompletionDelta::ToolCall {
+                        index: call.index as usize,
+                        id: call.id.as_deref().filter(|v| !v.is_empty()),
+                        name: call
+                            .function
+                            .as_ref()
+                            .and_then(|f| f.name.as_deref())
+                            .filter(|v| !v.is_empty()),
+                        arguments: call.function.as_ref().and_then(|f| f.arguments.as_deref()),
+                    })
+                    .await;
             }
         }
         Ok(())
@@ -462,7 +462,9 @@ pub(super) struct LegacySink<'a> {
 #[async_trait]
 impl super::DeltaSink for LegacySink<'_> {
     async fn emit(&mut self, delta: super::tools::CompletionDelta<'_>) {
-        if self.failure.is_some() { return; }
+        if self.failure.is_some() {
+            return;
+        }
         let event = delta_event(delta);
         if crate::bounded_json::to_vec(&event, stream::MAX_FRAME_BYTES).is_err() {
             self.failure = Some(InferenceFailure::StreamEventSchemaInvalid);

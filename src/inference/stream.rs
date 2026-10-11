@@ -5,12 +5,10 @@
 pub use super::tools::CompletionDelta;
 #[cfg(test)]
 use super::tools::{ToolInvocation, ToolProfile};
-use super::{
-    DeltaSink, InferenceError, InferenceFailure, Message,
-};
-use futures_util::FutureExt;
+use super::{DeltaSink, InferenceError, InferenceFailure, Message};
 #[cfg(test)]
 use super::{TextDeltaSink, TextSink};
+use futures_util::FutureExt;
 use rand::RngCore;
 use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
@@ -91,8 +89,7 @@ pub(super) async fn consume_completion_response(
     idle_timeout: Duration,
     on_delta: &mut dyn TextDeltaSink,
 ) -> Result<StreamCompletion, InferenceError> {
-    consume_sdk_response(response, idle_timeout, &mut TextSink(on_delta))
-    .await
+    consume_sdk_response(response, idle_timeout, &mut TextSink(on_delta)).await
 }
 
 #[cfg(test)]

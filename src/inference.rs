@@ -179,13 +179,18 @@ pub trait Inference: Send + Sync {
         heavy: Arc<crate::telemetry::hooks::Lease>,
         sink: &mut dyn forward::ForwardSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
-        let mut emit = forward::LegacySink { sink, failure: None };
+        let mut emit = forward::LegacySink {
+            sink,
+            failure: None,
+        };
         let result = match invocation {
             Some(invocation) => {
-                self.generate_invocation_stream(model, invocation, heavy, &mut emit).await
+                self.generate_invocation_stream(model, invocation, heavy, &mut emit)
+                    .await
             }
             None => {
-                self.generate_completion_stream(model, messages, heavy, &mut emit).await
+                self.generate_completion_stream(model, messages, heavy, &mut emit)
+                    .await
             }
         };
         if let Some(failure) = emit.failure {
