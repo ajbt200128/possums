@@ -96,16 +96,20 @@ async fn heavy_saturation_keeps_control_independent_and_frames_pin_exact_lease()
         .await
         .unwrap();
     assert_eq!(control.status(), StatusCode::OK);
-    assert_eq!(state.control_memory.available_permits(), 0);
-    assert_eq!(
-        app.clone()
-            .oneshot(request(Method::GET, "/v1/models"))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    drop(control);
+    let mut controls = vec![control];
+    for (method, uri) in [
+        (Method::GET, "/v1/models"),
+        (Method::POST, "/v1/submissions"),
+        (Method::POST, "/v1/balance"),
+        (Method::GET, "/attestation"),
+        (Method::POST, "/v1/chat/completions/"),
+    ] {
+        let response = app.clone().oneshot(request(method, uri)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        controls.push(response); // Leave every response unread while issuing the next.
+    }
+    assert_eq!(state.chat_memory.available_permits(), 0);
+    drop(controls);
     let mut body = response.into_body();
     let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
     let slice = frame.slice(1..2);
@@ -116,5 +120,4 @@ async fn heavy_saturation_keeps_control_independent_and_frames_pin_exact_lease()
     assert_eq!(state.chat_memory.available_permits(), 1);
     drop(other_heavy);
     assert_eq!(state.chat_memory.available_permits(), CHAT_LANES);
-    assert_eq!(state.control_memory.available_permits(), CONTROL_LANES);
 }

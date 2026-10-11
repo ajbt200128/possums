@@ -405,7 +405,7 @@ async fn strict_json_media_types_and_hostile_controls_are_bounded_and_sanitized(
 }
 
 #[tokio::test]
-async fn controls_keep_body_deadline_header_limits_and_response_frame_admission() {
+async fn controls_keep_body_deadline_header_limits_without_response_frame_admission() {
     let (state, _) = fixture(10);
     let app = router_with_body_deadline(state, Duration::from_millis(20));
     let stalled = Body::from_stream(futures_util::stream::pending::<
@@ -457,12 +457,12 @@ async fn controls_keep_body_deadline_header_limits_and_response_frame_admission(
         Request::get("/v1/auth/challenge")
             .body(Body::empty())
             .unwrap(),
-        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::OK,
     )
     .await;
     drop(slice);
     challenge(&app).await;
-    // Normalized errors also retain their control lease until data is released.
+    // Retained normalized error bytes do not block another control request.
     let res = app
         .clone()
         .oneshot(Request::get("/v1/missing").body(Body::empty()).unwrap())
@@ -474,7 +474,7 @@ async fn controls_keep_body_deadline_header_limits_and_response_frame_admission(
         Request::get("/v1/auth/challenge")
             .body(Body::empty())
             .unwrap(),
-        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::OK,
     )
     .await;
     drop(bytes);
@@ -723,7 +723,7 @@ async fn balance_unknown_account_fails_closed_without_leaking_identifiers() {
 }
 
 #[tokio::test]
-async fn balance_inherits_control_deadline_and_retains_admission_until_response_release() {
+async fn balance_inherits_control_deadline_without_response_admission() {
     let (state, credentials) = balance_fixture();
     let app = router_with_body_deadline(state, Duration::from_millis(20));
     let bearer = login(&app, &credentials[0]).await;
@@ -739,12 +739,7 @@ async fn balance_inherits_control_deadline_and_retains_admission_until_response_
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    response(
-        &app,
-        balance_request(&bearer, "{}"),
-        StatusCode::SERVICE_UNAVAILABLE,
-    )
-    .await;
+    response(&app, balance_request(&bearer, "{}"), StatusCode::OK).await;
     drop(bytes);
     response(&app, balance_request(&bearer, "{}"), StatusCode::OK).await;
 }

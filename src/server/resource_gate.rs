@@ -1,5 +1,6 @@
 //! Isolated API route allocation qualification. Requested bytes, not RSS or an
 //! SDK/TLS/helper-process bound; no real content or credentials enter this fixture.
+//! Control overlap is a finite fixture, not a shared control-memory bound.
 use super::*;
 use crate::{
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
@@ -54,7 +55,7 @@ fn phase(name: &str, baseline: Snapshot) {
     );
     assert!(
         now.phase_peak.saturating_sub(baseline.live) <= 512 * MIB,
-        "requested-allocation envelope at {name}: {now:?} baseline={baseline:?}"
+        "finite-fixture requested allocations at {name}: {now:?} baseline={baseline:?}"
     );
     ALLOCATOR.begin_phase();
 }
@@ -399,11 +400,9 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
     phase("four-tokenizers-with-raw-owners", baseline);
     let control = f.control("/v1/models").await;
     assert_eq!(control.status(), StatusCode::OK);
-    assert_eq!(f.state.available_lanes()[3], 0);
-    assert_eq!(
-        f.control("/v1/models").await.status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
+    let overlapping_control = f.control("/v1/models").await;
+    assert_eq!(overlapping_control.status(), StatusCode::OK);
+    drop(overlapping_control);
     let mut body = control.into_body();
     let frame = bounded(body.frame())
         .await
@@ -414,10 +413,8 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
     let retained = frame.slice(..1);
     drop(frame);
     drop(body);
-    assert_eq!(f.state.available_lanes()[3], 0);
     drop(retained);
-    assert_eq!(f.state.available_lanes()[3], 1);
-    phase("independent-model-control-final-owner", baseline);
+    phase("overlapping-unleased-model-controls", baseline);
     let balance = router(f.state.clone())
         .oneshot(
             Request::post("/v1/balance")
@@ -463,7 +460,6 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
     let retained = frame.slice(..1);
     drop(frame);
     drop(body);
-    assert_eq!(f.state.available_lanes()[3], 0);
     phase("maximum-evidence-control", baseline);
     drop(retained);
     open(tokenizer);
