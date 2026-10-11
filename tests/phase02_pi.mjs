@@ -47,9 +47,26 @@ async function terminalGatewayError(code, detail, billing) {
  try { await m.consumeCompletion(body,'synthetic',()=>{}); assert.fail('expected gateway error'); }
  catch (error) { assert(error instanceof m.GatewayError); return error; }
 }
+function mockPreparation(candidate) {
+ // Synthetic already-verified fixture only. Real prepared state and dispatch
+ // latch are exercised separately against the actual reference client below.
+ candidate.prepareChat=async(model,messages,onDelta,newConversation,options)=>{
+  const payload={model,stream:true,messages,...(options.tools?{tools:options.tools}:{})};
+  await options.onPayload?.(payload);
+  return {model,messages,onDelta,newConversation,options:{...options,onPayload:undefined},dispatched:false,close(){this.closed=true;}};
+ };
+ candidate.chatPrepared=async(prepared,guard)=>{
+  if(prepared.closed||prepared.dispatched)throw new m.DiagnosticFailure('request','schema');
+  const entry=(await candidate.models()).find(item=>item.id===prepared.model);
+  if(!entry)throw new m.CatalogFailure('validation');
+  guard?.();prepared.dispatched=true;
+  return candidate.chat(prepared.model,prepared.messages,prepared.onDelta,prepared.newConversation,prepared.options);
+ };
+}
 function freshFixture(candidate) {
  const fresh=new m.ReferenceClient(candidate.channel);
  for(const name of ['login','models','chat','balance'])if(Object.hasOwn(candidate,name))fresh[name]=(...args)=>candidate[name](...args);
+ if(Object.hasOwn(candidate,'prepareChat'))mockPreparation(fresh);
  return fresh;
 }
 async function setup(plan, tools = true) {
@@ -104,6 +121,7 @@ async function setup(plan, tools = true) {
     if (mode === 'abort') await new Promise((_resolve,reject)=>{ options.signal.addEventListener('abort',()=>{abortSeen=true;reject(new m.ChannelError('uncertain'));},{once:true}); });
     return receipt(['tool_calls','late_tools','held_tools'].includes(mode) ? 'tool_calls' : ['tool_length','length_partial','length'].includes(mode) ? 'length' : 'stop');
   };
+  mockPreparation(client);
   client.freshSession=()=>freshFixture(client);
   const provider = new m.PossumsProvider(async()=>client);
   const credential = await provider.auth.apiKey.login({signal:new AbortController().signal,prompt:async()=> 'synthetic_not_a_usable_credential'});
@@ -133,6 +151,7 @@ async function authFixture(plan = []) {
   candidate.chat=(model,messages,onDelta,newConversation,options)=>{
    trace.conversations.push(newConversation);return s.client.chat(model,messages,onDelta,newConversation,options);
   };
+  mockPreparation(candidate);
   candidate.freshSession=()=>freshFixture(candidate);
   return candidate;
  };
@@ -360,6 +379,167 @@ await check('prepared invocation freezes hooks and payload across setup and veri
  assert.equal(calls.length,4);
  assert.equal((await second.chat('synthetic',[{role:'user',content:'Frozen synthetic'}],()=>{},false,{onPayload:()=>{hooks++;}})).finish,'stop');
  assert.equal(hooks,2);assert.deepEqual(calls.slice(4),['catalog2','/v1/submissions','chat']);
+});
+await check('actual EHBP submission plaintext HTTP 422 is local binding observation, never authenticated cause',async()=>{
+ const client=await catalogFixture(),original=Object.getPrototypeOf(client.channel).control.bind(client.channel),fetch=globalThis.fetch;
+ client.channel.control=(route,payload,bearer,signal)=>route==='/v1/sessions'
+  ? Promise.resolve({token:'b'.repeat(43),token_type:'Bearer',expires_in:43200}) : original(route,payload,bearer,signal);
+ await client.login(recoveryKey);
+ client.channel.models=async()=>({object:'list',data:[entry()]});
+ let requests=0;
+ globalThis.fetch=async request=>{
+  requests++;assert.equal(request.url,'https://localhost:18443/v1/submissions');
+  const response=new Response('HOSTILE plaintext unauthorized credential', {status:422,headers:{'content-type':'text/plain'}});
+  Object.defineProperty(response,'url',{value:request.url});return response;
+ };
+ try{
+  const prepared=await client.prepareChat('synthetic',[{role:'user',content:'Synthetic input'}],()=>{});
+  await assert.rejects(client.chatPrepared(prepared),error=>error instanceof m.DiagnosticFailure&&error.stage==='submission'&&
+   error.constraint==='endpoint_binding'&&error.status===422&&error.code==='uncertain'&&!error.message.includes('HOSTILE'));
+  assert.equal(prepared.dispatched,false);assert.equal(requests,1);prepared.close();
+ }finally{globalThis.fetch=fetch;}
+});
+await check('last synchronous dispatch guard rejects replacement and abort after control without chatting',async()=>{
+ const client=await catalogFixture();await client.login(recoveryKey);
+ let chats=0,guardCalls=0;
+ client.channel.models=async()=>({object:'list',data:[entry()]});
+ client.channel.control=async()=>({submission:'s'.repeat(43)});
+ client.channel.chat=()=>{chats++;throw Error(hostileConnection);};
+ const prepared=await client.prepareChat('synthetic',[{role:'user',content:'Synthetic input'}],()=>{});
+ await assert.rejects(client.chatPrepared(prepared,()=>{guardCalls++;throw new m.DiagnosticFailure('request','interrupted','uncertain');}),
+  error=>error instanceof m.DiagnosticFailure&&error.stage==='request'&&error.constraint==='interrupted');
+ assert.equal(chats,0);assert.equal(guardCalls,1);assert.equal(prepared.dispatched,false);
+ prepared.close();await assert.rejects(client.chatPrepared(prepared));
+ const abort=new AbortController();const next=await client.prepareChat('synthetic',[{role:'user',content:'Synthetic input'}],()=>{},false,{signal:abort.signal});
+ await assert.rejects(client.chatPrepared(next,()=>abort.abort()),error=>error instanceof m.DiagnosticFailure&&error.constraint==='interrupted');
+ assert.equal(chats,0);assert.equal(next.dispatched,false);next.close();
+});
+await check('caller-wide pre-dispatch recovery shares three attempts across turns and never repeats payload hooks',async()=>{
+ const source=await setup(['stop','stop','stop']);let recoveries=0,active;
+ const rejected=new Set(),channels=[];
+ const make=()=>{
+  const candidate=new m.ReferenceClient(source.client.channel);channels.push(candidate);
+  candidate.login=async()=>{};
+  candidate.models=async()=>{if(rejected.has(candidate))throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+   return m.validateModels({object:'list',data:[entry(true)]});};
+  candidate.chat=(...args)=>source.client.chat(...args);
+  mockPreparation(candidate);candidate.freshSession=()=>freshFixture(candidate);return candidate;
+ };
+ const first=make(),provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{recoveries++;active=make();return active;});
+ await provider.auth.apiKey.login(interaction());provider.beginRun();provider.bindRun(new AbortController().signal);
+ let hooks=0;
+ try{
+  for(let i=0;i<3;i++){
+   rejected.add(provider.verifiedTemplate);
+   const result=await provider.streamSimple(provider.getModels()[0],context(false),{onPayload:()=>{hooks++;}}).result();
+   assert.equal(result.stopReason,'stop');assert.equal(recoveries,i+1);assert.equal(source.sends(),i+1);
+  }
+  rejected.add(provider.verifiedTemplate);
+  const exhausted=await provider.streamSimple(provider.getModels()[0],context(false),{onPayload:()=>{hooks++;}}).result();
+  assert.equal(exhausted.stopReason,'error');assert.equal(recoveries,3);assert.equal(source.sends(),3);
+  assert.equal(hooks,4,'one payload hook per logical request, not per setup attempt');
+  assert(!exhausted.errorMessage.includes(recoveryKey));
+ }finally{provider.settleRun();}
+});
+await check('coalesced recovery survives one caller abort; external logout suppresses late publication',async()=>{
+ const source=await setup(['stop']);const first=freshFixture(source.client);
+ const good=()=>{
+  const candidate=freshFixture(source.client);candidate.models=async()=>m.validateModels({object:'list',data:[entry(true)]});
+  mockPreparation(candidate);candidate.freshSession=()=>freshFixture(candidate);return candidate;
+ };
+ let stale=false,probes=0,entered=deferred(),release=deferred();
+ first.models=async()=>stale?Promise.reject(new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}})):
+  m.validateModels({object:'list',data:[entry(true)]});
+ first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;entered.resolve();await release.promise;return good();});
+ await provider.auth.apiKey.login(interaction());provider.beginRun();const run=new AbortController();provider.bindRun(run.signal);stale=true;
+ const a=new AbortController(),b=new AbortController();
+ const firstCall=provider.streamSimple(provider.getModels()[0],context(false),{signal:a.signal}).result();
+ const secondCall=provider.streamSimple(provider.getModels()[0],context(false),{signal:b.signal}).result();
+ await entered.promise;a.abort();release.resolve();
+ const one=await firstCall,two=await secondCall;
+ assert.equal(one.stopReason,'aborted');assert.equal(two.stopReason,'stop');assert.equal(probes,1);assert.equal(source.sends(),1);
+ provider.settleRun();
+ // New scope, stalled public probe: logout makes a late verified candidate inert.
+ provider.beginRun();provider.bindRun(new AbortController().signal);
+ const held=deferred();entered=deferred();release=deferred();provider.recover=async()=>{probes++;entered.resolve();await held.promise;return good();};
+ provider.client.models=async()=>{throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});};
+ const obsolete=provider.streamSimple(provider.getModels()[0],context(false)).result();await entered.promise;
+ provider.logout();held.resolve();const cancelled=await obsolete;
+ assert.equal(cancelled.stopReason,'error');assert.equal(provider.client,undefined);assert.equal(source.sends(),1);
+});
+await check('unchanged evidence latches failed scope; no credential/catalog refresh or inference on retry',async()=>{
+ const source=await setup([]);const first=freshFixture(source.client);
+ let catalogs=0,probes=0;
+ first.models=async()=>{catalogs++;if(catalogs>1)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+  return m.validateModels({object:'list',data:[entry(true)]});};
+ first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;throw new m.ConnectionFailure('evidence_unchanged');});
+ await provider.auth.apiKey.login(interaction());provider.beginRun();
+ const firstResult=await provider.streamSimple(provider.getModels()[0],context(false)).result();
+ assert.match(firstResult.errorMessage,/possums_evidence_unchanged/);assert.equal(probes,1);
+ assert.equal(source.sends(),0);
+ const again=await provider.streamSimple(provider.getModels()[0],context(false)).result();
+ assert.match(again.errorMessage,/possums_evidence_unchanged/);assert.equal(probes,1);
+ provider.settleRun();provider.beginRun();
+ const later=await provider.streamSimple(provider.getModels()[0],context(false)).result();
+ assert.match(later.errorMessage,/possums_evidence_unchanged/);assert.equal(probes,1);
+});
+await check('local pre-dispatch submission binding 422 alone can probe; uncertain control billing survives success',async()=>{
+ const source=await setup(['stop']);const first=freshFixture(source.client),candidate=freshFixture(source.client);
+ first.models=async()=>m.validateModels({object:'list',data:[entry(true)]});
+ const oldPrepared=first.chatPrepared;let controls=0,probes=0;
+ first.chatPrepared=async(prepared,guard)=>{
+  if(++controls===1)throw new m.DiagnosticFailure('submission','endpoint_binding','uncertain',422);
+  return oldPrepared(prepared,guard);
+ };
+ first.freshSession=()=>{const fresh=freshFixture(first);fresh.chatPrepared=first.chatPrepared;return fresh;};
+ candidate.models=async()=>m.validateModels({object:'list',data:[entry(true)]});mockPreparation(candidate);candidate.freshSession=()=>freshFixture(candidate);
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;return candidate;});
+ await provider.auth.apiKey.login(interaction());provider.beginRun();
+ const result=await provider.streamSimple(provider.getModels()[0],context(false)).result();
+ assert.equal(result.stopReason,'stop');assert.equal(probes,1);assert.equal(source.sends(),1);
+ assert.deepEqual(result.diagnostics.map(value=>value.type),['possums_settled_receipt','possums_billing_unknown']);
+ provider.settleRun();
+});
+await check('public acquisition retries only closed transient errors within one shared scope',async()=>{
+ const source=await setup([]);const first=freshFixture(source.client);
+ let calls=0,models=0;
+ first.models=async()=>{if(++models>1)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+  return m.validateModels({object:'list',data:[entry(true)]});};first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{
+  calls++;throw new m.ConnectionFailure('evidence_unavailable',new m.EvidenceObservation('gateway_attestation','http',503));
+ });
+ await provider.auth.apiKey.login(interaction());provider.beginRun();
+ const started=performance.now(),result=await provider.streamSimple(provider.getModels()[0],context(false)).result();
+ assert.match(result.errorMessage,/possums_evidence_unavailable/);assert.equal(calls,3);assert.equal(source.sends(),0);
+ assert(performance.now()-started>=1100,'250 + 1000ms delay must not collapse into an eager request burst');
+ assert.equal((await provider.streamSimple(provider.getModels()[0],context(false)).result()).stopReason,'error');
+ assert.equal(calls,3,'exhaustion remains latched even for another callback');
+ provider.settleRun();
+});
+await check('candidate catalog removing selected model or tool profile cannot substitute or dispatch',async()=>{
+ for(const removed of [true,false]){
+  const source=await setup([]),first=freshFixture(source.client);
+  let stale=false,probes=0;
+  first.models=async()=>{if(stale)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+   return m.validateModels({object:'list',data:[entry(true)]});};first.freshSession=()=>freshFixture(first);
+  const candidate=freshFixture(source.client);
+  candidate.models=async()=>m.validateModels({object:'list',data:[removed?{...entry(true),id:'other'}:entry(false)]});
+  mockPreparation(candidate);candidate.freshSession=()=>freshFixture(candidate);
+  const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;return candidate;});
+  await provider.auth.apiKey.login(interaction());provider.beginRun();stale=true;
+  const result=await provider.streamSimple(provider.getModels()[0],context(true)).result();
+  assert.match(result.errorMessage,removed?/possums_model_unavailable/:/possums_tools_unsupported/);
+  assert.equal(probes,1);assert.equal(source.sends(),0);
+  provider.settleRun();
+ }
+});
+await check('account logout inside the prepared payload hook cannot send on the old or new session',async()=>{
+ const source=await setup([]),first=freshFixture(source.client);first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>first);await provider.auth.apiKey.login(interaction());provider.beginRun();
+ const result=await provider.streamSimple(provider.getModels()[0],context(false),{onPayload:()=>provider.logout()}).result();
+ assert.equal(result.stopReason,'error');assert.equal(source.sends(),0);assert.equal(provider.client,undefined);
 });
 await check('ordinary chat retains original bearer when payload hook switches or overlaps login',async()=>{
  for(const switchInsideHook of [true,false]){
@@ -1052,6 +1232,7 @@ async function renewalFixture(name, plan=['stop','stop'], extra=[], tools=false)
    const client=new m.ReferenceClient(channel);
    client.models=async()=>{valid();return f.s.client.models();};
    client.chat=(...args)=>{valid();trace.attempts.push(tag);return f.s.client.chat(...args);};
+   mockPreparation(client);
    client.freshSession=create;return client;
   };
   return create();
@@ -1117,7 +1298,7 @@ await check('Stop during deferred verification/login aborts the real run and lat
   } finally {release.resolve();f.session.dispose();}
  }
 });
-await check('failed renewal preserves closed stage, sends no credential/prompt and cannot renew on background or extension work',async()=>{
+await check('failed renewal preserves closed stage; background refresh stays offline and a later authorized extension setup may retry',async()=>{
  for(const code of ['verification_failed','evidence_unavailable','approval_expired']) {
   const f=await renewalFixture('failure-'+code);f.expire();
   f.verifyHook(async()=>{throw new m.ConnectionFailure(code);});
@@ -1127,21 +1308,21 @@ await check('failed renewal preserves closed stage, sends no credential/prompt a
    assert.equal(f.trace.verified.length,2);assert.match(f.session.messages.at(-1).errorMessage,new RegExp('possums_'+code));
    await f.runtime.refresh({providers:['possums'],allowNetwork:true});
    await f.session.sendUserMessage('Synthetic extension cannot retry renewal');
-   assert.equal(f.trace.verified.length,2);assert.equal(f.s.sends(),0);
+   assert.equal(f.trace.verified.length,3);assert.equal(f.s.sends(),0);
    f.verifyHook(async()=>{});await f.session.prompt('Synthetic explicit retry');
-   assert.equal(f.trace.verified.length,3);assert.equal(f.s.sends(),1);
+   assert.equal(f.trace.verified.length,4);assert.equal(f.s.sends(),1);
   } finally {f.session.dispose();}
  }
 });
-await check('extension-origin prompts cannot initiate expiry renewal',async()=>{
+await check('authorized extension-origin prompts may initiate known-expiry renewal',async()=>{
  const f=await renewalFixture('extension');f.expire();
  try {
   await f.session.sendUserMessage('Synthetic extension prompt');
-  assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),0);
-  await f.session.prompt('Synthetic explicit prompt');assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
+  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
+  await f.session.prompt('Synthetic explicit prompt');assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),2);
  } finally {f.session.dispose();}
 });
-await check('expiry within native retries and tool continuation never swaps trust',async()=>{
+await check('known expiry renews setup in native retries and tool continuation without replaying completed tools',async()=>{
  for(const mode of ['unknown_bill','tool_calls']) {
   const f=await renewalFixture('continuation-'+mode,[mode,'stop'],[],mode==='tool_calls');
   if(mode==='tool_calls')f.session.setActiveToolsByName(['echo']);
@@ -1149,13 +1330,13 @@ await check('expiry within native retries and tool continuation never swaps trus
   f.s.client.chat=async(...args)=>{try{return await chat(...args);}finally{f.expire();}};
   try {
    await f.session.prompt('Synthetic continuation');
-   assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),1);
+   assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),2);
    assert.equal(f.toolRuns(),mode==='tool_calls'?1:0);
-   assert.equal(f.session.messages.at(-1).stopReason,'error');
+   assert.equal(f.session.messages.at(-1).stopReason,'stop');
   } finally {f.session.dispose();}
  }
 });
-await check('queued steering/follow-up do not grant renewal; the later idle explicit submission can',async()=>{
+await check('queued steering/follow-up may renew known expiry without a fresh budget',async()=>{
  for(const behavior of ['steer','followUp']) {
   const f=await renewalFixture('queued-'+behavior,['held','stop']),entered=deferred();
   const chat=f.s.client.chat;
@@ -1163,9 +1344,9 @@ await check('queued steering/follow-up do not grant renewal; the later idle expl
   try {
    const pending=f.session.prompt('Synthetic original run');await entered.promise;
    await f.session[behavior]('Synthetic queued input');f.s.release();await pending;
-   assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),1);
-   f.s.client.chat=chat;await f.session.prompt('Synthetic later explicit input');
    assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),2);
+   f.s.client.chat=chat;await f.session.prompt('Synthetic later explicit input');
+   assert.deepEqual(f.trace.verified,['A','B','B']);assert.equal(f.s.sends(),3);
   } finally {f.s.release();f.session.dispose();}
  }
 });
@@ -1187,7 +1368,7 @@ await check('logout/session/account replacement invalidates pending renewal and 
   } finally {release.resolve();f.session.dispose();}
  }
 });
-await check('background refresh during input and pre-prompt/manual compaction cannot borrow renewal permission',async()=>{
+await check('background refresh cannot renew; authorized manual and threshold compaction setup may',async()=>{
  let f;
  f=await renewalFixture('preflight',['stop','stop','stop'],[pi=>pi.on('input',async(_event,ctx)=>{
   if(!f)return;
@@ -1200,15 +1381,14 @@ await check('background refresh during input and pre-prompt/manual compaction ca
   await f.session.prompt('Synthetic prior context '.repeat(100));
   await f.session.prompt('Synthetic high context '.repeat(100));f.s.client.chat=chat;
   f.expire();
-  await assert.rejects(()=>f.session.compact(),/Compaction cancelled/);
-  assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),2);
-  f.settings.setCompactionEnabled(true);
-  await f.session.prompt('Synthetic explicit after expired compaction');
-  assert(f.compactions.some(event=>event.reason==='threshold'));
+  await f.session.compact();
   assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),3);
+  f.settings.setCompactionEnabled(true);
+  await f.session.prompt('Synthetic explicit after compaction');
+  assert.deepEqual(f.trace.verified,['A','B']);assert(f.s.sends()>=4);
  } finally {f.session.dispose();}
 });
-await check('nested extension custom run cannot steal a marked explicit submission',async()=>{
+await check('trusted nested extension run may renew known expiry without borrowing native-only permission',async()=>{
  let f,injected=false;
  f=await renewalFixture('nested-custom',['stop'],[pi=>pi.on('before_agent_start',async()=>{
   if(!f||injected)return;injected=true;
@@ -1217,10 +1397,10 @@ await check('nested extension custom run cannot steal a marked explicit submissi
  f.expire();
  try {
   await f.session.prompt('Synthetic explicit pending input');
-  assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),0);
+  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),2);
  } finally {f.session.dispose();}
 });
-await check('overlapping idle input origins fail closed instead of transferring explicit permission',async()=>{
+await check('overlapping authorized origins may renew known expiry without minting extra scope',async()=>{
  for(const heldSource of ['interactive','extension']) {
   const entered=deferred(),release=deferred();let held=false;
   const f=await renewalFixture('overlap-'+heldSource,['stop'],[pi=>pi.on('input',async event=>{
@@ -1231,9 +1411,9 @@ await check('overlapping idle input origins fail closed instead of transferring 
    const first=f.session.prompt('Synthetic first overlapping input',{source:heldSource});await entered.promise;
    await f.session.prompt('Synthetic other overlapping input',{source:heldSource==='interactive'?'extension':'interactive'});
    release.resolve();await first;
-   assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),0);
+   assert.deepEqual(f.trace.verified,['A','B']);
    await f.session.prompt('Synthetic unambiguous submission');
-   assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
+   assert.deepEqual(f.trace.verified,['A','B']);
   } finally {release.resolve();f.session.dispose();}
  }
 });
@@ -1246,7 +1426,7 @@ await check('expired returned verification context cannot authorize a credential
   assert.match(f.session.messages.at(-1).errorMessage,/possums_verification_failed/);
  } finally {f.session.dispose();}
 });
-await check('an earlier nested auth request on the active signal consumes the candidate without renewing',async()=>{
+await check('nested auth on active signal can renew known expiry without suppressing native request',async()=>{
  let f,injected=false;
  f=await renewalFixture('nested-auth',['stop'],[pi=>pi.on('agent_start',async(_event,ctx)=>{
   if(!f||injected)return;injected=true;
@@ -1255,9 +1435,9 @@ await check('an earlier nested auth request on the active signal consumes the ca
  f.expire();
  try {
   await f.session.prompt('Synthetic explicit after nested auth');
-  assert.deepEqual(f.trace.verified,['A']);assert.equal(f.s.sends(),0);
+  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),2);
   await f.session.prompt('Synthetic next explicit');
-  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
+  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),3);
  } finally {f.session.dispose();}
 });
 // Qualification only: these probes record a BLOCKER, not deployment-recovery
@@ -1298,7 +1478,7 @@ for(const [hook,round] of [
     if(turn===round&&(hook!=='message_start'||event.message.role==='user'))await inject(event,ctx);
    });
   }];
-  const beforeInitial=round===0&&!['before_provider_request','tool_execute'].includes(hook);
+  const beforeInitial=round===0&&hook!=='tool_execute';
   f=await sdkSetup('sdk-permission-'+hook+'-'+round,
    beforeInitial?['stop','tool_calls','stop']:['tool_calls','stop','stop'],true,false,true,false,{enabled:false},extensions,
    async(_id,_params,signal,_update,ctx)=>{if(hook==='tool_execute')await inject(undefined,ctx,signal);});
@@ -1311,7 +1491,7 @@ for(const [hook,round] of [
   try {
    await f.session.prompt('Synthetic permission qualification');
    assert(!hookFailure,'qualification hook failed');assert(injected);assert.equal(hookCalls,1);
-   assert.equal(nestedResult?.stopReason,'stop');assert.equal(f.session.messages.at(-1).stopReason,'stop');
+   assert(['stop','toolUse'].includes(nestedResult?.stopReason));assert.equal(f.session.messages.at(-1).stopReason,'stop');
    assert.equal(starts,1);assert.equal(ends,2);assert.equal(turn,1);
    assert.equal(f.toolRuns(),1);assert.equal(f.s.sends(),3);
    assert.equal(requests.length,3);assert.equal(auth.length,3);
@@ -1698,6 +1878,7 @@ await check('actual Pi runtime new/resume verifies once; stopped A never refresh
       candidate.login=async()=>{};
       candidate.models=async()=>(await source.client.models()).map(item=>({...item,context_tokens:'64000'}));
       candidate.chat=(...args)=>{attempts.push(tag);if(tag!==active||!available)throw new m.ChannelError('uncertain');return source.client.chat(...args);};
+      mockPreparation(candidate);
       candidate.freshSession=()=>freshFixture(candidate);return candidate;
      };register(value);};
      m.extension(pi);pi.on('session_start',event=>{starts.push(event.reason);});
@@ -1737,6 +1918,29 @@ await check('actual Pi SDK and shipped extension hooks run one receipted invocat
  const {session,s,toolRuns}=await sdkSetup('sdk-tools',['tool_calls','stop'],true);
  try{await session.prompt('Synthetic tool task');assert.equal(toolRuns(),1,session.messages.filter(value=>value.role==='assistant').at(-1)?.errorMessage);assert.equal(s.sends(),2);assert.equal(s.requests[1].messages.find(message=>message.role==='assistant').content,'');assert.equal(session.messages.filter(value=>value.role==='assistant').at(-1).content.find(value=>value.type==='text').text,'progressive');assert.equal(session.sessionManager.getSessionFile(),undefined);}
  finally{session.dispose();}
+});
+await check('actual Pi SDK native tool continuation shares two verified setup rotations without rerunning its tool',async()=>{
+ const f=await sdkSetup('sdk-e3-tool',['tool_calls','stop'],true,false,true,false,{enabled:false});
+ let probes=0,stale=true;
+ const originalModels=f.s.client.models,originalChat=f.s.client.chat;
+ f.s.client.models=async()=>{if(stale)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});return originalModels();};
+ f.s.client.chat=async(...args)=>{const result=await originalChat(...args);if(f.s.sends()===1)stale=true;return result;};
+ f.provider.recover=async()=>{
+  const number=++probes,candidate=new m.ReferenceClient(f.s.client.channel);
+  candidate.login=async()=>{};candidate.models=async()=>{
+   if(number===1&&stale)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+   return originalModels();
+  };
+  candidate.chat=(...args)=>f.s.client.chat(...args);
+  mockPreparation(candidate);candidate.freshSession=()=>freshFixture(candidate);
+  stale=false;return candidate;
+ };
+ f.session.setActiveToolsByName(['echo']);
+ try{
+  await f.session.prompt('Synthetic E3 native tool loop');
+  assert.equal(probes,2);assert.equal(f.toolRuns(),1);assert.equal(f.s.sends(),2);
+  assert.equal(f.session.messages.at(-1).stopReason,'stop');
+ }finally{f.session.dispose();}
 });
 await check('actual Pi SDK accepts steering during held text and tool responses, and queued follow-up',async()=>{
  for(const [mode,method] of [['held','steer'],['held_tools','steer'],['held','followUp']]) {
@@ -1992,6 +2196,36 @@ await check('summary success/failure preserves native continuation and ordinary 
   assert.equal((await drain(f.provider.streamSimple(f.ctx.model,continuation))).message.stopReason,'stop');
   assert.deepEqual(f.s.requests.map(r=>r.newConversation),[true,true,false,false]);assert.equal(f.s.sends(),4);
  }
+});
+await check('native idle split compaction reauthenticates known expiry once across two summary setups',async()=>{
+ const f=await compactionFixture(['stop','stop'],true);
+ const before=f.trace.keys.length;
+ Object.defineProperty(f.provider.client,'authExpiresAt',{value:0});
+ const result=await f.run();
+ assert(result.compaction);assert.equal(f.s.sends(),2);assert.equal(f.trace.keys.length,before+1);
+ assert.equal(f.provider.runScope,undefined);assert.equal(f.notices.length,0);
+});
+await check('native split compaction recovers each summary setup within one idle scope without rerunning generation',async()=>{
+ const f=await compactionFixture(['stop','stop'],true),originalModels=f.s.client.models;
+ let phase=0,probes=0;
+ const denied=()=>new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+ // The first template and, after its first paid summary, the first candidate
+ // lose their authenticated catalog; native compact still owns both prompts.
+ f.s.client.models=async()=>{if(phase>=1)throw denied();return originalModels();};
+ const oldChat=f.s.client.chat;
+ f.s.client.chat=async(...args)=>{const receipt=await oldChat(...args);if(f.s.sends()===1)phase=2;return receipt;};
+ f.provider.recover=async()=>{
+  const number=++probes,candidate=new m.ReferenceClient(f.s.client.channel);
+  candidate.login=async()=>{};
+  candidate.models=async()=>{if(number===1&&phase>=2)throw denied();return originalModels();};
+  candidate.chat=(...args)=>f.s.client.chat(...args);
+  mockPreparation(candidate);candidate.freshSession=()=>freshFixture(candidate);return candidate;
+ };
+ phase=1;
+ const result=await f.run();
+ assert(result.compaction);assert.equal(probes,2);assert.equal(f.s.sends(),2);
+ assert.equal(f.notices.length,0);assert.equal(f.provider.runScope,undefined);
+ assert.equal(f.s.requests.length,2);assert.equal(f.s.requests.every(request=>!request.tools),true);
 });
 await check('summary errors, length, empty text and tool attempts fail closed with safe stages and no replay',async()=>{
  for(const [mode,pattern] of [['refund',/Generation failed.*stream idle timeout.*Reservation refunded/],['unknown_bill',/Gateway unavailable.*inference unavailable.*Charge unknown/],['sdk_decode',/sdk stream decode failed/],['hostile',/possums_provider_unexpected/],['length',/possums_summary_length/],['empty',/possums_summary_empty/],['tool_calls',/possums_summary_tools/],['stop_tools',/possums_summary_tools/]]) {

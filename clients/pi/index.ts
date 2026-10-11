@@ -2,7 +2,7 @@ import { isAbsolute } from 'node:path';
 import { open, type FileHandle } from 'node:fs/promises';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { LIMITS } from '../../examples/phase01/limits.js';
-import { connect, connectPublished } from './bootstrap.js';
+import { connect, connectPublished, recoverCompiled, recoverPublished } from './bootstrap.js';
 import { ConnectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
 import { PossumsProvider, PROVIDER_ID } from './provider.js';
 
@@ -27,17 +27,17 @@ export default function possums(pi: ExtensionAPI): void {
   let ui: ExtensionContext['ui'] | undefined;
   let sessionEpoch = 0;
   const notifiedCodes = new Set<ConnectionFailure['code']>();
-  const provider = new PossumsProvider(async signal => {
-    const pinnedManifest = pi.getFlag('possums-manifest');
-    return pinnedManifest === undefined
-      ? connectPublished(signal)
-      : connect(await manifest(pinnedManifest), signal);
-  }, failure => {
+  // Keep the selected authority fixed for this trust session. An explicit
+  // manifest never silently falls through to published/latest recovery.
+  const pinnedManifest = pi.getFlag('possums-manifest');
+  const provider = new PossumsProvider(async signal => pinnedManifest === undefined
+    ? connectPublished(signal) : connect(await manifest(pinnedManifest), signal), failure => {
     if (!failure) { notifiedCodes.clear(); return; }
     if (!ui || notifiedCodes.has(failure.code)) return;
     notifiedCodes.add(failure.code);
     try { ui.notify(failure.message, 'warning'); } catch { /* Transient UI only. */ }
-  });
+  }, (previous, signal) => pinnedManifest === undefined
+    ? recoverPublished(previous, signal) : manifest(pinnedManifest).then(bytes => recoverCompiled(previous, bytes, signal)));
   pi.registerProvider(provider);
   pi.on('session_start', async (_event, ctx) => {
     const epoch = ++sessionEpoch;

@@ -502,10 +502,10 @@ export class ReferenceClient {
       throw new DiagnosticFailure(stage, constraint);
     } finally { op.close(); }
   }
-  async chatPrepared(prepared: PreparedChat): Promise<Receipt> {
-    return this.#chatPrepared(prepared, this.#bearer);
+  async chatPrepared(prepared: PreparedChat, beforeDispatch?: () => void): Promise<Receipt> {
+    return this.#chatPrepared(prepared, this.#bearer, beforeDispatch);
   }
-  async #chatPrepared(prepared: PreparedChat, bearer: string | undefined): Promise<Receipt> {
+  async #chatPrepared(prepared: PreparedChat, bearer: string | undefined, beforeDispatch?: () => void): Promise<Receipt> {
     // Acquire synchronously, before any await. The state is module-owned rather
     // than a mutable caller-supplied boolean, including across client rotations.
     const state = preparedStates.get(prepared);
@@ -532,6 +532,10 @@ export class ReferenceClient {
       constraint = 'schema';
       keys(issuance, ['submission']); requireThat(token(issuance.submission));
       op.check(); requireThat(!state.closed); stage = 'transport'; constraint = 'fetch';
+      // The owner checks session/account/run and cancellation synchronously at
+      // the last possible boundary, after all awaited setup and hooks.
+      beforeDispatch?.();
+      op.check(); requireThat(!state.closed);
       state.dispatched = true;
       const body = await this.channel.chat({ ...payload!, submission: issuance.submission }, bearer,
         { signal: op.controller.signal, onResponse: async info => {
