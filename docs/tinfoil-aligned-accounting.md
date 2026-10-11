@@ -1,5 +1,14 @@
 # Tinfoil-aligned streaming accounting source candidate
 
+**Historical pre-integration source/review record.** The parent subsequently
+committed this candidate. Current-main integration, rerun evidence and changed
+admission/tool-envelope semantics are recorded in
+[forwarding integration](tinfoil-forwarding-integration.md). The pending lower
+sizing discussion below is superseded by the separately authorized
+[documented platform fallback](tinfoil-sizing-fallback.md). Original test/review
+counts and uncommitted/deployment statements below describe that earlier scope,
+not the final integration status.
+
 ## Approval and status
 
 The operator approved promptly closing upstream inference on an observed downstream disconnect and aligning partial-stream settlement and opt-in response usage metrics with Tinfoil's documented behavior. The approved [forwarding plan](tinfoil-forwarding-plan.md) is now implemented in the existing dirty checkout. Its paused/baseline-only description is historical, not the current implementation status. **This record qualifies local source and isolated synthetic fixtures only; parent-owned final acceptance and release verification remain separate.**

@@ -57,7 +57,12 @@ Authenticated request
  → authenticated Possums receipt, if delivery remains possible
 ```
 
-Keep existing trust, admission, leased upload bytes, memory accounting and transient idempotency state.
+Keep existing trust, leased upload bytes, bounded delivery storage, passive
+lifetime accounting and transient idempotency state. Current main independently
+removed shared chat Heavy/Ingress and generation admission, cumulative client
+stream quotas and live tool-count/argument quotas. Preserve those removals and
+32-MiB request/retained-state envelopes; do not restore a shared workload gate.
+See [current-main integration evidence](tinfoil-forwarding-integration.md).
 
 Send upstream `X-Tinfoil-Request-Usage-Metrics: true`. Keep supported `stream_options.include_usage`. Do not invent undocumented continuous-usage options.
 
