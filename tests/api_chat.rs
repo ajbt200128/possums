@@ -50,6 +50,7 @@ struct Provider {
     text_repeats: AtomicUsize,
     running_usage: AtomicBool,
     native_metrics: AtomicBool,
+    native_response: Mutex<Option<reqwest::Response>>,
     missing_finish: AtomicBool,
     hold_tokenizer: AtomicBool,
     tokenizer_error: AtomicBool,
@@ -87,6 +88,16 @@ impl Inference for Provider {
         sink: &mut dyn possums::inference::forward::ForwardSink,
     ) -> Result<StreamCompletion, InferenceError> {
         self.generation_calls.fetch_add(1, Ordering::SeqCst);
+        let native_response = self.native_response.lock().unwrap().take();
+        if let Some(response) = native_response {
+            return possums::inference::forward::consume(
+                response,
+                &model.id,
+                Duration::from_secs(1),
+                sink,
+            )
+            .await;
+        }
         if self.panic_generation.load(Ordering::SeqCst) {
             panic!("synthetic generation panic");
         }
@@ -344,6 +355,7 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         text_repeats: 1.into(),
         running_usage: false.into(),
         native_metrics: false.into(),
+        native_response: Mutex::new(None),
         missing_finish: false.into(),
         hold_tokenizer: false.into(),
         tokenizer_error: false.into(),
@@ -403,6 +415,9 @@ async fn duplicate(state: &AppState, bearer: &str, submission: &str, expected: &
     assert!(value["error"]["code"] == "duplicate_request");
     assert!(value["error"]["outcome"] == expected);
 }
+
+#[path = "support/native_usage_contract.rs"]
+mod native_usage_contract;
 
 #[tokio::test]
 async fn downstream_native_metrics_require_single_opt_in_and_final_evidence() {
