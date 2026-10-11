@@ -136,6 +136,20 @@ fetch/SDK limits remain separate (including Node 24.13.0's default Undici
 gateway source changes are not deployed by this operation.
 See [scope and local checks](../../docs/provider-timeout-alignment.md).
 
+## Stream quota normalization (source candidate; not installed)
+
+The source candidate removes the cumulative 64-MiB response-byte and 65,536 frame/event quotas. Individual HTTP chunks, ciphertext frames, SSE events and unfinished parser state remain bounded; encrypted framing, SDK decryption, inactivity limits and ordered finish/receipt/DONE/authenticated EOF checks are unchanged. EHBP 0.3.2's separate 64-MiB **per-ciphertext-chunk** ceiling is not a cumulative response limit and remains unchanged. The inspected installed OpenAI SDK streaming path likewise has no cumulative byte/event quota; this is a comparison, not evidence of unlimited safe allocation.
+
+The separately requested [request alignment candidate](../../docs/request-limit-alignment.md) increases the history envelope to 32 MiB and total chat upload time to 600 seconds, with existing structural defenses retained independently of the selected model's context window. [Anthropic documents 32 MB](https://platform.claude.com/docs/en/api/errors#request-size-limits) for Messages and Token Counting requests; that provider-specific byte limit does not qualify a larger gateway envelope or prove Tinfoil equivalence. This stream packet itself changes no history limit. No client installation, gateway deployment or live inference occurred. The requested live-tool quota, chat admission and delivery-backpressure changes are not implemented in this packet. See [scoped verification](../../docs/verification.md#client-cumulative-stream-quota-removal-candidate).
+
+## Live-tool quota removal (source candidate; not installed)
+
+The source removes the 64-call, 64-KiB-per-call and 256-KiB-total live tool quotas. The gateway forwards argument fragments without a cumulative argument counter. It still bounds retained identity metadata; the client must retain arguments until authenticated terminal validation and defensively charges that state against the 32-MiB request-envelope allowance, including conservative record/string overhead. This does not promise 32 MiB of raw argument storage or unlimited tools. Parser/frame, identity/index/order, object-argument and terminal receipt checks remain. `possums_stream_tool_state` identifies the local retained-state boundary; legacy gateway quota diagnostics remain recognizable during rollout. See [evidence and exact allowance scope](../../docs/verification.md#live-tool-quota-removal--source-candidate).
+
+## Delivery backpressure and chat admission (gateway source candidate)
+
+The gateway candidate removes fixed Heavy/Ingress chat admission without a replacement gate. The existing connection and per-request defenses remain, but connections do not bound accepted disconnected work; no shared workload-memory envelope remains. It also waits for the existing eight-frame/64-KiB delivery buffer instead of discarding delivery when temporarily full. Disconnect wakes capacity waits and the gateway continues consuming and settling the same upstream request. A connected stalled reader can delay final usage/settlement and graceful drain until it reads or disconnects; no new delivery timeout is added. Receipt delivery is still not guaranteed and absence of a receipt means client billing is unknown. These are [source-only local checks](../../docs/verification.md#bounded-delivery-backpressure-without-frame-full-cutoff--source-candidate), not gateway deployment or installed-client activation.
+
 ## Safety and billing
 
 - The recovery credential is saved by ordinary Pi authentication, normally in `~/.pi/agent/auth.json` (or the configured Pi agent directory). It is **plaintext at rest**, accessible to local tools/extensions with your permissions. Pi creates new auth files with mode `0600` and parent directories with `0700`; existing modes/ACLs are preserved. Bearer/catalog state remains memory-only, and request hooks receive a non-secret marker rather than the recovery key or bearer.

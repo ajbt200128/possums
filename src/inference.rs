@@ -24,7 +24,7 @@ const MAX_EVIDENCE_FIELD_BYTES: usize = 4 * 1024;
 const MAX_EVIDENCE_STRING_BYTES: usize = 16 * 1024;
 const MAX_EVIDENCE_REGISTERS: usize = 32;
 const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 128 * 1024;
-const MAX_TOKENIZER_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TOKENIZER_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Message {
@@ -52,6 +52,43 @@ impl InferenceError {
     }
 }
 
+/// A borrowed output fragment may wait for bounded downstream capacity. A sink
+/// cannot cancel inference: after disconnect it discards output and returns.
+#[async_trait]
+pub trait TextDeltaSink: Send {
+    async fn emit(&mut self, text: &str);
+}
+
+#[async_trait]
+pub trait DeltaSink: Send {
+    async fn emit(&mut self, delta: CompletionDelta<'_>);
+}
+
+// Compatibility for synchronous parser/diagnostic callers, not a delivery bridge.
+#[async_trait]
+impl<F: FnMut(&str) + Send> TextDeltaSink for F {
+    async fn emit(&mut self, text: &str) {
+        self(text);
+    }
+}
+
+#[async_trait]
+impl<F: for<'a> FnMut(CompletionDelta<'a>) + Send> DeltaSink for F {
+    async fn emit(&mut self, delta: CompletionDelta<'_>) {
+        self(delta);
+    }
+}
+
+pub(crate) struct TextSink<'a>(pub &'a mut dyn TextDeltaSink);
+#[async_trait]
+impl DeltaSink for TextSink<'_> {
+    async fn emit(&mut self, delta: CompletionDelta<'_>) {
+        if let CompletionDelta::Text(text) = delta {
+            self.0.emit(text).await;
+        }
+    }
+}
+
 #[async_trait]
 pub trait Inference: Send + Sync {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError>;
@@ -72,6 +109,8 @@ pub trait Inference: Send + Sync {
     /// Call `heavy.dispatch_generation()` just before the actual generation send
     /// (after encoding/trust), never for tokenizer or role/usage-only events.
     ///
+    /// Legacy synchronous compatibility entry point (including diagnostic callers).
+    /// API delivery uses the async completion/invocation sinks below instead.
     /// The borrowed synchronous callback must not block, panic, or collect
     /// unbounded output. On delivery failure, detach delivery in the callback and
     /// keep polling this future to completion; never cancel upstream or retry an
@@ -89,13 +128,15 @@ pub trait Inference: Send + Sync {
     }
 
     /// API adapter preserves authenticated finish metadata as well as final usage.
+    /// Await each borrowed emission in the consuming future; do not buffer a
+    /// completion or spawn a delivery bridge. Delivery waits have no deadline.
     /// Implementations without a qualified completion protocol fail closed.
     async fn generate_completion_stream(
         &self,
         _model: &Model,
         _messages: &[Message],
         _heavy: Arc<crate::telemetry::hooks::Lease>,
-        _on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+        _on_delta: &mut dyn TextDeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         Err(InferenceError::Unavailable)
     }
@@ -115,14 +156,14 @@ pub trait Inference: Send + Sync {
         Err(InferenceError::Unavailable)
     }
 
-    /// The callback borrows bounded fragments; never collect complete arguments.
+    /// The async sink borrows bounded fragments; never collect complete arguments.
     /// Delivery failure must detach only, not cancel this settling operation.
     async fn generate_invocation_stream(
         &self,
         _model: &Model,
         _invocation: &ToolInvocation,
         _heavy: Arc<crate::telemetry::hooks::Lease>,
-        _on_delta: &mut (dyn for<'delta> FnMut(CompletionDelta<'delta>) + Send),
+        _on_delta: &mut dyn DeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         Err(InferenceError::Unavailable)
     }
@@ -171,9 +212,9 @@ impl TinfoilInference {
         model: &Model,
         messages: &[Message],
         heavy: Arc<crate::telemetry::hooks::Lease>,
-        on_delta: impl FnMut(&str) + Send,
+        mut on_delta: impl FnMut(&str) + Send,
     ) -> Result<stream::StreamUsage, InferenceError> {
-        self.generate_completion_stream(model, messages, heavy, on_delta)
+        self.generate_completion_stream(model, messages, heavy, &mut on_delta)
             .await
             .map(|completion| completion.usage)
     }
@@ -183,7 +224,7 @@ impl TinfoilInference {
         model: &Model,
         messages: &[Message],
         heavy: Arc<crate::telemetry::hooks::Lease>,
-        on_delta: impl FnMut(&str) + Send,
+        on_delta: &mut dyn TextDeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         let http = self.http()?;
         let url = format!("{}/v1/chat/completions", self.origin);
@@ -786,6 +827,22 @@ mod stream_probe_tests {
     }
 
     #[test]
+    fn tokenizer_request_full_envelope_boundary_is_thirty_two_mib() {
+        assert_eq!(MAX_TOKENIZER_REQUEST_BYTES, 32 * 1024 * 1024);
+        let mut messages = [Message {
+            role: "user".into(),
+            content: String::new(),
+        }];
+        let overhead = tokenizer_request_bytes("fixture", &messages).unwrap().len();
+        messages[0].content = "x".repeat(MAX_TOKENIZER_REQUEST_BYTES - overhead);
+        let encoded = tokenizer_request_bytes("fixture", &messages).unwrap();
+        assert_eq!(encoded.len(), MAX_TOKENIZER_REQUEST_BYTES);
+        drop(encoded);
+        messages[0].content.push('x');
+        assert!(tokenizer_request_bytes("fixture", &messages).is_err());
+    }
+
+    #[test]
     fn tokenizer_request_is_bounded_before_transport() {
         let messages = [Message {
             role: "user".into(),
@@ -930,7 +987,7 @@ pub(crate) mod resource_fixtures {
     pub(crate) async fn consume_response(
         response: reqwest::Response,
         idle_timeout: Duration,
-        on_delta: impl FnMut(&str),
+        on_delta: impl FnMut(&str) + Send,
     ) -> Result<stream::StreamUsage, InferenceError> {
         stream::consume_response(response, idle_timeout, on_delta).await
     }
@@ -974,7 +1031,7 @@ impl Inference for TinfoilInference {
         model: &Model,
         messages: &[Message],
         heavy: Arc<crate::telemetry::hooks::Lease>,
-        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+        on_delta: &mut dyn TextDeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         TinfoilInference::generate_completion_stream(self, model, messages, heavy, on_delta).await
     }
@@ -1015,7 +1072,7 @@ impl Inference for TinfoilInference {
         model: &Model,
         invocation: &ToolInvocation,
         heavy: Arc<crate::telemetry::hooks::Lease>,
-        on_delta: &mut (dyn for<'delta> FnMut(CompletionDelta<'delta>) + Send),
+        on_delta: &mut dyn DeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         let profile = self
             .tool_profile(&model.id)

@@ -1,6 +1,7 @@
 //! Isolated API route allocation qualification. Requested bytes, not RSS or an
 //! SDK/TLS/helper-process bound; no real content or credentials enter this fixture.
-//! Control overlap is a finite fixture, not a shared control-memory bound.
+//! Chat/control overlap is finite; there is no shared workload-memory envelope.
+//! The 1-GiB test threshold below is only a finite synthetic regression guard.
 use super::*;
 use crate::{
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
@@ -27,6 +28,7 @@ use std::{
 use tower::ServiceExt;
 
 const MIB: usize = 1024 * 1024;
+const FIXTURE_ALLOCATION_LIMIT: usize = 1024 * MIB;
 const TIMEOUT: Duration = Duration::from_secs(30);
 const CREDIT: u64 = 1_000_000_000;
 fn model(n: usize) -> String {
@@ -38,7 +40,7 @@ fn catalog() -> Vec<u8> {
         if n != 0 {
             wire.push(',');
         }
-        write!(wire, "{{\"id\":\"{}\",\"type\":\"chat\",\"context_window\":16000000,\"endpoints\":[\"/v1/chat/completions\"],\"pricing\":{{\"inputTokenPricePer1M\":1,\"outputTokenPricePer1M\":1,\"requestPrice\":0}}}}", model(n)).unwrap();
+        write!(wire, "{{\"id\":\"{}\",\"type\":\"chat\",\"context_window\":64000000,\"endpoints\":[\"/v1/chat/completions\"],\"pricing\":{{\"inputTokenPricePer1M\":1,\"outputTokenPricePer1M\":1,\"requestPrice\":0}}}}", model(n)).unwrap();
     }
     wire.push_str("],\"padding\":\"");
     wire.extend(std::iter::repeat_n('p', MAX_CATALOG_BYTES - wire.len() - 2));
@@ -54,7 +56,7 @@ fn phase(name: &str, baseline: Snapshot) {
         now.phase_peak.saturating_sub(baseline.live)
     );
     assert!(
-        now.phase_peak.saturating_sub(baseline.live) <= 512 * MIB,
+        now.phase_peak.saturating_sub(baseline.live) <= FIXTURE_ALLOCATION_LIMIT,
         "finite-fixture requested allocations at {name}: {now:?} baseline={baseline:?}"
     );
     ALLOCATOR.begin_phase();
@@ -128,12 +130,12 @@ impl Inference for Probe {
         _: &Model,
         invocation: &ToolInvocation,
         _: Arc<crate::telemetry::hooks::Lease>,
-        on_delta: &mut (dyn for<'d> FnMut(CompletionDelta<'d>) + Send),
+        on_delta: &mut dyn crate::inference::DeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         assert_eq!(invocation.messages().len(), 81);
         self.generations.fetch_add(1, Ordering::SeqCst);
         self.hooks.at("generation").await;
-        on_delta(CompletionDelta::Text("synthetic"));
+        on_delta.emit(CompletionDelta::Text("synthetic")).await;
         self.hooks.at("completion").await;
         Ok(stream::StreamCompletion {
             usage: stream::StreamUsage {
@@ -149,7 +151,7 @@ impl Inference for Probe {
         model: &Model,
         messages: &[Message],
         heavy: Arc<crate::telemetry::hooks::Lease>,
-        on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        on_delta: &mut dyn crate::inference::TextDeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         self.generations.fetch_add(1, Ordering::SeqCst);
         let body =
@@ -157,7 +159,7 @@ impl Inference for Probe {
         self.hooks.at("generation").await;
         let bytes = self.drain(body).await;
         assert!(bytes <= BODY_LIMIT as u64 + MIB as u64);
-        on_delta("synthetic");
+        on_delta.emit("synthetic").await;
         self.hooks.at("completion").await;
         Ok(stream::StreamCompletion {
             usage: stream::StreamUsage {
@@ -212,7 +214,7 @@ impl Fixture {
                 while let Some(frame) = body.frame().await {
                     if let Ok(data) = frame.unwrap().into_data() {
                         bytes += data.len() as u64;
-                        assert!(bytes <= 16 * MIB as u64);
+                        assert!(bytes <= BODY_LIMIT as u64);
                     }
                 }
                 bytes.to_string()
@@ -267,7 +269,7 @@ impl Fixture {
         );
         match shape {
             0 => {
-                // Dense 2,000-message history with long strings, near API body limit.
+                // Dense 2,000-message history with long strings (about 8 MiB, below API body limit).
                 for n in 0..2_000 {
                     if n != 0 {
                         wire.push(',');
@@ -366,38 +368,33 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
     let mut generation = Vec::new();
     let mut parser = Vec::new();
     let mut waiters = Vec::new();
-    for (n, shape) in [0, 1, 2, 3].into_iter().enumerate() {
+    for (n, shape) in [0, 1, 2, 3, 3, 3].into_iter().enumerate() {
         ingress.push(hooks.arm("ingress"));
         tokenizer.push(hooks.arm("tokenizer"));
         generation.push(hooks.arm("generation"));
         parser.push(hooks.arm("completion"));
-        let req = f.request(usize::from(n == 3), shape);
+        let req = f.request(usize::from(n >= 3), shape);
         phase("wire-built", baseline);
         waiters.push(tokio::spawn(router(f.state.clone()).oneshot(req)));
         bounded(&mut ingress.last_mut().unwrap().reached)
             .await
             .unwrap();
     }
-    assert_eq!(f.state.available_lanes()[1..3], [0, 0]);
-    let rejected = router(f.state.clone())
-        .oneshot(f.request(1, 3))
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(f.state.active_lanes()[1..3], [6, 6]);
     assert_eq!(f.probe.calls.load(Ordering::SeqCst), 0);
-    phase("four-ingress-reject-fifth", baseline);
+    phase("six-ingress-no-admission-gate", baseline);
     open(ingress);
     reached(&mut tokenizer).await;
-    assert_eq!(f.state.available_lanes()[1], 0);
-    assert_eq!(f.probe.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(f.state.active_lanes()[1], 6);
+    assert_eq!(f.probe.calls.load(Ordering::SeqCst), 6);
     let raw = std::mem::take(&mut *hooks.raw.lock().unwrap());
-    assert_eq!(raw.len(), 4);
+    assert_eq!(raw.len(), 6);
     let slices: Vec<_> = raw.iter().map(|b| b.slice(..1)).collect();
     drop(raw);
-    assert_eq!(f.state.available_lanes()[2], 0);
+    assert_eq!(f.state.active_lanes()[2], 6);
     drop(slices);
-    assert_eq!(f.state.available_lanes()[2], 4);
-    phase("four-tokenizers-with-raw-owners", baseline);
+    assert_eq!(f.state.active_lanes()[2], 0);
+    phase("six-tokenizers-with-raw-owners", baseline);
     let control = f.control("/v1/models").await;
     assert_eq!(control.status(), StatusCode::OK);
     let overlapping_control = f.control("/v1/models").await;
@@ -439,7 +436,7 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
         "completed_requests"
     ]
     .contains(&key.as_str())));
-    phase("prompt-free-balance-during-saturation", baseline);
+    phase("prompt-free-balance-during-overlap", baseline);
     let evidence = f.control("/attestation").await;
     assert_eq!(evidence.status(), StatusCode::SERVICE_UNAVAILABLE);
     drop(evidence);
@@ -470,10 +467,10 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
         bodies.push(response.into_body());
     }
     reached(&mut generation).await;
-    phase("four-generation-serializers", baseline);
+    phase("six-generation-serializers", baseline);
     open(generation);
     reached(&mut parser).await;
-    phase("four-completion-inputs", baseline);
+    phase("six-completion-inputs", baseline);
     open(parser);
     let mut retained = Vec::new();
     for mut body in bodies {
@@ -488,17 +485,17 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
         drop(body);
     }
     bounded(async {
-        while f.state.generation_headroom() != 4 {
+        while f.state.active_lanes()[0] != 0 {
             tokio::task::yield_now().await;
         }
     })
     .await;
-    assert_eq!(f.probe.generations.load(Ordering::SeqCst), 4);
-    assert_eq!(f.state.available_lanes()[1], 0);
+    assert_eq!(f.probe.generations.load(Ordering::SeqCst), 6);
+    assert_eq!(f.state.active_lanes()[1], 6);
     phase("terminal-with-held-sse-slices", baseline);
     drop(retained);
     bounded(async {
-        while f.state.available_lanes()[1] != 4 {
+        while f.state.active_lanes()[1] != 0 {
             tokio::task::yield_now().await;
         }
     })
@@ -507,7 +504,10 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
         f.state.accounting.available("account-0"),
         Some(CREDIT - 3 * 7)
     );
-    assert_eq!(f.state.accounting.available("account-1"), Some(CREDIT - 7));
+    assert_eq!(
+        f.state.accounting.available("account-1"),
+        Some(CREDIT - 3 * 7)
+    );
     phase("all-final-owners-released", baseline);
     for capacity in std::mem::take(&mut *hooks.capacities.lock().unwrap()) {
         println!(
@@ -518,7 +518,7 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
             capacity.strings,
             capacity.prompt
         );
-        assert!(capacity.vector_bytes + capacity.strings + capacity.prompt <= 32 * MIB);
+        assert!(capacity.vector_bytes + capacity.strings + capacity.prompt <= 2 * BODY_LIMIT + MIB);
     }
     drop(f);
     phase("fixture-released", baseline);

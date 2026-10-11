@@ -49,7 +49,7 @@ pub enum InferenceFailure {
     StreamChoiceInvalid,
     #[error("A stream delta uses an unsupported role or field.")]
     StreamDeltaUnsupported,
-    #[error("A tool call index is repeated, out of order or exceeds limits.")]
+    #[error("A tool call index is repeated, sparse or out of order.")]
     ToolIndexInvalid,
     #[error("A tool call identity is invalid, repeated or changed.")]
     ToolIdentityInvalid,
@@ -59,8 +59,8 @@ pub enum InferenceFailure {
     ToolChoiceViolated,
     #[error("The stream finished with an incomplete tool call.")]
     ToolCallIncomplete,
-    #[error("Tool arguments exceed the stream limit.")]
-    ToolArgumentsTooLarge,
+    #[error("Retained tool state exceeds the defensive envelope.")]
+    ToolStateTooLarge,
     #[error("The stream finish reason is unsupported or inconsistent.")]
     StreamFinishInvalid,
     #[error("The stream ended without a finish reason.")]
@@ -170,10 +170,7 @@ mod tests {
             ),
             (InferenceFailure::ToolChoiceViolated, "tool_choice_violated"),
             (InferenceFailure::ToolCallIncomplete, "tool_call_incomplete"),
-            (
-                InferenceFailure::ToolArgumentsTooLarge,
-                "tool_arguments_too_large",
-            ),
+            (InferenceFailure::ToolStateTooLarge, "tool_state_too_large"),
             (
                 InferenceFailure::StreamFinishInvalid,
                 "stream_finish_invalid",

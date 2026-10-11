@@ -10,7 +10,7 @@ use possums::{
     auth::Auth,
     catalog::Model,
     inference::{Inference, InferenceError, Message},
-    server::{router_with_body_deadline, serve_with_header_deadline, AppState},
+    server::{router, router_with_body_deadline, serve_with_header_deadline, AppState},
 };
 use sha2::{Digest, Sha256};
 use std::{convert::Infallible, sync::Arc, time::Duration};
@@ -303,22 +303,40 @@ async fn removed_browser_routes_are_bounded_non_html_and_never_infer() {
 
 #[tokio::test(start_paused = true)]
 async fn request_body_has_one_total_deadline_despite_trickling() {
-    let chunks = stream::unfold((), |_| async {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        Some((Ok::<Bytes, Infallible>(Bytes::from_static(b"x")), ()))
-    });
-    let response = router_with_body_deadline(state(), Duration::from_secs(3))
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/sessions")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from_stream(chunks))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    for path in ["/v1/sessions", "/v1/chat/completions"] {
+        let chunks = stream::unfold((), |_| async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Some((Ok::<Bytes, Infallible>(Bytes::from_static(b"x")), ()))
+        });
+        let start = tokio::time::Instant::now();
+        let response = router_with_body_deadline(state(), Duration::from_secs(3))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from_stream(chunks))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_upload_deadlines_are_chat_600_seconds_control_30_seconds() {
+    for (path, seconds) in [("/v1/chat/completions", 600), ("/v1/sessions", 30)] {
+        let start = tokio::time::Instant::now();
+        let body = Body::from_stream(stream::pending::<Result<Bytes, Infallible>>());
+        let response = router(state())
+            .oneshot(Request::post(path).body(body).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(start.elapsed(), Duration::from_secs(seconds));
+    }
 }
 
 #[tokio::test]

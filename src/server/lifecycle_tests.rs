@@ -5,7 +5,7 @@ use crate::{
     catalog::Model,
     inference::{
         stream::{FinishReason, StreamCompletion, StreamUsage},
-        tools::{CompletionDelta, ToolInvocation, ToolProfile},
+        tools::{ToolInvocation, ToolProfile},
         Inference, InferenceError, Message,
     },
 };
@@ -100,7 +100,7 @@ impl Inference for Probe {
         _: &Model,
         _: &[Message],
         _: Arc<Lease>,
-        _: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        _: &mut dyn crate::inference::TextDeltaSink,
     ) -> Result<StreamCompletion, InferenceError> {
         Ok(self.complete_generation().await)
     }
@@ -109,7 +109,7 @@ impl Inference for Probe {
         _: &Model,
         _: &ToolInvocation,
         _: Arc<Lease>,
-        _: &mut (dyn for<'d> FnMut(CompletionDelta<'d>) + Send),
+        _: &mut dyn crate::inference::DeltaSink,
     ) -> Result<StreamCompletion, InferenceError> {
         Ok(self.complete_generation().await)
     }
@@ -165,11 +165,6 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
 #[tokio::test]
 async fn unread_model_and_submission_responses_do_not_admit_or_block_controls() {
     let (state, probe, session) = fixture();
-    let heavy = state
-        .chat_memory
-        .clone()
-        .try_acquire_many_owned(CHAT_LANES as u32)
-        .unwrap();
     let mut unread = Vec::new();
     for _ in 0..3 {
         for (method, path, body) in [
@@ -195,16 +190,18 @@ async fn unread_model_and_submission_responses_do_not_admit_or_block_controls() 
             unread.push(response);
         }
     }
-    assert_eq!(state.chat_memory.available_permits(), 0);
-    let rejected = router(state.clone())
+    assert_eq!(state.active_lanes(), [0, 0, 0]);
+    let response = router(state.clone())
         .oneshot(chat(&state, &session, false))
         .await
         .unwrap();
-    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
     drop(unread);
-    drop(heavy);
-    assert_eq!(state.available_lanes(), [4, 4, 4]);
+    state.lifecycle.quiesce();
+    bounded(state.lifecycle.wait_drained()).await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(state.active_lanes(), [0, 0, 0]);
 }
 
 #[tokio::test]
@@ -298,7 +295,7 @@ async fn lost_handler_and_finished_worker_still_wait_for_whole_preflight() {
         // Worker returns generation marker before memory; preflight retains its
         // own heavy ref. Yield until the worker cleanup marker returns.
         bounded(async {
-            while state.generation_headroom() != CHAT_LANES {
+            while state.active_lanes()[0] != 0 {
                 tokio::task::yield_now().await;
             }
         })
@@ -581,4 +578,44 @@ async fn duplicate_does_not_add_an_accounting_owner() {
             .completed_requests,
         1
     );
+}
+
+#[tokio::test]
+async fn disconnected_retained_workers_do_not_gate_new_chat_and_drain_original_owners() {
+    for structured in [false, true] {
+        let (state, probe, session) = fixture();
+        let mut gates = Vec::new();
+        for n in 1..=9 {
+            let (pause, gate) = checkpoint();
+            *probe.generation.lock().unwrap() = Some(pause);
+            let response = router(state.clone())
+                .oneshot(chat(&state, &session, structured))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            bounded(gate.reached).await.unwrap();
+            drop(response); // Detached original worker still owns its input and reservation.
+            gates.push(gate.release);
+            assert_eq!(state.active_lanes(), [n, n, 0]);
+            assert_eq!(
+                state.accounting.snapshot("demo").unwrap().in_flight,
+                n as u32
+            );
+        }
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 9);
+        state.lifecycle.quiesce();
+        let drain = state.lifecycle.wait_drained();
+        tokio::pin!(drain);
+        assert!(poll!(&mut drain).is_pending());
+        for release in gates {
+            release.send(()).unwrap();
+        }
+        assert_eq!(bounded(drain).await, Ok(()));
+        assert_eq!(state.active_lanes(), [0, 0, 0]);
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 9); // No replay.
+        let balance = state.accounting.snapshot("demo").unwrap();
+        assert_eq!(balance.in_flight, 0);
+        assert_eq!(balance.completed_requests, 9);
+        assert_eq!(balance.available_microunits, 1000 - 9 * 7);
+    }
 }

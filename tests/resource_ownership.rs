@@ -7,6 +7,7 @@ mod resource_admission;
 #[allow(dead_code)]
 mod stream_owner;
 
+use futures_util::FutureExt;
 use http_body_util::BodyExt;
 use possums::telemetry;
 use resource_admission::Admission;
@@ -46,7 +47,7 @@ async fn control_responses_retain_only_their_own_lane_through_frame_drop() {
     let admission = Admission::new(4);
     let working: Vec<_> = (0..4).map(|_| admission.try_chat().unwrap()).collect();
     let (mut control_tx, control_body) = admission.try_control().unwrap().into_delivery(LIMITS);
-    control_tx.try_send(b"unread").unwrap();
+    control_tx.send(b"unread").await.unwrap();
     drop(control_tx);
     assert!(admission.try_control().is_none());
     drop(control_body);
@@ -55,13 +56,13 @@ async fn control_responses_retain_only_their_own_lane_through_frame_drop() {
     assert_eq!(admission.available(), (4, 4));
 }
 
-#[test]
-fn completed_workers_with_unread_responses_block_replacement_and_rollback() {
+#[tokio::test]
+async fn completed_workers_with_unread_responses_block_replacement_and_rollback() {
     let admission = Admission::new(4);
     let mut unread = Vec::new();
     for _ in 0..4 {
         let (work, mut tx, body) = admission.try_chat().unwrap().into_owners((), LIMITS);
-        tx.try_send(b"unread").unwrap();
+        tx.send(b"unread").await.unwrap();
         drop(work);
         drop(tx);
         unread.push(body);
@@ -80,8 +81,8 @@ fn completed_workers_with_unread_responses_block_replacement_and_rollback() {
     assert_eq!(admission.available(), (4, 4));
 }
 
-#[test]
-fn disconnect_does_not_release_work_or_its_reservation() {
+#[tokio::test]
+async fn disconnect_does_not_release_work_or_its_reservation() {
     struct Reservation(Arc<AtomicUsize>);
     impl Drop for Reservation {
         fn drop(&mut self) {
@@ -94,9 +95,9 @@ fn disconnect_does_not_release_work_or_its_reservation() {
         .try_chat()
         .unwrap()
         .into_owners(Reservation(drops.clone()), LIMITS);
-    tx.try_send(b"queued").unwrap();
+    tx.send(b"queued").await.unwrap();
     drop(body);
-    assert!(tx.try_send(b"gone").is_err());
+    assert!(tx.send(b"gone").await.is_err());
     assert_eq!((LIMITS.payload_bytes as usize - tx.usage().bytes), 16);
     drop(tx);
     assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -112,8 +113,8 @@ fn disconnect_does_not_release_work_or_its_reservation() {
 async fn dequeued_cloned_and_sliced_frames_keep_bytes_and_delivery_charged() {
     let admission = Admission::new(1);
     let (work, mut tx, mut body) = admission.try_chat().unwrap().into_owners((), LIMITS);
-    tx.try_send(b"12345678").unwrap();
-    tx.try_send(b"abcdefgh").unwrap();
+    tx.send(b"12345678").await.unwrap();
+    tx.send(b"abcdefgh").await.unwrap();
     let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
     let clone = frame.clone();
     let slice = clone.slice(1..2);
@@ -121,7 +122,7 @@ async fn dequeued_cloned_and_sliced_frames_keep_bytes_and_delivery_charged() {
     drop(clone);
     assert_eq!((LIMITS.payload_bytes as usize - tx.usage().bytes), 0);
     // Dequeue freed a channel slot, not bytes. One-byte slice retains all eight.
-    assert!(tx.try_send(b"x").is_err());
+    assert!(tx.send(b"x").now_or_never().is_none());
     drop(work);
     drop(tx);
     drop(body); // Discards the second frame, but cannot release the first.
@@ -153,7 +154,7 @@ fn early_return_and_unwind_release_admission_without_waiters() {
         assert_eq!(admission.available(), (4, 4));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let (_work, mut tx, _body) = admission.try_chat().unwrap().into_owners((), LIMITS);
-            tx.try_send(b"queued").unwrap();
+            tx.send(b"queued").now_or_never().unwrap().unwrap();
             panic!("test unwind");
         }));
         assert!(result.is_err());

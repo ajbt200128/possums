@@ -130,7 +130,7 @@ fn jittered_batch_survives_request_observations_at_minute_close() {
         table.resource(ResourceScope::Process, ResourceMetric::MemoryUsed),
         Some(8192.)
     );
-    assert_eq!(table.series_count(), 6);
+    assert_eq!(table.series_count(), 3);
     let encoded = crate::telemetry::export::encoded_infrastructure(table, view.window());
     let points = &encoded.resource_metrics[0].scope_metrics[0].metrics;
     assert_eq!(points.len(), 3);
@@ -143,8 +143,10 @@ fn jittered_batch_survives_request_observations_at_minute_close() {
     else {
         panic!("capacity must be a gauge")
     };
-    assert_eq!(gauge.data_points.len(), 4);
-    assert_eq!(table.capacity(Lane::Control), None);
+    assert_eq!(gauge.data_points.len(), 1);
+    for lane in [Lane::Control, Lane::Generation, Lane::Heavy, Lane::Ingress] {
+        assert_eq!(table.capacity(lane), None);
+    }
     for ((lane, capacity), point) in crate::server::admission_capacities()
         .into_iter()
         .zip(&gauge.data_points)
@@ -238,7 +240,7 @@ fn incomplete_or_failed_minute_is_unavailable_and_next_full_minute_recovers() {
                 let view = metrics.infrastructure();
                 if defect == 2 {
                     let view = view.unwrap();
-                    assert_eq!(view.tables().unwrap().series_count(), 5);
+                    assert_eq!(view.tables().unwrap().series_count(), 2);
                     assert_eq!(
                         view.tables()
                             .unwrap()
@@ -286,7 +288,7 @@ fn incomplete_or_failed_minute_is_unavailable_and_next_full_minute_recovers() {
                 .tables()
                 .unwrap()
                 .series_count(),
-            6
+            3
         );
     }
 }
@@ -312,7 +314,7 @@ fn configured_capacity_is_independent_of_idle_traffic_and_failed_resource_readin
         let table = view.tables().unwrap();
         assert_eq!(
             table.series_count(),
-            4 + usize::from(rss.is_some()) + usize::from(cpu.is_some())
+            1 + usize::from(rss.is_some()) + usize::from(cpu.is_some())
         );
         for (lane, capacity) in crate::server::admission_capacities() {
             assert_eq!(table.capacity(lane), Some(capacity as f64));
@@ -322,7 +324,7 @@ fn configured_capacity_is_independent_of_idle_traffic_and_failed_resource_readin
 }
 
 #[test]
-fn mismatched_source_capacity_is_rejected_without_affecting_other_lanes() {
+fn mismatched_source_capacity_is_unavailable() {
     let metrics = new();
     assert!(metrics.enable(Deployment::Production));
     let base = Instant::now();
@@ -341,13 +343,7 @@ fn mismatched_source_capacity_is_rejected_without_affecting_other_lanes() {
         });
         metrics.poll();
     }
-    let view = metrics.infrastructure().unwrap();
-    let table = view.tables().unwrap();
-    assert_eq!(table.capacity(Lane::Connection), None);
-    assert_eq!(table.series_count(), 3);
-    for (lane, capacity) in crate::server::admission_capacities().into_iter().skip(1) {
-        assert_eq!(table.capacity(lane), Some(capacity as f64));
-    }
+    assert!(metrics.infrastructure().is_none());
 }
 
 #[test]
@@ -387,7 +383,7 @@ fn restart_discards_partial_capacity_minute_and_requires_fresh_full_window() {
         }
     );
     let table = view.tables().unwrap();
-    assert_eq!(table.series_count(), 4);
+    assert_eq!(table.series_count(), 1);
     for (lane, capacity) in crate::server::admission_capacities() {
         assert_eq!(table.capacity(lane), Some(capacity as f64));
     }

@@ -23,120 +23,157 @@ fn lane() -> (Arc<Semaphore>, possums::telemetry::hooks::Lease) {
 }
 
 #[tokio::test]
-async fn held_frames_clones_and_slices_keep_credit_and_lease() {
-    let (lane, lease) = lane();
-    let (mut tx, mut body) = delivery(lease, LIMITS);
-    tx.try_send(b"12345678").unwrap();
-    tx.try_send(b"abcdefgh").unwrap();
-    let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    let clone = frame.clone();
-    let slice = clone.slice(1..2);
-    drop(frame);
-    drop(clone);
-    assert_eq!(tx.usage().bytes, 16);
-    assert_eq!(tx.usage().frames, 2);
-    assert_eq!(tx.try_send(b"x"), Err(DeliveryError::Full));
-    assert_eq!(tx.failure(), Some(DeliveryError::Full));
-    drop(body);
-    assert_eq!(tx.usage().bytes, 8);
-    assert_eq!(tx.usage().frames, 1);
-    assert_eq!(lane.available_permits(), 0);
-    drop(slice);
-    assert_eq!(tx.usage().bytes, 0);
-    assert_eq!(tx.usage().frames, 0);
-    assert_eq!(lane.available_permits(), 1); // Detached tx does not pin lease.
-    assert_eq!(tx.try_send(b"x"), Err(DeliveryError::Full));
-}
-
-#[tokio::test]
-async fn independent_frame_byte_chunk_limits_and_sticky_detachment() {
-    for (limits, chunks, expected) in [
-        (LIMITS, vec![&b"123456789"[..]], DeliveryError::TooLarge),
-        (LIMITS, vec![&b"a"[..], b"b", b"c"], DeliveryError::Full),
-        (
-            Limits {
-                frames: 3,
+async fn queue_frame_and_byte_waits_wake_on_body_drop_even_with_retained_slices() {
+    for wait in ["queue", "frame", "bytes"] {
+        let (lane, lease) = lane();
+        let limits = match wait {
+            "frame" => Limits {
+                frames: 1,
                 ..LIMITS
             },
-            vec![&b"12345678"[..], b"abcdefgh", b"x"],
-            DeliveryError::Full,
-        ),
-    ] {
-        let (_, lease) = lane();
+            "bytes" => Limits {
+                frames: 3,
+                payload_bytes: 8,
+                ..LIMITS
+            },
+            _ => LIMITS,
+        };
         let (mut tx, mut body) = delivery(lease, limits);
-        for _ in 0..100 {
-            tx.try_send(b"").unwrap();
-        }
-        assert_eq!(tx.usage().frames, 0);
-        for chunk in &chunks[..chunks.len() - 1] {
-            tx.try_send(chunk).unwrap();
-        }
-        assert_eq!(tx.try_send(chunks.last().unwrap()), Err(expected));
-        // Accepted chunks drain to actual EOF while the detached sender lives.
-        let mut consumed = 0;
-        while let Some(frame) = body.frame().await {
-            consumed += frame.unwrap().into_data().unwrap().len();
-        }
+        tx.send(b"12345678").await.unwrap();
+        let slice = if wait == "queue" {
+            tx.send(b"abcdefgh").await.unwrap();
+            None
+        } else {
+            let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            let clone = frame.clone();
+            let slice = clone.slice(1..2);
+            drop(frame);
+            drop(clone);
+            Some(slice)
+        };
+        let probe = body.probe();
+        let mut send = Box::pin(tx.send(b"x"));
+        assert!(futures_util::poll!(&mut send).is_pending());
+        let high = probe.usage();
+        assert!(high.high_frames <= limits.frames);
+        assert!(high.high_bytes <= limits.payload_bytes as usize);
+        drop(body);
         assert_eq!(
-            consumed,
-            chunks[..chunks.len() - 1]
-                .iter()
-                .map(|c| c.len())
-                .sum::<usize>()
+            tokio::time::timeout(std::time::Duration::from_secs(1), send)
+                .await
+                .unwrap(),
+            Err(DeliveryError::Closed)
         );
+        assert_eq!(tx.failure(), Some(DeliveryError::Closed));
+        assert_eq!(tx.send(b"next").await, Err(DeliveryError::Closed));
+        assert_eq!(tx.usage().bytes, if slice.is_some() { 8 } else { 0 });
+        if slice.is_some() {
+            assert_eq!(lane.available_permits(), 0);
+        }
+        drop(slice);
         assert_eq!(tx.usage().bytes, 0);
         assert_eq!(tx.usage().frames, 0);
-        assert!(tx.usage().high_bytes <= limits.payload_bytes as usize);
-        assert!(tx.usage().high_frames <= limits.frames);
-        // Model an upstream callback loop: no retry, waiter, or reattachment.
-        for _ in 0..1000 {
-            assert_eq!(tx.try_send(b"next"), Err(expected));
-        }
+        assert_eq!(lane.available_permits(), 1); // Detached sender cannot pin lease.
     }
 }
 
 #[tokio::test]
-async fn dequeued_frame_keeps_credit_until_final_slice_drops() {
+async fn retained_slice_backpressures_without_detaching_and_release_resumes() {
     let (_, lease) = lane();
-    let limits = Limits {
-        frames: 1,
-        payload_bytes: 8,
-        chunk_bytes: 8,
-    };
-    let (mut tx, mut body) = delivery(lease, limits);
-    tx.try_send(b"12345678").unwrap();
+    let (mut tx, mut body) = delivery(
+        lease,
+        Limits {
+            frames: 1,
+            ..LIMITS
+        },
+    );
+    tx.send(b"12345678").await.unwrap();
     let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    let slice = frame.slice(0..1);
+    let slice = frame.slice(..1);
     drop(frame);
-    assert_eq!(tx.usage().bytes, 8);
-    assert_eq!(tx.try_send(b"x"), Err(DeliveryError::Full));
+    let mut send = Box::pin(tx.send(b"next"));
+    assert!(futures_util::poll!(&mut send).is_pending());
     drop(slice);
-    assert_eq!(tx.usage().bytes, 0);
-    assert_eq!(tx.failure(), Some(DeliveryError::Full));
+    send.await.unwrap();
+    assert_eq!(tx.failure(), None);
+    tx.finish();
+    assert_eq!(
+        body.frame().await.unwrap().unwrap().into_data().unwrap(),
+        "next"
+    );
     assert!(body.frame().await.is_none());
 }
 
 #[tokio::test]
-async fn disconnected_consumer_detaches_without_pinning_delivery_lane() {
-    let (lane, lease) = lane();
+async fn lossless_slow_reader_exceeds_eight_frames_with_unchanged_highwater() {
+    let (_, lease) = lane();
+    let limits = Limits {
+        frames: 8,
+        payload_bytes: 64 * 1024,
+        chunk_bytes: 8 * 1024,
+    };
+    let (mut tx, mut body) = delivery(lease, limits);
+    let probe = body.probe();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let producer = tokio::spawn(async move {
+        for index in 0..8u8 {
+            tx.send(&[index; 8192]).await.unwrap();
+        }
+        let mut ninth = Box::pin(tx.send(&[8; 8192]));
+        assert!(futures_util::poll!(&mut ninth).is_pending());
+        ready.send(()).unwrap();
+        ninth.await.unwrap();
+        for index in 9..100u8 {
+            tx.send(&[index; 8192]).await.unwrap();
+        }
+        tx.finish();
+        assert_eq!(tx.failure(), None);
+    });
+    waiting.await.unwrap();
+    assert_eq!(
+        (probe.usage().high_frames, probe.usage().high_bytes),
+        (8, 64 * 1024)
+    );
+    for index in 0..100u8 {
+        tokio::task::yield_now().await;
+        let bytes = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(bytes.as_ref(), &[index; 8192]);
+    }
+    assert!(body.frame().await.is_none());
+    producer.await.unwrap();
+    assert_eq!(
+        (probe.usage().high_frames, probe.usage().high_bytes),
+        (8, 64 * 1024)
+    );
+    assert_eq!((probe.usage().frames, probe.usage().bytes), (0, 0));
+}
+
+#[tokio::test]
+async fn oversized_chunk_detaches_but_empty_emissions_consume_no_credit() {
+    let (_, lease) = lane();
     let (mut tx, mut body) = delivery(lease, LIMITS);
-    tx.try_send(b"queued").unwrap();
-    let held = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    drop(body);
-    assert_eq!(tx.try_send(b"next"), Err(DeliveryError::Closed));
-    assert_eq!(tx.failure(), Some(DeliveryError::Closed));
-    assert_eq!(lane.available_permits(), 0);
-    drop(held);
-    assert_eq!(lane.available_permits(), 1);
+    for _ in 0..100 {
+        tx.send(b"").await.unwrap();
+    }
+    assert_eq!(tx.usage().frames, 0);
+    tx.send(b"accepted").await.unwrap();
+    assert_eq!(tx.send(b"123456789").await, Err(DeliveryError::TooLarge));
+    assert_eq!(
+        body.frame().await.unwrap().unwrap().into_data().unwrap(),
+        "accepted"
+    );
+    assert!(body.frame().await.is_none());
+    assert_eq!(tx.send(b"next").await, Err(DeliveryError::TooLarge));
+    assert_eq!((tx.usage().frames, tx.usage().bytes), (0, 0));
 }
 
 #[tokio::test]
 async fn closed_sink_and_empty_body_have_explicit_lifetimes() {
     let (lane, lease) = lane();
     let (mut tx, body) = delivery(lease, LIMITS);
-    tx.try_send(b"queued").unwrap();
+    tx.send(b"queued").await.unwrap();
     drop(body);
-    assert_eq!(tx.try_send(b""), Err(DeliveryError::Closed));
+    assert_eq!(tx.send(b"").await, Err(DeliveryError::Closed));
     assert_eq!(tx.usage().bytes, 0);
     assert_eq!(lane.available_permits(), 1);
 

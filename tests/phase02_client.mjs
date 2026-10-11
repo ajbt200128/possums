@@ -50,8 +50,8 @@ for (const mutate of [
   c => { c.messages[1].tool_calls[0].function.arguments = '[]'; }, c => { c.messages[1].tool_calls[0].function.arguments = '{"x":1,"x":2}'; },
   c => { c.messages[1].tool_calls[0].function.arguments = '{"x":1e999}'; },
 ]) { const value = structuredClone({ ...chat, messages: batch }); mutate(value); bad(() => encoded(value)); }
-const fullArgs = '{"x":"' + 'a'.repeat(m.LIMITS.toolArguments - 8) + '"}';
-check(enc.encode(fullArgs).length === m.LIMITS.toolArguments);
+const fullArgs = '{"x":"' + 'a'.repeat((64 * 1024) - 8) + '"}';
+check(enc.encode(fullArgs).length === (64 * 1024));
 const history = calls => [{ role: 'assistant', content: null, tool_calls: calls }, ...calls.map(c => ({ role: 'tool', tool_call_id: c.id, content: '' }))];
 check(encoded({ ...chat, messages: history([call('a', 'lookup', fullArgs)]) }).messages.length === 2);
 check(encoded({ ...chat, messages: history([call('a', 'lookup', fullArgs + ' ')]) }).messages.length === 2);
@@ -171,12 +171,17 @@ function argumentStream(count, argumentsText) {
   return text + end('tool_calls') + usage() + done;
 }
 check((await consume(argumentStream(4, fullArgs))).finish === 'tool_calls');
-await rejects(() => consume(argumentStream(5, fullArgs)));
-await rejects(() => consume(argumentStream(5, fullArgs).replace(end('tool_calls'), end('length'))));
-await rejects(() => consume(argumentStream(1, fullArgs + ' ')));
-await rejects(() => consume(argumentStream(1, fullArgs + ' ').replace(end('tool_calls'), end('length'))));
+check((await consume(argumentStream(5, fullArgs))).finish === 'tool_calls');
+check((await consume(argumentStream(5, fullArgs).replace(end('tool_calls'), end('length')))).finish === 'length');
+check((await consume(argumentStream(1, fullArgs + ' '))).finish === 'tool_calls');
+check((await consume(argumentStream(1, fullArgs + ' ').replace(end('tool_calls'), end('length')))).finish === 'length');
 check((await consume(argumentStream(64, '{}'))).finish === 'tool_calls');
-await rejects(() => consume(argumentStream(65, '{}')));
+check((await consume(argumentStream(65, '{}'))).finish === 'tool_calls');
+await assert.rejects(() => consume(argumentStream(1, JSON.stringify({ x: 'a'.repeat(Math.ceil(m.LIMITS.chat / 6)) }))),
+  error => error.constraint === 'tool_state' && error.message === 'possums_stream_tool_state'); checks++;
+let metadata = role;
+for (let index = 0; index <= Math.floor(m.LIMITS.chat / 256); index++) metadata += delta({ tool_calls: [{ index }] });
+await assert.rejects(() => consume(metadata), error => error.constraint === 'tool_state'); checks++;
 const unicodeArgs = delta({ tool_calls: [initial(0, 'unicode', '{"x":"\ud83d')] }) + delta({ tool_calls: [continuation('\ude00"}')] });
 check((await consume(role + unicodeArgs + end('tool_calls') + usage() + done)).finish === 'tool_calls');
 let delivered = 0;
@@ -193,6 +198,11 @@ let eofController, settled = false;
 const delayedEOF = new ReadableStream({ start(c) { eofController = c; c.enqueue(enc.encode(valid)); } });
 const beforeEOF = m.consumeCompletion(delayedEOF, model, () => {}, { tools: [tool] }).then(value => { settled = true; return value; });
 await new Promise(r => setTimeout(r, 10)); check(!settled); eofController.close(); await beforeEOF; check(settled);
+// Retain closed diagnostics from still-approved older gateways during rollout.
+for (const detail of ['tool_arguments_too_large', 'tool_state_too_large']) {
+  await assert.rejects(() => consume(failure({ code: 'generation_failed', detail, billing: 'refunded' })),
+    error => error.reason === 'generation_failed' && error.detail === detail && error.billing === 'refunded'); checks++;
+}
 const newError = { code: 'generation_failed', detail: 'stream_idle_timeout', message: 'SECRET_PROMPT_AND_KEY', billing: 'refunded' };
 let errorEvents = 0, errorDeltas = 0;
 let legitimate;

@@ -26,7 +26,6 @@ pub(crate) struct Limits {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeliveryError {
-    Full,
     Closed,
     TooLarge,
 }
@@ -182,37 +181,35 @@ impl DeliveryTx {
         result
     }
 
-    /// Upstream callbacks NEVER await delivery capacity. Any error permanently
-    /// detaches delivery; the caller must keep consuming/settling upstream.
-    pub(crate) fn try_send(&mut self, data: &[u8]) -> Result<(), DeliveryError> {
-        let result = (|| {
+    /// Backpressure owns no copied payload until queue, frame and byte credit
+    /// are available. Body closure wakes EVERY wait, even if a transport retains
+    /// slices (and their credits) after dropping the body. The caller then keeps
+    /// consuming the same upstream operation with delivery detached.
+    pub(crate) async fn send(&mut self, data: &[u8]) -> Result<(), DeliveryError> {
+        let result = async {
             let size = self.size(data)?;
             let sender = self.sender.as_ref().unwrap();
             if sender.is_closed() {
                 return Err(DeliveryError::Closed);
             }
             if size == 0 {
-                return Ok(()); // No zero-credit owner or queue entry.
+                return Ok(());
             }
-            let slot = sender.try_reserve().map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => DeliveryError::Full,
-                mpsc::error::TrySendError::Closed(_) => DeliveryError::Closed,
-            })?;
-            let frame = self
-                .budget
-                .frames
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| DeliveryError::Full)?;
-            let bytes = self
-                .budget
-                .bytes
-                .clone()
-                .try_acquire_many_owned(size)
-                .map_err(|_| DeliveryError::Full)?;
-            slot.send(self.chunk(data, bytes, frame));
-            Ok(())
-        })();
+            tokio::select! {
+                biased;
+                _ = sender.closed() => Err(DeliveryError::Closed),
+                result = async {
+                    let slot = sender.reserve().await.map_err(|_| DeliveryError::Closed)?;
+                    let frame = self.budget.frames.clone().acquire_owned().await
+                        .map_err(|_| DeliveryError::Closed)?;
+                    let bytes = self.budget.bytes.clone().acquire_many_owned(size).await
+                        .map_err(|_| DeliveryError::Closed)?;
+                    slot.send(self.chunk(data, bytes, frame));
+                    Ok(())
+                } => result,
+            }
+        }
+        .await;
         self.detach_on_error(result)
     }
 

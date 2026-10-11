@@ -444,7 +444,7 @@ async fn proof_probe_does_not_pin_heavy_and_observes_sliced_frames() {
     );
     let probe = body.probe();
     let mut tx = tx;
-    tx.try_send(b"retained").unwrap();
+    tx.send(b"retained").await.unwrap();
     let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
     let slice = frame.clone().slice(..1);
     drop(frame);

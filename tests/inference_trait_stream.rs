@@ -175,9 +175,14 @@ async fn default_structured_methods_fail_closed_without_text_fallback() {
     ));
     assert!(matches!(
         inference
-            .generate_invocation_stream(&model, &input, heavy(), &mut |_| panic!(
-                "default must not emit"
-            ))
+            .generate_invocation_stream(
+                &model,
+                &input,
+                heavy(),
+                &mut |_: possums::inference::tools::CompletionDelta<'_>| panic!(
+                    "default must not emit"
+                )
+            )
             .await,
         Err(InferenceError::Unavailable)
     ));

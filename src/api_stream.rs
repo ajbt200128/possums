@@ -3,11 +3,11 @@ use crate::{
     accounting::Outcome,
     catalog::Model,
     generation::{PreparedGeneration, PreparedStructuredGeneration},
-    generation_owner::ReservedGeneration,
+    generation_owner::{ReservedGeneration, Settlement},
     inference::{
         stream::FinishReason,
         tools::{CompletionDelta, ToolInvocation},
-        InferenceFailure, Message, SharedInference,
+        DeltaSink, InferenceFailure, Message, SharedInference, TextDeltaSink,
     },
     stream_owner::{delivery, DeliveryBody, DeliveryTx, Limits},
 };
@@ -83,17 +83,15 @@ fn compose_core(
         };
         output.event(
             json!({"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}),
-        );
+        ).await;
+        let mut sink = OutputSink { output: &mut output, settlement: &mut settlement };
         let result = match &mut input {
             RenderInput::Text { history, prompt } => {
                 history.push(Message { role: "user".into(), content: std::mem::take(prompt) });
-                inference.generate_completion_stream(&model, history, heavy, &mut |delta| { if !delta.is_empty() { settlement.first_output(); } output.delta(delta) }).await
+                inference.generate_completion_stream(&model, history, heavy, &mut sink).await
             }
             RenderInput::Structured(invocation) => inference.generate_invocation_stream(
-                &model, invocation, heavy, &mut |delta| {
-                    if match &delta { CompletionDelta::Text(text) => !text.is_empty(), CompletionDelta::ToolCall { .. } => true } { settlement.first_output(); }
-                    output.structured_delta(delta)
-                },
+                &model, invocation, heavy, &mut sink,
             ).await,
         };
         let failure = result.as_ref().err().map(|error| error.failure());
@@ -106,7 +104,7 @@ fn compose_core(
         let receipt = settlement.finish(&usage);
         match (result, receipt.outcome()) {
             (Ok(completion), Ok(Outcome::Settled { charged })) => {
-                output.finish(completion.finish_reason);
+                output.finish(completion.finish_reason).await;
                 output.event(json!({"choices":[],"usage":{
                     "prompt_tokens":completion.usage.input_tokens,
                     "completion_tokens":completion.usage.output_tokens,
@@ -117,13 +115,13 @@ fn compose_core(
                     "quoted_output_microunits_per_million_tokens":model.output_microunits_per_million_tokens.to_string(),
                     "charged_microunits":charged.to_string(),
                     "refunded_microunits":(reserved_microunits - charged).to_string(),
-                }}));
-                let _ = output.tx.try_send(b"data: [DONE]\n\n");
+                }})).await;
+                let _ = output.tx.send(b"data: [DONE]\n\n").await;
             }
             (Err(_), Ok(Outcome::Refunded)) => {
-                output.failure(failure.unwrap_or(InferenceFailure::InferenceUnavailable), "refunded");
+                output.failure(failure.unwrap_or(InferenceFailure::InferenceUnavailable), "refunded").await;
             }
-            _ => output.failure(InferenceFailure::SettlementFailed, "unknown"),
+            _ => output.failure(InferenceFailure::SettlementFailed, "unknown").await,
         }
         output.tx.finish();
         receipt
@@ -138,7 +136,7 @@ struct Output<'a> {
 }
 
 impl Output<'_> {
-    fn event(&mut self, mut value: Value) {
+    async fn event(&mut self, mut value: Value) {
         if self.tx.failure().is_some() {
             return;
         }
@@ -146,7 +144,7 @@ impl Output<'_> {
         value["model"] = json!(self.model);
         // Small per-event serialization only, never a collected answer.
         let Ok(bytes) = crate::bounded_json::to_vec(&value, CHUNK_BYTES - 8) else {
-            // Permanently detach on an encoder bound failure, just like queue overflow.
+            // Permanently detach on an encoder bound failure, without cancelling inference.
             self.tx.detach();
             return;
         };
@@ -154,10 +152,10 @@ impl Output<'_> {
         frame.extend_from_slice(b"data: ");
         frame.extend_from_slice(&bytes);
         frame.extend_from_slice(b"\n\n");
-        let _ = self.tx.try_send(&frame);
+        let _ = self.tx.send(&frame).await;
     }
 
-    fn failure(&mut self, failure: InferenceFailure, billing: &'static str) {
+    async fn failure(&mut self, failure: InferenceFailure, billing: &'static str) {
         // Keep the legacy code first for older prefix-based consumers. No model,
         // SDK text, or response payload enters the diagnostic frame.
         #[derive(serde::Serialize)]
@@ -183,13 +181,13 @@ impl Output<'_> {
             let mut frame = b"data: ".to_vec();
             frame.extend_from_slice(&bytes);
             frame.extend_from_slice(b"\n\n");
-            let _ = self.tx.try_send(&frame);
+            let _ = self.tx.send(&frame).await;
         } else {
             self.tx.detach();
         }
     }
 
-    fn delta(&mut self, mut delta: &str) {
+    async fn delta(&mut self, mut delta: &str) {
         // JSON may expand one byte to six; split on UTF-8 boundaries before escaping.
         while !delta.is_empty() && self.tx.failure().is_none() {
             let mut end = delta.len().min(1024);
@@ -199,14 +197,15 @@ impl Output<'_> {
             let (text, remaining) = delta.split_at(end);
             self.event(
                 json!({"choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]}),
-            );
+            )
+            .await;
             delta = remaining;
         }
     }
 
-    fn structured_delta(&mut self, delta: CompletionDelta<'_>) {
+    async fn structured_delta(&mut self, delta: CompletionDelta<'_>) {
         match delta {
-            CompletionDelta::Text(text) => self.delta(text),
+            CompletionDelta::Text(text) => self.delta(text).await,
             CompletionDelta::ToolCall {
                 index,
                 id,
@@ -240,7 +239,7 @@ impl Output<'_> {
                         }
                         call["function"]["arguments"] = json!(fragment);
                     }
-                    self.event(json!({"choices":[{"index":0,"delta":{"tool_calls":[call]},"finish_reason":null}]}));
+                    self.event(json!({"choices":[{"index":0,"delta":{"tool_calls":[call]},"finish_reason":null}]})).await;
                     if rest.is_empty() {
                         break;
                     }
@@ -251,7 +250,38 @@ impl Output<'_> {
         }
     }
 
-    fn finish(&mut self, reason: FinishReason) {
-        self.event(json!({"choices":[{"index":0,"delta":{},"finish_reason":reason}]}));
+    async fn finish(&mut self, reason: FinishReason) {
+        self.event(json!({"choices":[{"index":0,"delta":{},"finish_reason":reason}]}))
+            .await;
+    }
+}
+
+// The sink borrows both owners only for the upstream consuming call. Settlement
+// is committed after EOF, before any terminal delivery capacity wait.
+struct OutputSink<'a, 'model> {
+    output: &'a mut Output<'model>,
+    settlement: &'a mut Settlement,
+}
+
+#[async_trait::async_trait]
+impl TextDeltaSink for OutputSink<'_, '_> {
+    async fn emit(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.settlement.first_output();
+        }
+        self.output.delta(text).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl DeltaSink for OutputSink<'_, '_> {
+    async fn emit(&mut self, delta: CompletionDelta<'_>) {
+        if match &delta {
+            CompletionDelta::Text(text) => !text.is_empty(),
+            CompletionDelta::ToolCall { .. } => true,
+        } {
+            self.settlement.first_output();
+        }
+        self.output.structured_delta(delta).await;
     }
 }

@@ -273,7 +273,7 @@ async fn settling_handoff_delivers_before_terminal_settlement() {
     let (tx, mut body) = f.delivery();
     let (finish_tx, finish) = oneshot::channel();
     let completion = pending.spawn_settling(tx, move |mut tx, settlement| async move {
-        tx.try_send(b"startup").unwrap();
+        tx.send(b"startup").await.unwrap();
         finish.await.unwrap();
         settlement.finish(&Ok(usage()))
     });
@@ -312,9 +312,9 @@ async fn shared_heavy_admission_returns_only_after_worker_body_and_slices_releas
         let (started_tx, started) = oneshot::channel();
         let (finish_tx, finish) = oneshot::channel();
         let completion = pending.spawn(tx, move |mut tx| async move {
-            tx.try_send(b"partial").unwrap();
+            tx.send(b"partial").await.unwrap();
             // Detach sender ownership, so only the worker/body/frame can pin it.
-            assert_eq!(tx.try_send(b"tail"), Err(DeliveryError::Full));
+            tx.detach();
             started_tx.send(()).unwrap();
             finish.await.unwrap();
             Ok(usage())
@@ -395,10 +395,10 @@ async fn caller_cancel_body_and_observer_drop_cannot_cancel_handed_off_generatio
     let (handoff_tx, handoff) = oneshot::channel();
     let caller = tokio::spawn(async move {
         let completion = pending.spawn(tx, move |mut tx| async move {
-            tx.try_send(b"partial").unwrap();
+            tx.send(b"partial").await.unwrap();
             started_tx.send(()).unwrap();
             finish.await.unwrap();
-            assert_eq!(tx.try_send(b"tail"), Err(DeliveryError::Closed));
+            assert_eq!(tx.send(b"tail").await, Err(DeliveryError::Closed));
             Ok(usage())
         });
         handoff_tx.send(completion).unwrap();
@@ -426,27 +426,33 @@ async fn caller_cancel_body_and_observer_drop_cannot_cancel_handed_off_generatio
     f.account_slots_returned(971);
 }
 
-#[tokio::test]
-async fn slow_sink_detaches_without_blocking_terminal_and_keeps_delivery_credit_separate() {
+#[tokio::test(start_paused = true)]
+async fn slow_sink_waits_then_body_drop_with_retained_slice_allows_settlement() {
     let f = Fixture::new();
     let pending = f.pending(1);
     let (tx, mut body) = f.delivery();
-    let (detached_tx, detached) = oneshot::channel();
-    let (finish_tx, finish) = oneshot::channel();
+    let (waiting_tx, waiting) = oneshot::channel();
     let completion = pending.spawn(tx, move |mut tx| async move {
-        tx.try_send(b"first").unwrap();
-        assert_eq!(tx.try_send(b"second"), Err(DeliveryError::Full));
-        detached_tx.send(tx.usage()).unwrap();
-        finish.await.unwrap();
-        // Delivery stays detached even if capacity could later become free.
-        assert_eq!(tx.try_send(b"third"), Err(DeliveryError::Full));
+        tx.send(b"first").await.unwrap();
+        let mut send = Box::pin(tx.send(b"second"));
+        assert!(futures_util::poll!(&mut send).is_pending());
+        waiting_tx.send(()).unwrap();
+        assert_eq!(send.await, Err(DeliveryError::Closed));
+        assert_eq!(tx.send(b"third").await, Err(DeliveryError::Closed));
         Ok(usage())
     });
-    let high = bounded(detached).await.unwrap();
-    assert_eq!((high.high_frames, high.high_bytes), (1, 5));
+    bounded(waiting).await.unwrap();
+    tokio::time::advance(Duration::from_secs(24 * 3600)).await;
     f.outcome(1, Outcome::InFlight, 948);
-    assert_eq!(f.generations.available_permits(), 3);
-    finish_tx.send(()).unwrap();
+    let frame = bounded(body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    let slice = frame.slice(..1);
+    drop(frame);
+    drop(body);
     assert_eq!(
         bounded(completion).await.unwrap(),
         Ok(Outcome::Settled { charged: 29 })
@@ -454,17 +460,7 @@ async fn slow_sink_detaches_without_blocking_terminal_and_keeps_delivery_credit_
     f.outcome(1, Outcome::Settled { charged: 29 }, 971);
     f.leases_returned();
     assert_eq!(f.lanes.available_permits(), 3);
-    let frame = bounded(body.frame())
-        .await
-        .unwrap()
-        .unwrap()
-        .into_data()
-        .unwrap();
-    assert_eq!(frame.len(), 5);
-    assert!(bounded(body.frame()).await.is_none());
-    drop(body);
-    assert_eq!(f.lanes.available_permits(), 3); // Retained frame owns only delivery.
-    drop(frame);
+    drop(slice);
     assert_eq!(f.lanes.available_permits(), 4);
     f.account_slots_returned(971);
 }
@@ -492,7 +488,7 @@ async fn error_missing_or_invalid_usage_after_partial_output_refunds_without_rep
         let (finish_tx, finish) = oneshot::channel();
         let completion = pending.spawn(tx, move |mut tx| async move {
             called.fetch_add(1, Ordering::SeqCst);
-            tx.try_send(b"partial").unwrap();
+            tx.send(b"partial").await.unwrap();
             finish.await.unwrap();
             terminal
         });
@@ -644,7 +640,7 @@ async fn factory_or_polled_future_panic_is_supervised_and_refunds() {
             assert!(!factory_panic, "synthetic owner factory failure");
             async move {
                 let _resource = probe;
-                tx.try_send(b"partial").unwrap();
+                tx.send(b"partial").await.unwrap();
                 panic!("synthetic owner poll failure");
             }
         });
@@ -1032,7 +1028,7 @@ async fn settling_observer_and_body_loss_while_held_never_abort_work() {
         let resource = probe;
         started_tx.send(()).unwrap();
         finish.await.unwrap();
-        assert_eq!(tx.try_send(b"tail"), Err(DeliveryError::Closed));
+        assert_eq!(tx.send(b"tail").await, Err(DeliveryError::Closed));
         let receipt = settlement.finish(&Ok(usage()));
         drop(resource);
         dropped_tx.send(()).unwrap();

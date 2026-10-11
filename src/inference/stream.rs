@@ -3,13 +3,10 @@
 //! `ProtocolParser` authenticates nothing. Only the origin-bound adapter may
 //! treat its terminal counts as authenticated. No answer or event list is kept.
 use super::{
-    tools::{
-        CompletionDelta, ToolInvocation, ToolProfile, MAX_ARGUMENT_BYTES, MAX_CALLS,
-        MAX_TOTAL_ARGUMENT_BYTES,
-    },
-    InferenceError, InferenceFailure, Message,
+    tools::{CompletionDelta, ToolInvocation, ToolProfile},
+    DeltaSink, InferenceError, InferenceFailure, Message, TextDeltaSink, TextSink,
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use rand::RngCore;
 use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
@@ -31,7 +28,7 @@ pub const MAX_TRAILER_BYTES: usize = 64 * 1024;
 /// backing; retain the whole chunk while feeding bounded slices, not a full answer.
 /// Producer/TLS allocations are separate from this parser limit.
 pub const MAX_TRANSPORT_BUFFER_BYTES: usize = 256 * 1024;
-const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// Send/response-header bound only; never a generation lifetime.
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -85,9 +82,9 @@ pub(super) fn invocation_body(
 pub(super) async fn consume_response(
     response: reqwest::Response,
     idle_timeout: Duration,
-    on_delta: impl FnMut(&str),
+    mut on_delta: impl FnMut(&str) + Send,
 ) -> Result<StreamUsage, InferenceError> {
-    consume_completion_response(response, idle_timeout, on_delta)
+    consume_completion_response(response, idle_timeout, &mut on_delta)
         .await
         .map(|completion| completion.usage)
 }
@@ -95,13 +92,14 @@ pub(super) async fn consume_response(
 pub(super) async fn consume_completion_response(
     response: reqwest::Response,
     idle_timeout: Duration,
-    mut on_delta: impl FnMut(&str),
+    on_delta: &mut dyn TextDeltaSink,
 ) -> Result<StreamCompletion, InferenceError> {
-    consume_with_parser(response, idle_timeout, ProtocolParser::default(), |event| {
-        if let CompletionDelta::Text(text) = event {
-            on_delta(text);
-        }
-    })
+    consume_with_parser(
+        response,
+        idle_timeout,
+        ProtocolParser::default(),
+        &mut TextSink(on_delta),
+    )
     .await
 }
 
@@ -110,7 +108,7 @@ pub(super) async fn consume_invocation_response(
     idle_timeout: Duration,
     _profile: ToolProfile,
     _invocation: &ToolInvocation,
-    on_delta: impl FnMut(CompletionDelta<'_>),
+    on_delta: &mut dyn DeltaSink,
 ) -> Result<StreamCompletion, InferenceError> {
     if !response.status().is_success() {
         return Err(InferenceFailure::GenerationHttpFailed.into()); // Never read an error body.
@@ -151,9 +149,9 @@ pub(super) async fn consume_invocation_response(
     });
     let mut events = tinfoil::sse::parse_event_stream(bytes);
     let mut validator = SdkToolValidator::default();
-    let mut on_delta = on_delta;
     loop {
         // The byte source owns inactivity; SDK events may lag healthy reads.
+        // No read/idle clock runs while accept_async awaits delivery capacity.
         let event = events.next().await;
         match event {
             Some(event) => {
@@ -167,7 +165,8 @@ pub(super) async fn consume_invocation_response(
                     )
                 })?;
                 validator
-                    .accept(event, &mut on_delta)
+                    .accept_async(event, on_delta)
+                    .await
                     .map_err(|error| InferenceError::from(error.failure()))?;
             }
             None => {
@@ -183,7 +182,7 @@ async fn consume_with_parser(
     mut response: reqwest::Response,
     idle_timeout: Duration,
     mut parser: ProtocolParser,
-    mut on_delta: impl FnMut(CompletionDelta<'_>),
+    on_delta: &mut dyn DeltaSink,
 ) -> Result<StreamCompletion, InferenceError> {
     if !response.status().is_success() {
         return Err(InferenceFailure::GenerationHttpFailed.into()); // Do not read error bodies.
@@ -213,7 +212,8 @@ async fn consume_with_parser(
             Some(bytes) => {
                 for fragment in bytes.chunks(MAX_TRANSPORT_BUFFER_BYTES) {
                     parser
-                        .feed_events(fragment, &mut on_delta)
+                        .feed_events(fragment, on_delta)
+                        .await
                         .map_err(|_| InferenceError::InvalidResponse)?;
                 }
             }
@@ -317,33 +317,38 @@ impl Default for ProtocolParser {
 struct CallState {
     id: Option<String>,
     name: Option<String>,
-    argument_bytes: usize,
 }
 #[derive(Clone, Default)]
 struct ToolState {
     calls: Vec<CallState>,
-    argument_bytes: usize,
+    retained_bytes: usize,
 }
 impl ToolState {
+    // Shared defensive retained-metadata allowance from the existing request
+    // envelope, not a tool-count quota. Identity strings are charged twice for
+    // the transactional validation clone. Arguments are forwarded, not retained.
+    // Allocator/SDK/parser/transport memory is separate: not a process RSS proof.
+    fn charge(&mut self, bytes: usize) -> Result<(), StreamError> {
+        add_bounded(&mut self.retained_bytes, bytes, MAX_REQUEST_BODY_BYTES)
+            .map_err(|_| InferenceFailure::ToolStateTooLarge.into())
+    }
+
     fn proposed<'a>(
         &mut self,
         calls: &'a [ChatCompletionMessageToolCallChunk],
     ) -> Result<Vec<CompletionDelta<'a>>, StreamError> {
-        if calls.len() > MAX_CALLS {
-            return Err(InferenceFailure::ToolIndexInvalid.into());
-        }
         let mut seen = BTreeSet::new();
         let mut deltas = Vec::with_capacity(calls.len());
         for call in calls {
-            let index = u64::from(call.index);
-            if index >= MAX_CALLS as u64 {
-                return Err(InferenceFailure::ToolIndexInvalid.into());
-            }
-            let index = index as usize;
+            let index =
+                usize::try_from(call.index).map_err(|_| InferenceFailure::ToolIndexInvalid)?;
             if !seen.insert(index) || index > self.calls.len() {
                 return Err(InferenceFailure::ToolIndexInvalid.into());
             }
             if index == self.calls.len() {
+                // Charge before vector growth. Eight record sizes conservatively
+                // cover geometric growth/reallocation and validation-clone overlap.
+                self.charge(8 * std::mem::size_of::<CallState>())?;
                 self.calls.push(CallState::default());
             }
             // SDK-style placeholders contribute nothing; never erase identity.
@@ -364,7 +369,15 @@ impl ToolState {
                 if state.id.as_ref().is_some_and(|old| old != id) {
                     return Err(InferenceFailure::ToolIdentityInvalid.into());
                 }
-                state.id = Some(id.to_owned());
+                if state.id.is_none() {
+                    add_bounded(
+                        &mut self.retained_bytes,
+                        2 * id.len(),
+                        MAX_REQUEST_BODY_BYTES,
+                    )
+                    .map_err(|_| InferenceFailure::ToolStateTooLarge)?;
+                    state.id = Some(id.to_owned());
+                }
             }
             let mut name = None;
             let mut arguments = None;
@@ -375,21 +388,15 @@ impl ToolState {
                     if name.len() > 64 || state.name.as_ref().is_some_and(|old| old != name) {
                         return Err(InferenceFailure::ToolIdentityInvalid.into());
                     }
-                    state.name = Some(name.to_owned());
-                }
-                if let Some(arguments) = arguments {
-                    add_bounded(
-                        &mut state.argument_bytes,
-                        arguments.len(),
-                        MAX_ARGUMENT_BYTES,
-                    )
-                    .map_err(|_| InferenceFailure::ToolArgumentsTooLarge)?;
-                    add_bounded(
-                        &mut self.argument_bytes,
-                        arguments.len(),
-                        MAX_TOTAL_ARGUMENT_BYTES,
-                    )
-                    .map_err(|_| InferenceFailure::ToolArgumentsTooLarge)?;
+                    if state.name.is_none() {
+                        add_bounded(
+                            &mut self.retained_bytes,
+                            2 * name.len(),
+                            MAX_REQUEST_BODY_BYTES,
+                        )
+                        .map_err(|_| InferenceFailure::ToolStateTooLarge)?;
+                        state.name = Some(name.to_owned());
+                    }
                 }
             }
             deltas.push(CompletionDelta::ToolCall {
@@ -423,22 +430,32 @@ impl SdkToolValidator {
     pub fn accept(
         &mut self,
         event: Value,
-        delta: impl FnMut(CompletionDelta<'_>),
+        mut delta: impl FnMut(CompletionDelta<'_>) + Send,
+    ) -> Result<(), StreamError> {
+        self.accept_async(event, &mut delta)
+            .now_or_never()
+            .expect("synchronous sink never waits")
+    }
+
+    pub async fn accept_async(
+        &mut self,
+        event: Value,
+        delta: &mut dyn DeltaSink,
     ) -> Result<(), StreamError> {
         if self.failed {
             return Err(StreamError::Protocol);
         }
-        let result = self.accept_inner(event, delta);
+        let result = self.accept_inner(event, delta).await;
         if result.is_err() {
             self.failed = true;
         }
         result
     }
 
-    fn accept_inner(
+    async fn accept_inner(
         &mut self,
         event: Value,
-        mut delta: impl FnMut(CompletionDelta<'_>),
+        delta: &mut dyn DeltaSink,
     ) -> Result<(), StreamError> {
         // Use SDK choice/delta/tool types without requiring envelope metadata.
         // Usage is u64 here (the SDK's CompletionUsage is only u32).
@@ -515,10 +532,10 @@ impl SdkToolValidator {
             self.finish_reason = Some(finish);
         }
         if let Some(content) = content.filter(|s| !s.is_empty()) {
-            delta(CompletionDelta::Text(content));
+            delta.emit(CompletionDelta::Text(content)).await;
         }
         for fragment in tool_deltas {
-            delta(fragment);
+            delta.emit(fragment).await;
         }
         Ok(())
     }
@@ -543,26 +560,35 @@ impl SdkToolValidator {
 }
 
 impl ProtocolParser {
-    /// Validate a whole event before calling `delta`. The callback must not block
-    /// or retain unbounded output. Errors are absorbing; earlier deltas are not a
-    /// successful answer. This method never publishes a usage candidate.
-    pub fn feed(&mut self, bytes: &[u8], mut delta: impl FnMut(&str)) -> Result<(), StreamError> {
-        self.feed_events(bytes, |event| {
-            if let CompletionDelta::Text(text) = event {
-                delta(text);
-            }
-        })
-    }
-
-    fn feed_events(
+    /// Synchronous compatibility entry point. No output is collected or queued.
+    pub fn feed(
         &mut self,
         bytes: &[u8],
-        mut delta: impl FnMut(CompletionDelta<'_>),
+        mut delta: impl FnMut(&str) + Send,
+    ) -> Result<(), StreamError> {
+        self.feed_async(bytes, &mut delta)
+            .now_or_never()
+            .expect("synchronous sink never waits")
+    }
+
+    /// Validate each complete event before awaiting any borrowed fragment.
+    pub async fn feed_async(
+        &mut self,
+        bytes: &[u8],
+        delta: &mut dyn TextDeltaSink,
+    ) -> Result<(), StreamError> {
+        self.feed_events(bytes, &mut TextSink(delta)).await
+    }
+
+    async fn feed_events(
+        &mut self,
+        bytes: &[u8],
+        delta: &mut dyn DeltaSink,
     ) -> Result<(), StreamError> {
         if self.state == State::Failed || self.state == State::SuccessfulEOF {
             return Err(StreamError::Protocol);
         }
-        let result = self.feed_inner(bytes, &mut delta);
+        let result = self.feed_inner(bytes, delta).await;
         if result.is_err() {
             self.state = State::Failed;
             self.usage = None;
@@ -595,10 +621,10 @@ impl ProtocolParser {
         self.line.capacity() + self.payload.capacity()
     }
 
-    fn feed_inner(
+    async fn feed_inner(
         &mut self,
         bytes: &[u8],
-        delta: &mut impl FnMut(CompletionDelta<'_>),
+        delta: &mut dyn DeltaSink,
     ) -> Result<(), StreamError> {
         for &byte in bytes {
             if self.state == State::Done {
@@ -616,13 +642,13 @@ impl ProtocolParser {
             if self.line.last() == Some(&b'\r') {
                 self.line.pop();
             }
-            self.line(delta)?;
+            self.line(delta).await?;
             self.line.clear();
         }
         Ok(())
     }
 
-    fn line(&mut self, delta: &mut impl FnMut(CompletionDelta<'_>)) -> Result<(), StreamError> {
+    async fn line(&mut self, delta: &mut dyn DeltaSink) -> Result<(), StreamError> {
         let line = std::str::from_utf8(&self.line).map_err(|_| StreamError::Protocol)?;
         if self.state == State::Done {
             if line.starts_with(':') || line.bytes().all(|b| b.is_ascii_whitespace()) {
@@ -632,7 +658,7 @@ impl ProtocolParser {
         }
         if line.is_empty() {
             if self.has_data {
-                self.event(delta)?;
+                self.event(delta).await?;
             } else if self.has_event {
                 return Err(StreamError::Protocol);
             }
@@ -666,7 +692,7 @@ impl ProtocolParser {
         Ok(())
     }
 
-    fn event(&mut self, delta: &mut impl FnMut(CompletionDelta<'_>)) -> Result<(), StreamError> {
+    async fn event(&mut self, delta: &mut dyn DeltaSink) -> Result<(), StreamError> {
         if self.payload == b"[DONE]" {
             if self.state != State::Finished || self.usage.is_none() {
                 return Err(StreamError::Protocol);
@@ -767,7 +793,7 @@ impl ProtocolParser {
             self.state = State::Finished;
         }
         if let Some(content) = content.filter(|s| !s.is_empty()) {
-            delta(CompletionDelta::Text(content));
+            delta.emit(CompletionDelta::Text(content)).await;
         }
         Ok(())
     }
@@ -954,6 +980,16 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    async fn consume_invocation_response(
+        response: reqwest::Response,
+        idle: Duration,
+        profile: ToolProfile,
+        invocation: &ToolInvocation,
+        mut delta: impl FnMut(CompletionDelta<'_>) + Send,
+    ) -> Result<StreamCompletion, InferenceError> {
+        super::consume_invocation_response(response, idle, profile, invocation, &mut delta).await
+    }
+
     fn heavy() -> Arc<crate::telemetry::hooks::Lease> {
         Arc::new(
             Arc::new(tokio::sync::Semaphore::new(1))
@@ -1101,6 +1137,101 @@ mod tests {
     }
 
     #[test]
+    fn live_tools_exceed_former_count_and_argument_quotas() {
+        let mut validator = SdkToolValidator::default();
+        let calls: Vec<_> = (0..65)
+            .map(|index| {
+                serde_json::json!({
+                    "index": index, "id": format!("call_{index}"), "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"}
+                })
+            })
+            .collect();
+        validator
+            .accept(
+                serde_json::json!({"choices":[{
+                    "index":0,"delta":{"tool_calls":calls},"finish_reason":null
+                }]}),
+                |_| {},
+            )
+            .unwrap();
+        // Fragments stay inside the existing frame bounds, while one call and
+        // the batch can exceed the removed 64 KiB / 256 KiB argument quotas.
+        let fragment = "x".repeat(32 * 1024);
+        let mut forwarded = 0;
+        for _ in 0..10 {
+            validator
+                .accept(
+                    serde_json::json!({"choices":[{
+                        "index":0,"delta":{"tool_calls":[{"index":0,
+                            "function":{"arguments":fragment}}]},"finish_reason":null
+                    }]}),
+                    |delta| {
+                        if let CompletionDelta::ToolCall {
+                            arguments: Some(args),
+                            ..
+                        } = delta
+                        {
+                            forwarded += args.len();
+                        }
+                    },
+                )
+                .unwrap();
+        }
+        assert!(forwarded > 256 * 1024);
+        assert_eq!(validator.tools.calls.len(), 65);
+        // Arguments have no effect on the retained metadata allowance.
+        let retained = validator.tools.retained_bytes;
+        validator
+            .accept(
+                serde_json::json!({"choices":[{
+                    "index":0,"delta":{},"finish_reason":"tool_calls"
+                }]}),
+                |_| {},
+            )
+            .unwrap();
+        validator
+            .accept(
+                serde_json::json!({"choices":[],"usage":{
+                    "prompt_tokens":1,"completion_tokens":1,"total_tokens":2
+                }}),
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(validator.tools.retained_bytes, retained);
+        validator.eof_completion().unwrap();
+    }
+
+    #[test]
+    fn retained_tool_metadata_is_charged_before_growth() {
+        let mut tools = ToolState::default();
+        loop {
+            let call: ChatCompletionMessageToolCallChunk =
+                serde_json::from_value(serde_json::json!({"index":tools.calls.len()})).unwrap();
+            let before = tools.calls.len();
+            match tools.proposed(&[call]) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert!(before > 64);
+                    assert_eq!(error.failure(), InferenceFailure::ToolStateTooLarge);
+                    assert_eq!(tools.calls.len(), before);
+                    break;
+                }
+            }
+        }
+        let mut tools = ToolState {
+            calls: vec![CallState::default()],
+            retained_bytes: MAX_REQUEST_BODY_BYTES - 1,
+        };
+        let call = serde_json::from_value(serde_json::json!({"index":0,"id":"a"})).unwrap();
+        assert_eq!(
+            tools.proposed(&[call]).err().unwrap().failure(),
+            InferenceFailure::ToolStateTooLarge
+        );
+        assert!(tools.calls[0].id.is_none());
+    }
+
+    #[test]
     fn sdk_semantic_categories_are_atomic_and_absorbing() {
         use serde_json::json;
         use InferenceFailure::*;
@@ -1129,13 +1260,6 @@ mod tests {
                 vec![],
                 delta(json!({"tool_calls":[call(0,"a",&"n".repeat(65),"{}".into())]})),
                 ToolIdentityInvalid,
-            ),
-            (
-                vec![],
-                delta(
-                    json!({"tool_calls":[call(0,"a","lookup","x".repeat(MAX_ARGUMENT_BYTES + 1))]}),
-                ),
-                ToolArgumentsTooLarge,
             ),
             (vec![], finish("content_filter"), StreamFinishInvalid),
             (
@@ -1209,6 +1333,35 @@ mod tests {
         }
         assert_eq!(scopes[0].len(), 43);
         assert_ne!(scopes[0], scopes[1]);
+    }
+
+    #[test]
+    fn streaming_request_full_envelope_boundary_is_thirty_two_mib() {
+        assert_eq!(MAX_REQUEST_BODY_BYTES, 32 * 1024 * 1024);
+        let mut messages = [Message {
+            role: "user".into(),
+            content: String::new(),
+        }];
+        let overhead = generation_bytes(
+            super::super::text_request("fixture", &messages).unwrap(),
+            99,
+        )
+        .unwrap()
+        .len();
+        messages[0].content = "x".repeat(MAX_REQUEST_BODY_BYTES - overhead);
+        let encoded = generation_bytes(
+            super::super::text_request("fixture", &messages).unwrap(),
+            99,
+        )
+        .unwrap();
+        assert_eq!(encoded.len(), MAX_REQUEST_BODY_BYTES);
+        drop(encoded);
+        messages[0].content.push('x');
+        assert!(generation_bytes(
+            super::super::text_request("fixture", &messages).unwrap(),
+            99
+        )
+        .is_err());
     }
 
     #[test]
@@ -1393,6 +1546,134 @@ mod tests {
             assert!(!format!("{result:?}").contains("secret-sdk-error-marker"));
             if let Err(error) = result {
                 assert!(!error.to_string().contains("secret-sdk-error-marker"));
+            }
+        }
+    }
+
+    struct DeliverySink {
+        tx: crate::stream_owner::DeliveryTx,
+        waiting: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl DeliverySink {
+        async fn fragment(&mut self, text: &str) {
+            // Test adapter borrows a single decoded event, never a completion.
+            for part in text.as_bytes().chunks(1024) {
+                let mut send = Box::pin(self.tx.send(part));
+                if futures_util::poll!(&mut send).is_pending() {
+                    if let Some(waiting) = self.waiting.take() {
+                        waiting.send(()).unwrap();
+                    }
+                    let _ = send.await;
+                }
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TextDeltaSink for DeliverySink {
+        async fn emit(&mut self, text: &str) {
+            self.fragment(text).await;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DeltaSink for DeliverySink {
+        async fn emit(&mut self, delta: CompletionDelta<'_>) {
+            match delta {
+                CompletionDelta::Text(text) => self.fragment(text).await,
+                CompletionDelta::ToolCall { arguments, .. } => {
+                    self.fragment(arguments.unwrap_or_default()).await
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn decoded_event_backpressure_is_incremental_and_not_upstream_idle() {
+        let argument_bytes = 96 * 1024;
+        for sdk in [false, true] {
+            for disconnect in [false, true] {
+                let text = "x".repeat(32 * 1024);
+                let mut first = choice(Some(&text), None);
+                if sdk {
+                    first["choices"][0]["delta"]["tool_calls"] = serde_json::json!([
+                        {"index":0,"id":"call_0","type":"function","function":{"name":"lookup","arguments":"x".repeat(argument_bytes)}}
+                    ]);
+                }
+                let chunks = vec![
+                    event(first),
+                    event(choice(None, Some("stop"))),
+                    [event(usage(2, 3)), b"data: [DONE]\n\n".to_vec()].concat(),
+                ];
+                let reads = Arc::new(AtomicUsize::new(0));
+                let read_count = reads.clone();
+                let bytes = futures_util::stream::iter(chunks.into_iter().map(move |chunk| {
+                    read_count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, std::io::Error>(chunk)
+                }));
+                let response = http::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(reqwest::Body::wrap_stream(bytes))
+                    .unwrap()
+                    .into();
+                let (tx, mut body) = crate::stream_owner::delivery(
+                    heavy(),
+                    crate::stream_owner::Limits {
+                        frames: 8,
+                        payload_bytes: 64 * 1024,
+                        chunk_bytes: 8 * 1024,
+                    },
+                );
+                let probe = body.probe();
+                let (waiting, blocked) = tokio::sync::oneshot::channel();
+                let consume = tokio::spawn(async move {
+                    let mut sink = DeliverySink {
+                        tx,
+                        waiting: Some(waiting),
+                    };
+                    let result = if sdk {
+                        super::consume_invocation_response(
+                            response,
+                            STREAM_IDLE_TIMEOUT,
+                            ToolProfile::OpenAiFunctionsV1,
+                            &tool_input(),
+                            &mut sink,
+                        )
+                        .await
+                    } else {
+                        super::consume_completion_response(response, STREAM_IDLE_TIMEOUT, &mut sink)
+                            .await
+                    };
+                    sink.tx.finish();
+                    result
+                });
+                blocked.await.unwrap();
+                assert_eq!(reads.load(Ordering::SeqCst), 1); // No read-ahead/completion buffer.
+                assert_eq!(probe.usage().frames, 8);
+                tokio::time::advance(Duration::from_secs(24 * 3600)).await;
+                assert!(!consume.is_finished()); // Connected backpressure has no deadline.
+                let held = body.frame().await.unwrap().unwrap().into_data().unwrap();
+                let slice = held.slice(..1);
+                drop(held);
+                if disconnect {
+                    drop(body); // Outstanding slice credit must not stall upstream EOF.
+                } else {
+                    // Count, don't collect output.
+                    let mut received = 1024;
+                    // The retained slice leaves seven credits, still sufficient to drain.
+                    while let Some(frame) = body.frame().await {
+                        let bytes = frame.unwrap().into_data().unwrap();
+                        assert!(bytes.iter().all(|byte| *byte == b'x'));
+                        received += bytes.len();
+                    }
+                    assert_eq!(received, 32 * 1024 + if sdk { argument_bytes } else { 0 });
+                }
+                assert_eq!(consume.await.unwrap().unwrap().usage.total_tokens, 5);
+                assert_eq!(reads.load(Ordering::SeqCst), 3);
+                assert!(probe.usage().high_frames <= 8 && probe.usage().high_bytes <= 64 * 1024);
+                drop(slice);
+                assert_eq!(probe.usage().bytes, 0);
             }
         }
     }

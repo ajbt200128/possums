@@ -508,7 +508,7 @@ impl Inference for NoInference {
         _: &possums::catalog::Model,
         _: &[Message],
         _: Arc<possums::telemetry::hooks::Lease>,
-        _: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        _: &mut dyn possums::inference::TextDeltaSink,
     ) -> Result<possums::inference::stream::StreamCompletion, InferenceError> {
         panic!("balance cannot generate")
     }
