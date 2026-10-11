@@ -191,6 +191,78 @@ async fn streaming_contract_probe_all_catalog_models() {
     // and maximum billable-token bounds remain UNVERIFIED operator risk.
 }
 
+/// One fresh fixed-input probe through the actual production SDK consumer.
+/// No replay, output collection, gateway account, logs or raw-usage report.
+#[tokio::test]
+#[ignore = "requires operator authorization and one funded synthetic generation"]
+async fn production_consumer_validates_deepseek_usage_without_raw_reports() {
+    use async_trait::async_trait;
+    use possums::inference::{
+        forward::{Evidence, ForwardSink},
+        InferenceError,
+    };
+    struct Sink;
+    #[async_trait]
+    impl ForwardSink for Sink {
+        async fn event(&mut self, _: serde_json::Value) -> Result<(), InferenceError> {
+            Ok(())
+        }
+        fn evidence(&mut self, _: Evidence) {}
+    }
+    assert!(env::var("TINFOIL_USAGE_PROBE_FUNDED").as_deref() == Ok("yes"));
+    let inference = TinfoilInference::connect(HOST, REPOSITORY, load_api_key())
+        .await
+        .unwrap_or_else(|e| panic!("probe stopped before generation: {}", e.failure()));
+    let catalog = authenticated_catalog(
+        &inference,
+        SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs(),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("probe stopped before generation: {}", e.failure()));
+    let selected = "deepseek-v4-1-flash";
+    assert!(
+        catalog.models.iter().any(|m| m.id == selected),
+        "selected probe model unavailable; no substitution"
+    );
+    let messages = [Message {
+        role: "user".into(),
+        content: "Reply with exactly: synthetic-canary".into(),
+    }];
+    let heavy: std::sync::Arc<possums::telemetry::hooks::Lease> = std::sync::Arc::new(
+        std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap()
+            .into(),
+    );
+    let input = inference
+        .count_tokens(selected, &messages, heavy.clone())
+        .await
+        .unwrap_or_else(|e| panic!("probe stopped before generation: {}", e.failure()));
+    let mut quote = catalog
+        .quote(selected, input)
+        .expect("probe context preflight failed");
+    quote.model.max_output_tokens = quote.model.max_output_tokens.min(CANARY_MAX_OUTPUT_TOKENS);
+    // Authenticated tokenizer input plus the explicit 64-output-token allowance;
+    // never rely on the prompt asking for a short answer. Invoice parity and
+    // provider enforcement of the allowance remain external assumptions.
+    assert!(
+        possums::catalog::actual_cost(&quote, quote.model.max_output_tokens)
+            .expect("probe budget arithmetic failed")
+            <= 250_000,
+        "probe worst-case quoted allowance exceeds one eighth of the authorized budget"
+    );
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        inference.generate_forwarded_stream(&quote.model, &messages, None, heavy, &mut Sink),
+    )
+    .await;
+    match result {
+        Ok(Ok(_)) => println!("usage_probe=validated_completion; no_retry"),
+        Ok(Err(error)) => panic!("usage_probe={}; no_retry", error.failure()),
+        Err(_) => panic!("usage_probe=probe_deadline; outcome_unknown; no_retry"),
+    }
+}
+
 fn load_api_key() -> String {
     env::var("TINFOIL_API_KEY")
         .ok()
@@ -200,7 +272,8 @@ fn load_api_key() -> String {
 }
 
 fn dotenv_value(wanted: &str) -> Option<String> {
-    let contents = fs::read_to_string(".env").ok()?;
+    let path = env::var("TINFOIL_RUNTIME_ENV_FILE").unwrap_or_else(|_| ".env".into());
+    let contents = fs::read_to_string(path).ok()?;
     contents.lines().find_map(|line| {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {

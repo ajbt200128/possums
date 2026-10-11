@@ -416,6 +416,8 @@ async fn duplicate(state: &AppState, bearer: &str, submission: &str, expected: &
     assert!(value["error"]["outcome"] == expected);
 }
 
+#[path = "support/duplicate_usage_metrics.rs"]
+mod duplicate_usage_metrics;
 #[path = "support/native_usage_contract.rs"]
 mod native_usage_contract;
 

@@ -42,7 +42,31 @@ fn response_frames(frames: &mut Vec<Frame<Bytes>>, metrics: Option<&str>) -> req
         .into()
 }
 
-async fn check(
+pub(super) fn duplicate_response(values: &[&str], initial_header: bool) -> reqwest::Response {
+    let mut frames = vec![
+        event(
+            json!({"model":"m","choices":[{"index":0,"delta":{"content":"synthetic-progress"},"finish_reason":null}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}),
+        ),
+        event(
+            json!({"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":usage()}),
+        ),
+        Frame::data(Bytes::from_static(b"data: [DONE]\n\n")),
+    ];
+    let mut headers = http::HeaderMap::new();
+    for value in values {
+        headers.append("x-tinfoil-usage-metrics", value.parse().unwrap());
+    }
+    if !initial_header {
+        frames.push(Frame::trailers(headers.clone()));
+    }
+    let mut response: http::Response<reqwest::Body> = response_frames(&mut frames, None).into();
+    if initial_header {
+        response.headers_mut().extend(headers);
+    }
+    response.into()
+}
+
+pub(super) async fn check(
     upstream: reqwest::Response,
     failure: Option<InferenceFailure>,
     source: &str,
