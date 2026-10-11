@@ -335,7 +335,7 @@ async fn invalid_mixed_events_are_atomic_and_semantic_failure_is_absorbing() {
 }
 
 #[tokio::test]
-async fn existing_call_and_argument_bounds() {
+async fn live_calls_and_arguments_exceed_former_quotas() {
     let mut p = parser();
     for index in 0..64 {
         feed(
@@ -346,13 +346,20 @@ async fn existing_call_and_argument_bounds() {
         .await
         .unwrap();
     }
-    assert!(feed(
+    feed(
         &mut p,
         &delta(json!({"tool_calls":[call(64,"extra","{}")]})),
-        |_| panic!()
+        |_| {},
     )
     .await
-    .is_err());
+    .unwrap();
+    feed(&mut p, &[finish("tool_calls"), usage()].concat(), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        p.eof_completion().unwrap().finish_reason,
+        FinishReason::ToolUse
+    );
     for total_limit in [false, true] {
         let mut p = parser();
         for index in 0..if total_limit { 4 } else { 1 } {
@@ -372,11 +379,20 @@ async fn existing_call_and_argument_bounds() {
         } else {
             json!({"index":0,"function":{"arguments":"x"}})
         };
-        assert!(feed(&mut p, &delta(json!({"tool_calls":[c]})), |_| panic!(
-            "byte limit leaked"
-        ))
+        let mut delivered = 0;
+        feed(&mut p, &delta(json!({"tool_calls":[c]})), |_| {
+            delivered += 1
+        })
         .await
-        .is_err());
+        .unwrap();
+        assert_eq!(delivered, 1);
+        feed(&mut p, &[finish("tool_calls"), usage()].concat(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            p.eof_completion().unwrap().finish_reason,
+            FinishReason::ToolUse
+        );
     }
 }
 

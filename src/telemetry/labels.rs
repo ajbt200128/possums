@@ -212,7 +212,7 @@ impl From<crate::inference::InferenceFailure> for GenerationTerminal {
             | ToolNameNotAllowed
             | ToolChoiceViolated
             | ToolCallIncomplete
-            | ToolArgumentsTooLarge
+            | ToolStateTooLarge
             | StreamFinishInvalid
             | StreamOutputAfterFinish
             | UpstreamResponseInvalid => Self::Validation,

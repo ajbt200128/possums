@@ -74,7 +74,7 @@ const details = new Set(`inference_unavailable upstream_response_invalid verific
   generation_send_failed generation_http_failed endpoint_binding_failed stream_content_type_invalid stream_transport_failed
   stream_idle_timeout stream_deadline_exceeded sdk_stream_decode_failed upstream_error_event stream_event_schema_invalid
   stream_choice_invalid stream_delta_unsupported tool_index_invalid tool_identity_invalid tool_name_not_allowed
-  tool_choice_violated tool_call_incomplete tool_arguments_too_large stream_finish_invalid stream_finish_missing
+  tool_choice_violated tool_call_incomplete tool_arguments_too_large tool_state_too_large stream_finish_invalid stream_finish_missing
   stream_usage_invalid stream_usage_unexpected stream_usage_missing stream_output_after_finish settlement_failed`.split(/\s+/));
 export function gatewayDetailLabel(detail: string | undefined): string | undefined {
   return detail !== undefined && details.has(detail) ? `[${detail}] ${detail.replaceAll('_', ' ')}` : undefined;
@@ -169,8 +169,18 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
   let failure: GatewayError | undefined, terminal = false;
   let stage: FailureStage = 'stream', constraint: FailureConstraint = 'envelope';
   let modelID: string, names: Set<string> | undefined;
-  const calls: { id: string; name: string; arguments: string; bytes: number }[] = [], ids = new Set<string>();
-  let argumentBytes = 0;
+  const calls: { id: string; name: string; arguments: string }[] = [], ids = new Set<string>();
+  // Shared encoded-state allowance, derived from the request envelope rather
+  // than a tool count/per-call quota. Six bytes per UTF-16 unit cover worst-case
+  // UTF-8 plus old/new string overlap; 256 covers records, slots and identity-set
+  // bookkeeping conservatively. Engine/parser/callback memory is separate, so
+  // this is not a whole-runtime RSS bound. Charge before retaining/concatenating.
+  const toolRecordRetainedBytes = 256, toolStringRetainedBytesPerUnit = 6;
+  let retainedBytes = 0;
+  function retain(bytes: number): void {
+    if (bytes > LIMITS.chat - retainedBytes) throw new DiagnosticFailure('stream', 'tool_state', 'uncertain');
+    retainedBytes += bytes;
+  }
   async function event(payload: string): Promise<void> {
     constraint = 'envelope';
     sawEvent = true;
@@ -236,16 +246,17 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
       } else if (Object.hasOwn(choice.delta, 'tool_calls')) {
         constraint = 'tool';
         keys(choice.delta, ['tool_calls']);
-        requireThat(names && Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0 && choice.delta.tool_calls.length <= LIMITS.tools);
+        requireThat(names && Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0);
         const indexes = new Set<number>();
         for (const delta of choice.delta.tool_calls) {
-          requireThat(delta && Number.isInteger(delta.index) && delta.index >= 0 && delta.index < LIMITS.tools && !indexes.has(delta.index));
+          requireThat(delta && Number.isSafeInteger(delta.index) && delta.index >= 0 && !indexes.has(delta.index));
           indexes.add(delta.index);
           fields(delta, ['index'], ['id', 'type', 'function']);
           let call = calls[delta.index];
           if (!call) {
             requireThat(delta.index === calls.length);
-            call = { id: '', name: '', arguments: '', bytes: 0 }; calls.push(call);
+            retain(toolRecordRetainedBytes);
+            call = { id: '', name: '', arguments: '' }; calls.push(call);
           }
           // The gateway preserves SDK fragments: identity and arguments can
           // arrive separately. Completeness is checked at the terminal finish.
@@ -253,6 +264,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
           if (Object.hasOwn(delta, 'id')) {
             toolID(delta.id);
             requireThat((!call.id || call.id === delta.id) && (!ids.has(delta.id) || call.id === delta.id));
+            if (!call.id) retain(toolStringRetainedBytesPerUnit * delta.id.length);
             call.id = delta.id; ids.add(delta.id);
           }
           if (Object.hasOwn(delta, 'function')) {
@@ -260,15 +272,14 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
             if (Object.hasOwn(delta.function, 'name')) {
               toolName(delta.function.name);
               requireThat(names.has(delta.function.name) && (!call.name || call.name === delta.function.name));
+              if (!call.name) retain(toolStringRetainedBytesPerUnit * delta.function.name.length);
               call.name = delta.function.name;
             }
           }
           const fragment = delta.function && Object.hasOwn(delta.function, 'arguments') ? delta.function.arguments : '';
-          requireThat(typeof fragment === 'string' && fragment.length <= LIMITS.toolArguments && call.arguments.length + fragment.length <= LIMITS.toolArguments);
+          requireThat(typeof fragment === 'string');
+          retain(toolStringRetainedBytesPerUnit * fragment.length);
           call.arguments += fragment;
-          const size = utf8.encode(call.arguments).length;
-          argumentBytes += size - call.bytes; call.bytes = size;
-          requireThat(size <= LIMITS.toolArguments && argumentBytes <= LIMITS.totalToolArguments);
         }
       } else {
         constraint = 'delta';

@@ -5,7 +5,6 @@ export const LIMITS = Object.freeze({
   key: 41, report: 1184, catalog: 256 * 1024, error: 4096,
   // Nested tool schemas need headroom for the surrounding request envelope.
   depth: 32, nodes: 32768, messages: 4096, models: 256,
-  tools: 64, toolArguments: 64 * 1024, totalToolArguments: 256 * 1024,
   chunk: 64 * 1024, frame: 256 * 1024, sseEvent: 64 * 1024,
   // Finite control/verification work; streams have no total lifetime.
   operationMs: 600000, bootstrapMs: 10 * 600000, idleMs: 600000, cleanupMs: 100,
@@ -14,7 +13,7 @@ export class ChannelError extends Error {
   constructor(public readonly code: 'rejected' | 'uncertain' = 'rejected') { super(code); }
 }
 export type FailureStage = 'trust' | 'challenge' | 'authentication' | 'catalog' | 'request' | 'submission' | 'transport' | 'stream' | 'settlement' | 'provider' | 'hook' | 'balance' | 'compaction';
-export type FailureConstraint = 'manifest' | 'attestation' | 'verification' | 'provenance' | 'publisher' | 'certificate' | 'key_config' | 'precision' | 'expired' | 'policy' | 'encoding' | 'fetch' | 'http' | 'body' | 'schema' | 'encryption' | 'endpoint_binding' | 'frames' | 'decryption' | 'utf8' | 'json' | 'envelope' | 'choice' | 'delta' | 'tool' | 'finish' | 'usage' | 'receipt' | 'finish_missing' | 'usage_missing' | 'done_missing' | 'eof' | 'interrupted' | 'idle' | 'deadline' | 'unexpected';
+export type FailureConstraint = 'manifest' | 'attestation' | 'verification' | 'provenance' | 'publisher' | 'certificate' | 'key_config' | 'precision' | 'expired' | 'policy' | 'encoding' | 'fetch' | 'http' | 'body' | 'schema' | 'encryption' | 'endpoint_binding' | 'frames' | 'decryption' | 'utf8' | 'json' | 'envelope' | 'choice' | 'delta' | 'tool' | 'tool_state' | 'finish' | 'usage' | 'receipt' | 'finish_missing' | 'usage_missing' | 'done_missing' | 'eof' | 'interrupted' | 'idle' | 'deadline' | 'unexpected';
 // Content-free observations only: never attach the original exception or cause.
 export class DiagnosticFailure extends ChannelError {
   readonly status?: number;
@@ -22,7 +21,7 @@ export class DiagnosticFailure extends ChannelError {
     code: ChannelError['code'] = 'rejected', status?: number) {
     super(code);
     requireThat('trust challenge authentication catalog request submission transport stream settlement provider hook balance compaction'.split(' ').includes(stage));
-    requireThat('manifest attestation verification provenance publisher certificate key_config precision expired policy encoding fetch http body schema encryption endpoint_binding frames decryption utf8 json envelope choice delta tool finish usage receipt finish_missing usage_missing done_missing eof interrupted idle deadline unexpected'.split(' ').includes(constraint));
+    requireThat('manifest attestation verification provenance publisher certificate key_config precision expired policy encoding fetch http body schema encryption endpoint_binding frames decryption utf8 json envelope choice delta tool tool_state finish usage receipt finish_missing usage_missing done_missing eof interrupted idle deadline unexpected'.split(' ').includes(constraint));
     requireThat(code === 'rejected' || code === 'uncertain');
     if (Number.isInteger(status) && status! >= 100 && status! <= 599) this.status = status;
     this.message = `possums_${stage}_${constraint}`;

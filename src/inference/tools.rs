@@ -5,10 +5,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-pub const MAX_CALLS: usize = 64;
-pub const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
-pub const MAX_TOTAL_ARGUMENT_BYTES: usize = 256 * 1024;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolProfile {
     OpenAiFunctionsV1,

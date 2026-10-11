@@ -1304,7 +1304,7 @@ await check('pinned Pi classifier admits only closed gateway operational failure
  const terminal=`inference_unavailable upstream_response_invalid verification_failed catalog_failed request_encoding_failed tool_profile_unqualified
  tokenizer_response_invalid tokenizer_upload_incomplete endpoint_binding_failed stream_content_type_invalid sdk_stream_decode_failed upstream_error_event
  stream_event_schema_invalid stream_choice_invalid stream_delta_unsupported tool_index_invalid tool_identity_invalid tool_name_not_allowed
- tool_choice_violated tool_call_incomplete tool_arguments_too_large stream_finish_invalid stream_finish_missing stream_usage_invalid
+ tool_choice_violated tool_call_incomplete tool_state_too_large stream_finish_invalid stream_finish_missing stream_usage_invalid
  stream_usage_unexpected stream_usage_missing stream_output_after_finish settlement_failed`.split(/\s+/);
  for(const detail of [...transient,...terminal,undefined]) {
   const s=await setup([{code:'generation_failed',detail}]);const {message}=await drain(s.provider.streamSimple(s.selected,context(false)));

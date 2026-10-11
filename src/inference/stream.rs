@@ -3,10 +3,7 @@
 //! `ProtocolParser` authenticates nothing. Only the origin-bound adapter may
 //! treat its terminal counts as authenticated. No answer or event list is kept.
 use super::{
-    tools::{
-        CompletionDelta, ToolInvocation, ToolProfile, MAX_ARGUMENT_BYTES, MAX_CALLS,
-        MAX_TOTAL_ARGUMENT_BYTES,
-    },
+    tools::{CompletionDelta, ToolInvocation, ToolProfile},
     InferenceError, InferenceFailure, Message,
 };
 use futures_util::StreamExt;
@@ -317,33 +314,38 @@ impl Default for ProtocolParser {
 struct CallState {
     id: Option<String>,
     name: Option<String>,
-    argument_bytes: usize,
 }
 #[derive(Clone, Default)]
 struct ToolState {
     calls: Vec<CallState>,
-    argument_bytes: usize,
+    retained_bytes: usize,
 }
 impl ToolState {
+    // Shared defensive retained-metadata allowance from the existing request
+    // envelope, not a tool-count quota. Identity strings are charged twice for
+    // the transactional validation clone. Arguments are forwarded, not retained.
+    // Allocator/SDK/parser/transport memory is separate: not a process RSS proof.
+    fn charge(&mut self, bytes: usize) -> Result<(), StreamError> {
+        add_bounded(&mut self.retained_bytes, bytes, MAX_REQUEST_BODY_BYTES)
+            .map_err(|_| InferenceFailure::ToolStateTooLarge.into())
+    }
+
     fn proposed<'a>(
         &mut self,
         calls: &'a [ChatCompletionMessageToolCallChunk],
     ) -> Result<Vec<CompletionDelta<'a>>, StreamError> {
-        if calls.len() > MAX_CALLS {
-            return Err(InferenceFailure::ToolIndexInvalid.into());
-        }
         let mut seen = BTreeSet::new();
         let mut deltas = Vec::with_capacity(calls.len());
         for call in calls {
-            let index = u64::from(call.index);
-            if index >= MAX_CALLS as u64 {
-                return Err(InferenceFailure::ToolIndexInvalid.into());
-            }
-            let index = index as usize;
+            let index =
+                usize::try_from(call.index).map_err(|_| InferenceFailure::ToolIndexInvalid)?;
             if !seen.insert(index) || index > self.calls.len() {
                 return Err(InferenceFailure::ToolIndexInvalid.into());
             }
             if index == self.calls.len() {
+                // Charge before vector growth. Eight record sizes conservatively
+                // cover geometric growth/reallocation and validation-clone overlap.
+                self.charge(8 * std::mem::size_of::<CallState>())?;
                 self.calls.push(CallState::default());
             }
             // SDK-style placeholders contribute nothing; never erase identity.
@@ -364,7 +366,15 @@ impl ToolState {
                 if state.id.as_ref().is_some_and(|old| old != id) {
                     return Err(InferenceFailure::ToolIdentityInvalid.into());
                 }
-                state.id = Some(id.to_owned());
+                if state.id.is_none() {
+                    add_bounded(
+                        &mut self.retained_bytes,
+                        2 * id.len(),
+                        MAX_REQUEST_BODY_BYTES,
+                    )
+                    .map_err(|_| InferenceFailure::ToolStateTooLarge)?;
+                    state.id = Some(id.to_owned());
+                }
             }
             let mut name = None;
             let mut arguments = None;
@@ -375,21 +385,15 @@ impl ToolState {
                     if name.len() > 64 || state.name.as_ref().is_some_and(|old| old != name) {
                         return Err(InferenceFailure::ToolIdentityInvalid.into());
                     }
-                    state.name = Some(name.to_owned());
-                }
-                if let Some(arguments) = arguments {
-                    add_bounded(
-                        &mut state.argument_bytes,
-                        arguments.len(),
-                        MAX_ARGUMENT_BYTES,
-                    )
-                    .map_err(|_| InferenceFailure::ToolArgumentsTooLarge)?;
-                    add_bounded(
-                        &mut self.argument_bytes,
-                        arguments.len(),
-                        MAX_TOTAL_ARGUMENT_BYTES,
-                    )
-                    .map_err(|_| InferenceFailure::ToolArgumentsTooLarge)?;
+                    if state.name.is_none() {
+                        add_bounded(
+                            &mut self.retained_bytes,
+                            2 * name.len(),
+                            MAX_REQUEST_BODY_BYTES,
+                        )
+                        .map_err(|_| InferenceFailure::ToolStateTooLarge)?;
+                        state.name = Some(name.to_owned());
+                    }
                 }
             }
             deltas.push(CompletionDelta::ToolCall {
@@ -1101,6 +1105,101 @@ mod tests {
     }
 
     #[test]
+    fn live_tools_exceed_former_count_and_argument_quotas() {
+        let mut validator = SdkToolValidator::default();
+        let calls: Vec<_> = (0..65)
+            .map(|index| {
+                serde_json::json!({
+                    "index": index, "id": format!("call_{index}"), "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"}
+                })
+            })
+            .collect();
+        validator
+            .accept(
+                serde_json::json!({"choices":[{
+                    "index":0,"delta":{"tool_calls":calls},"finish_reason":null
+                }]}),
+                |_| {},
+            )
+            .unwrap();
+        // Fragments stay inside the existing frame bounds, while one call and
+        // the batch can exceed the removed 64 KiB / 256 KiB argument quotas.
+        let fragment = "x".repeat(32 * 1024);
+        let mut forwarded = 0;
+        for _ in 0..10 {
+            validator
+                .accept(
+                    serde_json::json!({"choices":[{
+                        "index":0,"delta":{"tool_calls":[{"index":0,
+                            "function":{"arguments":fragment}}]},"finish_reason":null
+                    }]}),
+                    |delta| {
+                        if let CompletionDelta::ToolCall {
+                            arguments: Some(args),
+                            ..
+                        } = delta
+                        {
+                            forwarded += args.len();
+                        }
+                    },
+                )
+                .unwrap();
+        }
+        assert!(forwarded > 256 * 1024);
+        assert_eq!(validator.tools.calls.len(), 65);
+        // Arguments have no effect on the retained metadata allowance.
+        let retained = validator.tools.retained_bytes;
+        validator
+            .accept(
+                serde_json::json!({"choices":[{
+                    "index":0,"delta":{},"finish_reason":"tool_calls"
+                }]}),
+                |_| {},
+            )
+            .unwrap();
+        validator
+            .accept(
+                serde_json::json!({"choices":[],"usage":{
+                    "prompt_tokens":1,"completion_tokens":1,"total_tokens":2
+                }}),
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(validator.tools.retained_bytes, retained);
+        validator.eof_completion().unwrap();
+    }
+
+    #[test]
+    fn retained_tool_metadata_is_charged_before_growth() {
+        let mut tools = ToolState::default();
+        loop {
+            let call: ChatCompletionMessageToolCallChunk =
+                serde_json::from_value(serde_json::json!({"index":tools.calls.len()})).unwrap();
+            let before = tools.calls.len();
+            match tools.proposed(&[call]) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert!(before > 64);
+                    assert_eq!(error.failure(), InferenceFailure::ToolStateTooLarge);
+                    assert_eq!(tools.calls.len(), before);
+                    break;
+                }
+            }
+        }
+        let mut tools = ToolState {
+            calls: vec![CallState::default()],
+            retained_bytes: MAX_REQUEST_BODY_BYTES - 1,
+        };
+        let call = serde_json::from_value(serde_json::json!({"index":0,"id":"a"})).unwrap();
+        assert_eq!(
+            tools.proposed(&[call]).err().unwrap().failure(),
+            InferenceFailure::ToolStateTooLarge
+        );
+        assert!(tools.calls[0].id.is_none());
+    }
+
+    #[test]
     fn sdk_semantic_categories_are_atomic_and_absorbing() {
         use serde_json::json;
         use InferenceFailure::*;
@@ -1129,13 +1228,6 @@ mod tests {
                 vec![],
                 delta(json!({"tool_calls":[call(0,"a",&"n".repeat(65),"{}".into())]})),
                 ToolIdentityInvalid,
-            ),
-            (
-                vec![],
-                delta(
-                    json!({"tool_calls":[call(0,"a","lookup","x".repeat(MAX_ARGUMENT_BYTES + 1))]}),
-                ),
-                ToolArgumentsTooLarge,
             ),
             (vec![], finish("content_filter"), StreamFinishInvalid),
             (

@@ -27,7 +27,7 @@ export function toolName(value: unknown): asserts value is string {
 export function toolID(value: unknown): asserts value is string {
   requireThat(typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value));
 }
-export function objectArguments(value: unknown, cap = LIMITS.toolArguments): number {
+export function objectArguments(value: unknown, cap = LIMITS.chat): number {
   requireThat(typeof value === 'string' && value.length <= cap);
   const bytes = utf8.encode(value);
   const parsed = parseJSON(bytes, cap);
