@@ -187,10 +187,6 @@ export class PossumsProvider implements Provider {
   private sessionClosed = true;
   private reconciliation: { before: BalanceSnapshot; charged: bigint; completed: bigint; unknown: boolean } | undefined;
   private reconciliationEpoch = 0;
-  private pendingInput: boolean | undefined;
-  private renewalArmed = false;
-  private renewalSignal: AbortSignal | undefined;
-  private renewalCandidateSignal: AbortSignal | undefined;
   private renewalController: AbortController | undefined;
   private renewalRequired = false;
   private renewalFailure: ConnectionFailure | undefined;
@@ -278,12 +274,9 @@ export class PossumsProvider implements Provider {
       return isRecoveryKey(result?.auth.apiKey) ? { type: 'api_key', source: result.source } : undefined;
     },
     resolve: async input => {
-      // Consume once, before any await or expiry decision. Refresh/compaction
-      // signals cannot borrow an explicit run's permission; retries get none.
+      // Availability and status cannot initiate renewal. Model invocations
+      // outside the native auth signal use the same scoped path in perform().
       const diagnosticAttempt = this.activeRunSignal !== undefined && this.activeRunSignal === input.signal;
-      const mayRenew = this.renewalSignal !== undefined && this.renewalSignal === input.signal;
-      if (mayRenew) this.renewalSignal = undefined;
-      if (this.renewalCandidateSignal === input.signal) this.renewalCandidateSignal = undefined;
       const account = this.accountEpoch;
       let result;
       try { result = await recoveryAuth.resolve(input); }
@@ -305,7 +298,7 @@ export class PossumsProvider implements Provider {
       }
       let current = this.authEpoch;
       if (this.recoveryBlocked) throw this.recoveryBlocked;
-      if ((mayRenew || (this.activeRunSignal !== undefined && this.activeRunSignal === input.signal)) && (this.renewalRequired ||
+      if (diagnosticAttempt && (this.renewalRequired ||
         (this.release !== undefined && Date.now() >= this.release.expires) ||
         (this.client?.authExpiresAt !== undefined && Date.now() >= this.client.authExpiresAt))) {
         current = await this.joinRenewal(key, input.signal);
@@ -518,35 +511,13 @@ export class PossumsProvider implements Provider {
   }
 
   getModels(): readonly Model<typeof API>[] { return this.listed.length ? this.listed : this.discovery; }
-  markInput(explicit: boolean, activeSignal?: AbortSignal): void {
-    // Overlapping/handled idle inputs have no durable Pi submission ID. Deny
-    // ambiguous correlation rather than lend human permission to another input.
-    this.pendingInput = this.pendingInput === undefined ? explicit : false;
-    if (!activeSignal) this.renewalArmed = false;
-  }
   beginRun(): void {
     this.epoch++;
     if (!this.runScope) this.runScope = { account: this.accountEpoch, attempts: 0, controller: new AbortController(), waiters: 0 };
-    this.renewalArmed = this.pendingInput === true;
-    this.pendingInput = undefined;
   }
-  bindRun(signal?: AbortSignal): void {
-    this.activeRunSignal = signal;
-    this.renewalSignal = undefined;
-    this.renewalCandidateSignal = this.renewalArmed && signal && !signal.aborted ? signal : undefined;
-    this.renewalArmed = false;
-  }
-  confirmRunInput(user: boolean, signal?: AbortSignal): void {
-    // Native prompt runs emit an initial user message before request auth;
-    // sendCustomMessage can start a nested run without input/before_agent_start.
-    // Only the first non-system message can confirm the marked candidate.
-    if (this.renewalCandidateSignal && this.renewalCandidateSignal === signal) {
-      this.renewalSignal = user ? signal : undefined;
-      this.renewalCandidateSignal = undefined;
-    }
-  }
-  endRun(): void { this.activeRunSignal = undefined; this.renewalSignal = undefined; this.renewalCandidateSignal = undefined; this.renewalArmed = false; }
-  settleRun(): void { this.endRun(); this.pendingInput = undefined; this.runScope?.controller.abort(); this.runScope = undefined; }
+  bindRun(signal?: AbortSignal): void { this.activeRunSignal = signal; }
+  endRun(): void { this.activeRunSignal = undefined; }
+  settleRun(): void { this.endRun(); this.runScope?.controller.abort(); this.runScope = undefined; }
   newSession(): void {
     this.shutdown();
     this.sessionClosed = false;
@@ -765,10 +736,6 @@ export class PossumsProvider implements Provider {
   }
 
   private perform(selected: Model<typeof API>, context: TranscriptContext, options: RequestOptions = {}, summary?: () => void): AssistantMessageEventStream {
-    // A direct/nested stream that bypasses native auth must not leave renewal
-    // permission available after generation has already been attempted.
-    if (options.signal === this.renewalSignal) this.renewalSignal = undefined;
-    if (options.signal === this.renewalCandidateSignal) this.renewalCandidateSignal = undefined;
     const events = createAssistantMessageEventStream();
     const output = blank(selected);
     const epoch = this.epoch;
