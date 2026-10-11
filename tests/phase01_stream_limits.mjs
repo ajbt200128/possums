@@ -72,11 +72,15 @@ try {
   assert.equal((await consume()).chargedMicrounits, '7');
   assert.ok(emittedFrames > 65536 && encryptedBytes > 64 * 1024 * 1024);
   longFrames = emittedFrames; longBytes = encryptedBytes;
+  const oversizedEvent = enc.encode('data: ' + 'x'.repeat(m.LIMITS.sseEvent) + '\n\n');
   for (const [values, expected] of [
     [[role, repeated], 'finish_missing'], [[role, finish, done], 'usage_missing'],
     [[role, finish, receipt], 'done_missing'], [[role, finish, receipt, done, repeated], 'envelope'],
     [[enc.encode('data: {hostile}\n\n')], 'json'], [[new Uint8Array([255])], 'utf8'],
-    [[enc.encode('data: ' + 'x'.repeat(m.LIMITS.sseEvent) + '\n\n')], 'envelope'],
+    // A native event may span individually valid encrypted frames. Exercise
+    // its record ceiling without failing the independent ciphertext-frame cap.
+    [Array.from({ length: Math.ceil(oversizedEvent.length / m.LIMITS.chunk) }, (_, i) =>
+      oversizedEvent.slice(i * m.LIMITS.chunk, (i + 1) * m.LIMITS.chunk)), 'envelope'],
   ]) { parts = values; await negative(expected); }
   parts = [role, finish, receipt, done]; failEOF = true; await negative('fetch'); failEOF = false;
   parts = [role, finish, receipt, done]; mode = 'corrupt'; await negative('decryption');
