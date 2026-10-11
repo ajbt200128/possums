@@ -31,7 +31,7 @@ pub const MAX_TRAILER_BYTES: usize = 64 * 1024;
 /// backing; retain the whole chunk while feeding bounded slices, not a full answer.
 /// Producer/TLS allocations are separate from this parser limit.
 pub const MAX_TRANSPORT_BUFFER_BYTES: usize = 256 * 1024;
-const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// Send/response-header bound only; never a generation lifetime.
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -1209,6 +1209,35 @@ mod tests {
         }
         assert_eq!(scopes[0].len(), 43);
         assert_ne!(scopes[0], scopes[1]);
+    }
+
+    #[test]
+    fn streaming_request_full_envelope_boundary_is_thirty_two_mib() {
+        assert_eq!(MAX_REQUEST_BODY_BYTES, 32 * 1024 * 1024);
+        let mut messages = [Message {
+            role: "user".into(),
+            content: String::new(),
+        }];
+        let overhead = generation_bytes(
+            super::super::text_request("fixture", &messages).unwrap(),
+            99,
+        )
+        .unwrap()
+        .len();
+        messages[0].content = "x".repeat(MAX_REQUEST_BODY_BYTES - overhead);
+        let encoded = generation_bytes(
+            super::super::text_request("fixture", &messages).unwrap(),
+            99,
+        )
+        .unwrap();
+        assert_eq!(encoded.len(), MAX_REQUEST_BODY_BYTES);
+        drop(encoded);
+        messages[0].content.push('x');
+        assert!(generation_bytes(
+            super::super::text_request("fixture", &messages).unwrap(),
+            99
+        )
+        .is_err());
     }
 
     #[test]

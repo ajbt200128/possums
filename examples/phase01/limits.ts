@@ -1,6 +1,6 @@
 // Defensive client ceilings, not model/context limits or a whole-runtime RSS bound.
 export const LIMITS = Object.freeze({
-  chat: 8 * 1024 * 1024, control: 4096, evidence: 64 * 1024,
+  chat: 32 * 1024 * 1024, control: 4096, evidence: 64 * 1024,
   bundle: 1024 * 1024, provenance: 512 * 1024, certificate: 16 * 1024,
   key: 41, report: 1184, catalog: 256 * 1024, error: 4096,
   // Nested tool schemas need headroom for the surrounding request envelope.

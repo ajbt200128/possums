@@ -24,7 +24,7 @@ const MAX_EVIDENCE_FIELD_BYTES: usize = 4 * 1024;
 const MAX_EVIDENCE_STRING_BYTES: usize = 16 * 1024;
 const MAX_EVIDENCE_REGISTERS: usize = 32;
 const MAX_VERIFICATION_DOCUMENT_BYTES: usize = 128 * 1024;
-const MAX_TOKENIZER_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TOKENIZER_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Message {
@@ -783,6 +783,22 @@ mod stream_probe_tests {
             assert!(!format!("{error:?} {error}").contains("private-provider-marker"));
             drop(body);
         }
+    }
+
+    #[test]
+    fn tokenizer_request_full_envelope_boundary_is_thirty_two_mib() {
+        assert_eq!(MAX_TOKENIZER_REQUEST_BYTES, 32 * 1024 * 1024);
+        let mut messages = [Message {
+            role: "user".into(),
+            content: String::new(),
+        }];
+        let overhead = tokenizer_request_bytes("fixture", &messages).unwrap().len();
+        messages[0].content = "x".repeat(MAX_TOKENIZER_REQUEST_BYTES - overhead);
+        let encoded = tokenizer_request_bytes("fixture", &messages).unwrap();
+        assert_eq!(encoded.len(), MAX_TOKENIZER_REQUEST_BYTES);
+        drop(encoded);
+        messages[0].content.push('x');
+        assert!(tokenizer_request_bytes("fixture", &messages).is_err());
     }
 
     #[test]

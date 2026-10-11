@@ -685,12 +685,14 @@ async fn large_synthetic_history_and_catalog_reach_upstream_within_body_bound() 
 }
 
 #[tokio::test]
-async fn near_eight_mib_api_history_is_not_product_capped_or_replayed() {
+async fn near_thirty_two_mib_api_history_is_not_product_capped_or_replayed() {
     let (state, provider, bearer, submission) = fixture(5_000_000);
     let mut input = json!({"model":"m","stream":true,"stream_options":{"include_usage":true},
         "submission": submission, "messages":[{"role":"user","content":""}]});
     input["messages"][0]["content"] = json!("x".repeat(BODY_LIMIT - 512));
     let wire = input.to_string();
+    assert_eq!(BODY_LIMIT, 32 * 1024 * 1024);
+    assert!(wire.len() > 8 * 1024 * 1024);
     assert!(wire.len() < BODY_LIMIT && wire.len() > BODY_LIMIT - 1024);
     let response = router(state.clone())
         .oneshot(

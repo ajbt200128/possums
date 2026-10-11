@@ -19,7 +19,7 @@ fn admission() -> (Arc<Semaphore>, Arc<crate::telemetry::hooks::Lease>) {
 fn messages() -> [Message; 1] {
     [Message {
         role: "user".into(),
-        // Near the production 16-MiB serialized ceiling, beyond socket buffers.
+        // Near the production 32-MiB serialized ceiling, beyond socket buffers.
         content: "x".repeat(MAX_TOKENIZER_REQUEST_BYTES - 1024),
     }]
 }

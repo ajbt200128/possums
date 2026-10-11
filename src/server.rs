@@ -47,19 +47,18 @@ pub(crate) mod resource_streaming_tests;
 #[cfg(test)]
 mod timeout_tests;
 
-pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
-const BODY_DEADLINE: Duration = Duration::from_secs(30);
+pub const BODY_LIMIT: usize = 32 * 1024 * 1024;
+const BODY_DEADLINE: Duration = Duration::from_secs(600);
+const CONTROL_BODY_DEADLINE: Duration = Duration::from_secs(30);
 const HEADER_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_CONNECTIONS: usize = 64;
 const MAX_HEADERS: usize = 64;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
-// Scoped admission targets, not measured RSS or a whole-process memory proof:
-// 4 * (104 MiB heavy + 16 MiB ingress). Control requests have no
-// shared admission envelope.
 // Heavy is acquired BEFORE raw collection/decoding and covers decoded JSON,
 // tokenizer, streaming inference and delivery overlap. Ingress covers raw input
-// storage; it is NOT a standalone allowance for decoded history. SDK/TLS, shared
-// auth/accounting state and allocator overhead are outside these envelopes.
+// storage; it is NOT a standalone allowance for decoded history. The larger
+// chat body ceiling invalidates the former per-lane memory targets; finite
+// allocation fixtures do not establish a whole-process or SDK/TLS memory bound.
 const CHAT_LANES: usize = 4;
 // Control requests and unknown routes have bounded bodies.
 const CONTROL_BODY_LIMIT: usize = 4 * 1024;
@@ -538,6 +537,11 @@ async fn total_body_deadline(
         None
     };
     let limit = if chat { BODY_LIMIT } else { CONTROL_BODY_LIMIT };
+    let deadline = if chat {
+        deadline
+    } else {
+        deadline.min(CONTROL_BODY_DEADLINE)
+    };
     let (parts, body) = request.into_parts();
     let bytes = match tokio::time::timeout(deadline, collect_request(body, limit)).await {
         Ok(Ok(bytes)) => bytes,
@@ -567,7 +571,7 @@ async fn total_body_deadline(
 }
 
 async fn collect_request(mut body: Body, limit: usize) -> Result<Bytes, ()> {
-    // Do not collect a list of frames: an 8-MiB one-byte-fragmented request
+    // Do not collect a list of frames: a 32-MiB one-byte-fragmented request
     // otherwise retains millions of frame headers before coalescing. One fixed
     // allocation, one borrowed incoming frame, no growth/copy-overlap or queue.
     let mut bytes = Vec::with_capacity(limit);

@@ -1,6 +1,8 @@
 //! Isolated API route allocation qualification. Requested bytes, not RSS or an
 //! SDK/TLS/helper-process bound; no real content or credentials enter this fixture.
 //! Control overlap is a finite fixture, not a shared control-memory bound.
+//! The 32-MiB chat ceiling invalidates the old 512-MiB fixture target; the
+//! 1-GiB test threshold below is only a finite synthetic regression guard.
 use super::*;
 use crate::{
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
@@ -27,6 +29,7 @@ use std::{
 use tower::ServiceExt;
 
 const MIB: usize = 1024 * 1024;
+const FIXTURE_ALLOCATION_LIMIT: usize = 1024 * MIB;
 const TIMEOUT: Duration = Duration::from_secs(30);
 const CREDIT: u64 = 1_000_000_000;
 fn model(n: usize) -> String {
@@ -38,7 +41,7 @@ fn catalog() -> Vec<u8> {
         if n != 0 {
             wire.push(',');
         }
-        write!(wire, "{{\"id\":\"{}\",\"type\":\"chat\",\"context_window\":16000000,\"endpoints\":[\"/v1/chat/completions\"],\"pricing\":{{\"inputTokenPricePer1M\":1,\"outputTokenPricePer1M\":1,\"requestPrice\":0}}}}", model(n)).unwrap();
+        write!(wire, "{{\"id\":\"{}\",\"type\":\"chat\",\"context_window\":64000000,\"endpoints\":[\"/v1/chat/completions\"],\"pricing\":{{\"inputTokenPricePer1M\":1,\"outputTokenPricePer1M\":1,\"requestPrice\":0}}}}", model(n)).unwrap();
     }
     wire.push_str("],\"padding\":\"");
     wire.extend(std::iter::repeat_n('p', MAX_CATALOG_BYTES - wire.len() - 2));
@@ -54,7 +57,7 @@ fn phase(name: &str, baseline: Snapshot) {
         now.phase_peak.saturating_sub(baseline.live)
     );
     assert!(
-        now.phase_peak.saturating_sub(baseline.live) <= 512 * MIB,
+        now.phase_peak.saturating_sub(baseline.live) <= FIXTURE_ALLOCATION_LIMIT,
         "finite-fixture requested allocations at {name}: {now:?} baseline={baseline:?}"
     );
     ALLOCATOR.begin_phase();
@@ -212,7 +215,7 @@ impl Fixture {
                 while let Some(frame) = body.frame().await {
                     if let Ok(data) = frame.unwrap().into_data() {
                         bytes += data.len() as u64;
-                        assert!(bytes <= 16 * MIB as u64);
+                        assert!(bytes <= BODY_LIMIT as u64);
                     }
                 }
                 bytes.to_string()
@@ -267,7 +270,7 @@ impl Fixture {
         );
         match shape {
             0 => {
-                // Dense 2,000-message history with long strings, near API body limit.
+                // Dense 2,000-message history with long strings (about 8 MiB, below API body limit).
                 for n in 0..2_000 {
                     if n != 0 {
                         wire.push(',');
@@ -518,7 +521,7 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
             capacity.strings,
             capacity.prompt
         );
-        assert!(capacity.vector_bytes + capacity.strings + capacity.prompt <= 32 * MIB);
+        assert!(capacity.vector_bytes + capacity.strings + capacity.prompt <= 2 * BODY_LIMIT + MIB);
     }
     drop(f);
     phase("fixture-released", baseline);

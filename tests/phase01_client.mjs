@@ -10,6 +10,14 @@ export async function clientCases(moduleURL) {
   const m = await import(moduleURL);
   let count = 0;
   const check = ok => { if (!ok) throw new Error('client contract check'); count++; };
+  check(m.LIMITS.chat === 32 * 1024 * 1024 && m.LIMITS.control === 4096);
+  const largeChat = { model: 'fixture', stream: true, submission: 's'.repeat(43),
+    messages: [{ role: 'user', content: 'x'.repeat(9 * 1024 * 1024) }] };
+  check(m.encodeChat(largeChat).length > 8 * 1024 * 1024);
+  let oversizedChatRejected = false;
+  try { m.encodeChat({ ...largeChat, messages: [{ role: 'user', content: 'x'.repeat(m.LIMITS.chat) }] }); }
+  catch { oversizedChatRejected = true; }
+  check(oversizedChatRejected);
   const requestFailure = new m.BalanceFailure('request');
   const validationFailure = new m.BalanceFailure('validation');
   check(requestFailure instanceof m.BalanceFailure && requestFailure.code === 'rejected' && requestFailure.message === 'possums_balance_request_failed');
