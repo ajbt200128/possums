@@ -106,7 +106,12 @@ impl Catalog {
                 return Err(CatalogError::Invalid);
             }
             let input_price = scaled_price(&input_price)?;
-            let cached_input = upstream_model.pricing.cached_input.as_ref().map(scaled_amount).transpose()?;
+            let cached_input = upstream_model
+                .pricing
+                .cached_input
+                .as_ref()
+                .map(scaled_amount)
+                .transpose()?;
             if cached_input.is_some_and(|cached| cached > input_price) {
                 return Err(CatalogError::Invalid);
             }
@@ -208,7 +213,9 @@ fn valid_model(model: &Model) -> bool {
         && model.max_output_tokens <= model.context_tokens
         && model.input_microunits_per_million_tokens > 0
         && model.output_microunits_per_million_tokens > 0
-        && model.cached_input_microunits_per_million_tokens.is_none_or(|cached| cached <= model.input_microunits_per_million_tokens)
+        && model
+            .cached_input_microunits_per_million_tokens
+            .is_none_or(|cached| cached <= model.input_microunits_per_million_tokens)
 }
 
 pub(crate) fn marked_up_cost(
@@ -217,7 +224,14 @@ pub(crate) fn marked_up_cost(
     input_price: u64,
     output_price: u64,
 ) -> Result<u64, CatalogError> {
-    cached_cost(input_tokens, output_tokens, 0, input_price, output_price, input_price)
+    cached_cost(
+        input_tokens,
+        output_tokens,
+        0,
+        input_price,
+        output_price,
+        input_price,
+    )
 }
 
 pub(crate) fn cached_cost(
@@ -228,8 +242,12 @@ pub(crate) fn cached_cost(
     output_price: u64,
     cached_price: u64,
 ) -> Result<u64, CatalogError> {
-    let uncached = input_tokens.checked_sub(cached_tokens).ok_or(CatalogError::Invalid)?;
-    let cached = u128::from(cached_tokens).checked_mul(u128::from(cached_price)).ok_or(CatalogError::Overflow)?;
+    let uncached = input_tokens
+        .checked_sub(cached_tokens)
+        .ok_or(CatalogError::Invalid)?;
+    let cached = u128::from(cached_tokens)
+        .checked_mul(u128::from(cached_price))
+        .ok_or(CatalogError::Overflow)?;
     let input = u128::from(uncached)
         .checked_mul(u128::from(input_price))
         .ok_or(CatalogError::Overflow)?;

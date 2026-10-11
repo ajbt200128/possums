@@ -167,7 +167,12 @@ impl Accounting {
         self.finish_cached(submission_id, usage, 0)
     }
 
-    pub(crate) fn finish_cached(&self, submission_id: [u8; 32], usage: Option<FinalUsage>, cached: u64) -> Result<Outcome, AccountingError> {
+    pub(crate) fn finish_cached(
+        &self,
+        submission_id: [u8; 32],
+        usage: Option<FinalUsage>,
+        cached: u64,
+    ) -> Result<Outcome, AccountingError> {
         let mut state = self
             .state
             .lock()
@@ -193,7 +198,11 @@ impl Accounting {
                 cached,
                 submission.quote.model.input_microunits_per_million_tokens,
                 submission.quote.model.output_microunits_per_million_tokens,
-                submission.quote.model.cached_input_microunits_per_million_tokens.unwrap_or(submission.quote.model.input_microunits_per_million_tokens),
+                submission
+                    .quote
+                    .model
+                    .cached_input_microunits_per_million_tokens
+                    .unwrap_or(submission.quote.model.input_microunits_per_million_tokens),
             )
             .ok()
         });
@@ -291,17 +300,57 @@ mod tests {
     fn cache_split_rounds_once_at_submitted_rates_and_caps_liability() {
         for (cap, expected) in [(100, 4), (2, 2)] {
             let ledger = Accounting::new([("a".into(), 100)]);
-            let mut quote = quote(); quote.reserved_microunits = cap;
+            let mut quote = quote();
+            quote.reserved_microunits = cap;
             quote.model.cached_input_microunits_per_million_tokens = Some(0);
-            ledger.reserve("a", [1;32], [2;32], quote, Instant::now() + Duration::from_secs(60)).unwrap();
-            let usage = Some(FinalUsage { input_tokens: 3, output_tokens: 2, total_tokens: 5 });
-            assert_eq!(ledger.finish_cached([1;32], usage, 2).unwrap(), Outcome::Settled { charged: expected });
+            ledger
+                .reserve(
+                    "a",
+                    [1; 32],
+                    [2; 32],
+                    quote,
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap();
+            let usage = Some(FinalUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                total_tokens: 5,
+            });
+            assert_eq!(
+                ledger.finish_cached([1; 32], usage, 2).unwrap(),
+                Outcome::Settled { charged: expected }
+            );
             assert_eq!(ledger.available("a"), Some(100 - expected));
-            assert_eq!(ledger.finish([1;32], None).unwrap(), Outcome::Settled { charged: expected });
+            assert_eq!(
+                ledger.finish([1; 32], None).unwrap(),
+                Outcome::Settled { charged: expected }
+            );
         }
         let ledger = Accounting::new([("a".into(), 100)]);
-        ledger.reserve("a", [1;32], [2;32], quote(), Instant::now() + Duration::from_secs(60)).unwrap();
-        assert_eq!(ledger.finish_cached([1;32], Some(FinalUsage { input_tokens: 1, output_tokens: 1, total_tokens: 2 }), 2).unwrap(), Outcome::Refunded);
+        ledger
+            .reserve(
+                "a",
+                [1; 32],
+                [2; 32],
+                quote(),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
+        assert_eq!(
+            ledger
+                .finish_cached(
+                    [1; 32],
+                    Some(FinalUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        total_tokens: 2
+                    }),
+                    2
+                )
+                .unwrap(),
+            Outcome::Refunded
+        );
     }
 
     #[test]
