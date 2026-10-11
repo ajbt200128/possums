@@ -494,7 +494,11 @@ export class PossumsProvider implements Provider {
           } finally { op.close(); }
         }
         scope.terminal = last ?? new ConnectionFailure('session_unavailable');
+        check();
         this.recoveryBlocked = scope.terminal;
+        this.client = undefined; this.catalog = []; this.listed = []; this.restoring = undefined;
+        this.reconciliationEpoch++; this.reconciliation = undefined;
+        try { this.observeFailure(scope.terminal); } catch { /* Transient UI only. */ }
         throw scope.terminal;
       })();
       scope.pending = pending;
@@ -675,6 +679,7 @@ export class PossumsProvider implements Provider {
     const selected = ctx.model;
     const epoch = this.epoch;
     const accountEpoch = this.accountEpoch;
+    const idleScope = !this.runScope;
     const scope = this.runScope ?? (this.runScope = { account: accountEpoch, attempts: 0, controller: new AbortController(), waiters: 0 });
     let closed = false;
     let stage = 'authorization';
@@ -732,7 +737,7 @@ export class PossumsProvider implements Provider {
       try { ctx.ui.notify(`Possums compaction (${stage}): ${failure ?? safeFailure(error, false, 'compaction')}${billing} No checkpoint saved. Not replayed. Use /compact deliberately or /new.`, 'warning'); }
       catch { /* Transient UI only; never log or persist failed summaries. */ }
       return { cancel: true };
-    } finally { closed = true; if (!this.activeRunSignal && this.runScope === scope) { scope.controller.abort(); this.runScope = undefined; } }
+    } finally { closed = true; if (idleScope && this.runScope === scope) { scope.controller.abort(); this.runScope = undefined; } }
   }
 
   private perform(selected: Model<typeof API>, context: TranscriptContext, options: RequestOptions = {}, summary?: () => void): AssistantMessageEventStream {

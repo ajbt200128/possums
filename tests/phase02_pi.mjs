@@ -2211,6 +2211,12 @@ await check('summary success/failure preserves native continuation and ordinary 
   assert.deepEqual(f.s.requests.map(r=>r.newConversation),[true,true,false,false]);assert.equal(f.s.sends(),4);
  }
 });
+await check('auto compaction preserves its pre-existing run budget until agent_settled',async()=>{
+ const f=await compactionFixture(['stop']);f.provider.beginRun();const scope=f.provider.runScope;
+ f.provider.endRun();assert((await f.run()).compaction);
+ assert.equal(f.provider.runScope,scope);
+ f.provider.settleRun();assert.equal(f.provider.runScope,undefined);
+});
 await check('native idle split compaction reauthenticates known expiry once across two summary setups',async()=>{
  const f=await compactionFixture(['stop','stop'],true);
  const before=f.trace.keys.length;
