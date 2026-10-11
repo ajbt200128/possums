@@ -455,6 +455,87 @@ await check('caller-wide pre-dispatch recovery shares three attempts across turn
   assert(!exhausted.errorMessage.includes(recoveryKey));
  }finally{provider.settleRun();}
 });
+await check('direct and nested model callbacks without beginRun share one three-attempt recovery scope',async()=>{
+ const source=await setup([]),first=freshFixture(source.client);let stale=false,probes=0;
+ first.models=async()=>{if(stale)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+  return m.validateModels({object:'list',data:[entry(true)]});};
+ first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{
+  probes++;throw new m.ConnectionFailure('evidence_unavailable',new m.EvidenceObservation('gateway_keys','http',503));
+ });
+ await provider.auth.apiKey.login(interaction());stale=true;
+ const a=provider.streamSimple(provider.getModels()[0],context(false)).result();
+ const b=provider.streamSimple(provider.getModels()[0],context(false)).result();
+ const [one,two]=await Promise.all([a,b]);
+ assert.match(one.errorMessage,/possums_evidence_unavailable/);assert.match(two.errorMessage,/possums_evidence_unavailable/);
+ assert.equal(probes,3);assert.equal(provider.runScope.attempts,3);
+ assert.match((await provider.streamSimple(provider.getModels()[0],context(false)).result()).errorMessage,/possums_evidence_unavailable/);
+ assert.equal(probes,3);assert.equal(source.sends(),0);
+ provider.settleRun();
+});
+await check('direct known expiry and catalog rejection share three attempts without resetting on callbacks',async()=>{
+ const source=await setup([]),first=freshFixture(source.client);let models=0,probes=0,logins=0;
+ first.models=async()=>{if(++models>2)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+  return m.validateModels({object:'list',data:[entry(true)]});};
+ first.login=async()=>{logins++;};first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{
+  probes++;const candidate=freshFixture(source.client);let checks=0;
+  candidate.models=async()=>{if(++checks>1)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+   return m.validateModels({object:'list',data:[entry(true)]});};
+  mockPreparation(candidate);candidate.freshSession=()=>freshFixture(candidate);return candidate;
+ });
+ await provider.auth.apiKey.login(interaction());Object.defineProperty(provider.client,'authExpiresAt',{value:0});
+ const unscoped=await provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey}));
+ assert.equal(unscoped.auth.apiKey,requestMarker);assert.equal(logins,1,'availability cannot initiate expiry renewal');
+ assert.equal(provider.runScope,undefined);
+ const a=provider.streamSimple(provider.getModels()[0],context(false)).result();
+ const b=provider.streamSimple(provider.getModels()[0],context(false)).result();
+ const results=await Promise.all([a,b]);
+ assert(results.every(result=>result.stopReason==='error'));assert.equal(logins,2,'overlapping renewal is coalesced');
+ assert.equal(probes,2);assert.equal(provider.runScope.attempts,3);
+ await provider.streamSimple(provider.getModels()[0],context(false)).result();
+ assert.equal(probes,2);assert.equal(logins,2);assert.equal(source.sends(),0);
+ provider.settleRun();
+});
+await check('overlapping expiry renewal and public setup recovery cannot race publication or double-spend',async()=>{
+ const source=await setup(['stop']),first=freshFixture(source.client),entered=deferred(),release=deferred();
+ let logins=0,probes=0;
+ first.login=async()=>{if(++logins===2){entered.resolve();await release.promise;}};
+ first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;throw new Error('must not probe');});
+ await provider.auth.apiKey.login(interaction());Object.defineProperty(provider.client,'authExpiresAt',{value:0});
+ const request=provider.streamSimple(provider.getModels()[0],context(false)).result();await entered.promise;
+ const setupRecovery=provider.recoverSetup(provider.runScope);
+ assert.equal(provider.client.authExpiresAt,0,'old session remains published but unavailable for dispatch');
+ assert.equal(source.sends(),0);release.resolve();await setupRecovery;
+ assert.equal((await request).stopReason,'stop');assert.equal(probes,0);assert.equal(logins,2);
+ assert.equal(provider.runScope.attempts,1);assert.equal(source.sends(),1);provider.settleRun();
+});
+await check('prelatch guard refuses old prepared client after concurrent expiry renewal',async()=>{
+ const source=await setup(['stop']),first=freshFixture(source.client),entered=deferred(),release=deferred();
+ first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>first);await provider.auth.apiKey.login(interaction());
+ const selected=provider.getModels()[0];
+ const old=provider.streamSimple(selected,context(false),{onPayload:async()=>{entered.resolve();await release.promise;}}).result();
+ await entered.promise;Object.defineProperty(provider.client,'authExpiresAt',{value:0});
+ const current=provider.streamSimple(selected,context(false)).result();
+ assert.equal((await current).stopReason,'stop');release.resolve();
+ const obsolete=await old;assert.equal(obsolete.stopReason,'error');assert.equal(source.sends(),1);
+ provider.settleRun();
+});
+await check('failed direct expiry renewal keeps old snapshot but blocks dispatch and repeat verification',async()=>{
+ const source=await setup([]),first=freshFixture(source.client);let verifies=0;
+ first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>{verifies++;if(verifies>1)throw new m.ConnectionFailure('verification_failed');return first;});
+ await provider.auth.apiKey.login(interaction());const original=provider.client,listed=provider.getModels();
+ Object.defineProperty(provider.verifiedTemplate.channel,'release',{value:{tag:'synthetic',expires:0},configurable:true});
+ const firstResult=await provider.streamSimple(listed[0],context(false)).result();
+ assert.match(firstResult.errorMessage,/possums_verification_failed/);assert.equal(provider.client,original);
+ assert.deepEqual(provider.getModels(),listed);assert.equal(provider.renewalRequired,true);
+ const second=await provider.streamSimple(listed[0],context(false)).result();
+ assert.equal(second.stopReason,'error');assert.equal(verifies,2);assert.equal(source.sends(),0);
+ provider.settleRun();
+});
 await check('coalesced recovery survives one caller abort; external logout suppresses late publication',async()=>{
  const source=await setup(['stop']);const first=freshFixture(source.client);
  const good=()=>{
@@ -514,6 +595,53 @@ await check('local pre-dispatch submission binding 422 alone can probe; uncertai
  const result=await provider.streamSimple(provider.getModels()[0],context(false)).result();
  assert.equal(result.stopReason,'stop');assert.equal(probes,1);assert.equal(source.sends(),1);
  assert.deepEqual(result.diagnostics.map(value=>value.type),['possums_settled_receipt','possums_billing_unknown']);
+ provider.settleRun();
+});
+await check('authenticated submission unauthorized 401/403 probes only before dispatch and retains unknown control billing',async()=>{
+ for(const status of [401,403]){
+  const source=await setup(['stop']),first=freshFixture(source.client),candidate=freshFixture(source.client);
+  first.models=async()=>m.validateModels({object:'list',data:[entry(true)]});
+  first.chatPrepared=async()=>{throw new m.GatewayError('unauthorized',undefined,'unknown',status);};
+  first.freshSession=()=>{const fresh=freshFixture(first);fresh.chatPrepared=first.chatPrepared;return fresh;};
+  candidate.models=async()=>m.validateModels({object:'list',data:[entry(true)]});
+  mockPreparation(candidate);candidate.freshSession=()=>freshFixture(candidate);
+  let probes=0;
+  const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;return candidate;});
+  await provider.auth.apiKey.login(interaction());
+  const output=await provider.streamSimple(provider.getModels()[0],context(false)).result();
+  assert.equal(output.stopReason,'stop');assert.equal(probes,1);assert.equal(source.sends(),1);
+  assert.deepEqual(output.diagnostics.map(value=>value.type),['possums_settled_receipt','possums_billing_unknown']);
+  provider.settleRun();
+ }
+ for(const error of [new m.GatewayError('unauthorized',undefined,'unknown',400),
+  new m.GatewayError('invalid_request',undefined,'unknown',401)]){
+  const source=await setup([]),first=freshFixture(source.client);let probes=0;
+  first.chatPrepared=async()=>{throw error;};first.freshSession=()=>{const fresh=freshFixture(first);fresh.chatPrepared=first.chatPrepared;return fresh;};
+  const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;throw new Error('must not probe');});
+  await provider.auth.apiKey.login(interaction());
+  assert.equal((await provider.streamSimple(provider.getModels()[0],context(false)).result()).stopReason,'error');
+  assert.equal(probes,0);assert.equal(source.sends(),0);provider.settleRun();
+ }
+ const source=await setup([]),first=freshFixture(source.client);let probes=0;
+ first.chatPrepared=async prepared=>{prepared.dispatched=true;throw new m.GatewayError('unauthorized',undefined,'unknown',401);};
+ first.freshSession=()=>{const fresh=freshFixture(first);fresh.chatPrepared=first.chatPrepared;return fresh;};
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;throw new Error('must not probe');});
+ await provider.auth.apiKey.login(interaction());
+ assert.equal((await provider.streamSimple(provider.getModels()[0],context(false)).result()).stopReason,'error');
+ assert.equal(probes,0);assert.equal(source.sends(),0);provider.settleRun();
+});
+await check('unchanged public evidence after authenticated submission unauthorized stops without reauthenticating',async()=>{
+ const source=await setup([]),first=freshFixture(source.client);let probes=0,logins=0;
+ first.login=async()=>{logins++;};first.chatPrepared=async()=>{throw new m.GatewayError('unauthorized',undefined,'unknown',401);};
+ first.freshSession=()=>{const fresh=freshFixture(first);fresh.chatPrepared=first.chatPrepared;return fresh;};
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;throw new m.ConnectionFailure('evidence_unchanged');});
+ await provider.auth.apiKey.login(interaction());
+ const output=await provider.streamSimple(provider.getModels()[0],context(false)).result();
+ assert.match(output.errorMessage,/possums_evidence_unchanged/);
+ assert.match(output.errorMessage,/Earlier submission control outcome unknown/);
+ assert(output.diagnostics.some(value=>value.type==='possums_billing_unknown'));
+ assert.equal(probes,1);assert.equal(logins,1);assert.equal(source.sends(),0);
+ await provider.streamSimple(provider.getModels()[0],context(false)).result();assert.equal(probes,1);
  provider.settleRun();
 });
 await check('public acquisition retries only closed transient errors within one shared scope',async()=>{
@@ -1314,7 +1442,8 @@ await check('Stop during deferred verification/login aborts the real run and lat
    assert.deepEqual(f.trace.verified,['A','B']);
    await f.session.abort();await pending;assert(signal.aborted);assert.equal(f.s.sends(),0);
    release.resolve();await new Promise(setImmediate);
-   assert.equal(f.provider.release.tag,'A');assert.deepEqual(f.provider.catalog,[]);assert.deepEqual(f.provider.listed,[]);
+   assert.equal(f.provider.release.tag,'A');assert.equal(f.provider.catalog.length,1);assert.equal(f.provider.listed.length,1);
+   assert.equal(f.provider.renewalRequired,true,'old published snapshot stays intact but cannot dispatch');
    assert.equal(f.s.sends(),0);
    f.verifyHook(async()=>{});f.loginHook(async()=>{});
    await f.session.prompt('Synthetic deliberate next turn');
@@ -2226,6 +2355,16 @@ await check('auto compaction preserves its pre-existing run budget until agent_s
  f.provider.endRun();assert((await f.run()).compaction);
  assert.equal(f.provider.runScope,scope);
  f.provider.settleRun();assert.equal(f.provider.runScope,undefined);
+});
+await check('idle compaction leaves its scope alive for an overlapping direct model caller',async()=>{
+ const f=await compactionFixture(['stop','stop']),entered=deferred(),release=deferred(),directReady=deferred();
+ const original=f.ctx.modelRegistry.getProviderAuth.bind(f.ctx.modelRegistry);
+ f.ctx.modelRegistry.getProviderAuth=async(...args)=>{entered.resolve();await release.promise;return original(...args);};
+ const compaction=f.run();await entered.promise;const scope=f.provider.runScope;
+ const direct=f.provider.streamSimple(f.ctx.model,context(false),{onPayload:async()=>{directReady.resolve();await release.promise;}}).result();
+ await directReady.promise;assert.equal(scope.owners,2);release.resolve();assert((await compaction).compaction);
+ assert.equal((await direct).stopReason,'stop');assert.equal(f.provider.runScope,undefined);
+ assert.equal(f.s.sends(),2);
 });
 await check('native idle split compaction reauthenticates known expiry once across two summary setups',async()=>{
  const f=await compactionFixture(['stop','stop'],true);

@@ -22,13 +22,15 @@ const recoveryAuth = envApiKeyAuth('Possums recovery credential', ['POSSUMS_RECO
 const isRecoveryKey = (key: string | undefined): key is string => !!key && key !== LEGACY_AUTH && key !== REQUEST_AUTH;
 type RequestOptions = StreamOptions & { reasoning?: unknown; reasoningEffort?: unknown; toolChoice?: unknown };
 type RecoveryScope = { account: number; attempts: number; pending?: Promise<void>; renewalPending?: Promise<number>;
-  terminal?: ConnectionFailure; controller: AbortController; waiters: number };
+  terminal?: ConnectionFailure; controller: AbortController; waiters: number; owners: number; idleCompaction?: boolean };
 const recoveryDelays = [0, 250, 1000] as const;
 function eligibleSetup(error: unknown): boolean {
   return (error instanceof CatalogFailure && error.stage === 'http' &&
       (error.status === 401 || error.status === 403) && error.reason === 'unauthorized') ||
     (error instanceof DiagnosticFailure && error.stage === 'submission' &&
-      error.constraint === 'endpoint_binding' && error.status === 422);
+      error.constraint === 'endpoint_binding' && error.status === 422) ||
+    (error instanceof GatewayError && error.reason === 'unauthorized' &&
+      (error.status === 401 || error.status === 403));
 }
 
 
@@ -276,7 +278,7 @@ export class PossumsProvider implements Provider {
     resolve: async input => {
       // Availability and status cannot initiate renewal. Model invocations
       // outside the native auth signal use the same scoped path in perform().
-      const diagnosticAttempt = this.activeRunSignal !== undefined && this.activeRunSignal === input.signal;
+      const diagnosticAttempt = this.runScope !== undefined && this.activeRunSignal !== undefined && this.activeRunSignal === input.signal;
       const account = this.accountEpoch;
       let result;
       try { result = await recoveryAuth.resolve(input); }
@@ -390,19 +392,51 @@ export class PossumsProvider implements Provider {
     }
   }
 
+  private async recoveryAttempt(scope: RecoveryScope, signal: AbortSignal): Promise<void> {
+    if (scope.terminal) throw scope.terminal;
+    if (scope.attempts >= recoveryDelays.length) throw new ConnectionFailure('session_unavailable');
+    const delay = recoveryDelays[scope.attempts++];
+    if (delay) {
+      const op = new Operation(null, signal);
+      try { await op.wait(new Promise<void>(resolve => setTimeout(resolve, delay)), delay + 100); }
+      finally { op.close(); }
+    }
+    if (signal.aborted || scope !== this.runScope || scope.account !== this.accountEpoch) throw new Error('possums_run_replaced');
+  }
+
   private async joinRenewal(key: string, signal: AbortSignal): Promise<number> {
     const scope = this.runScope;
-    if (!scope) return this.renewForSubmission(key, signal);
+    if (!scope) throw new Error('possums_session_unavailable');
+    if (scope.terminal) throw scope.terminal;
     if (!scope.renewalPending) {
       const shared = this.activeRunSignal
         ? AbortSignal.any([scope.controller.signal, this.activeRunSignal]) : scope.controller.signal;
-      const pending = this.renewForSubmission(key, shared);
+      const pending = (async () => {
+        try {
+          // A public setup probe and an expiry renewal must not publish over
+          // each other or spend the same scope's budget concurrently.
+          if (scope.pending) await scope.pending;
+          if (!this.renewalRequired &&
+              !(this.release !== undefined && Date.now() >= this.release.expires) &&
+              !(this.client?.authExpiresAt !== undefined && Date.now() >= this.client.authExpiresAt)) return this.authEpoch;
+          await this.recoveryAttempt(scope, shared);
+          return await this.renewForSubmission(key, shared);
+        }
+        catch (error) {
+          if (scope === this.runScope && !shared.aborted) {
+            scope.terminal = connectionFailure(error);
+            this.renewalRequired = true;
+            this.renewalFailure = scope.terminal;
+          }
+          throw error;
+        }
+      })();
       scope.renewalPending = pending;
       void pending.finally(() => { if (scope.renewalPending === pending) scope.renewalPending = undefined; }).catch(() => {});
     }
     scope.waiters++;
     const wait = new Operation(null, signal);
-    try { return await wait.wait(scope.renewalPending, LIMITS.bootstrapMs); }
+    try { return await wait.wait(scope.renewalPending, 4 * LIMITS.operationMs + LIMITS.bootstrapMs); }
     finally {
       wait.close(); scope.waiters--;
       if (!scope.waiters && signal.aborted) scope.controller.abort();
@@ -417,7 +451,8 @@ export class PossumsProvider implements Provider {
     const epoch = ++this.authEpoch;
     // Internal bearer/trust renewal preserves the authorized run and its
     // compaction summaries. External logout/session replacement increments epoch.
-    this.client = undefined; this.catalog = []; this.listed = []; this.restoring = undefined;
+    // Keep the last published session intact until verification, login and
+    // catalog all succeed; the pre-dispatch guard blocks it meanwhile.
     this.renewalRequired = true; this.renewalFailure = undefined;
     // A changed verified instance or bearer cannot certify the old balance window.
     this.reconciliationEpoch++; this.reconciliation = undefined;
@@ -455,6 +490,14 @@ export class PossumsProvider implements Provider {
 
   private async recoverSetup(scope: RecoveryScope, signal?: AbortSignal): Promise<void> {
     if (scope.terminal) throw scope.terminal;
+    const previousClient = this.client;
+    if (scope.renewalPending) {
+      const wait = new Operation(null, signal);
+      try { await wait.wait(scope.renewalPending, 4 * LIMITS.operationMs + LIMITS.bootstrapMs); }
+      finally { wait.close(); }
+      if (scope.terminal) throw scope.terminal;
+      if (this.client !== previousClient && this.client && this.catalog.length) return;
+    }
     if (!this.recover || !this.verifiedTemplate) throw new ConnectionFailure('verification_failed');
     const account = this.accountEpoch, epoch = this.authEpoch, key = this.recoveryKey;
     const baseline = this.verifiedTemplate;
@@ -471,10 +514,9 @@ export class PossumsProvider implements Provider {
         let last: ConnectionFailure | undefined;
         while (scope.attempts < recoveryDelays.length) {
           check();
-          const delay = recoveryDelays[scope.attempts++];
           const op = new Operation(LIMITS.bootstrapMs, sharedSignal);
           try {
-            if (delay) await op.wait(new Promise<void>(resolve => setTimeout(resolve, delay)), delay + 100);
+            await this.recoveryAttempt(scope, sharedSignal);
             check();
             if (this.verifiedTemplate !== baseline && this.client && this.catalog.length) return;
             const candidate = await op.wait(this.recover!(baseline, op.controller.signal), LIMITS.bootstrapMs);
@@ -518,7 +560,7 @@ export class PossumsProvider implements Provider {
   getModels(): readonly Model<typeof API>[] { return this.listed.length ? this.listed : this.discovery; }
   beginRun(): void {
     this.epoch++;
-    if (!this.runScope) this.runScope = { account: this.accountEpoch, attempts: 0, controller: new AbortController(), waiters: 0 };
+    if (!this.runScope) this.runScope = { account: this.accountEpoch, attempts: 0, controller: new AbortController(), waiters: 0, owners: 0 };
   }
   bindRun(signal?: AbortSignal): void { this.activeRunSignal = signal; }
   endRun(): void { this.activeRunSignal = undefined; }
@@ -680,8 +722,8 @@ export class PossumsProvider implements Provider {
     const selected = ctx.model;
     const epoch = this.epoch;
     const accountEpoch = this.accountEpoch;
-    const idleScope = !this.runScope;
-    const scope = this.runScope ?? (this.runScope = { account: accountEpoch, attempts: 0, controller: new AbortController(), waiters: 0 });
+    const scope = this.runScope ?? (this.runScope = { account: accountEpoch, attempts: 0, controller: new AbortController(), waiters: 0, owners: 0, idleCompaction: true });
+    scope.owners++;
     let closed = false;
     let stage = 'authorization';
     let failure: string | undefined;
@@ -707,7 +749,7 @@ export class PossumsProvider implements Provider {
         stage = `summary ${++calls}`;
         // Only this closed-over native callback drops the SDK's advisory cap.
         // The gateway still reserves/grants the selected model's full allowance.
-        const { maxTokens: _nativeHint, ...rest } = options ?? {};
+        const { maxTokens: _nativeHint, ...rest } = (options ?? {}) as RequestOptions;
         const stream = this.perform(selected as Model<typeof API>, context, { ...rest, signal: event.signal }, requireScope);
         const result = await stream.result();
         for (const diagnostic of result.diagnostics ?? []) {
@@ -738,7 +780,7 @@ export class PossumsProvider implements Provider {
       try { ctx.ui.notify(`Possums compaction (${stage}): ${failure ?? safeFailure(error, false, 'compaction')}${billing} No checkpoint saved. Not replayed. Use /compact deliberately or /new.`, 'warning'); }
       catch { /* Transient UI only; never log or persist failed summaries. */ }
       return { cancel: true };
-    } finally { closed = true; if (idleScope && this.runScope === scope) { scope.controller.abort(); this.runScope = undefined; } }
+    } finally { closed = true; if (--scope.owners === 0 && scope.idleCompaction && this.runScope === scope) { scope.controller.abort(); this.runScope = undefined; } }
   }
 
   private perform(selected: Model<typeof API>, context: TranscriptContext, options: RequestOptions = {}, summary?: () => void): AssistantMessageEventStream {
@@ -746,7 +788,7 @@ export class PossumsProvider implements Provider {
     const output = blank(selected);
     const epoch = this.epoch;
     const account = this.accountEpoch;
-    const scope = this.runScope;
+    let scope: RecoveryScope | undefined;
     const reconciliation = this.reconciliation;
     const args = new Map<number, { block: ToolCall; contentIndex: number; json: string }>();
     let started = false;
@@ -775,11 +817,14 @@ export class PossumsProvider implements Provider {
         const entry = this.catalog.find(entry => entry.id === selected.id);
         if (!entry) throw new Error('possums_model_unavailable');
         if (payload.tools?.length && entry.tool_protocol !== 'openai-functions-v1') throw new Error('possums_tools_unsupported');
+        scope = this.runScope ?? (this.runScope = { account, attempts: 0, controller: new AbortController(), waiters: 0, owners: 0 });
+        scope.owners++;
+        if (scope.terminal) throw scope.terminal;
         // Only an admitted model invocation (including native compaction) can
         // renew known local expiry; listing and diagnostics cannot borrow it.
-        if (scope && this.recoveryKey &&
-            ((this.release !== undefined && Date.now() >= this.release.expires) ||
-             (this.client?.authExpiresAt !== undefined && Date.now() >= this.client.authExpiresAt))) {
+        if (this.recoveryKey && (this.renewalRequired ||
+            (this.release !== undefined && Date.now() >= this.release.expires) ||
+            (this.client?.authExpiresAt !== undefined && Date.now() >= this.client.authExpiresAt))) {
           await this.joinRenewal(this.recoveryKey, options.signal ?? scope.controller.signal);
           const renewed = this.catalog.find(value => value.id === selected.id);
           if (!renewed) throw new Error('possums_model_unavailable');
@@ -788,8 +833,8 @@ export class PossumsProvider implements Provider {
         failureStage = 'provider';
         const originalClient = this.client;
         const guard = () => {
-          if (epoch !== this.epoch || account !== this.accountEpoch || this.recoveryBlocked ||
-              (scope && this.runScope !== scope) || options.signal?.aborted || this.sessionClosed) {
+          if (epoch !== this.epoch || account !== this.accountEpoch || this.recoveryBlocked || this.renewalRequired ||
+              scope !== this.runScope || options.signal?.aborted || this.sessionClosed) {
             throw new DiagnosticFailure('request', 'interrupted', 'uncertain');
           }
         };
@@ -844,7 +889,8 @@ export class PossumsProvider implements Provider {
               break;
             } catch (error) {
               if (!scope || !this.recover || !eligibleSetup(error) || prepared.dispatched) throw error;
-              if (error instanceof DiagnosticFailure && error.stage === 'submission') uncertainControl = true;
+              if ((error instanceof DiagnosticFailure && error.stage === 'submission') ||
+                  (error instanceof GatewayError && error.billing === 'unknown')) uncertainControl = true;
               guard();
               await this.recoverSetup(scope, options.signal);
               guard();
@@ -904,18 +950,24 @@ export class PossumsProvider implements Provider {
         if (!output.diagnostics && error instanceof GatewayError && error.billing === 'refunded') {
           output.diagnostics = [{ type: 'possums_reservation_refunded', timestamp: Date.now(), details: { outcome: 'refunded' } }];
         }
-        if (!output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_settled_receipt') &&
+        if (!output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt') &&
           (uncertainControl || (error instanceof GatewayError && error.billing === 'unknown') ||
             (!(error instanceof GatewayError) && !(error instanceof ConnectionFailure) && ((submitted && !(error instanceof ChannelError && error.code === 'rejected')) || options.signal?.aborted || (error instanceof ChannelError && error.code === 'uncertain'))))) {
           output.diagnostics = [{ type: 'possums_billing_unknown', timestamp: Date.now(), details: { receipt: false } }];
         }
-        output.errorMessage = output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_settled_receipt') ?
+        output.errorMessage = output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt') ?
           `${safeFailure(error, false, failureStage).replace(/ Billing status: Charge unknown\..*$/, '')} Authenticated receipt: charge settled; not undone. Not replayed.` : options.signal?.aborted && !(error instanceof GatewayError) && !(error instanceof ConnectionFailure) ?
           'Possums: [possums_stream_interrupted] Stage: stream; constraint: interrupted. Delivery interrupted; charge unknown. Check connectivity and share only this code for support. Not replayed. A new request may incur another charge.' :
           safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted, failureStage);
+        if (uncertainControl && !output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt')) {
+          output.errorMessage += ' Earlier submission control outcome unknown; no inference request was replayed. A new request may incur another charge.';
+        }
         events.push({ type: 'error', reason: output.stopReason, error: output });
       } finally {
         if (reconciliation && reconciliation === this.reconciliation) this.observeReconciliation(output);
+        if (scope && --scope.owners === 0 && scope.idleCompaction && this.runScope === scope) {
+          scope.controller.abort(); this.runScope = undefined;
+        }
         events.end();
       }
     })();
