@@ -9,7 +9,7 @@ use possums::{
     catalog::Model,
     inference::{
         stream::{FinishReason, StreamCompletion, StreamUsage},
-        Inference, InferenceError, Message,
+        Inference, InferenceError, Message, TextDeltaSink,
     },
     server::{router, AppState},
 };
@@ -49,10 +49,10 @@ impl Inference for Provider {
         _: &Model,
         _: &[Message],
         _: Arc<possums::telemetry::hooks::Lease>,
-        on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        on_delta: &mut dyn TextDeltaSink,
     ) -> Result<StreamCompletion, InferenceError> {
         self.generations.fetch_add(1, Ordering::SeqCst);
-        on_delta("synthetic🐾<script>");
+        on_delta.emit("synthetic🐾<script>").await;
         if tokio::time::timeout(std::time::Duration::from_secs(30), self.release.notified())
             .await
             .is_err()

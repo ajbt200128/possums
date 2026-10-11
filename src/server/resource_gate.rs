@@ -130,12 +130,12 @@ impl Inference for Probe {
         _: &Model,
         invocation: &ToolInvocation,
         _: Arc<crate::telemetry::hooks::Lease>,
-        on_delta: &mut (dyn for<'d> FnMut(CompletionDelta<'d>) + Send),
+        on_delta: &mut dyn crate::inference::DeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         assert_eq!(invocation.messages().len(), 81);
         self.generations.fetch_add(1, Ordering::SeqCst);
         self.hooks.at("generation").await;
-        on_delta(CompletionDelta::Text("synthetic"));
+        on_delta.emit(CompletionDelta::Text("synthetic")).await;
         self.hooks.at("completion").await;
         Ok(stream::StreamCompletion {
             usage: stream::StreamUsage {
@@ -151,7 +151,7 @@ impl Inference for Probe {
         model: &Model,
         messages: &[Message],
         heavy: Arc<crate::telemetry::hooks::Lease>,
-        on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        on_delta: &mut dyn crate::inference::TextDeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         self.generations.fetch_add(1, Ordering::SeqCst);
         let body =
@@ -159,7 +159,7 @@ impl Inference for Probe {
         self.hooks.at("generation").await;
         let bytes = self.drain(body).await;
         assert!(bytes <= BODY_LIMIT as u64 + MIB as u64);
-        on_delta("synthetic");
+        on_delta.emit("synthetic").await;
         self.hooks.at("completion").await;
         Ok(stream::StreamCompletion {
             usage: stream::StreamUsage {

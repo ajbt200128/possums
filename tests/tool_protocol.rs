@@ -170,7 +170,7 @@ fn historical_calls_catalog_and_messages_use_body_bounds_not_stream_quotas() {
 async fn feed_chunks(
     parser: &mut SdkToolValidator,
     chunks: Vec<Vec<u8>>,
-    mut callback: impl FnMut(CompletionDelta<'_>),
+    mut callback: impl FnMut(CompletionDelta<'_>) + Send,
 ) -> Result<(), StreamError> {
     let bytes = futures_util::stream::iter(
         chunks
@@ -186,7 +186,7 @@ async fn feed_chunks(
 async fn feed(
     parser: &mut SdkToolValidator,
     bytes: &[u8],
-    callback: impl FnMut(CompletionDelta<'_>),
+    callback: impl FnMut(CompletionDelta<'_>) + Send,
 ) -> Result<(), StreamError> {
     feed_chunks(parser, vec![bytes.to_vec()], callback).await
 }

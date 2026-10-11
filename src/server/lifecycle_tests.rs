@@ -5,7 +5,7 @@ use crate::{
     catalog::Model,
     inference::{
         stream::{FinishReason, StreamCompletion, StreamUsage},
-        tools::{CompletionDelta, ToolInvocation, ToolProfile},
+        tools::{ToolInvocation, ToolProfile},
         Inference, InferenceError, Message,
     },
 };
@@ -100,7 +100,7 @@ impl Inference for Probe {
         _: &Model,
         _: &[Message],
         _: Arc<Lease>,
-        _: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        _: &mut dyn crate::inference::TextDeltaSink,
     ) -> Result<StreamCompletion, InferenceError> {
         Ok(self.complete_generation().await)
     }
@@ -109,7 +109,7 @@ impl Inference for Probe {
         _: &Model,
         _: &ToolInvocation,
         _: Arc<Lease>,
-        _: &mut (dyn for<'d> FnMut(CompletionDelta<'d>) + Send),
+        _: &mut dyn crate::inference::DeltaSink,
     ) -> Result<StreamCompletion, InferenceError> {
         Ok(self.complete_generation().await)
     }

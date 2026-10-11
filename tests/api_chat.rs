@@ -13,7 +13,7 @@ use possums::{
     catalog::Model,
     inference::{
         stream::{ProtocolParser, SdkToolValidator, StreamCompletion},
-        tools::{CompletionDelta, ToolInvocation, ToolProfile},
+        tools::{ToolInvocation, ToolProfile},
         Inference, InferenceError, InferenceFailure, Message,
     },
     server::{router, AppState, BODY_LIMIT},
@@ -47,6 +47,7 @@ struct Provider {
     invalid_usage: AtomicBool,
     missing_final_usage: AtomicBool,
     overflow_delivery: AtomicBool,
+    text_repeats: AtomicUsize,
     hold_tokenizer: AtomicBool,
     tokenizer_error: AtomicBool,
     invalid_receipt: AtomicBool,
@@ -107,7 +108,7 @@ impl Inference for Provider {
         model: &Model,
         _: &[Message],
         _: Arc<possums::telemetry::hooks::Lease>,
-        on_delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        on_delta: &mut dyn possums::inference::TextDeltaSink,
     ) -> Result<StreamCompletion, InferenceError> {
         self.generation_calls.fetch_add(1, Ordering::SeqCst);
         if self.panic_generation.load(Ordering::SeqCst) {
@@ -124,11 +125,12 @@ impl Inference for Provider {
         let repeats = if self.overflow_delivery.load(Ordering::SeqCst) {
             100
         } else {
-            1
+            self.text_repeats.load(Ordering::SeqCst)
         };
         for _ in 0..repeats {
             parser
-                .feed(event.as_bytes(), &mut *on_delta)
+                .feed_async(event.as_bytes(), &mut *on_delta)
+                .await
                 .map_err(|_| InferenceError::InvalidResponse)?;
         }
         self.started.notify_one();
@@ -147,7 +149,7 @@ impl Inference for Provider {
         } else if self.invalid_usage.load(Ordering::SeqCst) {
             Err(InferenceError::InvalidResponse)
         } else {
-            parser.feed(b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n", &mut *on_delta).map_err(|_| InferenceError::InvalidResponse)?;
+            parser.feed_async(b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n", &mut *on_delta).await.map_err(|_| InferenceError::InvalidResponse)?;
             parser
                 .eof_completion()
                 .map_err(|_| InferenceError::InvalidResponse)
@@ -176,7 +178,7 @@ impl Inference for Provider {
         model: &Model,
         invocation: &ToolInvocation,
         _: Arc<possums::telemetry::hooks::Lease>,
-        on_delta: &mut (dyn for<'d> FnMut(CompletionDelta<'d>) + Send),
+        on_delta: &mut dyn possums::inference::DeltaSink,
     ) -> Result<StreamCompletion, InferenceError> {
         assert_eq!(
             self.invocation.lock().unwrap().as_ref(),
@@ -200,7 +202,7 @@ impl Inference for Provider {
         );
         tx.send(Ok(event.into_bytes())).unwrap();
         validator
-            .accept(
+            .accept_async(
                 events
                     .next()
                     .await
@@ -208,6 +210,7 @@ impl Inference for Provider {
                     .map_err(|_| InferenceError::InvalidResponse)?,
                 &mut *on_delta,
             )
+            .await
             .map_err(|_| InferenceError::InvalidResponse)?;
         if self.overflow_delivery.load(Ordering::SeqCst) {
             let event = format!(
@@ -217,7 +220,7 @@ impl Inference for Provider {
             for _ in 0..100 {
                 tx.send(Ok(event.as_bytes().to_vec())).unwrap();
                 validator
-                    .accept(
+                    .accept_async(
                         events
                             .next()
                             .await
@@ -225,6 +228,7 @@ impl Inference for Provider {
                             .map_err(|_| InferenceError::InvalidResponse)?,
                         &mut *on_delta,
                     )
+                    .await
                     .map_err(|_| InferenceError::InvalidResponse)?;
             }
         }
@@ -255,10 +259,11 @@ impl Inference for Provider {
         let result = async {
             while let Some(event) = events.next().await {
                 validator
-                    .accept(
+                    .accept_async(
                         event.map_err(|_| InferenceError::InvalidResponse)?,
                         &mut *on_delta,
                     )
+                    .await
                     .map_err(|_| InferenceError::InvalidResponse)?;
             }
             validator
@@ -297,6 +302,7 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         invalid_usage: false.into(),
         missing_final_usage: false.into(),
         overflow_delivery: false.into(),
+        text_repeats: 1.into(),
         hold_tokenizer: false.into(),
         tokenizer_error: false.into(),
         invalid_receipt: false.into(),
@@ -460,19 +466,80 @@ async fn disconnect_and_backpressure_never_cancel_generation_or_change_settlemen
         let (state, provider, bearer, submission) = fixture(5_000_000);
         provider.overflow_delivery.store(overflow, Ordering::SeqCst);
         let response = send(&state, &bearer, &submission).await;
-        wait(&provider.started).await;
         if !overflow {
+            wait(&provider.started).await;
             drop(response);
+            assert_eq!(state.accounting.available("demo"), Some(5_000_000 - 52));
+            provider.finish.notify_one();
         } else {
-            let bytes = response.into_body().collect().await.unwrap().to_bytes();
-            assert!(!std::str::from_utf8(&bytes).unwrap().contains("[DONE]"));
-            assert!(bytes.len() < 64 * 1024);
+            // A connected slow reader receives every delta, not a truncated EOF
+            // after eight frames. Releasing EOF does not bypass delivery waits.
+            provider.finish.notify_one();
+            let mut body = response.into_body();
+            let mut text = String::new();
+            let mut done = false;
+            while let Some(frame) = body.frame().await {
+                tokio::task::yield_now().await;
+                let bytes = frame.unwrap().into_data().unwrap();
+                let frame = std::str::from_utf8(&bytes).unwrap();
+                if frame == "data: [DONE]\n\n" {
+                    done = true;
+                    continue;
+                }
+                let value: Value =
+                    serde_json::from_str(frame.strip_prefix("data: ").unwrap().trim()).unwrap();
+                if let Some(delta) = value
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+                {
+                    text.push_str(delta);
+                }
+            }
+            assert!(done);
+            assert_eq!(text, "<script>synthetic</script>🐾".repeat(100));
+            wait(&provider.started).await;
         }
-        assert_eq!(state.accounting.available("demo"), Some(5_000_000 - 52));
-        provider.finish.notify_one();
         terminal(&state, 5_000_000 - 7).await;
         duplicate(&state, &bearer, &submission, "settled").await;
         assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn settlement_precedes_blocked_terminal_delivery_and_body_loss_cannot_change_it() {
+    for failure in ["none", "upstream", "invalid_receipt"] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        // The role plus seven content frames exhaust all eight credits. The
+        // first terminal frame must wait, but not the terminal ledger attempt.
+        provider.text_repeats.store(7, Ordering::SeqCst);
+        provider
+            .upstream_error
+            .store(failure == "upstream", Ordering::SeqCst);
+        provider
+            .invalid_receipt
+            .store(failure == "invalid_receipt", Ordering::SeqCst);
+        let response = send(&state, &bearer, &submission).await;
+        wait(&provider.started).await;
+        assert_eq!(state.accounting.available("demo"), Some(5_000_000 - 52));
+        provider.finish.notify_one();
+        let expected = if failure == "none" {
+            "settled"
+        } else {
+            "refunded"
+        };
+        let balance = 5_000_000 - if failure == "none" { 7 } else { 0 };
+        terminal(&state, balance).await;
+        duplicate(&state, &bearer, &submission, expected).await;
+        let mut body = response.into_body();
+        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let slice = frame.slice(..1);
+        drop(frame);
+        drop(body);
+        wait(&provider.completed).await;
+        duplicate(&state, &bearer, &submission, expected).await;
+        assert_eq!(state.accounting.available("demo"), Some(balance));
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+        drop(slice);
     }
 }
 
@@ -839,6 +906,7 @@ async fn structured_disconnect_overflow_and_failure_keep_sole_settling_owner() {
     for mode in [
         "disconnect",
         "overflow",
+        "slow_reader",
         "failure",
         "invalid_usage",
         "missing_final_usage",
@@ -847,7 +915,7 @@ async fn structured_disconnect_overflow_and_failure_keep_sole_settling_owner() {
         provider.qualified.store(true, Ordering::SeqCst);
         provider
             .overflow_delivery
-            .store(mode == "overflow", Ordering::SeqCst);
+            .store(matches!(mode, "overflow" | "slow_reader"), Ordering::SeqCst);
         provider
             .upstream_error
             .store(mode == "failure", Ordering::SeqCst);
@@ -863,15 +931,46 @@ async fn structured_disconnect_overflow_and_failure_keep_sole_settling_owner() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        wait(&provider.started).await;
-        if mode == "overflow" {
-            let body = response.into_body().collect().await.unwrap().to_bytes();
-            assert!(body.len() <= 64 * 1024);
-            assert!(!std::str::from_utf8(&body).unwrap().contains("[DONE]"));
+        if mode == "slow_reader" {
+            provider.finish.notify_one();
+            let mut body = response.into_body();
+            let mut arguments = String::new();
+            let mut done = false;
+            while let Some(frame) = body.frame().await {
+                tokio::task::yield_now().await;
+                let bytes = frame.unwrap().into_data().unwrap();
+                let frame = std::str::from_utf8(&bytes).unwrap();
+                if frame == "data: [DONE]\n\n" {
+                    done = true;
+                    continue;
+                }
+                let value: Value =
+                    serde_json::from_str(frame.strip_prefix("data: ").unwrap().trim()).unwrap();
+                if let Some(fragment) = value
+                    .pointer("/choices/0/delta/tool_calls/0/function/arguments")
+                    .and_then(Value::as_str)
+                {
+                    arguments.push_str(fragment);
+                }
+            }
+            assert!(done);
+            assert_eq!(
+                arguments,
+                json!({"q":"🐾\n".repeat(260)}).to_string() + &" ".repeat(256 * 100)
+            );
+            wait(&provider.started).await;
         } else {
+            // Drop during a blocked emission in the overflow case; the same SDK
+            // stream must then drain to the fixture's terminal result exactly once.
+            if mode != "overflow" {
+                wait(&provider.started).await;
+            }
             drop(response);
+            if mode == "overflow" {
+                wait(&provider.started).await;
+            }
+            provider.finish.notify_one();
         }
-        provider.finish.notify_one();
         terminal(&state, 5_000_000 - if failed { 0 } else { 7 }).await;
         duplicate(
             &state,

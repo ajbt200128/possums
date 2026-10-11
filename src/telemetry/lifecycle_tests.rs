@@ -92,9 +92,9 @@ impl Inference for Provider {
         model: &Model,
         history: &[Message],
         heavy: Arc<Lease>,
-        delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        mut delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
     ) -> Result<StreamUsage, InferenceError> {
-        self.generate_completion_stream(model, history, heavy, delta)
+        self.generate_completion_stream(model, history, heavy, &mut delta)
             .await
             .map(|c| c.usage)
     }
@@ -103,7 +103,7 @@ impl Inference for Provider {
         _: &Model,
         _: &[Message],
         heavy: Arc<Lease>,
-        delta: &mut (dyn for<'d> FnMut(&'d str) + Send),
+        delta: &mut dyn crate::inference::TextDeltaSink,
     ) -> Result<StreamCompletion, InferenceError> {
         heavy.dispatch_generation();
         self.startup_queued.notify_one();
@@ -111,9 +111,9 @@ impl Inference for Provider {
         if let Some(ready) = ready {
             ready.notified().await;
         }
-        delta("");
-        delta("hostile-output-canary");
-        delta("another fragment");
+        delta.emit("").await;
+        delta.emit("hostile-output-canary").await;
+        delta.emit("another fragment").await;
         self.entered.notify_one();
         self.finish.notified().await;
         if matches!(self.failure, Failure::Stream) {
