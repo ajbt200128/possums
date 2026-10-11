@@ -5,7 +5,7 @@ export const LIMITS = Object.freeze({
   key: 41, report: 1184, catalog: 256 * 1024, error: 4096,
   // Nested tool schemas need headroom for the surrounding request envelope.
   depth: 32, nodes: 32768, messages: 4096, models: 256,
-  chunk: 64 * 1024, frame: 256 * 1024, sseEvent: 64 * 1024,
+  chunk: 64 * 1024, frame: 256 * 1024, sseEvent: 256 * 1024 + 512,
   // Finite control/verification work; streams have no total lifetime.
   operationMs: 600000, bootstrapMs: 10 * 600000, idleMs: 600000, cleanupMs: 100,
 });

@@ -21,6 +21,7 @@ fn quote() -> Quote {
             max_output_tokens: 10,
             input_microunits_per_million_tokens: 2_000_000,
             output_microunits_per_million_tokens: 3_000_000,
+            cached_input_microunits_per_million_tokens: None,
         },
         input_tokens: 5,
         reserved_microunits: 52,

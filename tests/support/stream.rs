@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 // Including test modules import the production module as `stream` in the parent.
 use super::stream::{
-    ProtocolParser, StreamError, StreamUsage, MAX_FRAME_BYTES, MAX_TRANSPORT_BUFFER_BYTES,
+    SdkToolValidator, StreamError, StreamUsage, MAX_FRAME_BYTES, MAX_TRANSPORT_BUFFER_BYTES,
 };
 use serde_json::{json, Value};
 use std::sync::{
@@ -180,15 +180,17 @@ pub fn terminal(
     output: u64,
     on_delta: &mut (dyn FnMut(&str) + Send),
 ) -> Result<StreamUsage, StreamError> {
-    let mut parser = ProtocolParser::default();
-    for bytes in [
-        event(choice(Some(content), Some("stop"))),
-        event(usage(input, output)),
-        b"data: [DONE]\n\n".to_vec(),
-    ] {
-        parser.feed(&bytes, &mut *on_delta)?;
+    let mut validator = SdkToolValidator::default();
+    for event in [choice(Some(content), Some("stop")), usage(input, output)] {
+        validator.accept(event, |delta| {
+            if let super::stream::CompletionDelta::Text(text) = delta {
+                on_delta(text);
+            }
+        })?;
     }
-    parser.eof()
+    validator
+        .eof_completion()
+        .map(|completion| completion.usage)
 }
 
 pub fn successful(content: &str) -> Vec<u8> {
@@ -312,19 +314,4 @@ impl FixtureCapture {
     pub fn retained_bytes(&self) -> usize {
         self.bytes
     }
-}
-
-/// Capture is intentionally capped and test-only, unlike the production adapter.
-/// Long-stream tests should count bytes in a callback instead of collecting them.
-pub fn parse(bytes: &[u8], fragment: usize) -> Result<(String, StreamUsage), StreamError> {
-    assert!(fragment > 0);
-    let mut parser = ProtocolParser::default();
-    let mut text = String::new();
-    for part in bytes.chunks(fragment) {
-        parser.feed(part, |delta| {
-            assert!(text.len().checked_add(delta.len()).unwrap() <= MAX_FRAME_BYTES);
-            text.push_str(delta);
-        })?;
-    }
-    Ok((text, parser.eof()?))
 }

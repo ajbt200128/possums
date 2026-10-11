@@ -1,7 +1,7 @@
 //! Synthetic protocol/schema coverage; not production model qualification.
 use futures_util::StreamExt;
 use possums::inference::{
-    stream::{FinishReason, ProtocolParser, SdkToolValidator, StreamError},
+    stream::{FinishReason, SdkToolValidator, StreamError},
     tools::{CompletionDelta, Tool, ToolChoice, ToolInvocation, ToolMessage},
 };
 use serde_json::{json, Value};
@@ -243,10 +243,6 @@ async fn sdk_fragmentation_nullable_metadata_and_optional_done() {
     let mut p = parser();
     feed(&mut p, &prefix, |_| {}).await.unwrap();
     assert!(p.eof_completion().is_err()); // Never synthesize a finish or usage.
-    let mut legacy = ProtocolParser::default();
-    assert!(legacy
-        .feed(&prefix, |_| panic!("legacy rejects omitted finish"))
-        .is_err());
 }
 
 #[tokio::test]

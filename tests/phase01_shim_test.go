@@ -55,13 +55,15 @@ func TestPhase01ChannelFixture(t *testing.T) {
 	var calls, authorized, encrypted, released atomic.Int64
 	var mode atomic.Int64
 	gate := make(chan struct{}, 1)
-	var apiBackend *httputil.ReverseProxy
+	var apiBackend, apiControls *httputil.ReverseProxy
 	if origin := os.Getenv("PHASE01_API_BACKEND"); origin != "" {
 		if origin != "http://host.docker.internal:18444" {
 			t.Fatal("fixture backend origin")
 		}
 		target, _ := url.Parse(origin)
 		apiBackend = httputil.NewSingleHostReverseProxy(target)
+		// Synthetic counters/gate are on a separate listener, not gateway routes.
+		apiControls = httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: "host.docker.internal:18445"})
 		apiBackend.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
 			w.WriteHeader(http.StatusBadGateway)
 		}
@@ -114,6 +116,18 @@ func TestPhase01ChannelFixture(t *testing.T) {
 			w.WriteHeader(400)
 			return
 		}
+		if payload.Model == "native-trailer" {
+			optIn := r.Header.Get("X-Tinfoil-Request-Usage-Metrics") == "true"
+			if optIn {
+				w.Header().Set("Trailer", "X-Tinfoil-Usage-Metrics")
+			}
+			io.WriteString(w, "data: synthetic-native\n\n")
+			w.(http.Flusher).Flush()
+			if optIn {
+				w.Header().Set("X-Tinfoil-Usage-Metrics", "prompt=2,completion=1,total=3,model=native-trailer")
+			}
+			return
+		}
 		if payload.Model == "oversized-event" {
 			io.WriteString(w, "data: "+strings.Repeat("x", 64<<10)+"\n\n")
 			return
@@ -159,15 +173,15 @@ func TestPhase01ChannelFixture(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/fixture/stats":
-			if apiBackend != nil {
-				apiBackend.ServeHTTP(w, r)
+			if apiControls != nil {
+				apiControls.ServeHTTP(w, r)
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]int64{"calls": calls.Load(), "authorized": authorized.Load(), "encrypted": encrypted.Load(), "released": released.Load()})
 			return
 		case "/fixture/release":
-			if apiBackend != nil {
-				apiBackend.ServeHTTP(w, r)
+			if apiControls != nil {
+				apiControls.ServeHTTP(w, r)
 				return
 			}
 			select {

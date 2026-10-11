@@ -358,8 +358,12 @@ mod tests {
                     .is_err()
             );
             let token_value: Value = serde_json::from_slice(&tokenizer).unwrap();
-            let generation =
-                stream::invocation_body("fixture", 123, &invocation, heavy.clone()).unwrap();
+            let generation = stream::builder_body(
+                crate::inference::invocation_request("fixture", &invocation).unwrap(),
+                123,
+                heavy.clone(),
+            )
+            .unwrap();
             let generation_request = reqwest::Client::new()
                 .post("http://127.0.0.1/")
                 .body(generation)

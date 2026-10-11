@@ -1,4 +1,8 @@
-import { CatalogFailure, GatewayError, gatewayDetailLabel } from '../../examples/phase01/client.js';
+import { CatalogFailure, GatewayError, gatewayDetailLabel, type Receipt } from '../../examples/phase01/client.js';
+
+export function settlementDescription(receipt: Readonly<Receipt>): string {
+  return `Authenticated ${receipt.complete === false ? 'incomplete' : 'complete'} settlement: charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits} microunits. Settlement is not tool-execution authorization; a new submission may incur another charge.`;
+}
 import { DiagnosticFailure } from '../../examples/phase01/limits.js';
 
 export function diagnosticDescription(failure: DiagnosticFailure): string {

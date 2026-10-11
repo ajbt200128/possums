@@ -400,6 +400,8 @@ struct ModelEntry {
     output_microunits_per_million_tokens: String,
     maximum_reservation_microunits: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    cached_input_microunits_per_million_tokens: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_protocol: Option<&'static str>,
 }
 
@@ -444,6 +446,9 @@ async fn models(
                 .output_microunits_per_million_tokens
                 .to_string(),
             maximum_reservation_microunits: quote.reserved_microunits.to_string(),
+            cached_input_microunits_per_million_tokens: model
+                .cached_input_microunits_per_million_tokens
+                .map(|rate| rate.to_string()),
         });
     }
     if state.auth.api_session(&id).is_none() {
@@ -496,9 +501,15 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     T::deserialize(decoder).map(Some)
 }
 
+fn usage_metrics_requested(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all("x-tinfoil-request-usage-metrics").iter();
+    values.next().is_some_and(|value| value == "true") && values.next().is_none()
+}
+
 async fn chat(
     State(state): State<AppState>,
     Extension(ticket): Extension<crate::lifecycle::Ticket>,
+    Extension(disconnect): Extension<crate::stream_owner::Disconnect>,
     Extension(heavy): Extension<Arc<crate::telemetry::hooks::Lease>>,
     Extension(observation): Extension<RequestContext>,
     headers: HeaderMap,
@@ -526,6 +537,7 @@ async fn chat(
     {
         return reject(StatusCode::BAD_REQUEST, MetricRejection::Input);
     }
+    let usage_metrics = usage_metrics_requested(&headers);
     let inference = state.inference.clone();
     let delivery_heavy = heavy.clone();
     let submission = Submission {
@@ -544,6 +556,7 @@ async fn chat(
         state
             .generation()
             .observed(observation.clone())
+            .disconnected(disconnect.clone())
             .submit_structured(
                 ticket,
                 submission,
@@ -558,6 +571,7 @@ async fn chat(
                         delivery_heavy,
                         prepared,
                         inference,
+                        usage_metrics,
                     )
                 },
             )
@@ -581,6 +595,7 @@ async fn chat(
         state
             .generation()
             .observed(observation.clone())
+            .disconnected(disconnect)
             .submit(
                 ticket,
                 submission,
@@ -591,7 +606,13 @@ async fn chat(
                 },
                 heavy,
                 move |owner, prepared| {
-                    crate::api_stream::compose(owner, delivery_heavy, prepared, inference)
+                    crate::api_stream::compose(
+                        owner,
+                        delivery_heavy,
+                        prepared,
+                        inference,
+                        usage_metrics,
+                    )
                 },
             )
             .await
@@ -599,6 +620,11 @@ async fn chat(
     match result {
         Ok(body) => {
             let mut response = axum::body::Body::new(body).into_response();
+            if usage_metrics {
+                response
+                    .headers_mut()
+                    .insert(header::TRAILER, "X-Tinfoil-Usage-Metrics".parse().unwrap());
+            }
             response
                 .headers_mut()
                 .insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());

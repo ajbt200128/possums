@@ -1,4 +1,4 @@
-//! Detached ownership for accepted `/chat` reservations.
+//! Detached settlement ownership for accepted `/v1/chat/completions` reservations.
 //!
 //! Admission supplies a generation lifetime marker and the existing defensive
 //! heavy resource lease shared with delivery. No separate generation quota exists.
@@ -26,6 +26,7 @@ struct Terminal {
     accounting: Arc<Accounting>,
     id: [u8; 32],
     armed: bool,
+    evidence: Option<crate::inference::forward::Evidence>,
     observation: Option<OwnedObservation>,
     failure: Option<GenerationTerminal>,
     model: Option<QualifiedModel>,
@@ -37,7 +38,17 @@ impl Terminal {
         // Even an accounting error must not cause a second, conflicting attempt.
         // Such errors indicate a broken reservation/ledger invariant, not retry.
         self.armed = false;
-        let result = self.accounting.finish(self.id, usage);
+        let usage = self
+            .evidence
+            .as_ref()
+            .map(|e| FinalUsage {
+                input_tokens: e.usage.input_tokens,
+                output_tokens: e.usage.output_tokens,
+                total_tokens: e.usage.total_tokens,
+            })
+            .or(usage);
+        let cached = self.evidence.as_ref().map_or(0, |e| e.cached_tokens);
+        let result = self.accounting.finish_cached(self.id, usage, cached);
         if result.is_err() {
             if let Some(lifecycle) = &self.lifecycle {
                 lifecycle.accounting_failed();
@@ -45,6 +56,7 @@ impl Terminal {
         }
         // Accounting has returned and released its lock. Telemetry never retries it.
         let terminal = match (&result, usage.is_some(), self.failure) {
+            (Ok(Outcome::Settled { .. }), _, Some(failure)) => failure,
             (Ok(Outcome::Settled { .. }), true, None) => GenerationTerminal::Success,
             (Ok(Outcome::Refunded), false, Some(failure)) => failure,
             (Ok(Outcome::Refunded), false, None) => GenerationTerminal::Unknown,
@@ -60,13 +72,14 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         if self.armed {
+            self.failure.get_or_insert(GenerationTerminal::Unknown);
             let _ = self.finish(None);
         }
     }
 }
 
 /// Linear, synchronous access to the original reservation's terminal guard.
-/// Dropping without `finish` refunds, including pre-poll cancellation and unwind.
+/// Dropping without `finish` settles committed usage or refunds if none exists.
 /// This owns no resource leases/lifetime markers: those stay with the worker until ALL
 /// captured input and rendering state is destroyed, even after settlement.
 pub(crate) struct Settlement {
@@ -75,6 +88,9 @@ pub(crate) struct Settlement {
 }
 
 impl Settlement {
+    pub(crate) fn evidence(&mut self, evidence: crate::inference::forward::Evidence) {
+        self.terminal.evidence = Some(evidence);
+    }
     pub(crate) fn first_output(&mut self) {
         // Later stream fragments need no global aggregation lock.
         if std::mem::replace(&mut self.first_output_seen, true) {
@@ -86,8 +102,9 @@ impl Settlement {
     }
 
     /// Consume verified adapter completion, not an intermediate usage event.
-    /// `Ok` is trusted ONLY after successful finish, DONE and EOF with no upstream
-    /// error; this capability cannot establish stream authenticity itself.
+    /// `Ok` is trusted ONLY after validated finish, final usage and actual EOF.
+    /// Committed partial evidence may settle money on `Err`, never completion.
+    /// This capability cannot establish stream authenticity itself.
     /// Accounting rechecks arithmetic and refunds invalid usage. No error text
     /// is retained or formatted. Even accounting failure is a single attempt.
     pub(crate) fn finish(mut self, result: &Result<StreamUsage, InferenceError>) -> SettledReceipt {
@@ -134,7 +151,8 @@ impl SettledReceipt {
 /// prompt-bearing work BEFORE this guard/leases. Preflight failure/deadline drops
 /// this sole guard (no explicit refund plus guard); success moves this same value
 /// synchronously into API streaming composition, even if observation was dropped.
-/// Neither a closed result channel nor reset/logout can veto accepted work.
+/// Observation loss cannot cancel this owner. The shared disconnect signal may
+/// close its upstream operation while the same guard still settles once.
 ///
 /// Retire generation tracking after terminal cleanup but before returning memory
 /// admission, so a replacement cannot overlap the old generation observation.
@@ -143,6 +161,7 @@ pub(crate) struct ReservedGeneration {
     _generation: Lease,
     _resources: Arc<crate::telemetry::hooks::Lease>,
     _ticket: Option<crate::lifecycle::Ticket>,
+    disconnect: crate::stream_owner::Disconnect,
 }
 
 /// Fixed, content-free supervision result. Never carry a JoinError/panic payload
@@ -168,6 +187,7 @@ impl ReservedGeneration {
                 accounting,
                 id,
                 armed: true,
+                evidence: None,
                 observation: None,
                 failure: None,
                 model: None,
@@ -176,7 +196,16 @@ impl ReservedGeneration {
             _resources: resources.into(),
             _generation: generation.into(),
             _ticket: None,
+            disconnect: Default::default(),
         }
+    }
+
+    pub(crate) fn disconnected(mut self, signal: crate::stream_owner::Disconnect) -> Self {
+        self.disconnect = signal;
+        self
+    }
+    pub(crate) fn disconnect(&self) -> crate::stream_owner::Disconnect {
+        self.disconnect.clone()
     }
 
     pub(crate) fn tracked(mut self, ticket: crate::lifecycle::Ticket) -> Self {
@@ -211,17 +240,17 @@ impl ReservedGeneration {
 
     /// Synchronous handoff. The work factory is invoked ONLY inside the spawned
     /// worker, after reservation and lease ownership have moved. Capture owned
-    /// inference inputs in it, not an already-running task. It must consume the
-    /// authenticated stream to terminal even when nonblocking delivery fails.
+    /// inference inputs in it, not an already-running task. Work must observe
+    /// disconnect without cancelling this settlement owner.
     ///
-    /// `Ok` must come only from the verified adapter after successful finish,
-    /// DONE and EOF, never from a parser/usage event alone. Missing/invalid usage
-    /// and upstream errors are `Err`; no output-derived token counts or replay.
+    /// `Ok` must come only from the verified adapter after validated finish,
+    /// final usage and EOF, never from a parser/usage event alone. Missing/invalid
+    /// final usage and upstream errors are `Err`; no text-derived counts or replay.
     /// The owner rechecks usage arithmetic through Accounting::finish.
     ///
     /// The returned receiver is observation only: dropping it or the HTTP body
-    /// cannot abort the worker or release either lease. Only runtime/service
-    /// shutdown may cancel the task; unwind/cancel cleanup refunds synchronously.
+    /// cannot abort the settlement worker or release either lease. Body drop
+    /// signals upstream cancellation; cleanup uses committed usage or refunds.
     pub(crate) fn spawn<F, Fut>(
         self,
         delivery: DeliveryTx,
@@ -234,18 +263,14 @@ impl ReservedGeneration {
         supervise(self.spawn_worker(delivery, work))
     }
 
-    /// Like `spawn`, but lets the owned future settle before completing a renderer
-    /// that borrows its captured history. Consume the verified adapter to EOF,
-    /// call `settlement.finish(&result)` synchronously, then ONLY when the
-    /// receipt's `outcome()` is `Ok(Outcome::Settled { .. })` complete rendering /
-    /// issue a next-turn token bound to the snapshotted model and conversation.
-    /// Return that same receipt, not a work-supplied completion.
-    /// Refunds and accounting errors must not mint tokens. Accounting releases
-    /// its lock before `finish` returns; token issuance must not run under it.
+    /// Like `spawn`, but lets the owned future settle before terminal delivery.
+    /// Call `settlement.finish(&result)` synchronously and return that same receipt,
+    /// not a work-supplied outcome. Settled money alone is not successful inference
+    /// or tool authorization. Accounting releases its lock before `finish` returns.
     ///
     /// No lease is transferred to the capability or observer. Dropping delivery
-    /// or observation cannot abort work. Dropping an unused capability refunds;
-    /// after a terminal attempt, panic/cancel cannot undo it or attempt a refund.
+    /// or observation cannot abort this owner. Dropping the capability settles
+    /// committed evidence or refunds; a terminal attempt is always absorbing.
     /// The owned delivery input may still be in its bounded startup phase; work
     /// (including startup) begins only after handoff to the detached worker.
     pub(crate) fn spawn_settling<T, F, Fut>(
@@ -283,6 +308,7 @@ impl ReservedGeneration {
             _resources,
             _generation,
             _ticket,
+            disconnect: _,
         } = self;
         let settlement = Settlement {
             terminal,

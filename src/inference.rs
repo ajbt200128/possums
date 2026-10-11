@@ -8,6 +8,7 @@ use tokio::time::Instant;
 
 mod errors;
 pub use errors::InferenceFailure;
+pub mod forward;
 pub mod stream;
 pub mod tools;
 use tools::{CompletionDelta, InvocationRequest, ToolInvocation, ToolProfile};
@@ -52,8 +53,8 @@ impl InferenceError {
     }
 }
 
-/// A borrowed output fragment may wait for bounded downstream capacity. A sink
-/// cannot cancel inference: after disconnect it discards output and returns.
+/// A borrowed output fragment may wait for bounded downstream capacity. The
+/// forwarding owner handles disconnect cancellation and retains settlement.
 #[async_trait]
 pub trait TextDeltaSink: Send {
     async fn emit(&mut self, text: &str);
@@ -104,7 +105,7 @@ pub trait Inference: Send + Sync {
     ) -> Result<u64, InferenceError>;
     /// Stream only after trust/catalog/reservation and context preflight.
     /// `model` carries the full context-legal output allowance. Successful usage
-    /// is terminal, withheld until validated finish, [DONE], and transport EOF.
+    /// is terminal, withheld until validated finish, final usage and transport EOF.
     /// Serialized upload DATA must retain `heavy` even beyond this call's return.
     /// Call `heavy.dispatch_generation()` just before the actual generation send
     /// (after encoding/trust), never for tokenizer or role/usage-only events.
@@ -112,9 +113,9 @@ pub trait Inference: Send + Sync {
     /// Legacy synchronous compatibility entry point (including diagnostic callers).
     /// API delivery uses the async completion/invocation sinks below instead.
     /// The borrowed synchronous callback must not block, panic, or collect
-    /// unbounded output. On delivery failure, detach delivery in the callback and
-    /// keep polling this future to completion; never cancel upstream or retry an
-    /// uncertain generation. Callback return values cannot cancel consumption.
+    /// unbounded output. The legacy callback cannot express backpressure; the API
+    /// uses `generate_forwarded_stream` and an async bounded sink. Its owner closes
+    /// upstream on observed disconnect and never automatically replays generation.
     /// Implementations must not expose prompt text or raw upstream diagnostics.
     /// The default fails closed for implementations without streaming support.
     async fn generate_stream(
@@ -157,7 +158,7 @@ pub trait Inference: Send + Sync {
     }
 
     /// The async sink borrows bounded fragments; never collect complete arguments.
-    /// Delivery failure must detach only, not cancel this settling operation.
+    /// The async forwarding entry point owns delivery backpressure/cancellation.
     async fn generate_invocation_stream(
         &self,
         _model: &Model,
@@ -166,6 +167,42 @@ pub trait Inference: Send + Sync {
         _on_delta: &mut dyn DeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         Err(InferenceError::Unavailable)
+    }
+
+    /// Native forwarding entry point. Existing synthetic implementations may
+    /// use the bounded legacy bridge; verified production overrides it.
+    async fn generate_forwarded_stream(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        invocation: Option<&ToolInvocation>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
+        sink: &mut dyn forward::ForwardSink,
+    ) -> Result<stream::StreamCompletion, InferenceError> {
+        let mut emit = forward::LegacySink {
+            sink,
+            failure: None,
+        };
+        let result = match invocation {
+            Some(invocation) => {
+                self.generate_invocation_stream(model, invocation, heavy, &mut emit)
+                    .await
+            }
+            None => {
+                self.generate_completion_stream(model, messages, heavy, &mut emit)
+                    .await
+            }
+        };
+        if let Some(failure) = emit.failure {
+            return Err(failure.into());
+        }
+        let completion = result?;
+        let mut evidence = forward::Evidence::sse(completion.usage);
+        evidence.source = "final_sse";
+        sink.evidence(evidence);
+        sink.event(serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":completion.finish_reason}]})).await?;
+        sink.event(serde_json::json!({"choices":[],"usage":{"prompt_tokens":completion.usage.input_tokens,"completion_tokens":completion.usage.output_tokens,"total_tokens":completion.usage.total_tokens}})).await?;
+        Ok(completion)
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError>;
@@ -205,8 +242,9 @@ impl TinfoilInference {
     /// carries the full context-legal output allowance, not a credit-reduced cap.
     /// Deltas are borrowed, bounded, and validated before this synchronous callback;
     /// it must not block or collect unbounded output. The one returned Result is
-    /// terminal: successful usage is withheld until finish, DONE and transport EOF.
-    /// Delivery failure is not a reason to stop calling/consuming this future.
+    /// terminal: successful usage is withheld until finish, final usage and EOF.
+    /// The API's owner may drop this upstream future on observed disconnect while
+    /// retaining sole settlement ownership.
     pub async fn generate_stream(
         &self,
         model: &Model,
@@ -226,31 +264,10 @@ impl TinfoilInference {
         heavy: Arc<crate::telemetry::hooks::Lease>,
         on_delta: &mut dyn TextDeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
-        let http = self.http()?;
-        let url = format!("{}/v1/chat/completions", self.origin);
-        let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
-        let request = self
-            .authenticate(http.post(&url))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .body(stream::request_body(
-                &model.id,
-                model.max_output_tokens,
-                messages,
-                Some(heavy.clone()),
-            )?);
-        // Use the origin-bound raw transport, not the SDK's retrying chat layer.
-        heavy.dispatch_generation();
-        let response = tokio::time::timeout_at(deadline, request.send())
+        let mut text = TextSink(on_delta);
+        let mut sink = forward::DeltaSinkAdapter(&mut text);
+        self.generate_forwarded_stream(model, messages, None, heavy, &mut sink)
             .await
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?;
-        if response.url().as_str() != url {
-            return Err(InferenceError::Detailed(
-                InferenceFailure::EndpointBindingFailed,
-            ));
-        }
-        stream::consume_completion_response(response, stream::STREAM_IDLE_TIMEOUT, on_delta).await
     }
 
     /// Funded diagnostic only: fixed non-user input, no gateway accounting or route.
@@ -1000,6 +1017,40 @@ struct TokenCount {
 
 #[async_trait]
 impl Inference for TinfoilInference {
+    async fn generate_forwarded_stream(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        invocation: Option<&ToolInvocation>,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
+        sink: &mut dyn forward::ForwardSink,
+    ) -> Result<stream::StreamCompletion, InferenceError> {
+        let builder = match invocation {
+            Some(invocation) => {
+                self.tool_profile(&model.id)
+                    .ok_or(InferenceFailure::ToolProfileUnqualified)?;
+                invocation_request(&model.id, invocation)?
+            }
+            None => text_request(&model.id, messages)?,
+        };
+        let body = stream::builder_body(builder, model.max_output_tokens, heavy.clone())?;
+        let url = format!("{}/v1/chat/completions", self.origin);
+        let request = self
+            .authenticate(self.http()?.post(&url))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header("X-Tinfoil-Request-Usage-Metrics", "true")
+            .body(body);
+        heavy.dispatch_generation();
+        let response = tokio::time::timeout(stream::RESPONSE_TIMEOUT, request.send())
+            .await
+            .map_err(|_| InferenceFailure::GenerationSendFailed)?
+            .map_err(|_| InferenceFailure::GenerationSendFailed)?;
+        if response.url().as_str() != url {
+            return Err(InferenceFailure::EndpointBindingFailed.into());
+        }
+        forward::consume(response, &model.id, stream::STREAM_IDLE_TIMEOUT, sink).await
+    }
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
         let request = self.authenticate(self.http()?.get(format!("{}/v1/models", self.origin)));
         self.bounded_response(request, MAX_CATALOG_BYTES)
@@ -1074,39 +1125,9 @@ impl Inference for TinfoilInference {
         heavy: Arc<crate::telemetry::hooks::Lease>,
         on_delta: &mut dyn DeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
-        let profile = self
-            .tool_profile(&model.id)
-            .ok_or(InferenceFailure::ToolProfileUnqualified)?;
-        let url = format!("{}/v1/chat/completions", self.origin);
-        let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
-        let request = self
-            .authenticate(self.http()?.post(&url))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .body(stream::invocation_body(
-                &model.id,
-                model.max_output_tokens,
-                invocation,
-                heavy.clone(),
-            )?);
-        heavy.dispatch_generation();
-        let response = tokio::time::timeout_at(deadline, request.send())
+        let mut sink = forward::DeltaSinkAdapter(on_delta);
+        self.generate_forwarded_stream(model, &[], Some(invocation), heavy, &mut sink)
             .await
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::GenerationSendFailed))?;
-        if response.url().as_str() != url {
-            return Err(InferenceError::Detailed(
-                InferenceFailure::EndpointBindingFailed,
-            ));
-        }
-        stream::consume_invocation_response(
-            response,
-            stream::STREAM_IDLE_TIMEOUT,
-            profile,
-            invocation,
-            on_delta,
-        )
-        .await
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {

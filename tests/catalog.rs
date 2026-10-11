@@ -101,6 +101,7 @@ fn rejects_cost_overflow() {
             max_output_tokens: u64::MAX,
             input_microunits_per_million_tokens: u64::MAX,
             output_microunits_per_million_tokens: u64::MAX,
+            cached_input_microunits_per_million_tokens: None,
         }],
     };
     assert_eq!(
@@ -256,15 +257,17 @@ fn cached_input_discount_never_lowers_the_reservation() {
         .unwrap()
         .reservation_quote("m")
         .unwrap();
-    for discount in [
-        serde_json::json!(0),
-        serde_json::json!(0.5),
-        serde_json::json!(2),
+    for (discount, rate) in [
+        (serde_json::json!(0), 0),
+        (serde_json::json!(0.5), 500_000),
+        (serde_json::json!(2), 2_000_000),
     ] {
         value["data"][0]["pricing"]["cachedInputTokenPricePer1M"] = discount;
         let catalog =
             Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0).unwrap();
-        assert_eq!(catalog.reservation_quote("m"), Ok(quote.clone()));
+        let mut expected = quote.clone();
+        expected.model.cached_input_microunits_per_million_tokens = Some(rate);
+        assert_eq!(catalog.reservation_quote("m"), Ok(expected));
     }
     for invalid in [
         serde_json::json!(2.000001),

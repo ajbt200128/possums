@@ -1,4 +1,4 @@
-use crate::catalog::{marked_up_cost, Quote};
+use crate::catalog::{cached_cost, Quote};
 use std::{collections::HashMap, sync::Mutex, time::Instant};
 use thiserror::Error;
 
@@ -164,6 +164,15 @@ impl Accounting {
         submission_id: [u8; 32],
         usage: Option<FinalUsage>,
     ) -> Result<Outcome, AccountingError> {
+        self.finish_cached(submission_id, usage, 0)
+    }
+
+    pub(crate) fn finish_cached(
+        &self,
+        submission_id: [u8; 32],
+        usage: Option<FinalUsage>,
+        cached: u64,
+    ) -> Result<Outcome, AccountingError> {
         let mut state = self
             .state
             .lock()
@@ -183,11 +192,17 @@ impl Accounting {
             if usage.input_tokens.checked_add(usage.output_tokens) != Some(usage.total_tokens) {
                 return None;
             }
-            marked_up_cost(
+            cached_cost(
                 usage.input_tokens,
                 usage.output_tokens,
+                cached,
                 submission.quote.model.input_microunits_per_million_tokens,
                 submission.quote.model.output_microunits_per_million_tokens,
+                submission
+                    .quote
+                    .model
+                    .cached_input_microunits_per_million_tokens
+                    .unwrap_or(submission.quote.model.input_microunits_per_million_tokens),
             )
             .ok()
         });
@@ -274,10 +289,68 @@ mod tests {
                 max_output_tokens: 1,
                 input_microunits_per_million_tokens: 1_000_000,
                 output_microunits_per_million_tokens: 1_000_000,
+                cached_input_microunits_per_million_tokens: None,
             },
             input_tokens: 1,
             reserved_microunits: 3,
         }
+    }
+
+    #[test]
+    fn cache_split_rounds_once_at_submitted_rates_and_caps_liability() {
+        for (cap, expected) in [(100, 4), (2, 2)] {
+            let ledger = Accounting::new([("a".into(), 100)]);
+            let mut quote = quote();
+            quote.reserved_microunits = cap;
+            quote.model.cached_input_microunits_per_million_tokens = Some(0);
+            ledger
+                .reserve(
+                    "a",
+                    [1; 32],
+                    [2; 32],
+                    quote,
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .unwrap();
+            let usage = Some(FinalUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                total_tokens: 5,
+            });
+            assert_eq!(
+                ledger.finish_cached([1; 32], usage, 2).unwrap(),
+                Outcome::Settled { charged: expected }
+            );
+            assert_eq!(ledger.available("a"), Some(100 - expected));
+            assert_eq!(
+                ledger.finish([1; 32], None).unwrap(),
+                Outcome::Settled { charged: expected }
+            );
+        }
+        let ledger = Accounting::new([("a".into(), 100)]);
+        ledger
+            .reserve(
+                "a",
+                [1; 32],
+                [2; 32],
+                quote(),
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
+        assert_eq!(
+            ledger
+                .finish_cached(
+                    [1; 32],
+                    Some(FinalUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        total_tokens: 2
+                    }),
+                    2
+                )
+                .unwrap(),
+            Outcome::Refunded
+        );
     }
 
     #[test]

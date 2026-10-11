@@ -22,6 +22,7 @@ fn quote() -> Quote {
             max_output_tokens: 10,
             input_microunits_per_million_tokens: 2_000_000,
             output_microunits_per_million_tokens: 3_000_000,
+            cached_input_microunits_per_million_tokens: None,
         },
         input_tokens: 5,
         reserved_microunits: 52,
@@ -137,6 +138,27 @@ async fn bounded<T>(future: impl Future<Output = T>) -> T {
         .unwrap()
 }
 
+#[tokio::test]
+async fn panic_after_committed_running_usage_settles_once_instead_of_refunding() {
+    let f = Fixture::new();
+    let owner = f.pending(1);
+    let (tx, body) = f.delivery();
+    let receipt = owner.spawn_settling(tx, |_, mut settlement| async move {
+        settlement.evidence(crate::inference::forward::Evidence::sse(usage()));
+        panic!("synthetic panic after evidence");
+        #[allow(unreachable_code)]
+        settlement.finish(&Err(InferenceError::Unavailable))
+    });
+    assert_eq!(bounded(receipt).await.unwrap(), Err(OwnerError::Panicked));
+    f.outcome(1, Outcome::Settled { charged: 29 }, 971);
+    assert_eq!(
+        f.ledger.finish([1; 32], None).unwrap(),
+        Outcome::Settled { charged: 29 }
+    );
+    drop(body);
+    f.leases_returned();
+}
+
 #[test]
 fn generation_tracking_retires_before_memory_handoff_in_both_owner_envelopes() {
     struct Handoff {
@@ -175,6 +197,7 @@ fn generation_tracking_retires_before_memory_handoff_in_both_owner_envelopes() {
                 _generation,
                 _resources,
                 _ticket,
+                disconnect: _,
             } = owner;
             let settlement = Settlement {
                 terminal,
