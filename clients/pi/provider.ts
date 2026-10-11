@@ -334,7 +334,7 @@ export class PossumsProvider implements Provider {
       // Never expose a recovery key or bearer token to Pi's request hooks.
       return { auth: { apiKey: REQUEST_AUTH }, source: result?.source };
     },
-    login: async interaction => {
+    login: async (interaction: Parameters<NonNullable<ApiKeyAuth['login']>>[0]) => {
       this.logout();
       const epoch = this.authEpoch;
       // Verify public evidence and the actual channel before requesting a secret.
@@ -653,8 +653,8 @@ export class PossumsProvider implements Provider {
   private observeReconciliation(output: AssistantMessage): void {
     const window = this.reconciliation;
     if (!window) return;
-    const receipts = output.diagnostics?.filter(diagnostic => diagnostic.type === 'possums_settled_receipt') ?? [];
-    const refunds = output.diagnostics?.filter(diagnostic => diagnostic.type === 'possums_reservation_refunded') ?? [];
+    const receipts = output.diagnostics?.filter((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt') ?? [];
+    const refunds = output.diagnostics?.filter((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_reservation_refunded') ?? [];
     if (receipts.length === 1 && refunds.length === 0) {
       const charged = receipts[0].details?.chargedMicrounits;
       if (typeof charged !== 'string' || !/^(0|[1-9][0-9]{0,19})$/.test(charged)) { window.unknown = true; return; }
@@ -665,7 +665,7 @@ export class PossumsProvider implements Provider {
     } else if (receipts.length || refunds.length || output.stopReason === 'error' || output.stopReason === 'aborted') {
       window.unknown = true;
     }
-    if (output.diagnostics?.some(diagnostic => diagnostic.type === 'possums_billing_unknown')) window.unknown = true;
+    if (output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_billing_unknown')) window.unknown = true;
   }
 
   async refreshModels(context: Parameters<NonNullable<Provider['refreshModels']>>[0]): Promise<void> {
