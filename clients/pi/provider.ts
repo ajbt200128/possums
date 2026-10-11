@@ -492,9 +492,13 @@ export class PossumsProvider implements Provider {
     if (scope.terminal) throw scope.terminal;
     const previousClient = this.client;
     if (scope.renewalPending) {
+      scope.waiters++;
       const wait = new Operation(null, signal);
       try { await wait.wait(scope.renewalPending, 4 * LIMITS.operationMs + LIMITS.bootstrapMs); }
-      finally { wait.close(); }
+      finally {
+        wait.close(); scope.waiters--;
+        if (!scope.waiters && signal?.aborted) scope.controller.abort();
+      }
       if (scope.terminal) throw scope.terminal;
       if (this.client !== previousClient && this.client && this.catalog.length) return;
     }

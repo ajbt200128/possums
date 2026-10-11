@@ -511,6 +511,23 @@ await check('overlapping expiry renewal and public setup recovery cannot race pu
  assert.equal((await request).stopReason,'stop');assert.equal(probes,0);assert.equal(logins,2);
  assert.equal(provider.runScope.attempts,1);assert.equal(source.sends(),1);provider.settleRun();
 });
+await check('public recovery waiter keeps shared expiry renewal alive when its first caller aborts',async()=>{
+ const source=await setup([]),first=freshFixture(source.client),entered=deferred(),release=deferred();
+ let logins=0,probes=0;
+ first.login=async()=>{if(++logins===2){entered.resolve();await release.promise;}};
+ first.freshSession=()=>freshFixture(first);
+ const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{probes++;throw new Error('must not probe');});
+ await provider.auth.apiKey.login(interaction());Object.defineProperty(provider.client,'authExpiresAt',{value:0});
+ const cancel=new AbortController();
+ const request=provider.streamSimple(provider.getModels()[0],context(false),{signal:cancel.signal}).result();
+ await entered.promise;const scope=provider.runScope;
+ const other=provider.recoverSetup(scope,new AbortController().signal);
+ assert.equal(scope.waiters,2);cancel.abort();await request;
+ assert.equal(scope.controller.signal.aborted,false,'another authorized waiter still owns renewal');
+ release.resolve();await other;
+ assert.equal(probes,0);assert.equal(logins,2);assert.equal(scope.attempts,1);assert.equal(source.sends(),0);
+ provider.settleRun();
+});
 await check('prelatch guard refuses old prepared client after concurrent expiry renewal',async()=>{
  const source=await setup(['stop']),first=freshFixture(source.client),entered=deferred(),release=deferred();
  first.freshSession=()=>freshFixture(first);
