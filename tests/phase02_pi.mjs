@@ -522,7 +522,7 @@ await check('public acquisition retries only closed transient errors within one 
  first.models=async()=>{if(++models>1)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
   return m.validateModels({object:'list',data:[entry(true)]});};first.freshSession=()=>freshFixture(first);
  const provider=new m.PossumsProvider(async()=>first,()=>{},async()=>{
-  calls++;throw new m.ConnectionFailure('evidence_unavailable',new m.EvidenceObservation('gateway_attestation','http',503));
+  calls++;throw new m.ConnectionFailure('evidence_unavailable',new m.EvidenceObservation('gateway_keys','http',503));
  });
  await provider.auth.apiKey.login(interaction());provider.beginRun();
  const started=performance.now(),result=await provider.streamSimple(provider.getModels()[0],context(false)).result();
@@ -531,6 +531,16 @@ await check('public acquisition retries only closed transient errors within one 
  assert.equal((await provider.streamSimple(provider.getModels()[0],context(false)).result()).stopReason,'error');
  assert.equal(calls,3,'exhaustion remains latched even for another callback');
  provider.settleRun();
+ const limited=await setup([]),template=freshFixture(limited.client);let checks=0,probes=0;
+ template.models=async()=>{if(++checks>1)throw new m.CatalogFailure('http','rejected',401,{error:{code:'unauthorized'}});
+  return m.validateModels({object:'list',data:[entry(true)]});};template.freshSession=()=>freshFixture(template);
+ const denied=new m.PossumsProvider(async()=>template,()=>{},async()=>{
+  probes++;throw new m.ConnectionFailure('evidence_unavailable',new m.EvidenceObservation('gateway_keys','rate_limited',429));
+ });
+ await denied.auth.apiKey.login(interaction());denied.beginRun();
+ const terminal=await denied.streamSimple(denied.getModels()[0],context(false)).result();
+ assert.match(terminal.errorMessage,/rate_limited.*429/);assert.equal(probes,1);assert.equal(limited.sends(),0);
+ denied.settleRun();
 });
 await check('candidate catalog removing selected model or tool profile cannot substitute or dispatch',async()=>{
  for(const removed of [true,false]){

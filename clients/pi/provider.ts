@@ -488,9 +488,10 @@ export class PossumsProvider implements Provider {
             check();
             last = connectionFailure(error);
             const observation = last.observation;
-            if (last.code !== 'evidence_unavailable' || !observation || observation.stage !== 'gateway_attestation' ||
-                !(observation.constraint === 'request' || observation.constraint === 'interrupted' ||
-                  observation.constraint === 'idle' || [408, 502, 503, 504].includes(observation.status ?? 0))) break;
+            const transient = observation && observation.stage !== 'public_evidence_cache' &&
+              ((observation.constraint === 'request' && observation.status === undefined) ||
+                (['http', 'redirect'].includes(observation.constraint) && [408, 502, 503, 504].includes(observation.status ?? 0)));
+            if (last.code !== 'evidence_unavailable' || !transient) break;
           } finally { op.close(); }
         }
         scope.terminal = last ?? new ConnectionFailure('session_unavailable');
