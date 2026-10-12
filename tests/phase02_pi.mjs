@@ -1284,14 +1284,15 @@ await check('large assistant reply survives a thirty-minute idle follow-up witho
  }finally{Date.now=now;}
 });
 await check('local invocation admission rejection is classified without inference or private content',async()=>{
- for(const parameters of [{type:'object',properties:{value:{$ref:'https://PRIVATE_SCHEMA_SENTINEL.invalid'}}},
-  {type:'array',description:'PRIVATE_SCHEMA_SENTINEL'},
-  {type:'object',$id:'PRIVATE_SCHEMA_SENTINEL'}]){
+ for(const [parameters,constraint] of [[{type:'object',properties:{value:{$ref:'https://PRIVATE_SCHEMA_SENTINEL.invalid'}}},'schema_reference'],
+  [{type:'array',description:'PRIVATE_SCHEMA_SENTINEL'},'tool_schema'],
+  [{type:'object',$id:'PRIVATE_SCHEMA_SENTINEL'},'schema_reference']]){
   const s=await setup(['stop']);
   const transcript=ai.normalizeContext({messages:[user],tools:[{...tool,parameters}]});
   s.provider.beginRun();const result=await drain(s.provider.streamSimple(s.selected,transcript));
   assert.equal(result.message.stopReason,'error');assert.equal(s.sends(),0);
-  assert.match(result.message.errorMessage,/\[possums_request_schema\].*Stage: request; constraint: schema.*Local request admission.*No inference request sent by this attempt.*Prior billing is unchanged or unknown.*Not replayed/);
+  assert(result.message.errorMessage.includes(`[possums_request_${constraint}] Stage: request; constraint: ${constraint}.`));
+  assert.match(result.message.errorMessage,/No inference request sent by this attempt.*Prior billing is unchanged or unknown.*Not replayed/);
   assert(!isRetryableAssistantError(result.message));
   assert.equal(result.message.diagnostics,undefined);
   assert(!JSON.stringify(result).includes('PRIVATE_SCHEMA_SENTINEL'));
@@ -1299,6 +1300,71 @@ await check('local invocation admission rejection is classified without inferenc
   const repeated=await drain(s.provider.streamSimple(s.selected,transcript));
   assert.equal(repeated.message.errorMessage,result.message.errorMessage);assert.equal(s.sends(),0);
  }
+});
+await check('request validation keeps precise constraints through payload-hook re-admission',async()=>{
+ const client=await catalogFixture();await client.login(recoveryKey);let calls=0;
+ for(const key of ['models','control','chat'])client.channel[key]=()=>{calls++;throw Error('PRIVATE_REQUEST_SENTINEL');};
+ const valid={model:'synthetic',stream:true,messages:[{role:'user',content:'Synthetic'}],tools:[{type:'function',function:{name:'echo',parameters:{type:'object'}}}]};
+ const batch=[{role:'assistant',content:'',tool_calls:[{id:'call',type:'function',function:{name:'echo',arguments:'{}'}}]},
+  {role:'tool',content:'Synthetic',tool_call_id:'call'}];
+ for(const [constraint,mutate] of [
+  ['tool_name',v=>{v.tools[0].function.name='PRIVATE_REQUEST_SENTINEL bad name';}],
+  ['tool_schema',v=>{delete v.tools[0].function.parameters;}],
+  ['schema_reference',v=>{v.tools[0].function.parameters.$dynamicRef='PRIVATE_REQUEST_SENTINEL';}],
+  ['tool_choice',v=>{v.tool_choice={type:'function',function:{name:'undeclared'}};}],
+  ['history',v=>{v.messages[0].content=null;}],
+  ['history_order',v=>{v.messages=batch.slice(0,1);}],
+  ['tool_id',v=>{v.messages=structuredClone(batch);v.messages[0].tool_calls[0].id='bad id';}],
+  ['tool_arguments',v=>{v.messages=structuredClone(batch);v.messages[0].tool_calls[0].function.arguments='{"private":"PRIVATE_REQUEST_SENTINEL","private":0}';}],
+ ]){
+  const invalid=structuredClone(valid);mutate(invalid);
+  const expected=error=>error instanceof m.DiagnosticFailure && error.stage==='request' && error.constraint===constraint &&
+   error.code==='rejected' && !error.message.includes('PRIVATE_REQUEST_SENTINEL') && error.cause===undefined;
+  assert.throws(()=>m.snapshotInvocation(invalid),expected);
+  await assert.rejects(client.prepareChat('synthetic',valid.messages,()=>{},false,{tools:valid.tools,onPayload:()=>invalid}),expected);
+ }
+ assert.equal(calls,0);
+});
+await check('Pi SDK conversion failures remain distinct, safe and pre-submission',async()=>{
+ const s=await setup(['stop']);
+ const assistant={role:'assistant',provider:'possums',api:'openai-completions',model:s.selected.id,timestamp:2,stopReason:'toolUse',
+  content:[{type:'toolCall',id:'call',name:'echo',arguments:{toJSON(){throw Error('PRIVATE_CONVERSION_SENTINEL');}}}]};
+ const resultMessage={role:'toolResult',toolCallId:'call',toolName:'echo',content:[{type:'text',text:'Synthetic'}],timestamp:3};
+ const transcript=ai.normalizeContext({messages:[user,assistant,resultMessage],tools:[tool]});
+ s.provider.beginRun();const result=await drain(s.provider.streamSimple(s.selected,transcript));
+ assert.match(result.message.errorMessage,/\[possums_request_conversion\].*Pi SDK history\/tool conversion.*underlying cause is unknown.*No inference request sent by this attempt/);
+ assert.equal(s.sends(),0);assert.equal(result.message.diagnostics,undefined);
+ assert(!JSON.stringify(result).includes('PRIVATE_CONVERSION_SENTINEL'));assert(!isRetryableAssistantError(result.message));
+ const invalid=await drain(s.provider.streamSimple(s.selected,{messages:[{...user,content:[{type:'text',text:42}]}]}));
+ assert.match(invalid.message.errorMessage,/\[possums_request_history\]/);assert.equal(s.sends(),0);
+ s.provider.client.chatPrepared=async()=>{throw new m.DiagnosticFailure('request','tool_schema');};
+ const late=await drain(s.provider.streamSimple(s.selected,context(true)));
+ assert.match(late.message.errorMessage,/Billing status: Charge unknown/);
+ assert(!late.message.errorMessage.includes('No inference request sent by this attempt'));
+});
+await check('supported schema roots and absent descriptions retain exact SDK semantics',async()=>{
+ const s=await setup(['stop']);
+ for(const parameters of [{},{allOf:[{type:'object',properties:{value:{type:'string'}}}]},
+  {$ref:'#/$defs/args',$defs:{args:{type:'object',properties:{value:{type:'string'}}}}}]){
+  const transcript=ai.normalizeContext({messages:[user],tools:[{...tool,description:undefined,parameters}]});
+  const payload=m.snapshotInvocation(m.invocation(s.selected,transcript));
+  assert.deepEqual(payload.tools[0].function.parameters,parameters);
+  assert(!Object.hasOwn(payload.tools[0].function,'description'));
+ }
+});
+await check('retired historical tools remain data while undeclared live calls stay blocked',async()=>{
+ const s=await setup(['stop','tool_calls']);
+ const assistant={role:'assistant',provider:'possums',api:'openai-completions',model:s.selected.id,timestamp:2,stopReason:'toolUse',
+  content:[{type:'toolCall',id:'past',name:'retired',arguments:{value:'Synthetic'}}]};
+ const resultMessage={role:'toolResult',toolCallId:'past',toolName:'retired',content:[{type:'text',text:'Synthetic result'}],timestamp:3};
+ const transcript=ai.normalizeContext({messages:[{role:'system',content:'',toolsAdded:[{...tool,name:'retired'}],timestamp:0},user,assistant,resultMessage,
+  {role:'system',content:'',toolsRemoved:[{name:'retired'}],toolsAdded:[tool],timestamp:4},user]});
+ const payload=m.snapshotInvocation(m.invocation(s.selected,transcript));
+ assert.deepEqual(payload.tools.map(t=>t.function.name),['echo']);assert.equal(payload.messages.find(message=>message.role==='assistant').tool_calls[0].function.name,'retired');
+ s.provider.beginRun();assert.equal((await drain(s.provider.streamSimple(s.selected,transcript))).message.stopReason,'stop');
+ const text='data: '+JSON.stringify(event({role:'assistant',tool_calls:[{index:0,id:'new',type:'function',function:{name:'retired',arguments:'{}'}}]}))+'\n\n';
+ const body=new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(text));c.close();}});
+ await assert.rejects(m.consumeCompletion(body,entry(true),()=>{},{tools:payload.tools}),error=>error instanceof m.DiagnosticFailure && error.stage==='stream' && error.constraint==='tool');
 });
 await check('nested tool schema survives Pi conversion and the complete request snapshot',async()=>{
  let parameters={type:'object',properties:{value:{type:'string',enum:['synthetic']}}};
@@ -1326,6 +1392,51 @@ await check('repeated over-deep requests fail deterministically without inferenc
  assert.equal(first.message.diagnostics,undefined);
  const second=await drain(s.provider.streamSimple(s.selected,transcript));
  assert.equal(second.message.errorMessage,first.message.errorMessage);assert.equal(s.sends(),0);
+});
+await check('short seeded request-preparation fuzz stays closed and never dispatches',async()=>{
+ const s=await setup([]),client=await catalogFixture();await client.login(recoveryKey);
+ let network=0,accepted=0,rejected=0,seed=0x51a7;
+ const next=()=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return seed>>>0;};
+ for(const key of ['models','control','chat'])client.channel[key]=()=>{network++;throw Error('PRIVATE_FUZZ_NETWORK');};
+ for(let i=0;i<256;i++){
+  const variant=i%12,word='x'.repeat(1+next()%64)+'🐾\ud800',parameters={type:'object',properties:{value:{type:'string',description:word}}};
+  const declaration={...tool,description:i%2?undefined:word,parameters};
+  const messages=[{...user,content:i%2?word:[{type:'text',text:word}]}];
+  let expected,choice;
+  if(variant===0){delete parameters.type;parameters.allOf=[{type:'object'}];}
+  if(variant===1){parameters.type=['array','string','null'][next()%3];expected='possums_request_tool_schema';}
+  if(variant===2){declaration.name='PRIVATE_FUZZ bad '+word;expected='possums_request_tool_name';}
+  if(variant===3){parameters.$ref='https://PRIVATE_FUZZ.invalid/'+word;expected='possums_request_schema_reference';}
+  if(variant===4){messages[0].content=[{type:'text',text:next()}];expected='possums_request_history';}
+  if(variant===5){messages.push({role:'toolResult',toolCallId:'orphan',toolName:'echo',content:[{type:'text',text:word}]});expected='possums_orphan_tool_result';}
+  if(variant===6||variant===7||variant===8){
+   const args=variant===6?{toJSON(){throw Error('PRIVATE_FUZZ_CONVERSION');}}:variant===7?[word]:{value:word};
+   messages.push({role:'assistant',provider:'possums',api:'openai-completions',model:s.selected.id,timestamp:2,stopReason:'toolUse',
+    content:[{type:'toolCall',id:'past_'+i,name:variant===8?'retired':'echo',arguments:args}]},
+    {role:'toolResult',toolCallId:'past_'+i,toolName:variant===8?'retired':'echo',content:[{type:'text',text:word}],timestamp:3});
+   if(variant===6)expected='possums_request_conversion';
+   if(variant===7)expected='possums_request_tool_arguments';
+  }
+  if(variant===9){parameters.$dynamicRef='PRIVATE_FUZZ';expected='possums_request_schema_reference';}
+  if(variant===10){choice={type:'function',function:{name:'undeclared'}};expected='possums_request_tool_choice';}
+  if(variant===11){delete parameters.type;parameters.$ref='#/$defs/args';parameters.$defs={args:{type:'object'}};}
+  try{
+   const payload=m.invocation(s.selected,ai.normalizeContext({messages,tools:[declaration]}));
+   if(choice)payload.tool_choice=choice;
+   const prepared=await client.prepareChat(payload.model,payload.messages,()=>{},false,{tools:payload.tools,
+    ...(next()%2?{onPayload:()=>payload}:{tool_choice:payload.tool_choice})});
+   prepared.close();assert.equal(expected,undefined);
+   const snapshot=m.snapshotInvocation(payload);assert.deepEqual(snapshot.tools[0].function.parameters,parameters);
+   assert(!Object.hasOwn(snapshot.tools[0].function,'description')||snapshot.tools[0].function.description===declaration.description);
+   accepted++;
+  }catch(error){
+   assert.equal(error.message,expected);assert(expected);assert.equal(error.cause,undefined);
+   assert(!error.message.includes('PRIVATE_FUZZ'));assert(!JSON.stringify(error).includes('PRIVATE_FUZZ'));
+   rejected++;
+  }
+ }
+ assert.equal(accepted+rejected,256);assert(accepted>0&&rejected>0);assert.equal(network,0);assert.equal(s.sends(),0);
+ console.log(JSON.stringify({suite:'request-preparation-fuzz',seed:'0x51a7',cases:256,accepted,rejected,network,inference:0}));
 });
 await check('failed catalog refresh removes prior usable list',async()=>{
  const s=await setup(['stop']);assert.equal(s.provider.getModels().length,1);s.failModels();
@@ -1412,6 +1523,18 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
  return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
 }
+await check('actual Pi context hook reports typed request rejection without inference or retry',async()=>{
+ const f=await sdkSetup('sdk-admission-schema',['stop'],false,false,true,false,{baseDelayMs:1,maxAgentDelayMs:8},[pi=>{
+  pi.on('context_with_system',event=>({messages:event.messages.map((message,index)=>index===0?{...message,
+   toolsAdded:[{...tool,parameters:{type:'object',properties:{value:{$ref:'https://PRIVATE_NATIVE_SCHEMA.invalid'}}}}]}:message)}));
+ }]);
+ try{
+  await f.session.prompt('Synthetic request');
+  const last=f.session.messages.filter(message=>message.role==='assistant').at(-1);
+  assert.match(last.errorMessage,/\[possums_request_schema_reference\].*Only local fragment.*No inference request sent by this attempt/);
+  assert.equal(f.s.sends(),0);assert.equal(last.stopReason,'error');assert(!last.errorMessage.includes('PRIVATE_NATIVE_SCHEMA'));
+ }finally{f.session.dispose();}
+});
 await check('deferred renewal qualification: explicit source and active signal reach auth before stream; background signal differs',async()=>{
  const trace=[],signals=[];let runSignal;
  const f=await sdkSetup('sdk-renewal-signal',['stop','stop','stop'],false,false,true,false,{enabled:false},[pi=>{

@@ -21,10 +21,22 @@ export function diagnosticDescription(failure: DiagnosticFailure): string {
     balance: 'This balance check sends no inference. Repeat it once Pi is idle; share only this code for support if it persists.',
     compaction: 'No checkpoint is authorized. Share only this code for support; a deliberate /compact may incur a new charge.',
   } as const;
-  const description = failure.constraint === 'expired' ? 'Session-pinned trust validity has elapsed.' :
+  const requestConstraints: Partial<Record<DiagnosticFailure['constraint'], string>> = {
+    tool_name: 'Function names must be 1–64 ASCII letters, digits, underscores or hyphens; declarations must have unique names. Correct the tool declaration.',
+    tool_id: 'Historical tool-call IDs must be 1–128 ASCII letters, digits, underscores or hyphens. Correct the call/result IDs together.',
+    tool_schema: 'Function declarations must contain a name and JSON schema object with no explicit non-object root type; optional descriptions must be text. Keep schemas within parser limits and use an object schema or a local reference/combinator.',
+    schema_reference: 'Only local fragment schema references are supported; resource IDs and dynamic/recursive references are unsupported. Inline external schemas without changing their constraints.',
+    tool_choice: 'Tool choice must be auto, none, required, or a named currently declared function. Correct the choice or declare that function.',
+    history: 'History must use supported text messages and function-call records within the request envelope. Correct the history structure; do not share its contents.',
+    history_order: 'Tool calls/results must have unique call IDs and complete, matching result batches before the next turn. Correct the history ordering.',
+    tool_arguments: 'Historical function arguments must be a JSON object with finite numbers and unique keys within parser limits. Correct the stored arguments.',
+    conversion: 'Pi SDK history/tool conversion did not complete; the underlying cause is unknown. Check custom context transformations; share only this code/stage/constraint for support.',
+  };
+  const requestDescription = failure.stage === 'request' ? requestConstraints[failure.constraint] : undefined;
+  const description = requestDescription ?? (failure.constraint === 'expired' ? 'Session-pinned trust validity has elapsed.' :
     failure.constraint === 'unexpected' ? 'The component did not complete; the underlying cause is unknown.' :
     failure.constraint === 'precision' ? 'A numeric value exceeds the supported safe-integer range for Pi metadata/display.' :
-    `The ${failure.constraint.replaceAll('_', ' ')} constraint was not satisfied.`;
+    `The ${failure.constraint.replaceAll('_', ' ')} constraint was not satisfied.`);
   return `[${failure.message}] Stage: ${failure.stage}; constraint: ${failure.constraint}. ${description}` +
     (failure.status === undefined ? '' : ` Observed HTTP status: ${failure.status}.`) + ` ${actions[failure.stage]}`;
 }

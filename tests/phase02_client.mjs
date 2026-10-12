@@ -30,6 +30,12 @@ const nestedTool={...tool,function:{...tool.function,parameters:nestedParameters
 assert.deepEqual(encoded({...chat,tools:[nestedTool]}).tools[0].function.parameters,nestedParameters);checks++;
 check(encoded({ ...chat, messages: batch }).messages.length === 3);
 check(encoded({ ...chat, messages: [...batch, { role: 'user', content: 'next' }] }).messages.length === 4);
+for(const parameters of [{}, {allOf:[{type:'object',properties:{n:{type:'number'}}}]},
+ {$ref:'#/$defs/args',$defs:{args:{type:'object',properties:{n:{type:'number'}}}}}]){
+ assert.deepEqual(encoded({...chat,tools:[{...tool,function:{...tool.function,parameters}}]}).tools[0].function.parameters,parameters);checks++;
+}
+const retired=structuredClone(batch);retired[1].tool_calls[0].function.name='retired';
+check(encoded({...chat,messages:retired}).messages[1].tool_calls[0].function.name==='retired');
 for (const mutate of [
   c => { c.tools = []; }, c => { c.tools = [tool, tool]; },
   c => { c.tools[0].function.name = 'n'.repeat(65); }, c => { c.tools[0].function.name = 'bad name'; },
@@ -46,7 +52,7 @@ for (const mutate of [
   c => { c.messages.pop(); }, c => { c.messages[2].tool_call_id = 'unknown'; }, c => { c.messages.push(c.messages[2]); },
   c => { c.messages.splice(2, 0, { role: 'user', content: 'interruption' }); },
   c => { c.messages[1].tool_calls.push(call()); }, c => { c.messages[1].tool_calls = []; },
-  c => { c.messages[1].tool_calls[0].id = 'i'.repeat(129); }, c => { c.messages[1].tool_calls[0].function.name = 'unknown'; },
+  c => { c.messages[1].tool_calls[0].id = 'i'.repeat(129); }, c => { c.messages[1].tool_calls[0].function.name = 'bad name'; },
   c => { c.messages[1].tool_calls[0].function.arguments = '[]'; }, c => { c.messages[1].tool_calls[0].function.arguments = '{"x":1,"x":2}'; },
   c => { c.messages[1].tool_calls[0].function.arguments = '{"x":1e999}'; },
 ]) { const value = structuredClone({ ...chat, messages: batch }); mutate(value); bad(() => encoded(value)); }
