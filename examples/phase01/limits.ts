@@ -13,7 +13,7 @@ export class ChannelError extends Error {
   constructor(public readonly code: 'rejected' | 'uncertain' = 'rejected') { super(code); }
 }
 export type FailureStage = 'trust' | 'challenge' | 'authentication' | 'catalog' | 'request' | 'submission' | 'transport' | 'stream' | 'settlement' | 'provider' | 'hook' | 'balance' | 'compaction';
-export type FailureConstraint = 'manifest' | 'attestation' | 'verification' | 'provenance' | 'publisher' | 'certificate' | 'key_config' | 'precision' | 'expired' | 'policy' | 'encoding' | 'fetch' | 'http' | 'body' | 'schema' | 'encryption' | 'endpoint_binding' | 'frames' | 'decryption' | 'utf8' | 'json' | 'envelope' | 'choice' | 'delta' | 'tool' | 'tool_state' | 'finish' | 'usage' | 'receipt' | 'finish_missing' | 'usage_missing' | 'done_missing' | 'eof' | 'interrupted' | 'idle' | 'deadline' | 'unexpected';
+export type FailureConstraint = 'manifest' | 'attestation' | 'verification' | 'provenance' | 'publisher' | 'certificate' | 'key_config' | 'precision' | 'expired' | 'policy' | 'encoding' | 'fetch' | 'http' | 'body' | 'schema' | 'encryption' | 'endpoint_binding' | 'frames' | 'decryption' | 'utf8' | 'json' | 'envelope' | 'choice' | 'delta' | 'tool' | 'tool_state' | 'finish' | 'usage' | 'receipt' | 'finish_missing' | 'usage_missing' | 'done_missing' | 'eof' | 'interrupted' | 'idle' | 'deadline' | 'unexpected' | 'tool_name' | 'tool_id' | 'tool_schema' | 'schema_reference' | 'tool_choice' | 'history' | 'history_order' | 'tool_arguments' | 'conversion';
 // Content-free observations only: never attach the original exception or cause.
 export class DiagnosticFailure extends ChannelError {
   readonly status?: number;
@@ -21,7 +21,7 @@ export class DiagnosticFailure extends ChannelError {
     code: ChannelError['code'] = 'rejected', status?: number) {
     super(code);
     requireThat('trust challenge authentication catalog request submission transport stream settlement provider hook balance compaction'.split(' ').includes(stage));
-    requireThat('manifest attestation verification provenance publisher certificate key_config precision expired policy encoding fetch http body schema encryption endpoint_binding frames decryption utf8 json envelope choice delta tool tool_state finish usage receipt finish_missing usage_missing done_missing eof interrupted idle deadline unexpected'.split(' ').includes(constraint));
+    requireThat('manifest attestation verification provenance publisher certificate key_config precision expired policy encoding fetch http body schema encryption endpoint_binding frames decryption utf8 json envelope choice delta tool tool_state finish usage receipt finish_missing usage_missing done_missing eof interrupted idle deadline unexpected tool_name tool_id tool_schema schema_reference tool_choice history history_order tool_arguments conversion'.split(' ').includes(constraint));
     requireThat(code === 'rejected' || code === 'uncertain');
     if (Number.isInteger(status) && status! >= 100 && status! <= 599) this.status = status;
     this.message = `possums_${stage}_${constraint}`;
@@ -39,8 +39,8 @@ export class OperationFailure extends ChannelError {
 export class JSONDepthError extends ChannelError {
   constructor() { super(); this.message = 'possums_request_json_depth'; }
 }
-export function requireThat(value: unknown): asserts value {
-  if (!value) throw new ChannelError();
+export function requireThat(value: unknown, requestConstraint?: FailureConstraint): asserts value {
+  if (!value) throw requestConstraint ? new DiagnosticFailure('request', requestConstraint) : new ChannelError();
 }
 export const utf8 = new TextEncoder();
 export function decode(bytes: Uint8Array): string {

@@ -1,7 +1,8 @@
-import { getCurrentTools, resolveTranscript, type Model, type TranscriptContext, type Tool } from '@earendil-works/pi-ai';
+import { getCurrentTools, type Model, type TranscriptContext, type Tool } from '@earendil-works/pi-ai';
 import { convertMessages } from '@earendil-works/pi-ai/api/openai-completions';
 import type { Chat } from '../../examples/phase01/transport.js';
 import { admitInvocation } from '../../examples/phase01/tools.js';
+import { DiagnosticFailure, requireThat } from '../../examples/phase01/limits.js';
 
 // Reuse Pi's supported conversion, but not its weaker completion/usage parser.
 // No inferred finish, cache markers, reasoning replay or synthetic image fallback.
@@ -20,7 +21,16 @@ const compat: Parameters<typeof convertMessages>[2] = {
 export type Invocation = Omit<Chat, 'stream' | 'submission'>;
 
 export function invocation(model: Model<'openai-completions'>, context: TranscriptContext): Invocation {
+  requireThat(Array.isArray(context?.messages), 'history');
   for (const message of context.messages) {
+    requireThat(message && ['system', 'user', 'assistant', 'toolResult'].includes(message.role), 'history');
+    requireThat(Array.isArray(message.content) || ((message.role === 'system' || message.role === 'user') && typeof message.content === 'string'), 'history');
+    if (Array.isArray(message.content)) {
+      for (const block of message.content) {
+        requireThat(block && typeof block === 'object' && typeof block.type === 'string', 'history');
+        if (block.type === 'text') requireThat(typeof block.text === 'string', 'history');
+      }
+    }
     if (message.role === 'assistant' && (message.provider !== 'possums' || message.api !== 'openai-completions')) {
       throw new Error('possums_mixed_provider_history');
     }
@@ -51,15 +61,18 @@ export function invocation(model: Model<'openai-completions'>, context: Transcri
     }
   }
   if (pending.size) throw new Error('possums_unresolved_tool_calls');
-  const normalized = resolveTranscript(context, false);
-  const tools = getCurrentTools(normalized.messages);
+  let tools: Tool[];
+  try { tools = getCurrentTools(context.messages); }
+  catch { throw new DiagnosticFailure('request', 'conversion'); }
   for (const tool of tools) {
     if ('namespace' in tool && tool.namespace !== undefined) throw new Error('possums_custom_tools_unsupported');
     if (tool.constrainedSampling && (tool.constrainedSampling.type !== 'json_schema' || tool.constrainedSampling.strict === 'require')) {
       throw new Error('possums_constrained_sampling_unsupported');
     }
   }
-  const converted = convertMessages(model, normalized, compat);
+  let converted: ReturnType<typeof convertMessages>;
+  try { converted = convertMessages(model, context, compat); }
+  catch { throw new DiagnosticFailure('request', 'conversion'); }
   // Pi represents text-only user blocks as an array. Collapse only those; do not
   // stringify multimodal/structured content into something the model can execute.
   const messages = converted.map((message: ReturnType<typeof convertMessages>[number]) => {
@@ -77,7 +90,8 @@ export function invocation(model: Model<'openai-completions'>, context: Transcri
   return admitInvocation({
     model: model.id, stream: true, messages,
     ...(tools.length ? { tools: tools.map((tool: Tool) => ({ type: 'function', function: {
-      name: tool.name, description: tool.description, parameters: tool.parameters,
+      name: tool.name, parameters: tool.parameters,
+      ...(tool.description === undefined ? {} : { description: tool.description }),
     } })) } : {}),
   });
 }

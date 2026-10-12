@@ -131,11 +131,14 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
 const transientDetails = new Set(['tokenizer_send_failed', 'tokenizer_http_failed',
   'generation_send_failed', 'generation_http_failed', 'stream_transport_failed',
   'stream_idle_timeout', 'stream_deadline_exceeded']);
-function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 'provider'): string {
+function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 'provider', beforeSubmission = false): string {
   if (error instanceof CatalogFailure) return catalogConnectionFailure(error).message;
   if (error instanceof BalanceFailure && error.observation) return `${diagnosticDescription(error.observation)} This balance command sent no inference; prior billing is unchanged or unknown.`;
   if (error instanceof DiagnosticFailure || error instanceof OperationFailure) {
     const failure = error instanceof DiagnosticFailure ? error : new DiagnosticFailure(stage, error.constraint, 'uncertain');
+    if (beforeSubmission && failure.stage === 'request' && failure.code === 'rejected') {
+      return `Possums: ${diagnosticDescription(failure)} No inference request sent by this attempt. Prior billing is unchanged or unknown. Not replayed.`;
+    }
     return `Possums: ${diagnosticDescription(failure)} Billing status: Charge unknown. Not replayed. A new request may incur another charge.`;
   }
   if (error instanceof JSONDepthError) return '[possums_request_json_depth] Stage: request; constraint: json_depth. Request encoding exceeds the JSON nesting limit. Simplify tool schemas or history. No inference request sent. Not replayed.';
@@ -172,6 +175,9 @@ function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 
     // classifier, even if a detail contains e.g. "timeout". Summaries never retry.
     return `Possums: ${description} Billing status: ` +
       (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown. A new request may incur another charge.') + ' Not replayed.';
+  }
+  if (stage === 'request' && error instanceof ChannelError && error.code === 'rejected') {
+    return `Possums: ${diagnosticDescription(new DiagnosticFailure('request', 'schema', 'rejected'))} Local request admission rejected the history or tool declarations. No inference request sent by this attempt. Prior billing is unchanged or unknown. Not replayed.`;
   }
   if (error instanceof ChannelError && error.code === 'uncertain') return `Possums: [possums_${stage}_uncertain] Stage: ${stage}; constraint: outcome_unknown. Request interrupted; charge unknown. Cause unknown; check connectivity and share only this code for support. Not replayed. A new request may incur another charge.`;
   // Only exact internal literals are displayable. Never echo a hook exception.
@@ -978,7 +984,7 @@ export class PossumsProvider implements Provider {
           output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt') ?
           `${safeFailure(error, false, failureStage).replace(/ Billing status: Charge unknown\..*$/, '')} Authenticated receipt: charge settled; not undone. Not replayed.` : options.signal?.aborted && !(error instanceof GatewayError) && !(error instanceof ConnectionFailure) ?
           'Possums: [possums_stream_interrupted] Stage: stream; constraint: interrupted. Delivery interrupted; charge unknown. Check connectivity and share only this code for support. Not replayed. A new request may incur another charge.' :
-          safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted, failureStage);
+          safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted, failureStage, !submitted);
         if (uncertainControl) {
           output.errorMessage += ' Earlier submission control outcome unknown; no inference request was replayed. A new request may incur another charge.';
         }

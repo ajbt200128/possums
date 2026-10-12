@@ -186,6 +186,10 @@ The source candidate removes advertised-tool/message counts, historical tool-cal
 
 ## Request encoding diagnostics
 
+The local source candidate gives pre-submission validation failures specific closed codes for tool names/IDs, schema shape/references, tool choice and history structure/order/arguments. `possums_request_conversion` separately means Pi SDK conversion failed for an unknown cause. These local failures sent no inference from this attempt; they do not establish earlier billing. Generic request-envelope rejections retain `possums_request_schema`; retry policy is unchanged.
+
+Conversion reuses Pi's supported OpenAI helper. Local-reference/combinator schema roots need not repeat `type`, absent descriptions stay absent, and completed history can refer to retired tools. No constraints, tools or history are silently removed; live tool execution still requires current declarations and authenticated successful completion. A synthetic large reply plus simulated thirty-minute pause passed, but the live incident's cause remains unknown. This candidate is not installed. See [offline checks and 256-case fuzz evidence](../../docs/pi-request-admission-verification.md#requested-request-preparation-follow-up-steps-14).
+
 `possums_request_json_depth` means local request encoding exceeded the defensive **32-level** JSON nesting limit. Simplify deeply nested tool schemas or history; this attempt sent no inference request and was not replayed. Tool schemas count inside the full request envelope, not in isolation. Byte/node ceilings and live-completion tool bounds still apply; the source candidate above removes historical tool-count quotas. This diagnostic does not establish billing for earlier attempts; post-submission transport failures still report unknown billing. See the [offline fix evidence](../../docs/verification.md#local-pi-json-depth-compatibility-fix).
 
 ## Compaction
