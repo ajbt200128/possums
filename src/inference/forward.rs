@@ -62,7 +62,9 @@ pub fn metrics(headers: &http::HeaderMap, model: &str) -> Result<Option<Evidence
     let Some(value) = values.next() else {
         return Ok(None);
     };
-    if values.next().is_some() || value.as_bytes().len() > 4096 {
+    // Identical repeated delivery carries one snapshot, not additive usage.
+    // Conflicting values remain ambiguous and fail closed before settlement.
+    if value.as_bytes().len() > 4096 || values.any(|duplicate| duplicate != value) {
         return Err(invalid());
     }
     let value = value.to_str().map_err(|_| invalid())?;
