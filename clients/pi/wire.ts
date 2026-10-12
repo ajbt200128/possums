@@ -1,4 +1,4 @@
-import { getCurrentTools, resolveTranscript, type Model, type TranscriptContext, type Tool } from '@earendil-works/pi-ai';
+import { getCurrentTools, type Model, type TranscriptContext, type Tool } from '@earendil-works/pi-ai';
 import { convertMessages } from '@earendil-works/pi-ai/api/openai-completions';
 import type { Chat } from '../../examples/phase01/transport.js';
 import { admitInvocation } from '../../examples/phase01/tools.js';
@@ -51,15 +51,14 @@ export function invocation(model: Model<'openai-completions'>, context: Transcri
     }
   }
   if (pending.size) throw new Error('possums_unresolved_tool_calls');
-  const normalized = resolveTranscript(context, false);
-  const tools = getCurrentTools(normalized.messages);
+  const tools = getCurrentTools(context.messages);
   for (const tool of tools) {
     if ('namespace' in tool && tool.namespace !== undefined) throw new Error('possums_custom_tools_unsupported');
     if (tool.constrainedSampling && (tool.constrainedSampling.type !== 'json_schema' || tool.constrainedSampling.strict === 'require')) {
       throw new Error('possums_constrained_sampling_unsupported');
     }
   }
-  const converted = convertMessages(model, normalized, compat);
+  const converted = convertMessages(model, context, compat);
   // Pi represents text-only user blocks as an array. Collapse only those; do not
   // stringify multimodal/structured content into something the model can execute.
   const messages = converted.map((message: ReturnType<typeof convertMessages>[number]) => {
