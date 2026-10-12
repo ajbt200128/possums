@@ -45,6 +45,33 @@ update are not one transaction: a main push **after admission** does not cancel
 an already-started update. GitHub's pending-job ordering/replacement does not
 promise a release or approval for every intermediate main commit.
 
+## no-rollout-needed
+
+The user or agent explicitly applies `no-rollout-needed` after reviewing rollout
+impact under [repository policy](../AGENTS.md#pr-rollout-labels). No workflow adds
+labels and no code classifies changed files. Required PR/main CI is unchanged.
+
+After existing exact-main checks, the trusted source gate reads the PR associated
+with the **originating check source**, not the latest PR or implementation SHA.
+If exactly one associated PR is merged into this repository's main, its
+`merge_commit_sha` equals the source and it has the label, automatic A/B image
+publication and downstream deployment are skipped (`RELEASE_ROLLOUT_LABELED`).
+Absent labels or missing/ambiguous/mismatched linkage keep normal publication
+(`RELEASE_ROLLOUT_NORMAL`). An unreadable or malformed API response stops
+admission with `RELEASE_ROLLOUT_LOOKUP`; check GitHub read permissions/availability
+and rerun source admission or explicitly dispatch current-main publication.
+Raw API/exception text is never printed.
+
+The gate runs from trusted `github.sha`, never PR code/artifacts. Manual
+`workflow_dispatch` on current main ignores the label (`RELEASE_ROLLOUT_MANUAL`)
+and retains all existing activation, qualification, provenance and deployment
+safeguards. Labels are read at admission; changing them cannot cancel work
+already admitted. There is no diff, path, test-only or publication-backlog check:
+the user/agent owns whether skipping this main arrival leaves necessary gateway
+changes unpublished. A label does not prove that the deployed gateway matches
+main. Offline and hosted evidence belongs in
+[label verification](no-rollout-needed-verification.md).
+
 ## Separately authorized setup and qualification
 
 Do not activate these workflows merely because local tests passed. Before setup:
