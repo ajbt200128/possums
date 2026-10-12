@@ -43,12 +43,37 @@ impl ConversationId {
     }
 }
 
+/// Sensitive, volatile upstream namespace, independent of authentication material.
+#[derive(Clone)]
+pub struct CacheScope([u8; 32]);
+
+impl Default for CacheScope {
+    fn default() -> Self {
+        let mut bytes = [0; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+}
+
+impl CacheScope {
+    pub(crate) fn encoded(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.0)
+    }
+}
+
+impl std::fmt::Debug for CacheScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CacheScope { [redacted] }")
+    }
+}
+
 #[derive(Clone)]
 pub struct Session {
     pub account_id: String,
     pub admission_binding: String,
     pub selected_model: Option<String>,
     pub conversation: ConversationId,
+    pub(crate) cache_scope: CacheScope,
     expires_at: Instant,
 }
 
@@ -79,6 +104,7 @@ pub struct BoundSubmission {
 
 #[derive(Debug)]
 pub struct Admission {
+    pub(crate) cache_scope: CacheScope,
     pub submission: BoundSubmission,
     pub result: ReserveResult,
 }
@@ -207,6 +233,7 @@ impl Auth {
             admission_binding: random_token(),
             selected_model: None,
             conversation: ConversationId::new(),
+            cache_scope: CacheScope::default(),
             expires_at: now + SESSION_LIFETIME,
         };
         let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
@@ -394,7 +421,11 @@ impl Auth {
         )?;
         session.selected_model = Some(selected_model);
         issued.model = Some(token_model);
-        Ok(Admission { submission, result })
+        Ok(Admission {
+            cache_scope: session.cache_scope.clone(),
+            submission,
+            result,
+        })
     }
 
     #[cfg(test)]
@@ -477,6 +508,99 @@ mod tests {
         let token = auth.issue_api_submission(&id, "m", false).unwrap();
         let ledger = Accounting::new(auth.account_budgets());
         (auth, ledger, id, session, token)
+    }
+
+    #[test]
+    fn cache_scope_is_session_owned_and_survives_accepted_logout_and_expiry() {
+        let (auth, ledger, id, session, token) = fixture();
+        let scope = session.cache_scope.encoded();
+        assert_eq!(URL_SAFE_NO_PAD.decode(&scope).unwrap().len(), 32);
+        assert_ne!(scope, id);
+        assert_ne!(scope, session.admission_binding);
+        assert!(!format!("{session:?} {:?}", session.cache_scope).contains(&scope));
+        let accepted = auth
+            .admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
+            .unwrap();
+        assert_eq!(accepted.cache_scope.encoded(), scope);
+        auth.issue_api_submission(&id, "m", true).unwrap();
+        assert_eq!(auth.api_session(&id).unwrap().cache_scope.encoded(), scope);
+        let tokens: Vec<_> = (0..2)
+            .map(|_| auth.issue_api_submission(&id, "m", false).unwrap())
+            .collect();
+        thread::scope(|threads| {
+            for token in tokens {
+                let expected = &scope;
+                let auth = &auth;
+                let ledger = &ledger;
+                let id = &id;
+                let binding = &session.admission_binding;
+                threads.spawn(move || {
+                    let admitted = auth
+                        .admit_submission(ledger, id, binding, &token, quote())
+                        .unwrap();
+                    assert_eq!(&admitted.cache_scope.encoded(), expected);
+                    ledger.finish(admitted.submission.id, None).unwrap();
+                });
+            }
+        });
+        auth.logout_api(&id).unwrap();
+        assert!(auth.api_session(&id).is_none());
+        assert!(auth.issue_api_submission(&id, "m", false).is_err());
+        assert_eq!(accepted.cache_scope.encoded(), scope);
+        assert_eq!(
+            ledger
+                .finish(
+                    accepted.submission.id,
+                    Some(crate::accounting::FinalUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        total_tokens: 2,
+                    })
+                )
+                .unwrap(),
+            Outcome::Settled { charged: 3 }
+        );
+        let credential = URL_SAFE_NO_PAD.encode([7; 32]);
+        let (other_id, other) = auth
+            .authenticate_api(&credential, &auth.issue_api_challenge().unwrap())
+            .unwrap();
+        assert_ne!(other.cache_scope.encoded(), scope);
+        let token = auth.issue_api_submission(&other_id, "m", false).unwrap();
+        let accepted = auth
+            .admit_submission(
+                &ledger,
+                &other_id,
+                &other.admission_binding,
+                &token,
+                quote(),
+            )
+            .unwrap();
+        auth.sessions
+            .lock()
+            .unwrap()
+            .get_mut(&other_id)
+            .unwrap()
+            .expires_at = Instant::now();
+        assert!(auth.api_session(&other_id).is_none());
+        assert!(auth.issue_api_submission(&other_id, "m", false).is_err());
+        assert_eq!(accepted.cache_scope.encoded(), other.cache_scope.encoded());
+        ledger.finish(accepted.submission.id, None).unwrap();
+        let (restarted, _, _, fresh, _) = fixture();
+        assert_ne!(fresh.cache_scope.encoded(), scope);
+        let other_credential = URL_SAFE_NO_PAD.encode([8; 32]);
+        let accounts = serde_json::json!([
+            {"id":"a", "credential_sha256":URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes())), "demo_microunits":1000},
+            {"id":"b", "credential_sha256":URL_SAFE_NO_PAD.encode(Sha256::digest(other_credential.as_bytes())), "demo_microunits":1000},
+        ]);
+        let multi = Auth::from_json(&accounts.to_string()).unwrap();
+        let (_, a) = multi
+            .authenticate_api(&credential, &multi.issue_api_challenge().unwrap())
+            .unwrap();
+        let (_, b) = multi
+            .authenticate_api(&other_credential, &multi.issue_api_challenge().unwrap())
+            .unwrap();
+        assert_ne!(a.cache_scope.encoded(), b.cache_scope.encoded());
+        assert!(restarted.api_session(&id).is_none());
     }
 
     fn quote() -> Quote {

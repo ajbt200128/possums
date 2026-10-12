@@ -40,6 +40,7 @@ struct Provider {
     generation_calls: AtomicUsize,
     output_allowance: AtomicU64,
     price: AtomicU64,
+    cache_price: AtomicBool,
     valid_catalog: AtomicBool,
     catalog_has_m: AtomicBool,
     valid_evidence: AtomicBool,
@@ -84,6 +85,7 @@ impl Inference for Provider {
         model: &Model,
         _: &[Message],
         invocation: Option<&ToolInvocation>,
+        _scope: &possums::auth::CacheScope,
         _: Arc<possums::telemetry::hooks::Lease>,
         sink: &mut dyn possums::inference::forward::ForwardSink,
     ) -> Result<StreamCompletion, InferenceError> {
@@ -189,7 +191,7 @@ impl Inference for Provider {
         } else {
             "other"
         };
-        Ok(json!({"object":"list","data":[{"id":id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"requestPrice":0}}]}).to_string().into_bytes())
+        Ok(json!({"object":"list","data":[{"id":id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"cachedInputTokenPricePer1M":self.cache_price.load(Ordering::SeqCst).then_some(0),"requestPrice":0}}]}).to_string().into_bytes())
     }
     async fn count_tokens(
         &self,
@@ -345,6 +347,7 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         generation_calls: 0.into(),
         output_allowance: 0.into(),
         price: 1.into(),
+        cache_price: false.into(),
         valid_catalog: true.into(),
         catalog_has_m: true.into(),
         valid_evidence: true.into(),
@@ -594,7 +597,7 @@ async fn final_metrics_without_finish_settle_but_never_emit_downstream_trailer()
         assert_eq!(receipt["evidence"], "final_metrics");
         assert_eq!(
             receipt["usage"],
-            json!({"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,"cached_tokens":0})
+            json!({"prompt_tokens":2,"completion_tokens":3,"total_tokens":5})
         );
         assert_eq!(receipt["provider_cost_usd"], "999.00");
         assert_eq!(receipt["reserved_microunits"], "52");
@@ -873,6 +876,7 @@ async fn reject_buffered_mode_tools_malformed_history_oversize_and_old_restart_a
 {
     let (state, provider, bearer, submission) = fixture(5_000_000);
     for input in [
+        json!({"model":"m","stream":true,"user_cache_secret":"hostile-override","submission":submission,"messages":[{"role":"user","content":"synthetic"}]}),
         json!({"model":"m","stream":false,"submission":submission,"messages":[{"role":"user","content":"synthetic"}]}),
         json!({"model":"m","stream":true,"stream_options":{"include_usage":false},"submission":submission,"messages":[{"role":"user","content":"synthetic"}]}),
         json!({"model":"m","stream":true,"n":2,"submission":submission,"messages":[{"role":"user","content":"synthetic"}]}),

@@ -361,6 +361,7 @@ mod tests {
             let generation = stream::builder_body(
                 crate::inference::invocation_request("fixture", &invocation).unwrap(),
                 123,
+                &crate::auth::CacheScope::default(),
                 heavy.clone(),
             )
             .unwrap();
