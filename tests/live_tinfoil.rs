@@ -253,7 +253,14 @@ async fn production_consumer_validates_deepseek_usage_without_raw_reports() {
     );
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(120),
-        inference.generate_forwarded_stream(&quote.model, &messages, None, heavy, &mut Sink),
+        inference.generate_forwarded_stream(
+            &quote.model,
+            &messages,
+            None,
+            &possums::auth::CacheScope::default(),
+            heavy,
+            &mut Sink,
+        ),
     )
     .await;
     match result {

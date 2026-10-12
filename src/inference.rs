@@ -169,13 +169,15 @@ pub trait Inference: Send + Sync {
         Err(InferenceError::Unavailable)
     }
 
-    /// Native forwarding entry point. Existing synthetic implementations may
-    /// use the bounded legacy bridge; verified production overrides it.
+    /// Native forwarding entry point. Scope is server-owned session memory and
+    /// may only be supplied over verified inference. Synthetic implementations
+    /// may use the bounded legacy bridge; verified production overrides it.
     async fn generate_forwarded_stream(
         &self,
         model: &Model,
         messages: &[Message],
         invocation: Option<&ToolInvocation>,
+        _scope: &crate::auth::CacheScope,
         heavy: Arc<crate::telemetry::hooks::Lease>,
         sink: &mut dyn forward::ForwardSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
@@ -266,8 +268,15 @@ impl TinfoilInference {
     ) -> Result<stream::StreamCompletion, InferenceError> {
         let mut text = TextSink(on_delta);
         let mut sink = forward::DeltaSinkAdapter(&mut text);
-        self.generate_forwarded_stream(model, messages, None, heavy, &mut sink)
-            .await
+        self.generate_forwarded_stream(
+            model,
+            messages,
+            None,
+            &crate::auth::CacheScope::default(),
+            heavy,
+            &mut sink,
+        )
+        .await
     }
 
     /// Funded diagnostic only: fixed non-user input, no gateway accounting or route.
@@ -1022,6 +1031,7 @@ impl Inference for TinfoilInference {
         model: &Model,
         messages: &[Message],
         invocation: Option<&ToolInvocation>,
+        scope: &crate::auth::CacheScope,
         heavy: Arc<crate::telemetry::hooks::Lease>,
         sink: &mut dyn forward::ForwardSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
@@ -1033,7 +1043,7 @@ impl Inference for TinfoilInference {
             }
             None => text_request(&model.id, messages)?,
         };
-        let body = stream::builder_body(builder, model.max_output_tokens, heavy.clone())?;
+        let body = stream::builder_body(builder, model.max_output_tokens, scope, heavy.clone())?;
         let url = format!("{}/v1/chat/completions", self.origin);
         let request = self
             .authenticate(self.http()?.post(&url))
@@ -1126,8 +1136,15 @@ impl Inference for TinfoilInference {
         on_delta: &mut dyn DeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         let mut sink = forward::DeltaSinkAdapter(on_delta);
-        self.generate_forwarded_stream(model, &[], Some(invocation), heavy, &mut sink)
-            .await
+        self.generate_forwarded_stream(
+            model,
+            &[],
+            Some(invocation),
+            &crate::auth::CacheScope::default(),
+            heavy,
+            &mut sink,
+        )
+        .await
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {

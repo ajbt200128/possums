@@ -33,7 +33,7 @@ pub(crate) fn compose(
         heavy,
         input.model,
         input.reserved_microunits,
-        (input.history, None),
+        (input.cache_scope, input.history, None),
         inference,
         usage_metrics,
     )
@@ -50,7 +50,7 @@ pub(crate) fn compose_structured(
         heavy,
         input.model,
         input.reserved_microunits,
-        (Vec::new(), Some(input.invocation)),
+        (input.cache_scope, Vec::new(), Some(input.invocation)),
         inference,
         usage_metrics,
     )
@@ -60,11 +60,15 @@ fn compose_core(
     heavy: Arc<crate::telemetry::hooks::Lease>,
     model: Model,
     reserved: u64,
-    input: (Vec<Message>, Option<ToolInvocation>),
+    input: (
+        crate::auth::CacheScope,
+        Vec<Message>,
+        Option<ToolInvocation>,
+    ),
     inference: SharedInference,
     usage_metrics: bool,
 ) -> DeliveryBody {
-    let (messages, invocation) = input;
+    let (scope, messages, invocation) = input;
     let disconnect = owner.disconnect();
     let (tx, body) = delivery(
         heavy.clone(),
@@ -84,7 +88,7 @@ fn compose_core(
             let result = tokio::select! {
                 biased;
                 _ = disconnect.cancelled() => Err(InferenceFailure::StreamTransportFailed.into()),
-                result = inference.generate_forwarded_stream(&model, &messages, invocation.as_ref(), heavy, &mut sink) => result,
+                result = inference.generate_forwarded_stream(&model, &messages, invocation.as_ref(), &scope, heavy, &mut sink) => result,
             };
             (result, sink.evidence)
         };
@@ -94,7 +98,11 @@ fn compose_core(
         match receipt.outcome() {
             Ok(outcome @ (Outcome::Settled { .. } | Outcome::Refunded)) => {
                 let charged = match outcome { Outcome::Settled { charged } => *charged, _ => 0 };
-                let counts = evidence.as_ref().map(|e| json!({"prompt_tokens":e.usage.input_tokens,"completion_tokens":e.usage.output_tokens,"total_tokens":e.usage.total_tokens,"cached_tokens":e.cached_tokens}));
+                let counts = evidence.as_ref().map(|e| {
+                    let mut counts = json!({"prompt_tokens":e.usage.input_tokens,"completion_tokens":e.usage.output_tokens,"total_tokens":e.usage.total_tokens});
+                    if e.cache_usage_available { counts["cached_tokens"] = json!(e.cached_tokens); }
+                    counts
+                });
                 let _ = output.event(json!({"choices":[],"possums":{
                     "outcome":if matches!(outcome, Outcome::Refunded) { "refunded" } else { "settled" },
                     "status":if complete { "complete" } else { "incomplete" },

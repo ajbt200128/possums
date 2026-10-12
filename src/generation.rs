@@ -66,6 +66,7 @@ pub(crate) struct PreparedGeneration {
     pub prompt: String,
     /// Original maximum, not the context-legal allowance or a refreshed price.
     pub reserved_microunits: u64,
+    pub cache_scope: crate::auth::CacheScope,
 }
 
 pub(crate) struct StructuredGenerationInput {
@@ -77,6 +78,7 @@ pub(crate) struct PreparedStructuredGeneration {
     pub model: Model,
     pub invocation: ToolInvocation,
     pub reserved_microunits: u64,
+    pub cache_scope: crate::auth::CacheScope,
 }
 
 enum RequestInput {
@@ -374,12 +376,14 @@ impl Generation<'_> {
                         history: input.history,
                         prompt: input.prompt,
                         reserved_microunits,
+                        cache_scope: admission.cache_scope,
                     }),
                     RequestInput::Structured(input) => {
                         Prepared::Structured(PreparedStructuredGeneration {
                             model: quote.model,
                             invocation: input.invocation,
                             reserved_microunits,
+                            cache_scope: admission.cache_scope,
                         })
                     }
                 };

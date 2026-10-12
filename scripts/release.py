@@ -33,6 +33,7 @@ CODES = {
     "event": ("source", "Use successful check.yml on an exact main push or current-main manual dispatch."),
     "checks": ("source", "Complete successful checks on the exact eligible commit/ref."),
     "stale": ("eligibility", "Use the newest main candidate; no update was requested by this check."),
+    "rollout_lookup": ("source-rollout", "Originating PR evidence could not be read or validated; no skip or publication was admitted. Check GitHub read permissions/availability, then rerun source admission or explicitly dispatch current-main publication."),
     "transform": ("configuration", "Review the one-line gateway digest template and release-only tree."),
     "identity": ("build", "Resolve the source/release image derivation mismatch."),
     "collision": ("publication", "Manually reconcile existing immutable tags/releases; never delete or repoint them."),
@@ -189,6 +190,33 @@ def source_event(event, kind, context_sha, context_ref, workflow_id):
     return source
 
 
+NO_ROLLOUT_LABEL = "no-rollout-needed"
+ROLLOUT_REASONS = {
+    "manual": "Explicit manual publication; labels do not block rollout.",
+    "normal": "No explicit label on an unambiguously linked merged PR; normal publication remains enabled.",
+    "labeled": "Originating merged PR explicitly labeled; automatic publication and deployment skipped.",
+}
+
+
+def automatic_rollout_skip(source):
+    # Rollout-impact review belongs to the user/agent, not a file classifier.
+    try:
+        associated = api(f"commits/{source}/pulls?per_page=100")
+        require(isinstance(associated, list), "rollout_lookup")
+        if len(associated) != 1:
+            return False, "normal"
+        number = associated[0]["number"]
+        require(type(number) is int and number > 0, "rollout_lookup")
+        pr = api(f"pulls/{number}")
+        require(type(pr["merged"]) is bool and isinstance(pr["labels"], list), "rollout_lookup")
+        linked = (pr["merged"] and pr["merge_commit_sha"] == source and pr["base"]["ref"] == "main"
+                  and pr["base"]["repo"]["full_name"] == REPO)
+        skip = linked and NO_ROLLOUT_LABEL in [label["name"] for label in pr["labels"]]
+        return skip, "labeled" if skip else "normal"
+    except (Stop, KeyError, TypeError, ValueError):
+        raise Stop("rollout_lookup") from None
+
+
 def select_source():
     require(os.environ.get("RELEASE_AUTOMATION_ENABLED") == "true", "disabled")
     require(os.environ["GITHUB_REPOSITORY"] == REPO, "event")
@@ -204,7 +232,12 @@ def select_source():
         require(live["workflow_id"] == workflow["id"], "event")
     checks(source, "main")
     latest(source)
-    output(source=source)
+    skip, reason = (automatic_rollout_skip(source) if os.environ["GITHUB_EVENT_NAME"] == "workflow_run"
+                    else (False, "manual"))
+    latest(source)
+    output(source=source, rollout="false" if skip else "true")
+    print(json.dumps({"code": "RELEASE_ROLLOUT_" + reason.upper(), "stage": "source-rollout",
+                      "action": ROLLOUT_REASONS[reason], "rollout": not skip}))
 
 
 def transform(config, image):

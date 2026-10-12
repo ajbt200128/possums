@@ -433,6 +433,12 @@ await check('native session and initial catalog failures reach status, deduplica
 });
 await check('catalog upstream unit rates become indicative retail estimates without changing authoritative total charge',async()=>{
  const s=await setup(['stop']);assert.equal(s.selected.cost.input,1.3);assert.equal(s.selected.cost.output,1.3);
+ assert.equal(s.selected.cost.cacheRead,1.3);
+ for(const [cached,expected] of [[undefined,1.3],[null,1.3],['0',0],['250000',0.325]]){
+  s.client.models=async()=>m.validateModels({object:'list',data:[{...entry(true),...(cached===undefined?{}:{cached_input_microunits_per_million_tokens:cached})}]});
+  await s.provider.auth.apiKey.login(interaction());
+  assert.equal(s.provider.getModels()[0].cost.cacheRead,expected);assert.equal(s.sends(),0);
+ }
  const {message}=await drain(s.provider.streamSimple(s.selected,context(false)));
  assert.equal(message.stopReason,'stop');assert.equal(message.usage.cost.total,7/1e6);
  assert.equal(message.usage.cost.input,0);assert.equal(message.usage.cost.output,0);
@@ -1262,6 +1268,32 @@ await check('progress before receipt and hooks preserve authoritative total with
  const result=await stream.result();assert(observed);assert.equal(payload,1);assert.equal(response,1);assert.equal(raw,2);
  assert.equal(result.usage.totalTokens,5);assert.equal(result.usage.cost.total,7/1e6);assert.equal(result.usage.cost.input,0);assert.equal(result.usage.cost.output,0);
  assert.match(result.diagnostics.find(d=>d.type==='possums_accounting_metadata').details.message,/placeholders, not free/);
+ assert.equal(result.diagnostics[0].details.costComponentsAvailable,false);
+ assert.equal(result.diagnostics[0].details.cacheUsageAvailable,false);
+});
+await check('cache usage availability preserves authoritative totals without invented components or warming',async()=>{
+ const cases=[
+  {value:{...receipt('stop'),cachedTokens:0},cache:true},
+  {value:{...receipt('stop'),inputTokens:20,outputTokens:10,totalTokens:30,cachedTokens:10,quotedCachedInputMicrounitsPerMillion:'0',chargedMicrounits:'26',refundedMicrounits:'26'},cache:true},
+  {value:{...receipt('stop'),inputTokens:20,outputTokens:10,totalTokens:30,cachedTokens:10,quotedCachedInputMicrounitsPerMillion:undefined,chargedMicrounits:'39',refundedMicrounits:'13'},cache:true},
+  {value:{...receipt('stop'),inputTokens:20,outputTokens:10,totalTokens:30,cachedTokens:20,quotedCachedInputMicrounitsPerMillion:'0',chargedMicrounits:'2',refundedMicrounits:'0'},cache:true},
+  {value:{...receipt('stop'),quotedInputMicrounitsPerMillion:undefined,quotedOutputMicrounitsPerMillion:undefined},cache:false},
+ ];
+ for(const {value,cache} of cases)for(const interrupted of [false,true]){
+  const s=await setup(['stop']);const chat=s.client.chat;
+  s.client.chat=async(...args)=>{await chat(...args);if(interrupted)throw new m.CompletionFailure('stream','eof',value);return value;};
+  s.provider.beginRun();const {message}=await drain(s.provider.streamSimple(s.selected,context(false)));
+  assert.equal(message.stopReason,'stop');assert.equal(s.sends(),1);
+  if(interrupted){warningText(message);assert.equal(message.diagnostics[0].details.deliveryComplete,false);}
+  assert.equal(message.diagnostics[0].details.chargedMicrounits,value.chargedMicrounits);
+  assert.equal(message.usage.input,value.inputTokens);assert.equal(message.usage.cacheRead,value.cachedTokens??0);
+  assert.equal(message.usage.totalTokens,value.totalTokens);assert.equal(message.usage.cacheWrite,0);
+  assert.equal(message.usage.cost.total,Number(value.chargedMicrounits)/1e6);
+  assert.equal(message.diagnostics[0].details.cacheUsageAvailable,cache);
+  assert.equal(message.diagnostics[0].details.costComponentsAvailable,false);
+  assert.equal(message.usage.cost.input+message.usage.cost.output+message.usage.cost.cacheRead,0);
+ }
+
 });
 await check('provider leaves subsequent invocation policy to native Pi after uncertain or length failure',async()=>{
  for(const mode of ['uncertain','length']){const s=await setup([mode,'stop']);s.provider.beginRun();const first=await drain(s.provider.streamSimple(s.selected,context(false)));

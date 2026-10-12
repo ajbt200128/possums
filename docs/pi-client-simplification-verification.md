@@ -78,3 +78,47 @@ Actual installed T3 notification/history rendering was not exercised. Native Pi/
 Follow [PRIVACY.md — data handling boundaries](../PRIVACY.md#data-handling-boundaries), [telemetry restrictions](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data) and [synthetic testing](../PRIVACY.md#synthetic-testing-exception). Negative tests use locally authored `PRIVATE_*`/`HOSTILE` sentinels; raw exceptions, prompts/history, credentials and hostile fields cannot escape diagnostics. Interrupted bare refund claims do not fabricate confirmed refund. No diagnostic logger, telemetry, support bundle, reporting-triggered inference or automatic inference replay was added. Scratch outputs contain synthetic assertions only.
 
 Release checks use real SDK orchestration, hashing and gzip/expiry/configuration checks but mock AMD verification, DSSE/Rekor crypto, X509 and public responses. Cache checks use real separate processes with synthetic acquisitions. Neither proves deployed gateway/hardware or live privacy/accounting behavior.
+
+## Main integration — offline acceptance
+
+Parent independently inspected the five resolutions and final PR diff against current main, then reran both SDKs' full unfiltered checks and strict TypeScript successfully. A separate fresh pinned production artifact at `package-parent-integration-104-ZEr0d3/extension.mjs` has the same SHA-256 as the artifact below. Parent log: `parent-integration-validation-final.log`. The scratch validation helper's peer-restoration path was corrected to be absolute after its first completed check/build run reached cleanup from the worktree directory; the final full rerun exited 0. This is still offline/source evidence, not installation or deployed qualification.
+
+Resolved the conflicted merge of exact main **`8e84e9c37130475433b3009bfe9f8b1c4ebd2631`** (PR64 rollout policy and PR65 session caching) into accepted client source **`bdc62f9bd16accad085153c3dd741ac1e3e08e0c`**, branch `fix/pi-client-graceful-warnings`, worktree `/Users/mb5/.t3/worktrees/possums/fix-deepseek-generation-http-retries`. The older parent main checkout was untouched. This packet resolves/stages source only; the parent owns the merge commit, PR/push/merge, explicitly authorized `no-rollout-needed` label and local installation. No commit, publication, installation, activation, deployment, live credentials or inference occurred here.
+
+The five conflict resolutions preserve the approved warning-only/no-generation-replay policy and auth ownership guard, PR64 label guidance, and PR65 independently random memory-only API-session cache scope/verified-path/privacy boundaries. `examples/phase01/client.ts` retains optional cache counts unchanged when absent; no cache-subset, price, reservation or bill-component arithmetic was restored. Pi input remains the inclusive reported count; cache count and total are independent. Successful and interrupted authenticated receipts expose `cacheUsageAvailable` independently of unavailable charge components. Catalog cache-read metadata uses the optional upstream cached price or input fallback, with the indicative **1.3** retail multiplier. Incoming PR65's quote-derived Pi components and native transient retry descriptions are superseded by [the approved client policy](pi-client-failure-policy.md), not restored by this merge. Its gateway settlement arithmetic remains unchanged.
+
+The automatic README merge was corrected narrowly to describe inclusive input, independent cache availability and unavailable components. The reference transport is byte-identical to `bdc62f9`: verified EHBP dispatch, native decoding, authentication-tag minimum, HTTP byte-idle handling and closed request authority remain; no client-owned cache secret/header or warming was added. All incoming gateway/cache/release files, `PRIVACY.md`, PR65 Rust tests and static shipped-decoder fixtures are byte-identical to main. Policy references remain [data handling](../PRIVACY.md#data-handling-boundaries), [forbidden exports](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data) and [synthetic testing](../PRIVACY.md#synthetic-testing-exception).
+
+Exact worktree TS/MJS/JSON sources and all MJS fixtures were refreshed into the existing cached scratch and compared byte-for-byte, with no network installs. Both real cached SDKs **1.0.4 and 1.1.0** passed unfiltered full `check.mjs` and strict TypeScript `--noEmit`, exit **0**: shared **38**, Phase 02 **682**, release **177**, public acquisition **39**, Pi/diagnostics **159 groups** (including **9 diagnostic groups**), discovery/RPC **28**, admission **70**. The shared stream regression still processes **65,541 events/frames, 76,809,934 encrypted bytes**. Discovery makes zero inference/public-network calls; admission rejection makes zero encryption/network/getter calls. New merged cache regressions cover absent/zero/partial/full counts, missing/zero/discounted catalog rates, unknown quoted cache price and capped authenticated totals, including received money after interrupted delivery, without reconstructed components or warming.
+
+The initial 1.0.4 attempt stopped on a new synthetic catalog fixture supplying an explicit JavaScript `undefined`; the fixture now correctly omits the absent optional JSON property. Both subsequent full runs passed without skips. Worktree LSP lacked cached peer dependency links and reported unresolved SDK imports/derived implicit-any findings plus an existing guarded-JSON rule finding; authoritative scratch strict compilation against both actual SDKs passed. No unresolved implementation/test error remains in the requested checks.
+
+`check.mjs` does not run Rust or the standalone historical `shipped_usage_decoder.mjs` extraction script. PR65's session ownership/expiry/logout/concurrency, builder-scope and cache-availability/discounted-settlement Rust regressions were preserved unchanged, not rerun here; hosted pinned Rust CI remains a required parent gate. The unchanged static extraction script contains the older strict decoder's malformed-cache/interrupted-money expectations; those are not this candidate's acceptance contract and must not be reported as a new-artifact pass. Historical PR65 evidence is not retrospectively upgraded.
+
+Fresh production-macro build against pinned **Pi 1.0.4** passed. Artifact: `/private/tmp/possums-pi-build-client-simplification-HrkWFN/package-integration-104/extension.mjs`; SHA-256 **`5e7c451e7259b3778e9d35b2fafda59dd35ea9596f9dfb8a3a4404c6f04e8db3`**. `build-report.json` hash matches the file; cached source peers were restored to 1.0.4. Logs: `integration-104.log`, `integration-110.log`, `integration-tsc-104.log`, `integration-tsc-110.log`, `integration-build-104.log`; the initial fixture-only failure is retained in `integration-104-initial-fixture-error.log`. Conflict-marker/stale removed-symbol scans and `git diff --check` passed. This is source/build evidence only, not installed notification rendering, live billing/cache-hit/invoice/retention/erasure or deployment evidence. Legacy-v2 freshness, native-v3 platform-signer and live privacy/accounting unknowns remain unchanged.
+
+Merged source SHA-256:
+
+- `clients/pi/provider.ts`: `3cf68976251cacd4c5db2e8d3d8b7efed3387d08488bd5ab0c05a3eefef49822`
+- `examples/phase01/client.ts`: `fda17a4b66be57d0445432c0d684db80bdf1b07b852cd5f38bdf4b03155a5485`
+- `examples/phase01/transport.ts`: `222dc52ed8edf9def426b15031cf6ee43f297b3d5260921770a12c0a9a894e3d`
+- `tests/phase02_pi.mjs`: `6e41d67825635526ec2cff881dfe3127b69ecf2d00ce631d992d89ec1b84c102`
+- `tests/tinfoil_forwarding_client.mjs`: `a1624a4282ae9b20398419062c7a38239516fc25109bf048013b6ff47bf34caf`
+
+Preserved main cache source SHA-256 (byte-identical to `8e84e9c`):
+
+- `src/auth.rs`: `84cce501289ec546c20565fa433cd549d0db778063760168d8a6c451e5102c6f`
+- `src/api_stream.rs`: `118565a1e38b30b2bb56f905b55ec020f36807a48c8cd5b66b760032f41227e2`
+- `src/generation.rs`: `ef2eb8b260ee26674a5b55f093c5e30b348085d6792a6351b65fc4f0a8e529d0`
+- `src/inference.rs`: `b8575724b0a59f7f2d0c942943b6bcefc420d269a170b0510c0f14768745f8ef`
+- `src/inference/forward.rs`: `4c66e81167455aef712b86fe145562e2322fd077dd1191e3a5566fa587d99dd3`
+- `src/inference/stream.rs`: `dd4d41e9324d360785f46ff18b344890f8d529da25d4607509ce81fe09e4942f`
+- `tests/support/native_usage_contract.rs`: `db06b5feea32125aa7dbc30a59df5f53dab8c1c9cb69569a4218640233aaf7f7`
+
+Parent revalidation uses the exact SDK-link/check/strict commands above in scratch `source/clients/pi`, substituting logs as desired. Refresh first:
+
+`W=/Users/mb5/.t3/worktrees/possums/fix-deepseek-generation-http-retries; S=/private/tmp/possums-pi-build-client-simplification-HrkWFN; cp "$W/clients/pi/"*.ts "$W/clients/pi/"*.mjs "$W/clients/pi/"*.json "$S/source/clients/pi/"; cp "$W/examples/phase01/"*.ts "$S/source/examples/phase01/"; cp "$W/tests/"*.mjs "$S/checks/source/"; cd "$S/source/clients/pi"`
+
+After both SDK runs, restore source peer links to 1.0.4 and use a fresh package directory (never reuse one with peer links):
+
+`PHASE02_OUT=$(mktemp -d /private/tmp/possums-pi-build-client-simplification-HrkWFN/package-parent-integration-104-XXXXXX) node build.mjs`

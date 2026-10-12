@@ -158,6 +158,53 @@ pub(super) async fn check(
 }
 
 #[tokio::test]
+async fn session_cache_discounts_final_and_validated_partial_usage_without_lowering_reservation() {
+    for (cached, incomplete) in [(0, false), (1, false), (2, false), (1, true)] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        provider.cache_price.store(true, Ordering::SeqCst);
+        let counts = json!({"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,"prompt_tokens_details":{"cached_tokens":cached}});
+        let mut frames = vec![event(
+            json!({"model":"m","choices":[{"index":0,"delta":{"content":"synthetic-progress"},"finish_reason":null}],"usage":counts}),
+        )];
+        if !incomplete {
+            frames.push(event(
+                json!({"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            ));
+            frames.push(event(json!({"choices":[],"usage":counts})));
+            frames.push(Frame::data(Bytes::from_static(b"data: [DONE]\n\n")));
+        }
+        *provider.native_response.lock().unwrap() = Some(response_frames(&mut frames, None));
+        let response = send(&state, &bearer, &submission).await;
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let events: Vec<Value> = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        let receipt = events.iter().find_map(|e| e.get("possums")).unwrap();
+        let charge = (13_u64 * (5 - cached)).div_ceil(10);
+        assert_eq!(receipt["reserved_microunits"], "52");
+        assert_eq!(
+            receipt["quoted_cached_input_microunits_per_million_tokens"],
+            "0"
+        );
+        assert_eq!(receipt["usage"]["cached_tokens"], cached);
+        assert_eq!(receipt["charged_microunits"], charge.to_string());
+        assert_eq!(receipt["refunded_microunits"], (52 - charge).to_string());
+        assert_eq!(
+            receipt["status"],
+            if incomplete { "incomplete" } else { "complete" }
+        );
+        assert_eq!(events.iter().any(|e| e.get("error").is_some()), incomplete);
+        terminal(&state, 5_000_000 - charge).await;
+        duplicate(&state, &bearer, &submission, "settled").await;
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
 async fn valid_native_usage_shapes_survive_sdk_and_settlement() {
     let variants = [
         usage(),

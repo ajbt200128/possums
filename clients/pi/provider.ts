@@ -60,7 +60,8 @@ function model(entry: LiveModel): Model<typeof API> {
     input: ['text'], reasoning: false,
     contextWindow: Number(entry.context_tokens), maxTokens: Number(entry.max_output_tokens),
     cost: { input: Number(entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000,
-      output: Number(entry.output_microunits_per_million_tokens) * 1.3 / 1_000_000, cacheRead: 0, cacheWrite: 0 },
+      output: Number(entry.output_microunits_per_million_tokens) * 1.3 / 1_000_000,
+      cacheRead: Number(entry.cached_input_microunits_per_million_tokens ?? entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000, cacheWrite: 0 },
   };
 }
 function catalogModels(entries: readonly LiveModel[]): readonly Model<typeof API>[] {
@@ -952,6 +953,7 @@ export class PossumsProvider implements Provider {
           : { type: 'possums_settled_receipt', timestamp: Date.now(), details: {
             chargedMicrounits: receipt.chargedMicrounits, refundedMicrounits: receipt.refundedMicrounits ?? null,
             complete: receipt.complete !== false, finish: receipt.finish, costComponentsAvailable: false,
+            cacheUsageAvailable: receipt.cachedTokens !== undefined,
           } }, accountingMetadata(receipt), ...(uncertainControl ? [{ type: 'possums_billing_unknown' as const, timestamp: Date.now(),
             details: { receipt: false, stage: 'submission' } }] : [])];
         if (receipt.chargedMicrounits === undefined) output.diagnostics.push({ type: 'possums_turn_warning', timestamp: Date.now(), details: {
@@ -993,7 +995,7 @@ export class PossumsProvider implements Provider {
           output.diagnostics = [{ type: partial.outcome === undefined ? 'possums_gateway_charge' : 'possums_settled_receipt', timestamp: Date.now(), details: {
             outcome: partial.outcome ?? 'unavailable', chargedMicrounits: partial.chargedMicrounits, refundedMicrounits: partial.refundedMicrounits ?? null,
             complete: partial.complete !== false, deliveryComplete: partial.deliveryComplete !== false,
-            costComponentsAvailable: false, evidence: partial.evidence ?? 'none',
+            costComponentsAvailable: false, cacheUsageAvailable: partial.cachedTokens !== undefined, evidence: partial.evidence ?? 'none',
           } }, accountingMetadata(partial), ...(uncertainControl ? [{ type: 'possums_billing_unknown' as const, timestamp: Date.now(),
             details: { receipt: false, stage: 'submission' } }] : [])];
           try { output.usage = receiptUsage(partial); } catch { /* Confirmed money survives local display failure. */ }
