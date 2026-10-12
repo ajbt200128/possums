@@ -10,8 +10,8 @@
 
 ## PR rollout labels
 
-- The user or agent may explicitly apply `no-rollout-needed` only when the **complete PR diff** fits the guarded client/Markdown allowlist and affects no gateway, build, release or deployment input. Do not auto-add labels. If impact is uncertain, omit it and keep normal rollout; the trusted gate may also refuse a skip because earlier changes or PR linkage are ineligible.
-- Never use this label to bypass necessary rollout, required CI or provenance/security gates. Manual current-main rollout remains available under the existing safeguards. See [release label rules](docs/approved-main-releases.md#no-rollout-needed) for exact scope and fallback behavior.
+- The user or agent may explicitly apply `no-rollout-needed` after reviewing the complete PR diff and deciding that gateway rollout is unnecessary (for example, client/docs changes or proven test-only backend changes). Do not auto-add labels. If impact is uncertain, omit it and keep normal rollout.
+- This is a discretionary review policy, not a code-enforced path allowlist. Do not use the label to bypass necessary rollout, required CI or provenance/security gates. Manual current-main rollout remains available; see [release behavior](docs/approved-main-releases.md#no-rollout-needed).
 
 ## Backward compatibility with shipped API clients
 
