@@ -8,6 +8,11 @@
 - Check nearby code for reusable functionality before adding another helper. Remove superseded code within the task; propose unrelated cleanup separately.
 - Keep existing required security/accounting behavior intact. Defer additional caps, abstractions and optimizations until the phase or production plan actually needs them.
 
+## PR rollout labels
+
+- The user or agent may explicitly apply `no-rollout-needed` only when the **complete PR diff** fits the guarded client/Markdown allowlist and affects no gateway, build, release or deployment input. Do not auto-add labels. If impact is uncertain, omit it and keep normal rollout; the trusted gate may also refuse a skip because earlier changes or PR linkage are ineligible.
+- Never use this label to bypass necessary rollout, required CI or provenance/security gates. Manual current-main rollout remains available under the existing safeguards. See [release label rules](docs/approved-main-releases.md#no-rollout-needed) for exact scope and fallback behavior.
+
 ## Backward compatibility with shipped API clients
 
 - Make best-effort backward compatibility a release requirement for the current API-only product. Gateway updates should preserve older shipped clients' authentication, model discovery, request submission, streaming, receipts and useful diagnostics without requiring a simultaneous client upgrade. This does not restore retired browser routes or promise indefinite support for every version.

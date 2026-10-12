@@ -45,6 +45,77 @@ update are not one transaction: a main push **after admission** does not cancel
 an already-started update. GitHub's pending-job ordering/replacement does not
 promise a release or approval for every intermediate main commit.
 
+## no-rollout-needed
+
+The user or agent may explicitly apply the PR label `no-rollout-needed` before
+merging a wholly client/documentation change. No workflow adds labels. Required
+PR/main CI is unchanged, including image tests. After exact successful main push
+checks and current-main validation, the trusted source gate may skip the costly
+**automatic** A/B image publication and therefore its downstream deployment.
+Manual `workflow_dispatch` on current main ignores the label and remains an
+explicit publication/rollout path with all existing switches and safeguards.
+
+The reviewed path allowlist is deliberately narrow:
+
+- Files under `clients/pi/` ending in `.ts`, `.js`, `.mjs`, `.json`, `.md` or `.sh`,
+  plus `clients/pi/.gitignore` (including client-only tests).
+- Markdown `.md` files under `docs/`, plus root `AGENTS.md`, `PRIVACY.md`,
+  `SPEC.md` and `OVERALL_PLAN.md`.
+
+All other paths are ineligible, including gateway Rust, helper/vendor code,
+Cargo manifests/locks, Nix/toolchain/development configuration, root environment
+files, workflows, release/deployment scripts/configuration, examples and root
+`tests/`. Tests/scripts are not presumed harmless: `tests/image_health.py` runs
+in publication qualification, `tests/support/stream.rs` is referenced by gateway
+source, and Rust files enter the crane source filter. The permitted client files
+and Markdown are not gateway image or qualification inputs in the current
+`flake.nix`/workflows; review the allowlist whenever dependencies change. A
+necessary runtime/security/deployment change must not be hidden by this label,
+even if a documentation change describes it.
+
+The gate uses the **originating check source**, not the latest PR or workflow
+implementation SHA. It reads GitHub PR metadata/files directly, never executes
+PR code or consumes PR artifacts, and runs from the workflow's trusted
+`github.sha` checkout. Each checked mainline commit must associate with exactly
+one merged PR targeting this repository's main, whose `merge_commit_sha` is that
+commit and whose current labels include `no-rollout-needed`. It checks the
+complete paginated PR diff, including prior names for renames/copies, and Git
+mainline diffs with rename detection disabled (both old/deleted and new paths).
+Merge and squash arrivals can qualify; rebased/direct multi-commit arrivals
+without exact merged-PR linkage for **every** mainline commit cannot.
+
+To avoid hiding earlier gateway changes in a multi-commit push or skipped/stale
+CI arrival, the gate covers **all** first-parent commits since a successful
+publication source, not just the tip PR. The baseline requires a successful
+trusted main publication run with successful source-checks, both builders and
+publish job; a successful run with skipped jobs is not publication evidence.
+This is a publication baseline, **not proof of deployment/serving health**.
+All intervening PRs must qualify, and each mainline diff is checked even if a
+later commit reverts an earlier gateway change.
+
+Fallbacks are explicit and content-free:
+
+- `RELEASE_ROLLOUT_ELIGIBLE`: automatic publication/deployment skipped.
+- `RELEASE_ROLLOUT_INELIGIBLE`: absent label, mixed/protected paths, missing or
+  ambiguous linkage: label ignored; normal publication continues.
+- `RELEASE_ROLLOUT_BASELINE`: no suitable baseline in the newest 100 successful
+  publication runs, non-ancestor/same-source baseline, or over 100 intervening
+  mainline commits: normal publication continues. PR diffs above GitHub's
+  3000-file endpoint limit are ineligible, never partially accepted.
+- `RELEASE_ROLLOUT_LOOKUP`: operational API/Git failure or malformed/incomplete
+  evidence stops admission; neither skip nor publication is authorized. Check
+  read permissions/availability and rerun source admission, or explicitly
+  dispatch current-main publication. Raw exceptions/PR content are suppressed.
+- `RELEASE_ROLLOUT_MANUAL`: explicit manual publication; labels do not block it.
+
+Labels are read at admission, not frozen at merge. Changing a label afterwards
+cannot cancel an already admitted publication/deployment; reruns still obey
+current-main checks. No automation variables, branch protection, label setup or
+production settings are changed by this source implementation. Hosted token
+permissions and actual skip-graph behavior remain unqualified until separately
+authorized hosted testing. Offline evidence is recorded in
+[label verification](no-rollout-needed-verification.md).
+
 ## Separately authorized setup and qualification
 
 Do not activate these workflows merely because local tests passed. Before setup:
