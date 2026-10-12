@@ -1,11 +1,10 @@
-// Defensive client ceilings, not model/context limits or a whole-runtime RSS bound.
+// Public-evidence, catalog and control ceilings, not inference/model limits.
 export const LIMITS = Object.freeze({
-  chat: 32 * 1024 * 1024, control: 4096, evidence: 64 * 1024,
+  control: 4096, evidence: 64 * 1024,
   bundle: 1024 * 1024, provenance: 512 * 1024, certificate: 16 * 1024,
   key: 41, report: 1184, catalog: 256 * 1024, error: 4096,
-  // Nested tool schemas need headroom for the surrounding request envelope.
-  depth: 32, nodes: 32768, messages: 4096, models: 256,
-  chunk: 64 * 1024, frame: 256 * 1024, sseEvent: 256 * 1024 + 512,
+  depth: 32, nodes: 32768, models: 256,
+  chunk: 64 * 1024,
   // Finite control/verification work; streams have no total lifetime.
   operationMs: 600000, bootstrapMs: 10 * 600000, idleMs: 600000, cleanupMs: 100,
 });

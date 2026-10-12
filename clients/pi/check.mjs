@@ -1,6 +1,6 @@
 // Run only from the scratch source tree printed by build.sh.
 import { build } from 'esbuild';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readlink, unlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
@@ -23,8 +23,12 @@ await build({ ...common, entryPoints: [path.join(packageSource, 'test-entry.ts')
 await mkdir(path.join(output, 'node_modules/@earendil-works'), { recursive: true });
 const { symlink } = await import('node:fs/promises');
 for (const name of ['pi-ai', 'pi-coding-agent', 'pi-agent-core']) {
-  try { await symlink(path.join(piRoot, 'node_modules/@earendil-works', name), path.join(output, 'node_modules/@earendil-works', name)); }
-  catch (error) { if (error.code !== 'EEXIST') throw error; }
+  const target = path.join(piRoot, 'node_modules/@earendil-works', name), link = path.join(output, 'node_modules/@earendil-works', name);
+  try { await symlink(target, link); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    if (await readlink(link) !== target) { await unlink(link); await symlink(target, link); }
+  }
 }
 function run(name, options) {
   try { execFileSync(process.execPath, [path.join(testSource, name)], { stdio: 'inherit',

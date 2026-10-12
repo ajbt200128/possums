@@ -10,14 +10,11 @@ export async function clientCases(moduleURL) {
   const m = await import(moduleURL);
   let count = 0;
   const check = ok => { if (!ok) throw new Error('client contract check'); count++; };
-  check(m.LIMITS.chat === 32 * 1024 * 1024 && m.LIMITS.control === 4096);
+  check(!Object.hasOwn(m.LIMITS, 'chat') && m.LIMITS.control === 4096);
   const largeChat = { model: 'fixture', stream: true, submission: 's'.repeat(43),
     messages: [{ role: 'user', content: 'x'.repeat(9 * 1024 * 1024) }] };
   check(m.encodeChat(largeChat).length > 8 * 1024 * 1024);
-  let oversizedChatRejected = false;
-  try { m.encodeChat({ ...largeChat, messages: [{ role: 'user', content: 'x'.repeat(m.LIMITS.chat) }] }); }
-  catch { oversizedChatRejected = true; }
-  check(oversizedChatRejected);
+  check(m.encodeChat({ ...largeChat, messages: [{ role: 'user', content: 'x'.repeat(32 * 1024 * 1024) }] }).length > 32 * 1024 * 1024);
   const requestFailure = new m.BalanceFailure('request');
   const validationFailure = new m.BalanceFailure('validation');
   check(requestFailure instanceof m.BalanceFailure && requestFailure.code === 'rejected' && requestFailure.message === 'possums_balance_request_failed');
@@ -29,8 +26,8 @@ export async function clientCases(moduleURL) {
   check(m.validateModels(structuredClone(catalog)).length === 2);
   for (const mutate of [
     c => { c.data.push(c.data[0]); }, c => { c.data = []; }, c => { c.data[0].context_tokens = '0'; },
-    c => { c.data[0].maximum_reservation_microunits = '51'; }, c => { c.data[0].context_tokens = '9007199254740993x'; },
-    c => { c.data[0].input_microunits_per_million_tokens = '0'; }, c => { c.data[0].tools = true; },
+    c => { c.data[0].maximum_reservation_microunits = 'invalid'; }, c => { c.data[0].context_tokens = '9007199254740993x'; },
+    c => { c.data[0].input_microunits_per_million_tokens = 'unreadable'; }, c => { delete c.data[0].id; },
   ]) {
     let rejected = false;
     try { const c = structuredClone(catalog); mutate(c); m.validateModels(c); } catch { rejected = true; }
@@ -85,20 +82,23 @@ export async function clientCases(moduleURL) {
     check(rejected && closed === 1);
   } finally { globalThis.setTimeout = setTimer; }
   for (const bad of [
-    role + usage + done, role + delta, role + delta + finish + done,
+    role + usage + done, role + delta,
     role + finish + usage, role + finish + usage + done + done, role + finish + usage + done + delta,
-    role + finish + usage.replace('"total_tokens":5', '"total_tokens":6') + done,
-    role + finish + usage.replace('"charged_microunits":"7"', '"charged_microunits":"7","charged_microunits":"0"') + done,
-    valid.replaceAll('org/model:v1', 'different'), valid.replace('"length"', '"tool_calls"'),
-    valid.replace('"prompt_tokens":2', '"prompt_tokens":9007199254740993'),
+    valid.replaceAll('org/model:v1', 'different'),
     role + 'data: {"error":{"code":"generation_failed"}}\n\n',
-    new Uint8Array([0xff]), 'data: ' + 'x'.repeat(m.LIMITS.sseEvent + 1),
+    new Uint8Array([0xff]), 'data: ' + 'x'.repeat(256 * 1024 + 513),
   ]) {
     let rejected = false;
     try { await m.consumeCompletion(stream(bad, 7), 'org/model:v1', () => {}); }
     catch (error) { rejected = error.code === 'uncertain'; }
     check(rejected);
   }
+  check(m.validateModels({object:'list',data:[{...model('fixture'),maximum_reservation_microunits:'51',extra:'ignored'}],extra:'ignored'})[0].maximum_reservation_microunits==='51');
+  const unreadableUsage=await m.consumeCompletion(stream(valid.replace('"prompt_tokens":2','"prompt_tokens":9007199254740993'),4096),'org/model:v1',()=>{});
+  check(unreadableUsage.chargedMicrounits==='7' && unreadableUsage.usageAvailable===false);
+  const nativeOnly=await m.consumeCompletion(stream(role+finish+done,4096),'org/model:v1',()=>{});
+  check(nativeOnly.finish==='length' && nativeOnly.chargedMicrounits===undefined);
+  check((await m.consumeCompletion(stream(role+finish+usage.replace('"total_tokens":5','"total_tokens":6')+done,4096),'org/model:v1',()=>{})).totalTokens===6);
   let cancelled = 0;
   const broken = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(role + delta)); }, cancel() { cancelled++; } });
   try { await m.consumeCompletion(broken, 'org/model:v1', () => { throw new Error('private callback'); }); } catch (error) { check(error.code === 'uncertain'); }

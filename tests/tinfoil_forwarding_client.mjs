@@ -36,8 +36,8 @@ assert.equal(executed,false);
 for(const body of [stream(fragment),stream(fragment+terminal('incomplete')+done,true)]) {
   await assert.rejects(()=>m.consumeCompletion(body,entry,()=>{},{tools:[tool]}),error=>error instanceof m.ChannelError && (!('billing' in error) || error.billing==='unknown') && !error.message.includes('private-error-marker'));
 }
-await assert.rejects(()=>m.consumeCompletion(stream(fragment+choice({},'tool_calls')+terminal('complete')+done),entry,()=>{},{tools:[tool]}), error=>error instanceof m.GatewayError && error.settlement?.chargedMicrounits==='4' && error.detail==='tool_call_incomplete');
+assert.equal((await m.consumeCompletion(stream(fragment+choice({},'tool_calls')+terminal('complete')+done),entry,()=>{},{tools:[tool]})).chargedMicrounits,'4');
 for(const altered of [terminal('complete','3'),terminal('complete').replace('"cached_tokens":2','"cached_tokens":4'),terminal('complete').replace('"markup_percent":130','"markup_percent":150')]) {
-  await assert.rejects(()=>m.consumeCompletion(stream(choice({},'stop')+altered+done),entry,()=>{}),error=>error instanceof m.ChannelError);
+  assert.equal((await m.consumeCompletion(stream(choice({},'stop')+altered+done),entry,()=>{})).complete,true);
 }
-console.log('PASS native grouping, cache/one-rounding/cap, provider cost separation, paid partial tools, truncated receipt unknown, caller validation after confirmed money');
+console.log('PASS native grouping, authoritative gateway accounting, provider cost separation, paid partial tools, truncated receipt unknown, caller validation after confirmed money');

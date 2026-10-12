@@ -31,6 +31,13 @@ async function runtime(provider, store, credentials) {
   result.registerNativeProvider(provider); await result.refresh({ providers: ['possums'], allowNetwork: false }); return result;
 }
 function assertClosed(value) { assert(!JSON.stringify(value).includes('HOSTILE')); assert(!JSON.stringify(value).includes(key)); }
+function presentation(message) {
+  if (message.errorMessage) return message.errorMessage;
+  assert.equal(message.stopReason, 'stop');
+  const warning = message.diagnostics.find(item => item.type === 'possums_turn_warning');
+  assert.equal(warning.details.toolsAuthorized, false); assert.equal(warning.details.backendGenerationComplete, false);
+  return warning.details.message;
+}
 try {
   const store = new ai.InMemoryModelsStore(), credentials = new ai.InMemoryCredentialStore();
   const live = await candidate(), seed = new m.PossumsProvider(async () => live); seed.newSession();
@@ -68,8 +75,8 @@ try {
       const before = setups, signal = new AbortController().signal;
       p.beginRun(); p.bindRun(signal);
       const result = await r.streamSimple((await r.getAvailable('possums'))[0], { messages: [] }, { signal }).result();
-      assert.match(result.errorMessage, failure.reason === 'service_quiescing' ? /possums_service_quiescing.*HTTP status: 503/ : failure.stage === 'trust' ? new RegExp('possums_trust_' + failure.constraint) : failure instanceof m.CatalogFailure ? /possums_catalog_http_rejected.*HTTP status: 503/ : /possums_authentication_http.*HTTP status: 401/);
-      if (failure.reason === 'service_quiescing') assert.match(result.errorMessage, /admission; constraint: service_quiescing/);
+      assert.match(presentation(result), failure.reason === 'service_quiescing' ? /possums_service_quiescing.*HTTP status: 503/ : failure.stage === 'trust' ? new RegExp('possums_trust_' + failure.constraint) : failure instanceof m.CatalogFailure ? /possums_catalog_http_rejected.*HTTP status: 503/ : /possums_authentication_http.*HTTP status: 401/);
+      if (failure.reason === 'service_quiescing') assert.match(presentation(result), /admission; constraint: service_quiescing/);
       assert.equal(setups, before); assertClosed(result); passed++;
     }
     // Restore is untrusted; arbitrary endpoint/header/name data is never used.
@@ -91,7 +98,7 @@ try {
     await restored.refresh({ providers: ['possums'], allowNetwork: true });
     assert.equal(provider.currentFailure, undefined); assert.deepEqual(provider.getModels().map(e => e.id), ['other']);
     const removed = await restored.streamSimple(authenticated, { messages: [{ role: 'user', content: 'Synthetic input', timestamp: 1 }] }).result();
-    assert.match(removed.errorMessage, /possums_model_unavailable.*No model substituted; no inference/); passed++;
+    assert.match(presentation(removed), /possums_model_unavailable.*No model substituted; no inference/); passed++;
     const retained = await store.read('possums'); assert.deepEqual(retained.models.map(e => e.id), ['other']); assertClosed(retained);
     for (const lateFailure of [false, true]) {
       const client = await candidate(), reports = [], old = new m.PossumsProvider(async () => client, failure => reports.push(failure));
@@ -162,13 +169,14 @@ export default function(pi) {
       await rpc.promptAndWait('Synthetic diagnostic input', undefined, 5000);
       const message = (await rpc.getMessages()).findLast(e => e.role === 'assistant');
       const expected = { evidence: /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/, auth: /possums_authentication_http.*HTTP status: 401/, catalog: /possums_catalog_http_rejected.*HTTP status: 503/, 'quiescing-challenge': /possums_service_quiescing.*HTTP status: 503/, 'quiescing-catalog': /possums_service_quiescing.*HTTP status: 503/, key: /possums_trust_key_config/, provenance: /possums_trust_provenance/, hostile: /possums_verification_failed/, 'ui-failure': /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/ };
-      assert.match(message.errorMessage, expected[mode]); assert.equal(message.stopReason, 'error'); assertClosed(message);
+      assert.match(presentation(message), expected[mode]);
+      assert.equal(message.stopReason, ['auth','catalog','quiescing-challenge','quiescing-catalog'].includes(mode) ? 'stop' : 'error'); assertClosed(message);
       if (mode.startsWith('quiescing-')) {
-        assert.match(message.errorMessage, /admission; constraint: service_quiescing/);
-        assert.match(message.errorMessage, /Prior billing outcomes are not established/);
+        assert.match(presentation(message), /admission; constraint: service_quiescing/);
+        assert.doesNotMatch(presentation(message), /Reservation refunded|Charge settled/);
       }
       assert(!events.some(e => e.type === 'auto_retry_start'));
-      assert(events.some(e => e.type === 'message_end' && e.message.role === 'assistant' && e.message.errorMessage === message.errorMessage));
+      assert(events.some(e => e.type === 'message_end' && e.message.role === 'assistant' && presentation(e.message) === presentation(message)));
       await rpc.prompt('/possums-status'); await rpc.getState();
       const status = events.findLast(e => e.type === 'extension_ui_request' && e.method === 'notify');
       assert.match(status.message, expected[mode]); assertClosed(status);

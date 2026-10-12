@@ -1,7 +1,6 @@
 import { getCurrentTools, type Model, type TranscriptContext, type Tool } from '@earendil-works/pi-ai';
 import { convertMessages } from '@earendil-works/pi-ai/api/openai-completions';
 import type { Chat } from '../../examples/phase01/transport.js';
-import { admitInvocation } from '../../examples/phase01/tools.js';
 import { DiagnosticFailure, requireThat } from '../../examples/phase01/limits.js';
 
 // Reuse Pi's supported conversion, but not its weaker completion/usage parser.
@@ -23,14 +22,6 @@ export type Invocation = Omit<Chat, 'stream' | 'submission'>;
 export function invocation(model: Model<'openai-completions'>, context: TranscriptContext): Invocation {
   requireThat(Array.isArray(context?.messages), 'history');
   for (const message of context.messages) {
-    requireThat(message && ['system', 'user', 'assistant', 'toolResult'].includes(message.role), 'history');
-    requireThat(Array.isArray(message.content) || ((message.role === 'system' || message.role === 'user') && typeof message.content === 'string'), 'history');
-    if (Array.isArray(message.content)) {
-      for (const block of message.content) {
-        requireThat(block && typeof block === 'object' && typeof block.type === 'string', 'history');
-        if (block.type === 'text') requireThat(typeof block.text === 'string', 'history');
-      }
-    }
     if (message.role === 'assistant' && (message.provider !== 'possums' || message.api !== 'openai-completions')) {
       throw new Error('possums_mixed_provider_history');
     }
@@ -43,24 +34,6 @@ export function invocation(model: Model<'openai-completions'>, context: Transcri
       throw new Error('possums_custom_tools_unsupported');
     }
   }
-  const pending = new Set<string>();
-  for (const message of context.messages) {
-    if (message.role === 'system') continue;
-    if (message.role === 'assistant' && (message.stopReason === 'error' || message.stopReason === 'aborted')) continue;
-    if (message.role === 'toolResult') {
-      if (!pending.delete(message.toolCallId)) throw new Error('possums_orphan_tool_result');
-      continue;
-    }
-    if (pending.size) throw new Error('possums_unresolved_tool_calls');
-    if (message.role === 'assistant') {
-      for (const block of message.content) {
-        if (block.type !== 'toolCall') continue;
-        if (pending.has(block.id)) throw new Error('possums_duplicate_tool_call');
-        pending.add(block.id);
-      }
-    }
-  }
-  if (pending.size) throw new Error('possums_unresolved_tool_calls');
   let tools: Tool[];
   try { tools = getCurrentTools(context.messages); }
   catch { throw new DiagnosticFailure('request', 'conversion'); }
@@ -87,11 +60,11 @@ export function invocation(model: Model<'openai-completions'>, context: Transcri
     }
     return message;
   });
-  return admitInvocation({
+  return {
     model: model.id, stream: true, messages,
     ...(tools.length ? { tools: tools.map((tool: Tool) => ({ type: 'function', function: {
       name: tool.name, parameters: tool.parameters,
       ...(tool.description === undefined ? {} : { description: tool.description }),
     } })) } : {}),
-  });
+  } as Invocation;
 }

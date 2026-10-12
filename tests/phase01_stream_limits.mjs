@@ -72,28 +72,36 @@ try {
   assert.equal((await consume()).chargedMicrounits, '7');
   assert.ok(emittedFrames > 65536 && encryptedBytes > 64 * 1024 * 1024);
   longFrames = emittedFrames; longBytes = encryptedBytes;
-  const oversizedEvent = enc.encode('data: ' + 'x'.repeat(m.LIMITS.sseEvent) + '\n\n');
+  const oversizedEvent = delta('x'.repeat(512 * 1024));
+  parts = [role, oversizedEvent, finish, receipt, done];
+  assert.equal((await consume()).finish, 'stop');
+  mode = 'large-chunk'; parts = [role, oversizedEvent, finish, receipt, done];
+  assert.equal((await consume()).finish, 'stop'); mode = undefined;
+  let nested = {};
+  for (let i = 0; i < 64; i++) nested = { nested };
+  const structured = event({ choices: [], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5,
+    prompt_tokens_details: nested }, possums: { outcome: 'settled', charged_microunits: '7', refunded_microunits: '45' } });
+  const manyCalls = event({ choices: [{ index: 0, delta: { tool_calls: Array.from({ length: 4096 }, (_, index) =>
+    ({ index, id: 'id_' + index, type: 'function', function: { name: 'unknown', arguments: '{}' } })) } }] });
+  parts = [role, manyCalls, finish, structured, done];
+  assert.equal((await consume()).finish, 'stop');
   for (const [values, expected] of [
-    [[role, repeated], 'finish_missing'], [[role, finish, done], 'usage_missing'],
+    [[role, repeated], 'finish_missing'],
     [[role, finish, receipt], 'done_missing'], [[role, finish, receipt, done, repeated], 'envelope'],
     [[enc.encode('data: {hostile}\n\n')], 'json'], [[new Uint8Array([255])], 'utf8'],
-    // A native event may span individually valid encrypted frames. Exercise
-    // its record ceiling without failing the independent ciphertext-frame cap.
-    [Array.from({ length: Math.ceil(oversizedEvent.length / m.LIMITS.chunk) }, (_, i) =>
-      oversizedEvent.slice(i * m.LIMITS.chunk, (i + 1) * m.LIMITS.chunk)), 'envelope'],
   ]) { parts = values; await negative(expected); }
+  parts = [role, finish, done]; assert.equal((await consume()).chargedMicrounits, undefined);
   parts = [role, finish, receipt, done]; failEOF = true; await negative('fetch'); failEOF = false;
   parts = [role, finish, receipt, done]; mode = 'corrupt'; await negative('decryption');
   mode = 'raw';
   for (const raw of [new Uint8Array(), new Uint8Array([0, 0]), new Uint8Array([0, 0, 0, 16, 1]),
     new Uint8Array([0, 0, 0, 0]), new Uint8Array([0, 4, 0, 1])]) {
-    parts = raw.length ? [raw] : []; await negative('frames');
+    parts = raw.length ? [raw] : []; await negative(raw.length===4 && raw.every(byte=>byte===0)?'frames':'eof');
   }
-  // Single ciphertext frame and HTTP chunk ceilings still precede SDK allocation.
-  mode = undefined; parts = [new Uint8Array(m.LIMITS.frame)]; await negative('frames');
-  mode = 'large-chunk'; parts = [new Uint8Array(65536)]; await negative('frames');
-  await negative('envelope', () => m.consumeCompletion(lazy([new Uint8Array(m.LIMITS.frame + 1)]), 'fixture', () => {}));
+  // No local HTTP chunk, encrypted-frame or SSE-size quotas. Native EHBP
+  // authentication still rejects corruption; incomplete/tag-short frames fail.
+  mode = undefined;
   await negative('eof', () => m.consumeCompletion(lazy([role, finish, receipt, done], true), 'fixture', () => {}));
 } finally { globalThis.fetch = originalFetch; }
 console.log(JSON.stringify({ suite: 'phase01_stream_limits', lazyEvents: repetitions + 4, emittedFrames: longFrames, encryptedBytes: longBytes,
-  cumulativeBytesAndCounts: 'passed', retainedCeilingsAndTerminalFailures: 'passed' }));
+  cumulativeBytesAndCounts: 'passed', removedInferenceQuotasAndRetainedTrustTerminalFailures: 'passed' }));
