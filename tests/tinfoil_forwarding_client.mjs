@@ -40,4 +40,17 @@ await assert.rejects(()=>m.consumeCompletion(stream(fragment+choice({},'tool_cal
 for(const altered of [terminal('complete','3'),terminal('complete').replace('"cached_tokens":2','"cached_tokens":4'),terminal('complete').replace('"markup_percent":130','"markup_percent":150')]) {
   await assert.rejects(()=>m.consumeCompletion(stream(choice({},'stop')+altered+done),entry,()=>{}),error=>error instanceof m.ChannelError);
 }
-console.log('PASS native grouping, cache/one-rounding/cap, provider cost separation, paid partial tools, truncated receipt unknown, caller validation after confirmed money');
+for (const cached of [undefined, 0, 2]) {
+  const wire = terminal('complete', cached === 2 ? '4' : '7');
+  const value = JSON.parse(wire.slice(6));
+  if (cached === undefined) delete value.possums.usage.cached_tokens;
+  else value.possums.usage.cached_tokens = cached;
+  const receipt = await m.consumeCompletion(stream(choice({},'stop')+event({choices:[],possums:value.possums})+done),entry,()=>{});
+  assert.equal(receipt.cachedTokens,cached);
+  assert.equal(receipt.chargedMicrounits,cached === 2 ? '4' : '7');
+}
+const unknownPrice = JSON.parse(terminal('complete','7').slice(6));
+delete unknownPrice.possums.quoted_cached_input_microunits_per_million_tokens;
+const standard = await m.consumeCompletion(stream(choice({},'stop')+event({choices:[],possums:unknownPrice.possums})+done),entry,()=>{});
+assert.equal(standard.cachedTokens,2);assert.equal(standard.chargedMicrounits,'7');
+console.log('PASS native grouping, cache availability/unknown price/one-rounding/cap, provider cost separation, paid partial tools, truncated receipt unknown, caller validation after confirmed money');

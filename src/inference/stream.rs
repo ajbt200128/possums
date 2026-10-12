@@ -9,7 +9,6 @@ use super::{DeltaSink, InferenceError, InferenceFailure, Message};
 #[cfg(test)]
 use super::{TextDeltaSink, TextSink};
 use futures_util::FutureExt;
-use rand::RngCore;
 use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
     Deserialize, Serialize,
@@ -34,9 +33,8 @@ pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 fn generation_bytes(
     builder: tinfoil::relaxed::RelaxedChatRequestBuilder,
     max_tokens: u64,
+    scope: &crate::auth::CacheScope,
 ) -> Result<Vec<u8>, InferenceError> {
-    let mut scope = [0u8; 32];
-    rand::rng().fill_bytes(&mut scope);
     // The SDK constructs the provider body; transport remains verified, leased
     // and noncloneable. Drop its temporary JSON before transferring upload DATA.
     let request = builder
@@ -44,10 +42,7 @@ fn generation_bytes(
         .set("stream", true)
         .set("stream_options", serde_json::json!({"include_usage": true}))
         .set("n", 1)
-        .set(
-            "user_cache_secret",
-            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, scope),
-        )
+        .set("user_cache_secret", scope.encoded())
         .build();
     crate::bounded_json::to_vec(&request, MAX_REQUEST_BODY_BYTES)
         .map_err(|_| InferenceFailure::RequestEncodingFailed.into())
@@ -59,16 +54,21 @@ pub(super) fn request_body(
     messages: &[Message],
     heavy: Option<std::sync::Arc<crate::telemetry::hooks::Lease>>,
 ) -> Result<reqwest::Body, InferenceError> {
-    let bytes = generation_bytes(super::text_request(model, messages)?, max_output_tokens)?;
+    let bytes = generation_bytes(
+        super::text_request(model, messages)?,
+        max_output_tokens,
+        &crate::auth::CacheScope::default(),
+    )?;
     Ok(super::upload::body(bytes, heavy).0)
 }
 
 pub(super) fn builder_body(
     builder: tinfoil::relaxed::RelaxedChatRequestBuilder,
     max_tokens: u64,
+    scope: &crate::auth::CacheScope,
     heavy: std::sync::Arc<crate::telemetry::hooks::Lease>,
 ) -> Result<reqwest::Body, InferenceError> {
-    Ok(super::upload::body(generation_bytes(builder, max_tokens)?, Some(heavy)).0)
+    Ok(super::upload::body(generation_bytes(builder, max_tokens, scope)?, Some(heavy)).0)
 }
 
 // Test-only text callback over the unified native consumer.
@@ -961,6 +961,32 @@ mod tests {
     }
 
     #[test]
+    fn text_and_tool_builders_reuse_only_the_supplied_session_scope() {
+        let scope = crate::auth::CacheScope::default();
+        let expected = scope.encoded();
+        for tools in [false, true, false] {
+            let builder = tinfoil::relaxed::RelaxedChatRequestBuilder::new()
+                .model("fixture")
+                .messages([serde_json::json!({"role":"user","content":"synthetic"})])
+                .set("user_cache_secret", "hostile-override");
+            let builder = if tools {
+                builder.set(
+                    "tools",
+                    serde_json::json!([{ "type":"function", "function":{"name":"lookup"}}]),
+                )
+            } else {
+                builder
+            };
+            let value: Value =
+                serde_json::from_slice(&generation_bytes(builder, 99, &scope).unwrap()).unwrap();
+            assert_eq!(value["user_cache_secret"], expected);
+            assert_eq!(value["max_tokens"], 99);
+        }
+        assert_ne!(crate::auth::CacheScope::default().encoded(), expected);
+        assert!(!format!("{scope:?}").contains(&expected));
+    }
+
+    #[test]
     fn streaming_request_full_envelope_boundary_is_thirty_two_mib() {
         assert_eq!(MAX_REQUEST_BODY_BYTES, 32 * 1024 * 1024);
         let mut messages = [Message {
@@ -970,6 +996,7 @@ mod tests {
         let overhead = generation_bytes(
             super::super::text_request("fixture", &messages).unwrap(),
             99,
+            &crate::auth::CacheScope::default(),
         )
         .unwrap()
         .len();
@@ -977,6 +1004,7 @@ mod tests {
         let encoded = generation_bytes(
             super::super::text_request("fixture", &messages).unwrap(),
             99,
+            &crate::auth::CacheScope::default(),
         )
         .unwrap();
         assert_eq!(encoded.len(), MAX_REQUEST_BODY_BYTES);
@@ -984,7 +1012,8 @@ mod tests {
         messages[0].content.push('x');
         assert!(generation_bytes(
             super::super::text_request("fixture", &messages).unwrap(),
-            99
+            99,
+            &crate::auth::CacheScope::default(),
         )
         .is_err());
     }

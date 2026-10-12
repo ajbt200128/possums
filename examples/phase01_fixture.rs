@@ -59,6 +59,7 @@ impl Inference for Provider {
         model: &Model,
         _: &[Message],
         _: Option<&possums::inference::tools::ToolInvocation>,
+        _: &possums::auth::CacheScope,
         _: Arc<possums::telemetry::hooks::Lease>,
         sink: &mut dyn possums::inference::forward::ForwardSink,
     ) -> Result<StreamCompletion, InferenceError> {

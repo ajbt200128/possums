@@ -17,6 +17,7 @@ use std::{
 pub struct Evidence {
     pub usage: StreamUsage,
     pub cached_tokens: u64,
+    pub cache_usage_available: bool,
     pub source: &'static str,
     pub provider_cost_usd: Option<String>,
     /// Bounded allowlisted native summary; publish only after authenticated EOF.
@@ -27,6 +28,7 @@ impl Evidence {
         Self {
             usage,
             cached_tokens: 0,
+            cache_usage_available: false,
             source: "running_sse",
             provider_cost_usd: None,
             final_metrics: None,
@@ -143,6 +145,7 @@ pub fn metrics(headers: &http::HeaderMap, model: &str) -> Result<Option<Evidence
     Ok(Some(Evidence {
         usage,
         cached_tokens,
+        cache_usage_available: fields.contains_key("cached_prompt_tokens"),
         source: "final_metrics",
         provider_cost_usd,
         final_metrics,
@@ -181,6 +184,9 @@ pub fn sse_evidence(event: &Value) -> Result<Option<Evidence>, InferenceError> {
     }
     Ok(Some(Evidence {
         cached_tokens: cached,
+        cache_usage_available: usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .is_some_and(|v| !v.is_null()),
         ..Evidence::sse(counts)
     }))
 }
@@ -792,10 +798,46 @@ mod tests {
             "prompt=2,completion=1,total=3,model=m"
         );
         assert!(evidence.provider_cost_usd.is_none());
+        assert!(!evidence.cache_usage_available);
         headers.insert("x-tinfoil-usage-metrics", "prompt=2,completion=1,total=3,model=m,cost_usd=999.00,other_cost_usd=1.20,web_search_calls=2,cached_prompt_tokens=1,uncached_prompt_tokens=1,unknown=private-header-marker".parse().unwrap());
         let evidence = metrics(&headers, "m").unwrap().unwrap();
         assert_eq!(evidence.final_metrics.unwrap(), "prompt=2,completion=1,total=3,model=m,cached_prompt_tokens=1,uncached_prompt_tokens=1,cost_usd=999.00,other_cost_usd=1.20,web_search_calls=2");
+        assert!(evidence.cache_usage_available);
     }
+    #[test]
+    fn cache_availability_distinguishes_native_unknown_from_confirmed_zero() {
+        for details in [
+            None,
+            Some(Value::Null),
+            Some(json!({"cached_tokens":null})),
+            Some(json!({"cached_tokens":0})),
+            Some(json!({"cached_tokens":1})),
+        ] {
+            let mut event =
+                json!({"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+            if let Some(details) = details {
+                event["usage"]["prompt_tokens_details"] = details;
+            }
+            let evidence = sse_evidence(&event).unwrap().unwrap();
+            assert_eq!(
+                evidence.cache_usage_available,
+                event
+                    .pointer("/usage/prompt_tokens_details/cached_tokens")
+                    .is_some_and(|v| v.is_u64())
+            );
+        }
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-tinfoil-usage-metrics",
+            "prompt=2,completion=1,total=3,model=m,cached_prompt_tokens=0,uncached_prompt_tokens=2"
+                .parse()
+                .unwrap(),
+        );
+        let evidence = metrics(&headers, "m").unwrap().unwrap();
+        assert_eq!(evidence.cached_tokens, 0);
+        assert!(evidence.cache_usage_available);
+    }
+
     #[test]
     fn metrics_reject_duplicates_oversize_model_and_cache_arithmetic() {
         for value in [
