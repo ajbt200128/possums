@@ -173,6 +173,9 @@ function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 
     return `Possums: ${description} Billing status: ` +
       (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown. A new request may incur another charge.') + ' Not replayed.';
   }
+  if (stage === 'request' && error instanceof ChannelError && error.code === 'rejected') {
+    return `Possums: ${diagnosticDescription(new DiagnosticFailure('request', 'schema', 'rejected'))} Local request admission rejected the history or tool declarations. No inference request sent by this attempt. Prior billing is unchanged or unknown. Not replayed.`;
+  }
   if (error instanceof ChannelError && error.code === 'uncertain') return `Possums: [possums_${stage}_uncertain] Stage: ${stage}; constraint: outcome_unknown. Request interrupted; charge unknown. Cause unknown; check connectivity and share only this code for support. Not replayed. A new request may incur another charge.`;
   // Only exact internal literals are displayable. Never echo a hook exception.
   if (error instanceof Error && Object.hasOwn(localFailures, error.message)) return `[${error.message}] Stage: ${stage}; constraint: ${error.message.slice('possums_'.length)}. ${localFailures[error.message]}`;

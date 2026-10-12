@@ -1266,6 +1266,40 @@ await check('large synthetic Pi history and tool catalog use whole-request bound
  assert.equal(JSON.parse(payload.messages[1].tool_calls[0].function.arguments).value.length,65*1024);
  assert(Object.isFrozen(payload.messages[1].tool_calls[0]));
 });
+await check('large assistant reply survives a thirty-minute idle follow-up without renewal',async()=>{
+ const s=await setup(['stop']);
+ const now=Date.now, before=now();let elapsed=0;
+ Date.now=()=>before+elapsed;
+ try{
+  const text='Synthetic long reply 🐾\n'.repeat(24000);
+  const assistant={role:'assistant',provider:'possums',api:'openai-completions',model:s.selected.id,timestamp:before,
+   stopReason:'stop',content:[{type:'text',text}],usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+  const transcript=ai.normalizeContext({messages:[user,assistant,{...user,content:'Synthetic follow-up',timestamp:before+1800000}],tools:[tool]});
+  const original=m.snapshotInvocation(m.invocation(s.selected,transcript));
+  elapsed=30*60*1000;
+  assert.deepEqual(m.snapshotInvocation(m.invocation(s.selected,transcript)),original);
+  s.provider.beginRun();const result=await drain(s.provider.streamSimple(s.selected,transcript));
+  assert.equal(result.message.stopReason,'stop');assert.equal(s.sends(),1);
+  assert.equal(s.requests[0].messages[1].content,text);
+ }finally{Date.now=now;}
+});
+await check('local invocation admission rejection is classified without inference or private content',async()=>{
+ for(const parameters of [{type:'object',properties:{value:{$ref:'https://PRIVATE_SCHEMA_SENTINEL.invalid'}}},
+  {type:'array',description:'PRIVATE_SCHEMA_SENTINEL'},
+  {type:'object',$id:'PRIVATE_SCHEMA_SENTINEL'}]){
+  const s=await setup(['stop']);
+  const transcript=ai.normalizeContext({messages:[user],tools:[{...tool,parameters}]});
+  s.provider.beginRun();const result=await drain(s.provider.streamSimple(s.selected,transcript));
+  assert.equal(result.message.stopReason,'error');assert.equal(s.sends(),0);
+  assert.match(result.message.errorMessage,/\[possums_request_schema\].*Stage: request; constraint: schema.*Local request admission.*No inference request sent by this attempt.*Prior billing is unchanged or unknown.*Not replayed/);
+  assert(!isRetryableAssistantError(result.message));
+  assert.equal(result.message.diagnostics,undefined);
+  assert(!JSON.stringify(result).includes('PRIVATE_SCHEMA_SENTINEL'));
+  assert(!result.message.errorMessage.includes('possums_request_unexpected'));
+  const repeated=await drain(s.provider.streamSimple(s.selected,transcript));
+  assert.equal(repeated.message.errorMessage,result.message.errorMessage);assert.equal(s.sends(),0);
+ }
+});
 await check('nested tool schema survives Pi conversion and the complete request snapshot',async()=>{
  let parameters={type:'object',properties:{value:{type:'string',enum:['synthetic']}}};
  for(let i=0;i<6;i++)parameters={type:'object',properties:{nested:parameters}};

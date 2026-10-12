@@ -186,6 +186,8 @@ The source candidate removes advertised-tool/message counts, historical tool-cal
 
 ## Request encoding diagnostics
 
+The local source diagnostic fix reports `possums_request_schema` when pre-dispatch history/tool admission rejects the request, instead of `possums_request_unexpected`. This attempt sent no inference; it does not establish earlier billing. Validation and retry behavior are unchanged. A synthetic large reply followed by a simulated thirty-minute pause passed; the reported live incident's cause remains unknown. This fix is not installed. See [offline evidence](../../docs/pi-request-admission-verification.md).
+
 `possums_request_json_depth` means local request encoding exceeded the defensive **32-level** JSON nesting limit. Simplify deeply nested tool schemas or history; this attempt sent no inference request and was not replayed. Tool schemas count inside the full request envelope, not in isolation. Byte/node ceilings and live-completion tool bounds still apply; the source candidate above removes historical tool-count quotas. This diagnostic does not establish billing for earlier attempts; post-submission transport failures still report unknown billing. See the [offline fix evidence](../../docs/verification.md#local-pi-json-depth-compatibility-fix).
 
 ## Compaction
