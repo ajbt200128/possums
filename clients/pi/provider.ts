@@ -127,7 +127,8 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
 });
 // Pi 1.0.4 classifies errorMessage, with no provider classifier hook. Only these
 // closed gateway operational failures opt into its native bounded retry policy.
-// HTTP details do not expose upstream status; this is not a claim of HTTP 503.
+// HTTP details do not expose upstream status or prove retryability. Preserve the
+// approved policy without presenting every upstream HTTP rejection as transient.
 const transientDetails = new Set(['tokenizer_send_failed', 'tokenizer_http_failed',
   'generation_send_failed', 'generation_http_failed', 'stream_transport_failed',
   'stream_idle_timeout', 'stream_deadline_exceeded']);
@@ -157,18 +158,24 @@ function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 
       settlement_failed: 'settlement', sdk_stream_decode_failed: 'gateway_sdk_decoding',
       endpoint_binding_failed: 'gateway_verified_transport', verification_failed: 'gateway_verification',
       catalog_failed: 'gateway_catalog', request_encoding_failed: 'gateway_request_encoding',
+      generation_send_failed: 'gateway_generation_transport', generation_http_failed: 'gateway_generation_http',
+      tokenizer_send_failed: 'gateway_tokenizer_transport', tokenizer_http_failed: 'gateway_tokenizer_http',
+      tokenizer_response_invalid: 'gateway_tokenizer_validation', tokenizer_upload_incomplete: 'gateway_tokenizer_transport',
     };
     const detail = label ? error.detail! : '';
+    const upstreamHttpFailure = detail === 'generation_http_failed' || detail === 'tokenizer_http_failed';
     const gatewayStage = error.reason === 'service_quiescing' ? 'admission' : error.reason === 'unauthorized' ? 'gateway_authentication' :
       Object.hasOwn(detailStages, detail) ? detailStages[detail] :
       detail.startsWith('stream_') || detail.startsWith('tool_') ? 'gateway_stream' : 'gateway_admission';
     const action = error.reason === 'insufficient_credit' ? 'Add credit before submitting this model again.' : error.reason === 'invalid_request' ? 'Review supported request options and context limits.' : error.reason === 'account_limit' ? 'Wait for pending requests before submitting again.' : error.reason === 'unauthorized' ? 'Check authentication, not trust pins.' : 'If this persists, share only the content-free code/stage/constraint for support.';
-    const description = `${known ? `[${error.reason}] ${reason[error.reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; underlying cause unknown.'}${label ? ` ${label}.` : error.detail === 'unclassified' ? ' [possums_gateway_detail_unclassified] Gateway detail is unclassified; underlying cause unknown.' : ''} Stage: ${gatewayStage}; constraint: ${error.detail === 'unclassified' ? 'unclassified' : label ? error.detail : known ? error.reason : 'unclassified'}.${error.status === undefined ? '' : ` Observed HTTP status: ${error.status}.`} ${action}`;
+    const description = `${known ? `[${error.reason}] ${reason[error.reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; underlying cause unknown.'}${label ? ` ${label}.` : error.detail === 'unclassified' ? ' [possums_gateway_detail_unclassified] Gateway detail is unclassified; underlying cause unknown.' : ''} Stage: ${gatewayStage}; constraint: ${error.detail === 'unclassified' ? 'unclassified' : label ? error.detail : known ? error.reason : 'unclassified'}.${error.status === undefined ? '' : ` Observed gateway HTTP status: ${error.status}.`}${upstreamHttpFailure ? ' Upstream HTTP status: unavailable; upstream retryability unknown.' : ''} ${action}`;
     const transient = (error.reason === 'unavailable' && (error.detail === undefined || error.detail === 'inference_unavailable')) ||
       (error.reason === 'generation_failed' && error.detail !== undefined && transientDetails.has(error.detail));
-    if (error.settlement) return `Possums: ${nativeRetry && transient ? 'Transient service unavailable. ' : 'Billing status: '}${description} ${settlementDescription(error.settlement)} Settlement alone does not authorize tool execution. Not replayed.${nativeRetry && transient ? ' Native automatic retry may incur another charge.' : ''}`;
+    const retryLabel = upstreamHttpFailure
+      ? 'Native retry policy: service unavailable category. ' : 'Transient service unavailable. ';
+    if (error.settlement) return `Possums: ${nativeRetry && transient ? retryLabel : 'Billing status: '}${description} ${settlementDescription(error.settlement)} Settlement alone does not authorize tool execution. Gateway did not replay this request.${nativeRetry && transient ? ' Native automatic retry may incur another charge. Each retry is a new submission.' : ''}`;
     if (nativeRetry && transient) {
-      return `Possums: Transient service unavailable. ${description} ` +
+      return `Possums: ${retryLabel}${description} ` +
         (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown.') + ' Native automatic retry may incur another charge.';
     }
     // "Billing" explicitly excludes terminal gateway diagnostics from Pi's broad

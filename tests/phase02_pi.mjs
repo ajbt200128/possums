@@ -87,6 +87,24 @@ async function setup(plan, tools = true) {
     if (mode === 'held' || mode === 'held_tools') release=deferred();
     if (options.onPayload) await options.onPayload({model:'synthetic',stream:true,messages,...(options.tools?{tools:options.tools}:{})});
     await options.onResponse?.({status:200,contentType:'text/event-stream'});
+    if (['generation_http_receipt', 'generation_http_unknown', 'generation_http_interrupted'].includes(mode)) {
+      const frame = value => 'data: '+JSON.stringify(value)+'\n\n';
+      const terminal = {object:'chat.completion.chunk',model:'synthetic',choices:[],possums:{
+        outcome:'refunded',status:'incomplete',reserved_microunits:'52',charged_microunits:'0',refunded_microunits:'52',markup_percent:130,
+        quoted_input_microunits_per_million_tokens:'1000000',quoted_output_microunits_per_million_tokens:'1000000',
+        quoted_cached_input_microunits_per_million_tokens:null,evidence:'none',usage:null,provider_cost_usd:null,
+      }};
+      const text = (mode==='generation_http_unknown'?'':frame(terminal)) +
+        frame({error:{code:'generation_failed',detail:'generation_http_failed',billing:'unknown',message:'PRIVATE_PROMPT_CREDENTIAL_HTTP_401'}}) + 'data: [DONE]\n\n';
+      let sent=false;
+      const body=new ReadableStream({pull(controller){
+        if(!sent){sent=true;controller.enqueue(new TextEncoder().encode(text));}
+        else if(mode==='generation_http_interrupted')controller.error(new Error('PRIVATE_PROMPT_CREDENTIAL_HTTP_503'));
+        else controller.close();
+      }},{highWaterMark:0});
+      try { return await m.consumeCompletion(body,entry(tools),onDelta,{tools:options.tools,onEvent:options.onEvent,signal:options.signal}); }
+      catch(error){if(error instanceof m.GatewayError)Object.defineProperty(error,'status',{value:200});throw error;}
+    }
     if (['paid_partial', 'paid_partial_transient', 'paid_partial_truncated', 'refunded_partial', 'capped_partial'].includes(mode)) {
       const frame = value => 'data: '+JSON.stringify(value)+'\n\n';
       const refund = mode === 'refunded_partial', cap = mode === 'capped_partial';
@@ -1483,6 +1501,11 @@ await check('pinned Pi classifier admits only closed gateway operational failure
   const s=await setup([{code:'generation_failed',detail}]);const {message}=await drain(s.provider.streamSimple(s.selected,context(false)));
   assert.equal(isRetryableAssistantError(message),transient.includes(detail),String(detail));assert.equal(s.sends(),1);
   assert(message.errorMessage.includes('[generation_failed]'));if(detail)assert(message.errorMessage.includes(`[${detail}]`));
+  if(detail==='generation_http_failed'||detail==='tokenizer_http_failed'){
+   assert(message.errorMessage.includes(`Stage: gateway_${detail==='generation_http_failed'?'generation':'tokenizer'}_http`));
+   assert.match(message.errorMessage,/Upstream HTTP status: unavailable; upstream retryability unknown/);
+   assert.doesNotMatch(message.errorMessage,/Transient service unavailable/);
+  }
   assert(message.diagnostics.some(d=>d.type==='possums_billing_unknown'));
   assert(!JSON.stringify(message).includes('PRIVATE_PROMPT'));
  }
@@ -2347,6 +2370,45 @@ await check('actual Pi SDK retries validated transient failures with native even
    assert.equal(f.session.messages.filter(message=>message.role==='assistant').length,1,'native projection omits the failed attempt, not raw history');
    assert.deepEqual(f.s.requests[0].messages,f.s.requests[1].messages);
   } finally {unsubscribe();f.session.dispose();}
+ }
+});
+await check('generation HTTP diagnostics retain provenance across native success, exhaustion and backoff abort',async()=>{
+ for(const [name,mode,policy] of [['success','generation_http_receipt',{maxRetries:1,baseDelayMs:1}],
+   ['unknown','generation_http_unknown',{maxRetries:1,baseDelayMs:1}],
+   ['interrupted','generation_http_interrupted',{maxRetries:1,baseDelayMs:1}],
+   ['exhausted','generation_http_receipt',{maxRetries:2,baseDelayMs:1}],
+   ['abort','generation_http_receipt',{maxRetries:1,baseDelayMs:1000}]]){
+  const exhausted=name==='exhausted',abort=name==='abort';
+  const f=await sdkSetup('sdk-generation-http-'+name,exhausted?Array(3).fill(mode):[mode,'stop'],true,false,true,false,policy);
+  const events=[];let cancellation;
+  const unsubscribe=f.session.subscribe(event=>{
+   if(event.type.startsWith('auto_retry_'))events.push(event);
+   if(abort&&event.type==='auto_retry_start')cancellation=new Promise(resolve=>setImmediate(()=>resolve(f.session.abort())));
+  });
+  try{
+   await f.session.prompt('Synthetic generation HTTP failure');if(cancellation)await cancellation;
+   assert.equal(f.s.sends(),exhausted?3:abort?1:2);assert.equal(f.toolRuns(),0);
+   assert.equal(events.at(-1).success,!exhausted&&!abort);
+   assert.deepEqual(events.filter(e=>e.type==='auto_retry_start').map(e=>e.attempt),exhausted?[1,2]:[1]);
+   const failed=rawAssistants(f.session).filter(message=>message.stopReason==='error');
+   assert.equal(failed.length,exhausted?3:1);
+   for(const message of failed){
+    assert.match(message.errorMessage,/\[generation_http_failed\].*Stage: gateway_generation_http; constraint: generation_http_failed.*Observed gateway HTTP status: 200.*Upstream HTTP status: unavailable; upstream retryability unknown/);
+    assert.match(message.errorMessage,/Native retry policy: service unavailable category.*Native automatic retry may incur another charge/);
+    assert.doesNotMatch(message.errorMessage,/gateway_admission|Transient service unavailable|PRIVATE_PROMPT|HTTP_401|HTTP_503/);
+    if(mode==='generation_http_receipt'){
+     assert.match(message.errorMessage,/Authenticated incomplete settlement: charged 0 microunits; refunded 52 microunits.*not tool-execution authorization/);
+     assert.match(message.errorMessage,/Gateway did not replay this request.*Each retry is a new submission/);
+     assert.doesNotMatch(message.errorMessage,/Not replayed/);
+     assert(!message.diagnostics.some(d=>d.type==='possums_billing_unknown'));
+    }else{
+     assert.match(message.errorMessage,/Charge unknown/);assert.doesNotMatch(message.errorMessage,/Authenticated incomplete settlement|Reservation refunded/);
+     assert(message.diagnostics.some(d=>d.type==='possums_billing_unknown'));
+    }
+   }
+   assert(events.filter(e=>e.type==='auto_retry_start').every(e=>e.errorMessage===failed[0].errorMessage));
+   if(!exhausted&&!abort){assert.equal(f.session.messages.filter(m=>m.role==='assistant').length,1);assert.deepEqual(f.s.requests[0].messages,f.s.requests[1].messages);}
+  }finally{unsubscribe();f.session.dispose();}
  }
 });
 await check('actual Pi SDK exhausts exactly the default three retries and resets budget after success',async()=>{
