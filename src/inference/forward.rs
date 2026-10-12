@@ -581,6 +581,32 @@ mod tests {
         assert!(sink.events.iter().all(|event| event.get("id").is_none()));
     }
     #[tokio::test]
+    async fn http_rejections_keep_only_the_closed_category_without_reading_body() {
+        // This category cannot establish upstream retryability: deterministic
+        // and potentially transient HTTP rejections share the existing wire code.
+        for status in [400, 401, 403, 429, 500, 503] {
+            let body = futures_util::stream::once(async {
+                panic!("unsuccessful upstream body must not be polled");
+                #[allow(unreachable_code)]
+                Ok::<_, std::io::Error>(Frame::data(Bytes::from_static(
+                    b"PRIVATE_PROMPT_CREDENTIAL_HTTP_503",
+                )))
+            });
+            let response = http::Response::builder()
+                .status(status)
+                .body(reqwest::Body::wrap(http_body_util::StreamBody::new(body)))
+                .unwrap()
+                .into();
+            let mut sink = Sink::default();
+            let error = consume(response, "m", Duration::from_secs(1), &mut sink)
+                .await
+                .unwrap_err();
+            assert_eq!(error.failure(), InferenceFailure::GenerationHttpFailed);
+            assert!(sink.events.is_empty() && sink.evidence.is_none());
+            assert!(!format!("{error:?} {error}").contains("PRIVATE_PROMPT"));
+        }
+    }
+    #[tokio::test]
     async fn cumulative_interruption_keeps_last_snapshot_and_no_usage_keeps_none() {
         for with_usage in [false, true] {
             let mut frames = vec![Ok(event(choice(

@@ -487,6 +487,29 @@ try {
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }));
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: { type: 'function', function: { name: 'lookup' } } }));
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: 'none' }));
+  // Actual SDK-decrypted gateway SSE: 200 is the gateway transport status,
+  // not the unsuccessful upstream status represented by generation_http_failed.
+  const incomplete = event({choices:[],possums:{outcome:'refunded',status:'incomplete',reserved_microunits:'52',
+    charged_microunits:'0',refunded_microunits:'52',markup_percent:130,
+    quoted_input_microunits_per_million_tokens:'1000000',quoted_output_microunits_per_million_tokens:'1000000',
+    quoted_cached_input_microunits_per_million_tokens:null,evidence:'none',usage:null,provider_cost_usd:null}});
+  const generationError = 'data: '+JSON.stringify({error:{code:'generation_failed',detail:'generation_http_failed',billing:'unknown',message:'PRIVATE_PROMPT_CREDENTIAL_HTTP_401'}})+'\n\n';
+  for(const receipt of [true,false]){
+    chatText=(receipt?incomplete:'')+generationError+done;initial=sent.length;
+    await assert.rejects(()=>client.chat('fixture',chat.messages,()=>{},false),error=>{
+      check(error.reason==='generation_failed' && error.detail==='generation_http_failed' && error.status===200);
+      check(error.billing===(receipt?'refunded':'unknown'));
+      check(error.settlement?.complete===(receipt?false:undefined));
+      check(!JSON.stringify(error).includes('PRIVATE_PROMPT'));return true;
+    });checks++;
+    check(sent.slice(initial).filter(path=>path==='/v1/chat/completions').length===1);
+  }
+  encryptedFailureRoute='/v1/chat/completions';encryptedFailureStatus=200;
+  encryptedFailureWire=incomplete+generationError+done;interruptClose=true;
+  await assert.rejects(()=>client.chat('fixture',chat.messages,()=>{},false),error=>
+    error.reason==='generation_failed' && error.detail==='generation_http_failed' && error.status===200 &&
+    error.billing==='unknown' && error.settlement===undefined);checks++;
+  encryptedFailureRoute=undefined;interruptClose=false;
   chatText = valid;
   let depthFailure;try{f.serialize({tools:[{...tool,function:{...tool.function,parameters:tooDeep}}]},f.LIMITS.chat);}catch(error){depthFailure=error;}
   check(depthFailure?.message==='possums_request_json_depth');
