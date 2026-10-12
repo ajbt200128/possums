@@ -1,7 +1,7 @@
 import { Channel, hasByteReadTimeout, type ResponseOptions } from './transport.js';
-import { ChannelError, DiagnosticFailure, JSONDepthError, LIMITS, Operation, OperationFailure, cleanup, parseJSON, requireThat, serialize, utf8,
+import { ChannelError, DiagnosticFailure, LIMITS, Operation, OperationFailure, cleanup, parseJSON, requireThat, serialize,
   type FailureConstraint, type FailureStage } from './limits.js';
-import { admitTools, fields, freezeJSON, objectArguments, snapshotInvocation, toolID, toolName,
+import { fields, freezeJSON, snapshotInvocation,
   type Chat, type Invocation, type Tool, type ToolChoice } from './tools.js';
 
 // Events are provisional display data, NEVER permission to execute a tool.
@@ -24,10 +24,20 @@ export type ChatOptions = ResponseOptions & CompletionOptions & { tool_choice?: 
 export type LiveModel = { object: 'model'; id: string; context_tokens: string; max_output_tokens: string;
   input_microunits_per_million_tokens: string; output_microunits_per_million_tokens: string; maximum_reservation_microunits: string;
   tool_protocol?: 'openai-functions-v1'; cached_input_microunits_per_million_tokens?: string | null };
-export type Receipt = { finish: 'stop' | 'length' | 'tool_calls'; inputTokens: number; outputTokens: number; totalTokens: number;
-  chargedMicrounits: string; refundedMicrounits: string;
+export type Receipt = { finish?: 'stop' | 'length' | 'tool_calls'; inputTokens: number; outputTokens: number; totalTokens: number;
+  chargedMicrounits: string; refundedMicrounits?: string;
   quotedInputMicrounitsPerMillion?: string; quotedOutputMicrounitsPerMillion?: string;
-  complete?: boolean; outcome?: 'settled' | 'refunded'; reservedMicrounits?: string; cachedTokens?: number; quotedCachedInputMicrounitsPerMillion?: string | null; evidence?: string };
+  complete?: boolean; outcome?: 'settled' | 'refunded'; reservedMicrounits?: string; cachedTokens?: number; quotedCachedInputMicrounitsPerMillion?: string | null; evidence?: string;
+  usageAvailable?: boolean; deliveryComplete?: boolean };
+export type Completion = Partial<Receipt> & { finish: NonNullable<Receipt['finish']> };
+const interruptedReceipts = new WeakMap<CompletionFailure, Readonly<Receipt>>();
+export class CompletionFailure extends DiagnosticFailure {
+  constructor(stage: FailureStage, constraint: FailureConstraint, receipt?: Readonly<Receipt>, status?: number) {
+    super(stage, constraint, 'uncertain', status);
+    if (receipt) interruptedReceipts.set(this, Object.freeze({ ...receipt, deliveryComplete: false }));
+  }
+  get settlement(): Readonly<Receipt> | undefined { return interruptedReceipts.get(this); }
+}
 export type BalanceSnapshot = Readonly<{ availableMicrounits: string; inFlight: number; completedRequests: string }>;
 export class BalanceFailure extends ChannelError {
   constructor(readonly stage: 'request' | 'validation', code: ChannelError['code'] = 'rejected', readonly observation?: DiagnosticFailure) {
@@ -36,11 +46,16 @@ export class BalanceFailure extends ChannelError {
     Object.freeze(this);
   }
 }
+function usageMetadata(value: any) {
+  const input = count(value?.prompt_tokens), output = count(value?.completion_tokens), sum = count(value?.total_tokens);
+  return { inputTokens: input ?? 0, outputTokens: output ?? 0, totalTokens: sum ?? 0,
+    cachedTokens: count(value?.cached_tokens ?? value?.prompt_tokens_details?.cached_tokens),
+    usageAvailable: input !== undefined && output !== undefined && sum !== undefined };
+}
 const token = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
 function keys(value: any, names: readonly string[]): void {
   requireThat(value && typeof value === 'object' && !Array.isArray(value));
-  const actual = Object.keys(value);
-  requireThat(actual.length === names.length && actual.every(key => names.includes(key)));
+  requireThat(names.every(key => Object.hasOwn(value, key)));
 }
 function amount(value: unknown): bigint {
   requireThat(typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value));
@@ -48,22 +63,30 @@ function amount(value: unknown): bigint {
   requireThat(result <= (1n << 64n) - 1n);
   return result;
 }
+// Response fields are forward-compatible; request fields remain closed authority.
+function responseFields(value: any, required: readonly string[], optional: readonly string[] = []): any {
+  keys(value, required);
+  return Object.fromEntries([...required, ...optional].filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
+}
+function optionalAmount(value: unknown): string | undefined {
+  try { amount(value); return value as string; } catch { return undefined; }
+}
+const count = (value: unknown): number | undefined => Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined;
 export function validateModels(value: any): readonly LiveModel[] {
   value = parseJSON(serialize(value, LIMITS.catalog), LIMITS.catalog);
   keys(value, ['object', 'data']);
   requireThat(value.object === 'list' && Array.isArray(value.data) && value.data.length > 0 && value.data.length <= LIMITS.models);
   const ids = new Set<string>();
+  value.data = value.data.map((model: unknown) => responseFields(model, ['object', 'id', 'context_tokens', 'max_output_tokens', 'input_microunits_per_million_tokens', 'output_microunits_per_million_tokens', 'maximum_reservation_microunits'], ['tool_protocol', 'cached_input_microunits_per_million_tokens']));
   for (const model of value.data) {
-    fields(model, ['object', 'id', 'context_tokens', 'max_output_tokens', 'input_microunits_per_million_tokens', 'output_microunits_per_million_tokens', 'maximum_reservation_microunits'], ['tool_protocol', 'cached_input_microunits_per_million_tokens']);
     if (Object.hasOwn(model, 'tool_protocol')) requireThat(model.tool_protocol === 'openai-functions-v1');
     requireThat(model.object === 'model' && typeof model.id === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(model.id) && !ids.has(model.id));
     ids.add(model.id);
     const context = amount(model.context_tokens), output = amount(model.max_output_tokens);
-    const inputPrice = amount(model.input_microunits_per_million_tokens), outputPrice = amount(model.output_microunits_per_million_tokens);
-    requireThat(context > 0n && output > 0n && output <= context && inputPrice > 0n && outputPrice > 0n);
-    if (model.cached_input_microunits_per_million_tokens != null) requireThat(amount(model.cached_input_microunits_per_million_tokens) <= inputPrice);
-    const quote = (130n * (context * inputPrice + output * outputPrice) + 100_000_000n - 1n) / 100_000_000n;
-    requireThat(amount(model.maximum_reservation_microunits) === quote);
+    amount(model.input_microunits_per_million_tokens); amount(model.output_microunits_per_million_tokens);
+    requireThat(context > 0n && output > 0n);
+    if (model.cached_input_microunits_per_million_tokens != null) amount(model.cached_input_microunits_per_million_tokens);
+    amount(model.maximum_reservation_microunits);
     Object.freeze(model);
   }
   return Object.freeze(value.data);
@@ -96,7 +119,7 @@ function gatewayDescription(reason: string, detail: string | undefined, refunded
   const label = gatewayDetailLabel(detail);
   const known = Object.hasOwn(reasons, reason);
   return `Possums: ${known ? `[${reason}] ${reasons[reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; cause unknown.'}` +
-    (label ? ` ${label}.` : '') + ` Stage: ${reason === 'service_quiescing' ? 'admission' : 'gateway'}; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (receipt ? ` Authenticated ${receipt.complete === false ? 'incomplete' : 'complete'} settlement: charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits} microunits. Settlement alone does not authorize tool execution. Not replayed. A new request may incur another charge.` : refunded ? ' Reservation refunded. Not replayed.' :
+    (label ? ` ${label}.` : '') + ` Stage: ${reason === 'service_quiescing' ? 'admission' : 'gateway'}; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (receipt ? ` Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits. Receipt alone does not establish successful generation or authorize tool execution. Not replayed. A new request may incur another charge.` : refunded ? ' Reservation refunded. Not replayed.' :
       ' Charge unknown. Not replayed. A new request may incur another charge.');
 }
 export class GatewayError extends ChannelError {
@@ -110,7 +133,7 @@ export class GatewayError extends ChannelError {
     if (Number.isInteger(status) && status! >= 100 && status! <= 599) this.status = status;
     this.message = gatewayDescription(this.reason, this.detail, false);
   }
-  get billing(): 'refunded' | 'settled' | 'unknown' { const receipt = confirmedSettlements.get(this); return receipt ? receipt.outcome ?? 'settled' : confirmedRefunds.has(this) ? 'refunded' : 'unknown'; }
+  get billing(): 'refunded' | 'settled' | 'unknown' { const receipt = confirmedSettlements.get(this); return receipt ? receipt.outcome ?? 'unknown' : confirmedRefunds.has(this) ? 'refunded' : 'unknown'; }
   get settlement(): Readonly<Receipt> | undefined { return confirmedSettlements.get(this); }
 }
 export function gatewayError(value: any, status?: number): GatewayError {
@@ -124,7 +147,7 @@ export function gatewayError(value: any, status?: number): GatewayError {
       typeof value.error.message === 'string');
     return new GatewayError('service_quiescing', undefined, 'unknown', status);
   }
-  fields(value.error, ['code'], ['detail', 'message', 'billing', 'outcome']);
+  responseFields(value.error, ['code'], ['detail', 'message', 'billing', 'outcome']);
   requireThat(typeof value.error.code === 'string' &&
     gatewayReasons.has(value.error.code) && value.error.code !== 'service_quiescing');
   requireThat(value.error.detail === undefined || (typeof value.error.detail === 'string' && details.has(value.error.detail)));
@@ -163,103 +186,73 @@ export class CatalogFailure extends ChannelError {
 // Success requires the ordered, authenticated gateway receipt AND stream EOF.
 // No answer is accumulated; interruption is uncertain and never causes a resend.
 export async function consumeCompletion(body: ReadableStream<Uint8Array>, model: string | LiveModel,
-  onDelta: (text: string) => void, options: CompletionOptions = {}, httpStatus?: number): Promise<Receipt> {
+  onDelta: (text: string) => void, options: CompletionOptions = {}, httpStatus?: number): Promise<Completion> {
   let reader: ReadableStreamDefaultReader<Uint8Array>, op: Operation;
   try { reader = body.getReader(); op = new Operation(null, options.signal); }
   catch { throw new DiagnosticFailure('stream', 'envelope', 'uncertain'); }
   const decoder = new TextDecoder('utf-8', { fatal: true });
   let pending = '', data: string | undefined, state: 'role' | 'text' | 'usage' | 'done' | 'eof' | 'error' = 'role';
   let finish: Receipt['finish'] | undefined, receipt: Receipt | undefined, sawEvent = false, controlError = false;
+  let usage = usageMetadata(undefined);
   let failure: GatewayError | undefined, terminal = false;
   let stage: FailureStage = 'stream', constraint: FailureConstraint = 'envelope';
-  let modelID: string, names: Set<string> | undefined;
-  const calls: { id: string; name: string; arguments: string }[] = [], ids = new Set<string>();
-  // Shared encoded-state allowance, derived from the request envelope rather
-  // than a tool count/per-call quota. Six bytes per UTF-16 unit cover worst-case
-  // UTF-8 plus old/new string overlap; 256 covers records, slots and identity-set
-  // bookkeeping conservatively. Engine/parser/callback memory is separate, so
-  // this is not a whole-runtime RSS bound. Charge before retaining/concatenating.
-  const toolRecordRetainedBytes = 256, toolStringRetainedBytesPerUnit = 6;
-  let retainedBytes = 0;
-  function retain(bytes: number): void {
-    if (bytes > LIMITS.chat - retainedBytes) throw new DiagnosticFailure('stream', 'tool_state', 'uncertain');
-    retainedBytes += bytes;
-  }
+  let modelID: string;
   async function event(payload: string): Promise<void> {
     constraint = 'envelope';
     sawEvent = true;
     if (payload === '[DONE]') {
       constraint = state === 'role' || state === 'text' ? 'finish_missing' : 'usage_missing';
-      requireThat(state === 'done'); state = 'eof'; return;
+      requireThat(state === 'done' || (state === 'usage' && finish)); state = 'eof'; return;
     }
     requireThat(state !== 'eof' && state !== 'error');
     constraint = 'json';
-    const value = parseJSON(utf8.encode(payload), LIMITS.sseEvent);
+    let value = JSON.parse(payload);
     constraint = 'schema';
     requireThat(value && typeof value === 'object');
     if (Object.hasOwn(value, 'error')) { failure = gatewayError(value); state = receipt ? 'done' : 'error'; return; }
     requireThat(value.object === 'chat.completion.chunk' && value.model === modelID && Array.isArray(value.choices));
     let textDelta: string | undefined;
-    fields(value, ['object', 'model', 'choices'], ['usage', 'possums']);
+    value = responseFields(value, ['object', 'model', 'choices'], ['usage', 'possums']);
     if (value.possums !== undefined) {
       constraint = 'usage';
       requireThat(!receipt && value.choices.length === 0);
-      const counts = value.possums.usage ?? value.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-      fields(counts, ['prompt_tokens', 'completion_tokens', 'total_tokens'], ['cached_tokens', 'prompt_tokens_details', 'completion_tokens_details', 'cost_usd']);
-      const { prompt_tokens: input, completion_tokens: output, total_tokens: sum } = counts;
-      requireThat([input, output, sum].every(n => Number.isSafeInteger(n) && n >= 0) && input + output === sum);
+      const accounting = value.possums;
+      usage = usageMetadata(accounting.usage ?? value.usage);
       constraint = 'receipt';
-      fields(value.possums, ['outcome', 'charged_microunits', 'refunded_microunits'],
-        ['quoted_input_microunits_per_million_tokens', 'quoted_output_microunits_per_million_tokens', 'quoted_cached_input_microunits_per_million_tokens', 'status', 'reserved_microunits', 'markup_percent', 'evidence', 'usage', 'provider_cost_usd']);
-      requireThat(value.possums.outcome === 'settled' || value.possums.outcome === 'refunded');
-      const complete = value.possums.status === undefined || value.possums.status === 'complete';
-      requireThat(value.possums.status === undefined || complete || value.possums.status === 'incomplete');
-      requireThat(!complete || (finish && value.possums.outcome === 'settled'));
-      if (value.possums.status !== undefined) {
-        requireThat(value.possums.markup_percent === 130 && ['none', 'running_sse', 'final_sse', 'final_metrics'].includes(value.possums.evidence));
-        requireThat(amount(value.possums.reserved_microunits) === amount(value.possums.charged_microunits) + amount(value.possums.refunded_microunits));
+      requireThat(accounting && typeof accounting === 'object' && !Array.isArray(accounting));
+      const charged = optionalAmount(accounting.charged_microunits);
+      // Optional/unreadable metadata cannot erase readable authenticated money.
+      if (charged !== undefined) {
+        receipt = { finish, ...usage,
+          chargedMicrounits: charged, refundedMicrounits: optionalAmount(accounting.refunded_microunits),
+          complete: accounting.status === undefined || accounting.status === 'complete',
+          outcome: accounting.outcome === 'settled' || accounting.outcome === 'refunded' ? accounting.outcome : undefined,
+          reservedMicrounits: optionalAmount(accounting.reserved_microunits),
+          quotedInputMicrounitsPerMillion: optionalAmount(accounting.quoted_input_microunits_per_million_tokens),
+          quotedOutputMicrounitsPerMillion: optionalAmount(accounting.quoted_output_microunits_per_million_tokens),
+          quotedCachedInputMicrounitsPerMillion: optionalAmount(accounting.quoted_cached_input_microunits_per_million_tokens),
+          evidence: ['none', 'running_sse', 'final_sse', 'final_metrics'].includes(accounting.evidence) ? accounting.evidence : undefined };
       }
-      if (value.possums.outcome === 'refunded') requireThat(amount(value.possums.charged_microunits) === 0n);
-      amount(value.possums.charged_microunits); amount(value.possums.refunded_microunits);
-      const reportedCached = counts.cached_tokens ?? counts.prompt_tokens_details?.cached_tokens;
-      const cached = reportedCached ?? 0;
-      requireThat(Number.isSafeInteger(cached) && cached >= 0 && cached <= input);
-      receipt = { finish: finish ?? 'stop', inputTokens: input, outputTokens: output, totalTokens: sum,
-        chargedMicrounits: value.possums.charged_microunits, refundedMicrounits: value.possums.refunded_microunits,
-        complete, outcome: value.possums.outcome, reservedMicrounits: value.possums.reserved_microunits, cachedTokens: reportedCached,
-        quotedCachedInputMicrounitsPerMillion: value.possums.quoted_cached_input_microunits_per_million_tokens, evidence: value.possums.evidence };
-      const quotedInput = value.possums.quoted_input_microunits_per_million_tokens;
-      const quotedOutput = value.possums.quoted_output_microunits_per_million_tokens;
-      if (quotedInput !== undefined || quotedOutput !== undefined) {
-        const inputRate = amount(quotedInput), outputRate = amount(quotedOutput);
-        requireThat(inputRate > 0n && outputRate > 0n);
-        const cachedRate = value.possums.quoted_cached_input_microunits_per_million_tokens == null ? inputRate : amount(value.possums.quoted_cached_input_microunits_per_million_tokens);
-        requireThat(cachedRate <= inputRate);
-        const computed = (130n * (BigInt(input - cached) * inputRate + BigInt(cached) * cachedRate + BigInt(output) * outputRate) + 100_000_000n - 1n) / 100_000_000n;
-        const reserved = value.possums.reserved_microunits === undefined ? computed : amount(value.possums.reserved_microunits);
-        const charged = value.possums.outcome === 'refunded' ? 0n : computed < reserved ? computed : reserved;
-        requireThat(amount(value.possums.charged_microunits) === charged);
-        receipt.quotedInputMicrounitsPerMillion = quotedInput;
-        receipt.quotedOutputMicrounitsPerMillion = quotedOutput;
-      }
+      // Only normalized, understood response data reaches hooks.
+      value.possums = { outcome: receipt?.outcome, status: receipt?.complete ? 'complete' : 'incomplete',
+        charged_microunits: receipt?.chargedMicrounits, refunded_microunits: receipt?.refundedMicrounits };
+      delete value.usage;
       state = 'done';
     } else {
       constraint = 'choice';
       requireThat(value.choices.length <= 1 && !receipt && state !== 'done');
       if (value.usage != null) {
-        constraint = 'usage';
-        fields(value.usage, ['prompt_tokens', 'completion_tokens', 'total_tokens'], ['prompt_tokens_details', 'completion_tokens_details', 'cost_usd']);
-        const u = value.usage;
-        requireThat([u.prompt_tokens, u.completion_tokens, u.total_tokens].every(n => Number.isSafeInteger(n) && n >= 0) && u.prompt_tokens + u.completion_tokens === u.total_tokens);
-        if (u.prompt_tokens_details?.cached_tokens != null) requireThat(Number.isSafeInteger(u.prompt_tokens_details.cached_tokens) && u.prompt_tokens_details.cached_tokens >= 0 && u.prompt_tokens_details.cached_tokens <= u.prompt_tokens);
+        usage = usageMetadata(value.usage);
+        value.usage = { prompt_tokens: usage.inputTokens, completion_tokens: usage.outputTokens, total_tokens: usage.totalTokens };
       }
       if (value.choices.length === 0) { requireThat(value.usage != null); return; }
       constraint = 'choice';
       requireThat(state === 'role' || state === 'text');
-      const choice = value.choices[0]; fields(choice, ['index', 'delta'], ['finish_reason']);
+      const choice = responseFields(value.choices[0], ['index', 'delta'], ['finish_reason']);
+      value.choices = [choice];
       requireThat(choice.index === 0);
       constraint = 'delta';
-      fields(choice.delta, [], ['role', 'content', 'tool_calls', 'reasoning', 'reasoning_content']);
+      choice.delta = responseFields(choice.delta, [], ['role', 'content', 'tool_calls', 'reasoning', 'reasoning_content']);
       if (choice.delta.role != null) requireThat(choice.delta.role === 'assistant');
       state = 'text';
       if (choice.delta.content != null) { requireThat(typeof choice.delta.content === 'string'); textDelta = choice.delta.content; }
@@ -267,40 +260,20 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
       if (Object.hasOwn(choice.delta, 'tool_calls') && choice.delta.tool_calls != null) {
         constraint = 'tool';
         requireThat(Array.isArray(choice.delta.tool_calls));
+        choice.delta.tool_calls = choice.delta.tool_calls.map((delta: unknown) => responseFields(delta, ['index'], ['id', 'type', 'function']));
         const indexes = new Set<number>();
         for (const delta of choice.delta.tool_calls) {
-          requireThat(names);
           requireThat(delta && Number.isSafeInteger(delta.index) && delta.index >= 0 && !indexes.has(delta.index));
           indexes.add(delta.index);
-          fields(delta, ['index'], ['id', 'type', 'function']);
-          let call = calls[delta.index];
-          if (!call) {
-            requireThat(delta.index === calls.length);
-            retain(toolRecordRetainedBytes);
-            call = { id: '', name: '', arguments: '' }; calls.push(call);
-          }
-          // The gateway preserves SDK fragments: identity and arguments can
-          // arrive separately. Completeness is checked at the terminal finish.
+          // Fragments are forwarded, not accumulated or authorized here.
+          // Pi assembles calls and applies lookup/schema policy before execution.
           if (delta.type != null) requireThat(delta.type === 'function');
-          if (delta.id != null && delta.id !== '') {
-            toolID(delta.id);
-            requireThat((!call.id || call.id === delta.id) && (!ids.has(delta.id) || call.id === delta.id));
-            if (!call.id) retain(toolStringRetainedBytesPerUnit * delta.id.length);
-            call.id = delta.id; ids.add(delta.id);
-          }
+          if (delta.id != null) requireThat(typeof delta.id === 'string');
           if (delta.function != null) {
-            fields(delta.function, [], ['name', 'arguments']);
-            if (delta.function.name != null && delta.function.name !== '') {
-              toolName(delta.function.name);
-              requireThat(names.has(delta.function.name) && (!call.name || call.name === delta.function.name));
-              if (!call.name) retain(toolStringRetainedBytesPerUnit * delta.function.name.length);
-              call.name = delta.function.name;
-            }
+            delta.function = responseFields(delta.function, [], ['name', 'arguments']);
+            if (delta.function.name != null) requireThat(typeof delta.function.name === 'string');
+            if (delta.function.arguments != null) requireThat(typeof delta.function.arguments === 'string');
           }
-          const fragment = delta.function?.arguments ?? '';
-          requireThat(typeof fragment === 'string');
-          retain(toolStringRetainedBytesPerUnit * fragment.length);
-          call.arguments += fragment;
         }
       }
       if (choice.finish_reason != null) {
@@ -337,19 +310,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
   try {
     op.check();
     stage = 'request'; constraint = 'schema';
-    // String models retain the legacy text-only API. Tools require an explicitly
-    // qualified live entry AND declarations; no name-based model inference.
-    if (typeof model === 'string') modelID = model;
-    else {
-      const entry = validateModels({ object: 'list', data: [model] })[0]; modelID = entry.id;
-      if (options.tools !== undefined) {
-        requireThat(entry.tool_protocol === 'openai-functions-v1');
-        const tools = admitTools(options.tools);
-        serialize(tools, LIMITS.chat);
-        names = new Set(Array.from(tools, tool => tool.function.name));
-      }
-    }
-    requireThat(options.tools === undefined || names);
+    modelID = typeof model === 'string' ? model : validateModels({ object: 'list', data: [model] })[0].id;
     stage = 'stream'; constraint = 'envelope';
     for (;;) {
       op.check();
@@ -363,13 +324,13 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
       if (next.done) {
         constraint = 'utf8'; requireThat(decoder.decode() === '');
         // Only a Channel-produced, SDK-decrypted body may carry HTTP admission status.
-        if (controlError) { constraint = 'json'; failure = gatewayError(parseJSON(utf8.encode(pending), LIMITS.error), hasByteReadTimeout(body) ? httpStatus : undefined); }
+        if (controlError) { constraint = 'json'; failure = gatewayError(JSON.parse(pending), hasByteReadTimeout(body) ? httpStatus : undefined); }
         else { constraint = 'envelope'; requireThat(pending === '' && data === undefined); }
-        if (receipt?.complete === false && !failure) failure = new GatewayError('generation_failed', 'stream_finish_missing');
+        if (receipt && (receipt.complete === false || receipt.outcome === 'refunded') && !failure) failure = new GatewayError('generation_failed', 'stream_finish_missing');
         if (failure) {
           terminal = true;
           if (receipt && atEOF()) {
-            confirmedSettlements.set(failure, Object.freeze(receipt));
+            confirmedSettlements.set(failure, Object.freeze({ ...receipt, deliveryComplete: true }));
             failure.message = gatewayDescription(failure.reason, failure.detail, false, receipt);
           } else if (claimedRefunds.has(failure)) {
             confirmedRefunds.add(failure);
@@ -377,42 +338,35 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
           }
           throw failure;
         }
-        constraint = state === 'role' || state === 'text' ? 'finish_missing' :
-          state === 'usage' ? 'usage_missing' : state === 'done' ? 'done_missing' : 'eof';
-        requireThat(atEOF() && receipt && receipt.complete !== false);
-        try {
-          if (finish === 'tool_calls') requireThat(names && calls.length > 0);
-          if (calls.length && finish !== 'length') {
-            requireThat(names);
-            for (const call of calls) { toolID(call.id); toolName(call.name); objectArguments(call.arguments); }
-          }
-        } catch {
-          failure = new GatewayError('generation_failed', 'tool_call_incomplete'); terminal = true;
-          confirmedSettlements.set(failure, Object.freeze(receipt));
-          failure.message = gatewayDescription(failure.reason, failure.detail, false, receipt);
-          throw failure;
-        }
-        return Object.freeze(receipt);
+        constraint = !finish ? 'finish_missing' : !atEOF() ? 'done_missing' : 'eof';
+        requireThat(atEOF() && finish && (!receipt || (receipt.complete !== false && receipt.outcome === 'settled')));
+        return Object.freeze(receipt ? { ...receipt, finish, deliveryComplete: true } : { ...usage, finish });
       }
       constraint = 'envelope';
-      requireThat(next.value.length <= LIMITS.frame);
       constraint = 'utf8'; pending += decoder.decode(next.value, { stream: true });
       constraint = 'envelope';
       if (!sawEvent && !failure && pending.trimStart().startsWith('{')) controlError = true;
-      if (controlError) { requireThat(pending.length <= LIMITS.error); continue; }
+      if (controlError) continue;
       let end: number;
       while ((end = pending.indexOf('\n')) !== -1) {
-        requireThat(end <= LIMITS.sseEvent);
         const current = pending.slice(0, end); pending = pending.slice(end + 1); await line(current);
       }
-      requireThat(pending.length <= LIMITS.sseEvent);
     }
   } catch (error) {
     if (terminal && error === failure) throw failure;
-    if (failure) throw new GatewayError(failure.reason, failure.detail, 'unknown', failure.status); // No authenticated EOF: refund is unproven.
-    if (error instanceof DiagnosticFailure) throw error;
-    if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint, 'uncertain');
-    throw new DiagnosticFailure(stage, constraint, 'uncertain');
+    // A later integrity failure must not be hidden by an earlier operational
+    // error frame. Keep received money, but preserve the fatal trust category.
+    if (error instanceof DiagnosticFailure && (error.stage === 'trust' || ['endpoint_binding', 'decryption', 'frames'].includes(error.constraint))) {
+      throw new CompletionFailure(error.stage, error.constraint, receipt, error.status ?? httpStatus);
+    }
+    if (failure) {
+      const interrupted = new GatewayError(failure.reason, failure.detail, 'unknown', failure.status);
+      if (receipt) confirmedSettlements.set(interrupted, Object.freeze({ ...receipt, deliveryComplete: false }));
+      throw interrupted; // An error's refund claim alone still needs authenticated EOF.
+    }
+    if (error instanceof DiagnosticFailure) throw new CompletionFailure(error.stage, error.constraint, receipt, error.status ?? httpStatus);
+    if (error instanceof OperationFailure) throw new CompletionFailure(stage, error.constraint, receipt, httpStatus);
+    throw new CompletionFailure(stage, constraint, receipt, httpStatus);
   }
   finally { op.close(); await cleanup(reader.cancel()); }
 }
@@ -508,7 +462,7 @@ export class ReferenceClient {
     } catch { throw new BalanceFailure('validation'); }
   }
   async chat(model: string, messages: Chat['messages'], onDelta: (text: string) => void, newConversation = false,
-    options: ChatOptions = {}): Promise<Receipt> {
+    options: ChatOptions = {}): Promise<Completion> {
     const bearer = this.#bearer;
     const prepared = await this.prepareChat(model, messages, onDelta, newConversation, options);
     try { return await this.#chatPrepared(prepared, bearer); }
@@ -537,7 +491,7 @@ export class ReferenceClient {
         stage = 'request'; constraint = 'encoding';
         // Returning undefined keeps the immutable original; replacements are
         // re-admitted with the same model and cannot smuggle transport options.
-        payload = snapshotInvocation(replacement === undefined ? payload : replacement);
+        if (replacement !== undefined) payload = snapshotInvocation(replacement);
         requireThat(payload.model === model);
       }
       op.check();
@@ -545,15 +499,15 @@ export class ReferenceClient {
         options: Object.freeze({ signal: opts.signal, onResponse: opts.onResponse, onEvent: opts.onEvent }), onDelta,
         model, newConversation, dispatched: false, busy: false, closed: false });
     } catch (error) {
-      if (error instanceof DiagnosticFailure || error instanceof JSONDepthError) throw error;
+      if (error instanceof DiagnosticFailure) throw error;
       if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint);
       throw new DiagnosticFailure(stage, constraint);
     } finally { op.close(); }
   }
-  async chatPrepared(prepared: PreparedChat, beforeDispatch?: () => void): Promise<Receipt> {
+  async chatPrepared(prepared: PreparedChat, beforeDispatch?: () => void): Promise<Completion> {
     return this.#chatPrepared(prepared, this.#bearer, beforeDispatch);
   }
-  async #chatPrepared(prepared: PreparedChat, bearer: string | undefined, beforeDispatch?: () => void): Promise<Receipt> {
+  async #chatPrepared(prepared: PreparedChat, bearer: string | undefined, beforeDispatch?: () => void): Promise<Completion> {
     // Acquire synchronously, before any await. The state is module-owned rather
     // than a mutable caller-supplied boolean, including across client rotations.
     const state = preparedStates.get(prepared);
@@ -592,13 +546,8 @@ export class ReferenceClient {
           try { await opts!.onResponse!(info); }
           catch { hookThrown = true; throw new DiagnosticFailure('hook', 'unexpected', 'uncertain', status); }
         } });
-      // A forced function constrains generation; 'none' never permits live calls.
-      let tools = payload!.tool_choice === 'none' ? undefined : payload!.tools;
-      if (typeof payload!.tool_choice === 'object') {
-        const name = payload!.tool_choice.function.name; tools = tools?.filter(tool => tool.function.name === name);
-      }
       stage = 'stream';
-      return await consumeCompletion(body, entry, onDelta!, { signal: op.controller.signal, tools, onEvent: opts!.onEvent }, status);
+      return await consumeCompletion(body, entry, onDelta!, { signal: op.controller.signal, onEvent: opts!.onEvent }, status);
     } catch (error) {
       if (error instanceof GatewayError) {
         // Preserve the same authenticated refund carrier; copying would lose its evidence.
@@ -607,13 +556,13 @@ export class ReferenceClient {
       }
       if (error instanceof CatalogFailure) throw error;
       if (hookThrown) throw new DiagnosticFailure('hook', 'unexpected', 'uncertain', status);
+      if (error instanceof CompletionFailure) throw new CompletionFailure(error.stage, error.constraint, error.settlement, error.status ?? status);
       if (error instanceof DiagnosticFailure) {
         if ((issued && error.code !== 'uncertain') || (error.status === undefined && status !== undefined)) {
           throw new DiagnosticFailure(error.stage, error.constraint, issued ? 'uncertain' : error.code, error.status ?? status);
         }
         throw error;
       }
-      if (!issued && error instanceof JSONDepthError) throw error;
       if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint, issued ? 'uncertain' : 'rejected');
       throw new DiagnosticFailure(stage, constraint,
         issued || (error instanceof ChannelError && error.code === 'uncertain') ? 'uncertain' : 'rejected');

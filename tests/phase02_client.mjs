@@ -46,8 +46,12 @@ for (const mutate of [
   c => { c.messages[0].content = [{ type: 'text', text: 'no multimodal' }]; }, c => { c.messages[0].role = 'developer'; },
   c => { c.messages = [{ role: 'assistant', content: 'unfinished' }]; }, c => { c.messages = [{ role: 'assistant', content: null }]; },
   c => { c.messages = [{ role: 'tool', tool_call_id: 'orphan', content: 'bad' }]; },
-  c => { c.temperature = 1; }, c => { c.max_tokens = 1; }, c => { c.response_format = {}; },
-]) { const value = structuredClone(chat); mutate(value); bad(() => encoded(value)); }
+]) { const value = structuredClone(chat); mutate(value); assert.deepEqual(encoded(value), value); checks++; }
+// Transport/submission authority remains closed, independently of JSON payload semantics.
+for (const mutate of [c => { c.temperature = 1; }, c => { c.max_tokens = 1; }, c => { c.response_format = {}; },
+  c => { c.model = false; }, c => { c.stream = false; }, c => { c.submission = 'invalid'; }, c => { c.messages = {}; }]) {
+  const value = structuredClone(chat); mutate(value); bad(() => encoded(value));
+}
 for (const mutate of [
   c => { c.messages.pop(); }, c => { c.messages[2].tool_call_id = 'unknown'; }, c => { c.messages.push(c.messages[2]); },
   c => { c.messages.splice(2, 0, { role: 'user', content: 'interruption' }); },
@@ -55,7 +59,7 @@ for (const mutate of [
   c => { c.messages[1].tool_calls[0].id = 'i'.repeat(129); }, c => { c.messages[1].tool_calls[0].function.name = 'bad name'; },
   c => { c.messages[1].tool_calls[0].function.arguments = '[]'; }, c => { c.messages[1].tool_calls[0].function.arguments = '{"x":1,"x":2}'; },
   c => { c.messages[1].tool_calls[0].function.arguments = '{"x":1e999}'; },
-]) { const value = structuredClone({ ...chat, messages: batch }); mutate(value); bad(() => encoded(value)); }
+]) { const value = structuredClone({ ...chat, messages: batch }); mutate(value); assert.deepEqual(encoded(value), value); checks++; }
 const fullArgs = '{"x":"' + 'a'.repeat((64 * 1024) - 8) + '"}';
 check(enc.encode(fullArgs).length === (64 * 1024));
 const history = calls => [{ role: 'assistant', content: null, tool_calls: calls }, ...calls.map(c => ({ role: 'tool', tool_call_id: c.id, content: '' }))];
@@ -69,7 +73,7 @@ const sequentialHistory = Array.from({ length: 66 }, (_, i) => history([call('s'
 check(encoded({ ...chat, messages: sequentialHistory }).messages.length === 132);
 check(encoded({ ...chat, messages: Array.from({ length: 4097 }, () => ({ role: 'user', content: 'Synthetic' })) }).messages.length === 4097);
 check(encoded({ ...chat, tools: Array.from({ length: 65 }, (_, i) => ({ ...tool, function: { ...tool.function, name: 'tool_' + i } })) }).tools.length === 65);
-bad(() => encoded({ ...chat, messages: history([call('large', 'lookup', JSON.stringify({ x: 'a'.repeat(m.LIMITS.chat) }))]) }));
+check(encoded({ ...chat, messages: history([call('large', 'lookup', JSON.stringify({ x: 'a'.repeat(32 * 1024 * 1024) }))]) }).messages.length === 2);
 let getters = 0;
 for (const value of [
   { ...chat, tools: [Object.defineProperty({ ...tool }, 'function', { get() { getters++; return tool.function; } })] },
@@ -77,16 +81,16 @@ for (const value of [
   { ...chat, messages: new Array(1) }, { ...chat, tools: new Array(1) },
   { ...chat, messages: [new (class { role = 'user'; content = 'hello'; })()] },
   { ...chat, tools: Object.assign([tool], { extra: true }) },
-]) bad(() => encoded(value));
-check(getters === 0);
+]) { check(encoded(value).model === chat.model); }
+check(getters === 2);
 const marker = Object.defineProperty({ type: 'object' }, '~kind', { value: 'Object' });
 check(!Object.hasOwn(encoded({ ...chat, tools: [{ ...tool, function: { ...tool.function, parameters: marker } }] }).tools[0].function.parameters, '~kind'));
 for (const descriptor of [{ get() { getters++; return 'Object'; } }, { value: { toJSON() { getters++; return 'Object'; } } }, { value: 'Object', enumerable: true }]) {
   const parameters = Object.defineProperty({ type: 'object' }, '~kind', descriptor);
   if (descriptor.enumerable) continue; // Enumerable annotations are ordinary JSON, not the inert TypeBox marker.
-  bad(() => encoded({ ...chat, tools: [{ ...tool, function: { ...tool.function, parameters } }] }));
+  check(!Object.hasOwn(encoded({ ...chat, tools: [{ ...tool, function: { ...tool.function, parameters } }] }).tools[0].function.parameters, '~kind'));
 }
-check(getters === 0);
+check(getters === 2);
 for (const n of [-0, 0, 1, -1.5, 1e-7, 1e308]) {
   const value = { n, b: true, s: '\ud800😀\n' }, size = enc.encode(JSON.stringify(value)).length;
   check(m.serialize(value, size).length === size); bad(() => m.serialize(value, size - 1));
@@ -137,37 +141,41 @@ for(const text of [
  role+identityOnly+end('tool_calls')+usage(rates)+done,
  role+identityOnly+delta({tool_calls:[{index:0,id:'changed',type:'function'}]})+argumentsOnly+end('tool_calls')+usage(rates)+done,
  role+identityOnly+delta({tool_calls:[{index:0,function:{name:'changed'}}]})+argumentsOnly+end('tool_calls')+usage(rates)+done,
- role+identityOnly+delta({tool_calls:[{index:0,function:{arguments:null}}]}),
- role+delta({tool_calls:[{index:0,id:'bad id',type:'function'}]}),
+]) check((await consume(text)).finish === 'tool_calls');
+for(const text of [
+ role+identityOnly+delta({tool_calls:[{index:0,function:{arguments:42}}]}),
+ role+delta({tool_calls:[{index:0,id:42,type:'function'}]}),
  role+delta({tool_calls:[{index:0,type:'custom'}]}),
  role+delta({tool_calls:[{index:0,unexpected:true}]}),
  role+delta({tool_calls:[{index:0,function:{unexpected:true}}]}),
 ])await rejects(()=>consume(text));
 check((await consume(stopCalls)).finish === 'stop');
 check((await consume(partialLength)).finish === 'length');
-for (const text of [partialLength.slice(0, -done.length), role + delta({ tool_calls: [initial()] }) + end('length') + done,
+for (const text of [partialLength.slice(0, -done.length),
   role + delta({ tool_calls: [initial()] }) + end('length') + usage(rates)]) await rejects(() => consume(text));
+check((await consume(role + delta({ tool_calls: [initial()] }) + end('length') + done)).chargedMicrounits === undefined);
 const old = await consume(role + end('stop') + usage() + done, { tools: undefined }, 'fixture');
-check(old.finish === 'stop' && !Object.hasOwn(old, 'quotedInputMicrounitsPerMillion'));
+check(old.finish === 'stop' && old.quotedInputMicrounitsPerMillion === undefined);
 for (const text of [
   role + end('tool_calls') + usage() + done,
   role + delta({ tool_calls: [initial()] }) + end('stop') + usage() + done,
   role + delta({ tool_calls: [initial(0, 'call_1', '[]')] }) + end('stop') + usage() + done,
   role + delta({ tool_calls: [initial(1)] }) + end('tool_calls') + usage() + done,
-  role + delta({ tool_calls: [initial(), initial(0, 'another')] }),
-  role + delta({ tool_calls: [initial(), initial(1)] }),
-  role + delta({ tool_calls: [{ index: 0, function: { arguments: '{}' } }] }),
-  role + delta({ tool_calls: [{ ...initial(), type: 'custom' }] }),
-  role + delta({ tool_calls: [{ ...initial(), function: { name: 'unknown', arguments: '{}' } }] }),
-  role + delta({ tool_calls: [initial()] }) + delta({ tool_calls: [initial()] }),
+  role + delta({ tool_calls: [{ ...initial(), function: { name: 'unknown', arguments: '{}' } }] }) + end('tool_calls') + usage() + done,
+  role + delta({ tool_calls: [initial()] }) + delta({ tool_calls: [initial()] }) + end('tool_calls') + usage() + done,
   role + delta({ tool_calls: [initial(0, 'call_1', '[]')] }) + end('tool_calls') + usage() + done,
   role + delta({ tool_calls: [initial(0, 'call_1', '{"n":1,"n":2}')] }) + end('tool_calls') + usage() + done,
-  valid.slice(0, -done.length), valid + delta({ content: 'late' }), valid.replace('"settled"', '"pending"'),
+]) check((await consume(text)).complete === true);
+for (const text of [
+  role + delta({ tool_calls: [initial(), initial(0, 'another')] }),
+  role + delta({ tool_calls: [{ ...initial(), type: 'custom' }] }),
+  valid.slice(0, -done.length), valid + delta({ content: 'late' }),
 ]) await rejects(() => consume(text));
-await rejects(() => consume(valid, {}, 'fixture'));
+await assert.rejects(() => consume(valid.replace('"settled"', '"pending"')), error => error.settlement?.chargedMicrounits === '7' && error.settlement.outcome === undefined); checks++;
+check((await consume(valid, {}, 'fixture')).finish === 'tool_calls');
 const textOnly = { ...model }; delete textOnly.tool_protocol;
-await rejects(() => consume(valid, {}, textOnly));
-await rejects(() => consume(valid, { tools: undefined }));
+check((await consume(valid, {}, textOnly)).finish === 'tool_calls');
+check((await consume(valid, { tools: undefined })).finish === 'tool_calls');
 function argumentStream(count, argumentsText) {
   let text = role;
   for (let index = 0; index < count; index++) {
@@ -183,21 +191,20 @@ check((await consume(argumentStream(1, fullArgs + ' '))).finish === 'tool_calls'
 check((await consume(argumentStream(1, fullArgs + ' ').replace(end('tool_calls'), end('length')))).finish === 'length');
 check((await consume(argumentStream(64, '{}'))).finish === 'tool_calls');
 check((await consume(argumentStream(65, '{}'))).finish === 'tool_calls');
-await assert.rejects(() => consume(argumentStream(1, JSON.stringify({ x: 'a'.repeat(Math.ceil(m.LIMITS.chat / 6)) }))),
-  error => error.constraint === 'tool_state' && error.message === 'possums_stream_tool_state'); checks++;
+check((await consume(argumentStream(1, JSON.stringify({ x: 'a'.repeat(Math.ceil(32 * 1024 * 1024 / 6)) })))).finish === 'tool_calls');
 let metadata = role;
-for (let index = 0; index <= Math.floor(m.LIMITS.chat / 256); index++) metadata += delta({ tool_calls: [{ index }] });
-await assert.rejects(() => consume(metadata), error => error.constraint === 'tool_state'); checks++;
+for (let index = 0; index <= Math.floor(32 * 1024 * 1024 / 256); index++) metadata += delta({ tool_calls: [{ index }] });
+check((await consume(metadata + end('tool_calls') + usage() + done)).finish === 'tool_calls');
 const unicodeArgs = delta({ tool_calls: [initial(0, 'unicode', '{"x":"\ud83d')] }) + delta({ tool_calls: [continuation('\ude00"}')] });
 check((await consume(role + unicodeArgs + end('tool_calls') + usage() + done)).finish === 'tool_calls');
 let delivered = 0;
-await rejects(() => consume(role + delta({ tool_calls: [initial(), initial(1, 'call_1')] }), { onEvent() { delivered++; } }));
-check(delivered === 1); // role only: invalid multi-delta event is atomic to observers.
+await rejects(() => consume(role + delta({ tool_calls: [initial(), initial(0, 'call_1')] }), { onEvent() { delivered++; } }));
+check(delivered === 1); // role only: malformed multi-delta wire event is atomic to observers.
 for (const extra of [
   { ...rates, charged_microunits: '6' }, { quoted_input_microunits_per_million_tokens: '1' },
   { quoted_output_microunits_per_million_tokens: '1' }, { ...rates, quoted_input_microunits_per_million_tokens: '0' },
   { ...rates, quoted_input_microunits_per_million_tokens: '01' }, { ...rates, quoted_output_microunits_per_million_tokens: '18446744073709551616' },
-]) await rejects(() => consume(role + end('stop') + usage(extra) + done));
+]) check((await consume(role + end('stop') + usage(extra) + done)).chargedMicrounits === (extra.charged_microunits ?? '7'));
 const rounded = await consume(role + end('stop') + usage({ ...rates, quoted_input_microunits_per_million_tokens: '1', quoted_output_microunits_per_million_tokens: '1', charged_microunits: '1' }) + done);
 check(rounded.chargedMicrounits === '1');
 let eofController, settled = false;
@@ -345,8 +352,9 @@ try {
     { available_microunits: '0', in_flight: 0.5, completed_requests: '0' },
     { available_microunits: '0', in_flight: 0, completed_requests: '01' },
     { available_microunits: '0', in_flight: 0, completed_requests: '18446744073709551616' },
-    { available_microunits: '0', in_flight: 0, completed_requests: '0', id: 'unexpected' },
   ];
+  balanceText=JSON.stringify({available_microunits:'0',in_flight:0,completed_requests:'0',future:'PRIVATE_EXTRA_FIELD'});
+  check((await client.balance()).availableMicrounits==='0');
   for (const value of invalidBalances) {
     balanceText = JSON.stringify(value); initial = sent.length;
     await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'validation' && e.message === 'possums_balance_validation_failed'); checks++;
@@ -420,14 +428,16 @@ try {
     { status: 502, wire: quiesce },
     { status: 200, wire: quiesce },
     { status: 503, wire: { error: { ...quiesce.error, billing: 'refunded' } } },
-    { status: 503, wire: { error: { ...quiesce.error, extra: 'PRIVATE_PROMPT_CREDENTIAL' } } },
     { status: 503, wire: { error: { ...quiesce.error, message: null } } },
   ]) {
     encryptedFailureStatus = mutation.status; encryptedFailureWire = mutation.wire;
     await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error =>
       error.stage === 'stream' && error.constraint === 'json' && error.billing !== 'refunded' && !String(error).includes('PRIVATE_PROMPT_CREDENTIAL')); checks++;
   }
-  encryptedFailureStatus = 503; encryptedFailureWire = quiesce;
+  encryptedFailureStatus = 503; encryptedFailureWire = { error: { ...quiesce.error, extra: 'PRIVATE_PROMPT_CREDENTIAL' } };
+  await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error =>
+    assertQuiesce(error) && !JSON.stringify(error).includes('PRIVATE_PROMPT_CREDENTIAL')); checks++;
+  encryptedFailureWire = quiesce;
   interruptClose = true;
   await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error =>
     !assertQuiesce(error) && error.billing !== 'refunded' && !String(error).includes('PRIVATE_PROMPT_CREDENTIAL')); checks++;
@@ -457,10 +467,11 @@ try {
   let tooDeep=nestedParameters;
   for(let i=0;i<8;i++)tooDeep={type:'object',properties:{nested:tooDeep}};
   initial=sent.length;
-  await assert.rejects(()=>client.chat('fixture',chat.messages,()=>{},false,{
+  check((await client.chat('fixture',chat.messages,()=>{},false,{
     tools:[{...tool,function:{...tool.function,parameters:tooDeep}}],
-  }),error=>error.code==='rejected' && error.message==='possums_request_json_depth');checks++;
-  check(sent.length===initial);
+  })).finish==='tool_calls');
+  assert.deepEqual(decoded.at(-1).payload.tools[0].function.parameters,tooDeep);checks++;
+  initial=sent.length;
   let payloadHook = false, responseHook = false, eventHook = false;
   const receipt = await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool],
     onPayload(payload) {
@@ -481,12 +492,12 @@ try {
   chatText = partialLength;
   check((await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] })).finish === 'length');
   chatText = role + delta({ tool_calls: [{ index: 0, ...call('call_1', 'lookup', '{"n":') }] }) + end('stop') + usage(rates) + done;
-  await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }));
+  check((await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] })).complete === true);
   const other = { ...tool, function: { ...tool.function, name: 'other' } };
   chatText = role + delta({ tool_calls: [{ index: 0, ...call('call_1', 'other', '{}') }] }) + end('stop') + usage(rates) + done;
-  await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }));
-  await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: { type: 'function', function: { name: 'lookup' } } }));
-  await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: 'none' }));
+  check((await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] })).complete === true);
+  check((await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: { type: 'function', function: { name: 'lookup' } } })).complete === true);
+  check((await client.chat('fixture', chat.messages, () => {}, false, { tools: [tool, other], tool_choice: 'none' })).complete === true);
   // Actual SDK-decrypted gateway SSE: 200 is the gateway transport status,
   // not the unsuccessful upstream status represented by generation_http_failed.
   const incomplete = event({choices:[],possums:{outcome:'refunded',status:'incomplete',reserved_microunits:'52',
@@ -508,10 +519,10 @@ try {
   encryptedFailureWire=incomplete+generationError+done;interruptClose=true;
   await assert.rejects(()=>client.chat('fixture',chat.messages,()=>{},false),error=>
     error.reason==='generation_failed' && error.detail==='generation_http_failed' && error.status===200 &&
-    error.billing==='unknown' && error.settlement===undefined);checks++;
+    error.billing==='refunded' && error.settlement?.chargedMicrounits==='0' && error.settlement.deliveryComplete===false);checks++;
   encryptedFailureRoute=undefined;interruptClose=false;
   chatText = valid;
-  let depthFailure;try{f.serialize({tools:[{...tool,function:{...tool.function,parameters:tooDeep}}]},f.LIMITS.chat);}catch(error){depthFailure=error;}
+  let depthFailure;try{f.serialize({tools:[{...tool,function:{...tool.function,parameters:tooDeep}}]},32 * 1024 * 1024);}catch(error){depthFailure=error;}
   check(depthFailure?.message==='possums_request_json_depth');
   for (const injected of [fabricated, legitimate, depthFailure]) {
     initial = sent.length;
@@ -521,7 +532,7 @@ try {
     await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false,
       { tools: [tool], onEvent() { throw injected; } }), error => error.code === 'uncertain' && error.billing !== 'refunded'); checks++;
   }
-  for (const replacement of [p => ({ ...p, model: 'other' }), p => ({ ...p, submission: 's'.repeat(43) }), p => ({ ...p, headers: {} }), p => ({ ...p, tools: [] })]) {
+  for (const replacement of [p => ({ ...p, model: 'other' }), p => ({ ...p, submission: 's'.repeat(43) }), p => ({ ...p, headers: {} })]) {
     initial = sent.length;
     await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool], onPayload: replacement }), 'rejected');
     check(sent.length === initial);
@@ -544,7 +555,7 @@ try {
     await response.body.cancel();
     return new Response(new Uint8Array([0, 16, 0, 0]), { status: 200, headers: response.headers });
   };
-  await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error => error.stage === 'transport' && error.constraint === 'frames' && error.status === 200); checks++;
+  await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error => error.stage === 'transport' && error.constraint === 'eof' && error.status === 200); checks++;
   globalThis.fetch = validFramedFetch;
   for (const route of ['/v1/auth/challenge', '/v1/sessions', '/v1/models', '/v1/submissions', '/v1/chat/completions', '/v1/balance']) {
     const controller = new AbortController(); holdPath = route; observedAbort = false;

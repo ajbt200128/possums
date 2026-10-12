@@ -43,9 +43,9 @@ await rejects('fixture disabled in production build', () => prod.Channel.fixture
 await rejects('fixture cannot select production', () => fixture.Channel.fixture(origin, key, meta.key));
 assert.deepEqual([credentials,content,acquisitions],[0,0,0]);
 const chat = { model: 'fixture', stream: true, submission: 's'.repeat(43), messages:[{role:'user',content:'qualification-content\ud800😀\n"\\\u0000'}] };
-assert.throws(() => prod.encodeChat({...chat, messages:[{role:'user',content:'x'.repeat(prod.LIMITS.chat)}]})); passed++;
-assert.throws(() => prod.encodeChat({...chat, tools:[]})); passed++;
-assert.throws(() => prod.serialize(new Array(2**30),prod.LIMITS.chat)); passed++;
+assert(prod.encodeChat({...chat, messages:[{role:'user',content:'x'.repeat(32*1024*1024)}]}).length>32*1024*1024); passed++;
+assert(prod.encodeChat({...chat, tools:[]}).length>0); passed++;
+assert.throws(() => prod.serialize(new Array(2**30),32*1024*1024)); passed++;
 assert.throws(() => prod.encodeChat({...chat,model:true})); passed++;
 assert.throws(() => prod.parseJSON(bytes('x'.repeat(5000)),4096)); passed++;
 assert.throws(() => prod.parseJSON(new TextEncoder().encode('['.repeat(prod.LIMITS.depth+1)+'0'+']'.repeat(prod.LIMITS.depth+1)),4096)); passed++;
@@ -103,14 +103,14 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
   await beforeWork('fixture cannot select production',()=>f.Channel.fixture(m.API_APPROVALS[0].origin,config,meta.key));
   await beforeWork('wide encodeChat',()=>m.encodeChat(wideChat),10);
   await beforeWork('wide public chat',()=>c.chat(wideChat,bearer),10);
-  // Structured admission additionally validates both own array-length descriptors.
-  await beforeWork('wide nested message',()=>c.chat({...chat,messages:[wideMessage]},bearer),18);
+  check(m.encodeChat({...chat,messages:[wideMessage]}).length>0,'native wide nested message'); checks++;
   await beforeWork('wide session',()=>c.control('/v1/sessions',wideSession),6);
   await beforeWork('wide submission',()=>c.control('/v1/submissions',wideSubmission,bearer),6);
-  await beforeWork('generic wide node limit',()=>m.serialize(wideChat,m.LIMITS.chat),2*m.LIMITS.nodes+2);
+  await beforeWork('public/control serializer wide node limit',()=>m.serialize(wideChat,32*1024*1024),2*m.LIMITS.nodes+2);
   const accessor = (seed, key, enumerable = true) => Object.defineProperty({...seed},key,{enumerable,configurable:true,get(){getterCalls++;return 'forbidden';}});
   for (const key of ['model','stream','submission','messages']) await beforeWork('chat accessor '+key,()=>c.chat(accessor(chat,key),bearer));
-  for (const key of ['role','content']) await beforeWork('message accessor '+key,()=>c.chat({...chat,messages:[accessor(chat.messages[0],key)]},bearer));
+  for (const key of ['role','content']) check(m.encodeChat({...chat,messages:[accessor(chat.messages[0],key)]}).length>0,'native nested accessor');
+  check(getterCalls===2,'native JSON accessor semantics'); getterCalls=0; checks++;
   for (const key of ['challenge','credential']) await beforeWork('session accessor '+key,()=>c.control('/v1/sessions',accessor(session,key)));
   for (const key of ['model','new_conversation']) await beforeWork('submission accessor '+key,()=>c.control('/v1/submissions',accessor(submission,key),bearer));
   await beforeWork('hidden accessor',()=>c.chat(accessor(chat,'extra',false),bearer));
@@ -118,19 +118,19 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
   await beforeWork('hidden required field',()=>c.chat(Object.defineProperty({...chat},'model',{value:'fixture',enumerable:false}),bearer));
   await beforeWork('symbol field',()=>c.chat({...chat,[Symbol('extra')]:null},bearer));
   const sparse = new Array(2); sparse[1] = chat.messages[0];
-  await beforeWork('sparse messages',()=>c.chat({...chat,messages:sparse},bearer));
+  check(JSON.parse(new TextDecoder().decode(m.encodeChat({...chat,messages:sparse}))).messages[0]===null,'native sparse array'); checks++;
   const arrayAccessor = [chat.messages[0]];
   Object.defineProperty(arrayAccessor,'0',{get(){getterCalls++;return chat.messages[0];}});
-  await beforeWork('array accessor',()=>c.chat({...chat,messages:arrayAccessor},bearer));
-  await beforeWork('array unknown field',()=>c.chat({...chat,messages:Object.assign([chat.messages[0]],{extra:null})},bearer));
-  await beforeWork('message count',()=>c.chat({...chat,messages:new Array(m.LIMITS.messages+1)},bearer));
+  check(m.encodeChat({...chat,messages:arrayAccessor}).length>0,'native array accessor'); getterCalls=0; checks++;
+  check(m.encodeChat({...chat,messages:Object.assign([chat.messages[0]],{extra:null})}).length>0,'native array encoding'); checks++;
+  check(m.encodeChat({...chat,messages:Array(4097).fill(chat.messages[0])}).length>0,'no message quota'); checks++;
   await beforeWork('malformed chat',()=>c.chat({...chat,stream:false},bearer));
-  await beforeWork('malformed message',()=>c.chat({...chat,messages:[{role:'tool',content:''}]},bearer));
+  check(m.encodeChat({...chat,messages:[{role:'tool',content:''}]}).length>0,'message semantics belong to caller/gateway'); checks++;
   await beforeWork('malformed session',()=>c.control('/v1/sessions',{...session,challenge:false}));
   await beforeWork('malformed submission',()=>c.control('/v1/submissions',{...submission,new_conversation:'true'},bearer));
   await beforeWork('oversized session',()=>c.control('/v1/sessions',{...session,credential:'c'.repeat(m.LIMITS.control)}));
   await beforeWork('oversized submission',()=>c.control('/v1/submissions',{...submission,model:'m'.repeat(m.LIMITS.control)},bearer));
-  await beforeWork('empty final user',()=>m.encodeChat({...chat,messages:[{role:'user',content:''}]}));
+  check(m.encodeChat({...chat,messages:[{role:'user',content:''}]}).length>0,'empty user JSON'); checks++;
   for (const value of [undefined,NaN,Infinity,-Infinity,1n,()=>{},new Date(),new Uint8Array(1)]) await beforeWork('unsupported type',()=>m.serialize({value},m.LIMITS.control));
   await beforeWork('toJSON hook',()=>m.serialize({toJSON(){getterCalls++;return ''; }},m.LIMITS.control));
   await beforeWork('generic sparse array',()=>m.serialize(new Array(2),m.LIMITS.control));
@@ -142,9 +142,9 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
   check(m.parseJSON(jsonAtDepth,m.LIMITS.control)!==undefined,'parser depth inclusive'); checks++;
   await beforeWork('parser depth exceeded',()=>m.parseJSON(jsonOverDepth,m.LIMITS.control));
   const nodes = Array(m.LIMITS.nodes-1).fill(null);
-  check(m.serialize(nodes,m.LIMITS.chat).length>0,'nodes inclusive'); checks++;
-  await beforeWork('nodes exceeded',()=>m.serialize([...nodes,null],m.LIMITS.chat));
-  await beforeWork('aggregate nodes exceeded',()=>m.serialize([nodes],m.LIMITS.chat));
+  check(m.serialize(nodes,32*1024*1024).length>0,'public/control nodes inclusive'); checks++;
+  await beforeWork('public/control nodes exceeded',()=>m.serialize([...nodes,null],32*1024*1024));
+  await beforeWork('public/control aggregate nodes exceeded',()=>m.serialize([nodes],32*1024*1024));
   await beforeWork('incremental aggregate bytes',()=>m.serialize({a:'a'.repeat(8),b:'b'.repeat(8),c:'c'.repeat(8)},16),4);
   for (const text of ['', 'ASCII', 'é漢😀\ud800X\udfff\n\r\t\b\f"\\\u0000']) {
     const value = {text}, expected = JSON.stringify(value), size = new TextEncoder().encode(expected).length;
@@ -158,16 +158,15 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
   check(m.serialize('x'.repeat(m.LIMITS.control-2),m.LIMITS.control).length===m.LIMITS.control,'control bytes inclusive'); checks++;
   await beforeWork('control bytes exceeded',()=>m.serialize('x'.repeat(m.LIMITS.control-1),m.LIMITS.control));
   const overhead = new TextEncoder().encode(JSON.stringify(chat)).length - chat.messages[0].content.length;
-  const fullChat = {...chat,messages:[{role:'user',content:'x'.repeat(m.LIMITS.chat-overhead)}]};
-  check(m.encodeChat(fullChat).length===m.LIMITS.chat,'chat bytes inclusive'); checks++;
-  await beforeWork('chat bytes exceeded',()=>c.chat({...chat,messages:[{role:'user',content:fullChat.messages[0].content+'x'}]},bearer));
-  check(m.encodeChat({...chat,messages:Array(m.LIMITS.messages).fill(chat.messages[0])}).length>0,'messages inclusive'); checks++;
+  const fullChat = {...chat,messages:[{role:'user',content:'x'.repeat(32*1024*1024-overhead)}]};
+  check(m.encodeChat(fullChat).length===32*1024*1024,'former chat byte boundary'); checks++;
+  check(m.encodeChat({...chat,messages:[{role:'user',content:fullChat.messages[0].content+'x'}]}).length>32*1024*1024,'no chat byte quota'); checks++;
+  check(m.encodeChat({...chat,messages:Array(4097).fill(chat.messages[0])}).length>0,'no message quota'); checks++;
   const frozen = Object.freeze({...chat,messages:Object.freeze([Object.freeze({...chat.messages[0]})])});
   check(m.encodeChat(frozen).length>0,'frozen data objects'); checks++;
   const originalStringify = JSON.stringify;
   JSON.stringify = value => {
-    check(value!==chat && value.messages!==chat.messages && value.messages[0]!==chat.messages[0],'snapshot not unchecked aliases');
-    check(Object.getPrototypeOf(value)===null && Object.getPrototypeOf(value.messages)===null,'no inherited toJSON');
+    check(value!==chat && Object.getPrototypeOf(value)===null,'dispatch envelope copied before encoding');
     return originalStringify(value);
   };
   try { m.encodeChat(chat); checks++; } finally { JSON.stringify=originalStringify; }
@@ -223,10 +222,10 @@ assert.deepEqual(await channel.balance(bearer),{available_microunits:'0',in_flig
 const balanceAfter = await fixtureControl('stats');
 assert.equal(balanceAfter.encrypted,balanceBefore.encrypted+1);
 assert.equal(balanceAfter.authorized,balanceBefore.authorized+1); passed++;
-for(const model of ['oversized-event','invalid-utf8']) {
+for(const model of ['invalid-utf8']) {
   await rejects(model,async()=>{const r=(await channel.chat({...chat,model},bearer)).getReader();for(;;){if((await r.read()).done)break;}},'uncertain');
 }
-// Hostile fetch streams exercise cancellation/ceilings before SDK buffering. The
+// Hostile fetch streams exercise cancellation and public/control ceilings. The
 // crypto and verified flags are NOT mocked. A never-ending plaintext 422 is never read.
 let read=0,cancel=0;
 globalThis.fetch = async () => new Response(new ReadableStream({pull(){read++;},cancel(){cancel++;return new Promise(()=>{});}},{highWaterMark:0}),{status:422});
@@ -240,7 +239,7 @@ start=performance.now();
 await rejects('idle deadline',()=>channel.models(bearer));
 assert.ok(performance.now()-start>=14000 && performance.now()-start<18000); passed++;
 globalThis.fetch = async () => new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array([4,0,0,0]));},cancel(){cancel++;}},{highWaterMark:0}),{headers:{'Ehbp-Response-Nonce':'0'.repeat(64)}});
-await rejects('frame ceiling before SDK buffer',async()=>{const r=(await channel.chat(chat,bearer)).getReader();await r.read();},'uncertain');
+await rejects('native EHBP decoder ceiling',async()=>{const r=(await channel.chat(chat,bearer)).getReader();await r.read();},'uncertain');
 let calls=0;
 globalThis.fetch = async () => {calls++; throw new Error('transport');};
 await rejects('post-send network no replay',()=>channel.chat(chat,bearer),'uncertain'); assert.equal(calls,1);

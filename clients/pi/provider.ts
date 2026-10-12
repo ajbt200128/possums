@@ -8,8 +8,8 @@ import {
   type TranscriptContext, type ToolCall,
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
-import { ReferenceClient, PreparedChat, BalanceFailure, CatalogFailure, GatewayError, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent, type Receipt } from '../../examples/phase01/client.js';
-import { ChannelError, DiagnosticFailure, OperationFailure, JSONDepthError, LIMITS, Operation, parseJSON, serialize, requireThat, type FailureStage } from '../../examples/phase01/limits.js';
+import { ReferenceClient, PreparedChat, BalanceFailure, CatalogFailure, GatewayError, CompletionFailure, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent, type Completion, type Receipt } from '../../examples/phase01/client.js';
+import { ChannelError, DiagnosticFailure, OperationFailure, LIMITS, Operation, parseJSON, serialize, requireThat, type FailureStage } from '../../examples/phase01/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure, diagnosticDescription, settlementDescription } from './diagnostics.js';
 import { invocation } from './wire.js';
 
@@ -34,32 +34,20 @@ function eligibleSetup(error: unknown): boolean {
 }
 
 
-function safeNumber(value: string, stage: 'catalog' | 'settlement' = 'catalog'): number {
-  const result = Number(value);
-  if (!Number.isSafeInteger(result) || result < 0) throw new DiagnosticFailure(stage, 'precision');
-  return result;
+function accountingMetadata(receipt: Readonly<Partial<Receipt>>) {
+  const usageAvailable = receipt.usageAvailable !== false && receipt.inputTokens !== undefined;
+  return { type: 'possums_accounting_metadata' as const, timestamp: Date.now(), details: {
+    costComponentsAvailable: false, usageAvailable,
+    message: `${usageAvailable ? '' : 'Token counts are unavailable; native token zeros are placeholders. '}Input/cache/output charges are unavailable; Pi component zeros are placeholders, not free inference.`,
+  } };
 }
-function receiptComponents(receipt: Readonly<Receipt>): bigint[] | undefined {
-  if (receipt.quotedInputMicrounitsPerMillion === undefined || receipt.quotedOutputMicrounitsPerMillion === undefined) return;
-  const cached = receipt.cachedTokens ?? 0, denominator = 100_000_000n;
-  const components = [
-    BigInt(receipt.inputTokens - cached) * BigInt(receipt.quotedInputMicrounitsPerMillion) * 130n,
-    BigInt(receipt.outputTokens) * BigInt(receipt.quotedOutputMicrounitsPerMillion) * 130n,
-    BigInt(cached) * BigInt(receipt.quotedCachedInputMicrounitsPerMillion ?? receipt.quotedInputMicrounitsPerMillion) * 130n,
-  ];
-  // Do not assign rounding residue or absorbed reservation caps to output.
-  if (components.every(value => value % denominator === 0n) &&
-      components.reduce((sum, value) => sum + value, 0n) === BigInt(receipt.chargedMicrounits) * denominator) {
-    return components.map(value => value / denominator);
-  }
-}
-function receiptUsage(receipt: Readonly<Receipt>): AssistantMessage['usage'] {
-  const cached = receipt.cachedTokens ?? 0;
-  // Pi requires numbers: zeros are unavailable fallbacks, not free components.
-  const [input, output, cache] = receiptComponents(receipt) ?? [0n, 0n, 0n];
-  const usd = (value: bigint) => safeNumber(value.toString(), 'settlement') / 1_000_000;
-  return { input: receipt.inputTokens - cached, output: receipt.outputTokens, cacheRead: cached, cacheWrite: 0, totalTokens: receipt.totalTokens,
-    cost: { input: usd(input), cacheRead: usd(cache), cacheWrite: 0, output: usd(output), total: usd(BigInt(receipt.chargedMicrounits)) } };
+function receiptUsage(receipt: Readonly<Partial<Receipt>>): AssistantMessage['usage'] {
+  // Pi requires numbers. Component charges are unavailable in the current wire
+  // contract: zero placeholders are disclosed, never allocated from a quote.
+  return { input: receipt.inputTokens ?? 0, output: receipt.outputTokens ?? 0, cacheRead: receipt.cachedTokens ?? 0,
+    cacheWrite: 0, totalTokens: receipt.totalTokens ?? 0,
+    cost: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0,
+      total: receipt.chargedMicrounits === undefined ? 0 : Number(receipt.chargedMicrounits) / 1_000_000 } };
 }
 function dollars(microunits: string): string {
   const value = BigInt(microunits);
@@ -70,10 +58,10 @@ function model(entry: LiveModel): Model<typeof API> {
     id: entry.id, provider: PROVIDER_ID, api: API, baseUrl: ORIGIN,
     name: `${entry.id} · ${entry.tool_protocol ? 'tools' : 'text only'} · max $${dollars(entry.maximum_reservation_microunits)} (indicative)`,
     input: ['text'], reasoning: false,
-    contextWindow: safeNumber(entry.context_tokens), maxTokens: safeNumber(entry.max_output_tokens),
-    cost: { input: safeNumber(entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000,
-      output: safeNumber(entry.output_microunits_per_million_tokens) * 1.3 / 1_000_000,
-      cacheRead: safeNumber(entry.cached_input_microunits_per_million_tokens ?? entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000, cacheWrite: 0 },
+    contextWindow: Number(entry.context_tokens), maxTokens: Number(entry.max_output_tokens),
+    cost: { input: Number(entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000,
+      output: Number(entry.output_microunits_per_million_tokens) * 1.3 / 1_000_000,
+      cacheRead: Number(entry.cached_input_microunits_per_million_tokens ?? entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000, cacheWrite: 0 },
   };
 }
 function catalogModels(entries: readonly LiveModel[]): readonly Model<typeof API>[] {
@@ -120,7 +108,7 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_summary_tools: 'Summary attempted tool use; no tool executed.',
   possums_summary_length: 'Summary hit the output limit.',
   possums_catalog_unavailable: 'Model catalog unavailable. Use /login to refresh the session.',
-  possums_incomplete_tool_round: 'Tool response incomplete; no tool executed. Charge settled. Not automatically continued. A new request may incur another charge.',
+  possums_incomplete_tool_round: 'Tool response incomplete; no tool executed. Use received authenticated billing evidence if available; otherwise charge unknown. Not automatically continued. A new request may incur another charge.',
   possums_invalid_stream: 'Pi stream assembly violated the validated event ordering/identity constraint; no tool executed. Share this code for support.',
   possums_login_cancelled: 'Login cancelled. Use /login to start again.',
   possums_request_options_unsupported: 'Request options unsupported; remove custom options.',
@@ -131,20 +119,20 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_automatic_replay_blocked: 'Automatic replay blocked. Submit a deliberate new request if needed.',
   possums_constrained_sampling_unsupported: 'Constrained sampling unsupported; remove the option.',
   possums_custom_tools_unsupported: 'Custom tools unsupported; remove the option.',
-  possums_duplicate_tool_call: 'Duplicate tool call in history; correct the history.',
   possums_images_unsupported: 'Images unsupported; remove images before sending.',
   possums_mixed_provider_history: 'Mixed provider history unsupported; start a new session.',
-  possums_orphan_tool_result: 'Tool result has no matching call; correct the history.',
-  possums_unresolved_tool_calls: 'Tool calls lack results; complete the history.',
 });
-// Pi 1.0.4 classifies errorMessage, with no provider classifier hook. Only these
-// closed gateway operational failures opt into its native bounded retry policy.
-// HTTP details do not expose upstream status or prove retryability. Preserve the
-// approved policy without presenting every upstream HTTP rejection as transient.
-const transientDetails = new Set(['tokenizer_send_failed', 'tokenizer_http_failed',
-  'generation_send_failed', 'generation_http_failed', 'stream_transport_failed',
-  'stream_idle_timeout', 'stream_deadline_exceeded']);
-function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 'provider', beforeSubmission = false): string {
+// A failed turn is reserved for an unconfirmed backend identity/authenticity.
+// Other failures stop host control flow with a warning, never native replay.
+function trustFailure(error: unknown): boolean {
+  if (error instanceof ConnectionFailure) return (error.diagnostic !== undefined && trustFailure(error.diagnostic)) ||
+    ['trust_expired', 'approval_expired', 'approval_unavailable', 'manifest_unavailable', 'manifest_mismatch',
+      'evidence_unavailable', 'verification_failed'].includes(error.code);
+  if (error instanceof GatewayError) return ['verification_failed', 'endpoint_binding_failed'].includes(error.detail ?? '');
+  return error instanceof DiagnosticFailure && (error.stage === 'trust' ||
+    ['endpoint_binding', 'decryption', 'frames'].includes(error.constraint));
+}
+function safeFailure(error: unknown, stage: FailureStage = 'provider', beforeSubmission = false): string {
   if (error instanceof CatalogFailure) return catalogConnectionFailure(error).message;
   if (error instanceof BalanceFailure && error.observation) return `${diagnosticDescription(error.observation)} This balance command sent no inference; prior billing is unchanged or unknown.`;
   if (error instanceof DiagnosticFailure || error instanceof OperationFailure) {
@@ -154,7 +142,6 @@ function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 
     }
     return `Possums: ${diagnosticDescription(failure)} Billing status: Charge unknown. Not replayed. A new request may incur another charge.`;
   }
-  if (error instanceof JSONDepthError) return '[possums_request_json_depth] Stage: request; constraint: json_depth. Request encoding exceeds the JSON nesting limit. Simplify tool schemas or history. No inference request sent. Not replayed.';
   if (error instanceof ConnectionFailure) return `${error.message} No automatic retry for this connection/billing check.`;
   if (error instanceof GatewayError) {
     const reason: Readonly<Record<string, string>> = {
@@ -181,22 +168,13 @@ function safeFailure(error: unknown, nativeRetry = false, stage: FailureStage = 
       detail.startsWith('stream_') || detail.startsWith('tool_') ? 'gateway_stream' : 'gateway_admission';
     const action = error.reason === 'insufficient_credit' ? 'Add credit before submitting this model again.' : error.reason === 'invalid_request' ? 'Review supported request options and context limits.' : error.reason === 'account_limit' ? 'Wait for pending requests before submitting again.' : error.reason === 'unauthorized' ? 'Check authentication, not trust pins.' : 'If this persists, share only the content-free code/stage/constraint for support.';
     const description = `${known ? `[${error.reason}] ${reason[error.reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; underlying cause unknown.'}${label ? ` ${label}.` : error.detail === 'unclassified' ? ' [possums_gateway_detail_unclassified] Gateway detail is unclassified; underlying cause unknown.' : ''} Stage: ${gatewayStage}; constraint: ${error.detail === 'unclassified' ? 'unclassified' : label ? error.detail : known ? error.reason : 'unclassified'}.${error.status === undefined ? '' : ` Observed gateway HTTP status: ${error.status}.`}${upstreamHttpFailure ? ' Upstream HTTP status: unavailable; upstream retryability unknown.' : ''} ${action}`;
-    const transient = (error.reason === 'unavailable' && (error.detail === undefined || error.detail === 'inference_unavailable')) ||
-      (error.reason === 'generation_failed' && error.detail !== undefined && transientDetails.has(error.detail));
-    const retryLabel = upstreamHttpFailure
-      ? 'Native retry policy: service unavailable category. ' : 'Transient service unavailable. ';
-    if (error.settlement) return `Possums: ${nativeRetry && transient ? retryLabel : 'Billing status: '}${description} ${settlementDescription(error.settlement)} Settlement alone does not authorize tool execution. Gateway did not replay this request.${nativeRetry && transient ? ' Native automatic retry may incur another charge. Each retry is a new submission.' : ''}`;
-    if (nativeRetry && transient) {
-      return `Possums: ${retryLabel}${description} ` +
-        (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown.') + ' Native automatic retry may incur another charge.';
-    }
-    // "Billing" explicitly excludes terminal gateway diagnostics from Pi's broad
-    // classifier, even if a detail contains e.g. "timeout". Summaries never retry.
+    if (error.settlement) return `Possums: ${description} Billing evidence: ${settlementDescription(error.settlement)} Settlement alone does not authorize tool execution. Not replayed.`;
+    // Warning-only host completion never enters Pi's error/retry classifier.
     return `Possums: ${description} Billing status: ` +
       (error.billing === 'refunded' ? 'Reservation refunded.' : 'Charge unknown. A new request may incur another charge.') + ' Not replayed.';
   }
   if (stage === 'request' && error instanceof ChannelError && error.code === 'rejected') {
-    return `Possums: ${diagnosticDescription(new DiagnosticFailure('request', 'schema', 'rejected'))} Local request admission rejected the history or tool declarations. No inference request sent by this attempt. Prior billing is unchanged or unknown. Not replayed.`;
+    return `Possums: ${diagnosticDescription(new DiagnosticFailure('request', 'schema', 'rejected'))} Request encoding/dispatch envelope was rejected. No inference request sent by this attempt. Prior billing is unchanged or unknown. Not replayed.`;
   }
   if (error instanceof ChannelError && error.code === 'uncertain') return `Possums: [possums_${stage}_uncertain] Stage: ${stage}; constraint: outcome_unknown. Request interrupted; charge unknown. Cause unknown; check connectivity and share only this code for support. Not replayed. A new request may incur another charge.`;
   // Only exact internal literals are displayable. Never echo a hook exception.
@@ -315,20 +293,31 @@ export class PossumsProvider implements Provider {
     resolve: async input => {
       // Availability and status cannot initiate renewal. Model invocations
       // outside the native auth signal use the same scoped path in perform().
-      const diagnosticAttempt = this.runScope !== undefined && this.activeRunSignal !== undefined && this.activeRunSignal === input.signal;
-      const account = this.accountEpoch;
+      const scope = this.runScope, account = this.accountEpoch, run = this.epoch;
+      const diagnosticAttempt = scope !== undefined && this.activeRunSignal !== undefined && this.activeRunSignal === input.signal;
+      const requireOwner = () => {
+        if (input.signal.aborted || (diagnosticAttempt && (account !== this.accountEpoch || run !== this.epoch ||
+            scope !== this.runScope || scope.controller.signal.aborted || this.activeRunSignal !== input.signal))) {
+          throw new Error('possums_login_cancelled');
+        }
+      };
+      try {
       let result;
       try { result = await recoveryAuth.resolve(input); }
       catch {
+        requireOwner();
         if (account !== this.accountEpoch || input.signal.aborted) throw new Error('possums_login_cancelled');
         const failure = new ConnectionFailure('credential_resolution_failed');
         try { this.observeFailure(failure); } catch { /* Transient UI only. */ }
         throw failure;
       }
+      requireOwner();
       if (account !== this.accountEpoch || input.signal.aborted) throw new Error('possums_login_cancelled');
       const key = result?.auth.apiKey;
       if (!isRecoveryKey(key)) {
-        try { this.observeFailure(new ConnectionFailure('credential_missing')); } catch { /* Transient UI only. */ }
+        const failure = new ConnectionFailure('credential_missing');
+        try { this.observeFailure(failure); } catch { /* Transient UI only. */ }
+        if (diagnosticAttempt) throw failure;
         return undefined;
       }
       if (key !== this.recoveryKey) {
@@ -368,8 +357,20 @@ export class PossumsProvider implements Provider {
       }
       this.requireCurrent(current, input.signal);
       if (this.recoveryBlocked) throw this.recoveryBlocked;
+      if (this.client && this.catalog.length && this.failure && !trustFailure(this.failure)) this.observeFailure(undefined);
       // Never expose a recovery key or bearer token to Pi's request hooks.
+      requireOwner();
       return { auth: { apiKey: REQUEST_AUTH }, source: result?.source };
+      } catch (error) {
+        // Intentional cancellation/replacement dominates warning conversion and
+        // must not publish a marker or failure into the replacement's state.
+        requireOwner();
+        if (!diagnosticAttempt || trustFailure(error)) throw error;
+        // The marker lets the adapter finish the host turn with a warning; it
+        // is not gateway authority. perform() stops at the recorded failure.
+        this.failure = error instanceof ConnectionFailure ? error : new ConnectionFailure('session_unavailable');
+        return { auth: { apiKey: REQUEST_AUTH }, source: undefined };
+      }
     },
     login: async (interaction: Parameters<NonNullable<ApiKeyAuth['login']>>[0]) => {
       this.logout();
@@ -579,9 +580,11 @@ export class PossumsProvider implements Provider {
         }
         scope.terminal = last ?? new ConnectionFailure('session_unavailable');
         check();
-        this.recoveryBlocked = scope.terminal;
-        this.client = undefined; this.catalog = []; this.listed = []; this.restoring = undefined;
-        this.reconciliationEpoch++; this.reconciliation = undefined;
+        if (trustFailure(scope.terminal)) {
+          this.recoveryBlocked = scope.terminal;
+          this.client = undefined; this.catalog = []; this.listed = []; this.restoring = undefined;
+          this.reconciliationEpoch++; this.reconciliation = undefined;
+        }
         try { this.observeFailure(scope.terminal); } catch { /* Transient UI only. */ }
         throw scope.terminal;
       })();
@@ -685,7 +688,7 @@ export class PossumsProvider implements Provider {
     return `Reconciliation matched: balance debit $${dollars(window.charged.toString())} equals authenticated receipt charges across ${completed} completed requests (including confirmed refunds). Available demo credit: $${dollars(snapshot.availableMicrounits)}. This does not verify upstream invoices.`;
   }
 
-  reconciliationFailure(error: unknown): string { return `${safeFailure(error, false, 'balance')} This command sent no inference; it does not establish prior accounting outcomes.`; }
+  reconciliationFailure(error: unknown): string { return `${safeFailure(error, 'balance')} This command sent no inference; it does not establish prior accounting outcomes.`; }
 
   private observeReconciliation(output: AssistantMessage): void {
     const window = this.reconciliation;
@@ -702,7 +705,7 @@ export class PossumsProvider implements Provider {
     } else if (receipts.length || refunds.length || output.stopReason === 'error' || output.stopReason === 'aborted') {
       window.unknown = true;
     }
-    if (output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_billing_unknown')) window.unknown = true;
+    if (output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => (diagnostic.type === 'possums_billing_unknown' || diagnostic.type === 'possums_gateway_charge'))) window.unknown = true;
   }
 
   async refreshModels(context: Parameters<NonNullable<Provider['refreshModels']>>[0]): Promise<void> {
@@ -794,14 +797,14 @@ export class PossumsProvider implements Provider {
         const stream = this.perform(selected as Model<typeof API>, context, { ...rest, signal: event.signal }, requireScope);
         const result = await stream.result();
         for (const diagnostic of result.diagnostics ?? []) {
-          if (diagnostic.type === 'possums_settled_receipt' && typeof diagnostic.details?.chargedMicrounits === 'string') {
+          if ((diagnostic.type === 'possums_settled_receipt' || diagnostic.type === 'possums_gateway_charge') && typeof diagnostic.details?.chargedMicrounits === 'string') {
             settled += BigInt(diagnostic.details.chargedMicrounits);
           }
           if (diagnostic.type === 'possums_billing_unknown') unknown = true;
         }
         // perform authors these messages locally; never display native exceptions.
-        if (result.stopReason !== 'stop') {
-          failure = result.errorMessage;
+        if (result.stopReason !== 'stop' || result.diagnostics?.some(item => item.type === 'possums_turn_warning')) {
+          failure = result.errorMessage ?? result.diagnostics?.find(item => item.type === 'possums_turn_warning')?.details?.message as string | undefined;
           throw new Error('possums_compaction_failed');
         }
         requireScope();
@@ -818,7 +821,7 @@ export class PossumsProvider implements Provider {
       const billing = `${settled > 0n ? ` Observed settled charges: $${dollars(settled.toString())}; not undone.` : ''}${unknown ? ' Additional charge unknown.' : ''}`;
       // ExtensionRunner swallows thrown hooks and would then use the default
       // summarizer. Even a failing UI must not turn this into a fallback/replay.
-      try { ctx.ui.notify(`Possums compaction (${stage}): ${failure ?? safeFailure(error, false, 'compaction')}${billing} No checkpoint saved. Not replayed. Use /compact deliberately or /new.`, 'warning'); }
+      try { ctx.ui.notify(`Possums compaction (${stage}): ${failure ?? safeFailure(error, 'compaction')}${billing} No checkpoint saved. Not replayed. Use /compact deliberately or /new.`, 'warning'); }
       catch { /* Transient UI only; never log or persist failed summaries. */ }
       return { cancel: true };
     } finally { closed = true; if (--scope.owners === 0 && scope.idleCompaction && this.runScope === scope) { scope.controller.abort(); this.runScope = undefined; } }
@@ -847,7 +850,7 @@ export class PossumsProvider implements Provider {
       try {
         if (summary) summary();
         if (this.recoveryBlocked) throw this.recoveryBlocked;
-        if (this.failure && (!this.client || this.catalog.length === 0)) throw this.failure;
+        if (this.failure) throw this.failure;
         if (!this.client || options.signal?.aborted) throw new Error('possums_session_unavailable');
         if (selected.provider !== PROVIDER_ID || selected.api !== API || selected.baseUrl !== ORIGIN || options.fetch || options.maxTokens !== undefined || options.samplingParams || options.temperature !== undefined || options.reasoning !== undefined || options.reasoningEffort !== undefined) {
           throw new Error('possums_request_options_unsupported');
@@ -944,13 +947,18 @@ export class PossumsProvider implements Provider {
           }
         } finally { prepared.close(); }
         failureStage = 'settlement';
-        // Record authenticated accounting before local display/precision conversion.
-        output.diagnostics = [{ type: 'possums_settled_receipt', timestamp: Date.now(), details: {
-          chargedMicrounits: receipt.chargedMicrounits, refundedMicrounits: receipt.refundedMicrounits,
-          quotedCostComponents: receiptComponents(receipt) !== undefined, cacheUsageAvailable: receipt.cachedTokens !== undefined,
-          finish: receipt.finish,
-        } }, ...(uncertainControl ? [{ type: 'possums_billing_unknown' as const, timestamp: Date.now(),
-          details: { receipt: false, stage: 'submission' } }] : [])];
+        // Native completion and authenticated accounting are separate evidence.
+        output.diagnostics = [receipt.chargedMicrounits === undefined
+          ? { type: 'possums_billing_unknown', timestamp: Date.now(), details: { receipt: false, nativeCompletion: true } }
+          : { type: 'possums_settled_receipt', timestamp: Date.now(), details: {
+            chargedMicrounits: receipt.chargedMicrounits, refundedMicrounits: receipt.refundedMicrounits ?? null,
+            complete: receipt.complete !== false, finish: receipt.finish, costComponentsAvailable: false,
+            cacheUsageAvailable: receipt.cachedTokens !== undefined,
+          } }, accountingMetadata(receipt), ...(uncertainControl ? [{ type: 'possums_billing_unknown' as const, timestamp: Date.now(),
+            details: { receipt: false, stage: 'submission' } }] : [])];
+        if (receipt.chargedMicrounits === undefined) output.diagnostics.push({ type: 'possums_turn_warning', timestamp: Date.now(), details: {
+          message: safeFailure(new DiagnosticFailure('stream', 'receipt', 'uncertain')), backendGenerationComplete: false, toolsAuthorized: false,
+        } });
         if (!summary && epoch === this.epoch) this.newConversation = false;
         if (!started) throw new Error('possums_invalid_stream');
         endText();
@@ -963,52 +971,69 @@ export class PossumsProvider implements Provider {
           if (!output.content.some((block: AssistantMessage['content'][number]) => block.type === 'text' && block.text.trim())) throw new Error('possums_summary_empty');
         }
         if (args.size && receipt.finish === 'length') throw new Error('possums_incomplete_tool_round');
+        if ((args.size || receipt.finish === 'tool_calls') && receipt.chargedMicrounits === undefined) throw new DiagnosticFailure('stream', 'receipt', 'uncertain');
         const toolUse = receipt.finish === 'tool_calls' || (receipt.finish === 'stop' && args.size > 0);
         for (const pending of args.values()) {
           if (!pending.block.id || !pending.block.name) throw new Error('possums_invalid_stream');
-          pending.block.arguments = JSON.parse(pending.json);
+          pending.block.arguments = parseStreamingJson(pending.json);
           events.push({ type: 'toolcall_end', contentIndex: pending.contentIndex, toolCall: pending.block, partial: output });
         }
-        // Pi omits a recoverable length attempt before the compaction hook.
-        // A non-retryable terminal error preserves this paid partial answer;
-        // the authenticated finish remains recorded in the receipt diagnostic.
+        // Host stop prevents native length regeneration; it is not backend success.
         output.stopReason = toolUse ? 'toolUse' : 'stop';
         if (receipt.finish === 'length') {
-          output.stopReason = 'error';
-          output.errorMessage = 'Possums: [possums_output_limit] Stage: completion; constraint: output_limit. Partial answer reached the model output limit; charge settled. Not automatically continued. Submit a deliberate follow-up if needed; a new request may incur another charge.';
+          output.diagnostics.push({ type: 'possums_turn_warning', timestamp: Date.now(), details: {
+            message: 'Possums: [possums_output_limit] Stage: completion; constraint: output_limit. Partial answer reached the model output limit. Billing status: see authenticated receipt if available; otherwise charge unknown. Not automatically continued. Submit a deliberate follow-up if needed; a new request may incur another charge.',
+            backendGenerationComplete: false, toolsAuthorized: false,
+          } });
+          output.content = output.content.filter(block => block.type !== 'toolCall');
         }
-        if (output.stopReason === 'error') events.push({ type: 'error', reason: 'error', error: output });
-        else events.push({ type: 'done', reason: output.stopReason, message: output });
+        events.push({ type: 'done', reason: output.stopReason, message: output });
       } catch (error) {
         output.stopReason = options.signal?.aborted ? 'aborted' : 'error';
-        if (!output.diagnostics && error instanceof GatewayError && error.settlement) {
+        if (!output.diagnostics && (error instanceof GatewayError || error instanceof CompletionFailure) && error.settlement) {
           const partial = error.settlement;
-          output.diagnostics = [{ type: 'possums_settled_receipt', timestamp: Date.now(), details: {
-            chargedMicrounits: partial.chargedMicrounits, refundedMicrounits: partial.refundedMicrounits,
-            complete: partial.complete !== false, evidence: partial.evidence ?? 'none',
-            quotedCostComponents: receiptComponents(partial) !== undefined, cacheUsageAvailable: partial.cachedTokens !== undefined,
-          } }, ...(uncertainControl ? [{ type: 'possums_billing_unknown' as const, timestamp: Date.now(),
+          output.diagnostics = [{ type: partial.outcome === undefined ? 'possums_gateway_charge' : 'possums_settled_receipt', timestamp: Date.now(), details: {
+            outcome: partial.outcome ?? 'unavailable', chargedMicrounits: partial.chargedMicrounits, refundedMicrounits: partial.refundedMicrounits ?? null,
+            complete: partial.complete !== false, deliveryComplete: partial.deliveryComplete !== false,
+            costComponentsAvailable: false, cacheUsageAvailable: partial.cachedTokens !== undefined, evidence: partial.evidence ?? 'none',
+          } }, accountingMetadata(partial), ...(uncertainControl ? [{ type: 'possums_billing_unknown' as const, timestamp: Date.now(),
             details: { receipt: false, stage: 'submission' } }] : [])];
           try { output.usage = receiptUsage(partial); } catch { /* Confirmed money survives local display failure. */ }
         }
         if (!output.diagnostics && error instanceof GatewayError && error.billing === 'refunded') {
           output.diagnostics = [{ type: 'possums_reservation_refunded', timestamp: Date.now(), details: { outcome: 'refunded' } }];
         }
-        if (!output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt') &&
-          (uncertainControl || (error instanceof GatewayError && error.billing === 'unknown') ||
-            (!(error instanceof GatewayError) && !(error instanceof ConnectionFailure) && ((submitted && !(error instanceof ChannelError && error.code === 'rejected')) || options.signal?.aborted || (error instanceof ChannelError && error.code === 'uncertain'))))) {
-          output.diagnostics = [{ type: 'possums_billing_unknown', timestamp: Date.now(), details: { receipt: false } }];
+        if (!output.diagnostics?.some(diagnostic => ['possums_settled_receipt', 'possums_gateway_charge', 'possums_billing_unknown'].includes(diagnostic.type))) {
+          output.diagnostics = [...(output.diagnostics ?? []), { type: 'possums_billing_unknown', timestamp: Date.now(), details: { receipt: false } }];
         }
-        output.errorMessage = error instanceof GatewayError && error.settlement ?
-          safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted, failureStage) :
+        output.errorMessage = error instanceof CompletionFailure && error.settlement ?
+          `Possums: ${diagnosticDescription(error)} Billing evidence: ${settlementDescription(error.settlement)} Delivery incomplete; no tool authorized. Not replayed.` :
+          error instanceof GatewayError && error.settlement ?
+          safeFailure(error, failureStage) :
           output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt') ?
-          `${safeFailure(error, false, failureStage).replace(/ Billing status: Charge unknown\..*$/, '')} Authenticated receipt: charge settled; not undone. Not replayed.` : options.signal?.aborted && !(error instanceof GatewayError) && !(error instanceof ConnectionFailure) ?
+          `${safeFailure(error, failureStage).replace(/ Billing status: Charge unknown\..*$/, '')} Authenticated receipt: charge settled; not undone. Not replayed.` : options.signal?.aborted && !(error instanceof GatewayError) && !(error instanceof ConnectionFailure) ?
           'Possums: [possums_stream_interrupted] Stage: stream; constraint: interrupted. Delivery interrupted; charge unknown. Check connectivity and share only this code for support. Not replayed. A new request may incur another charge.' :
-          safeFailure(error, !summary && epoch === this.epoch && !options.signal?.aborted, failureStage, !submitted);
+          safeFailure(error, failureStage, !submitted);
         if (uncertainControl) {
           output.errorMessage += ' Earlier submission control outcome unknown; no inference request was replayed. A new request may incur another charge.';
         }
-        events.push({ type: 'error', reason: output.stopReason, error: output });
+        if (trustFailure(error)) {
+          this.recoveryBlocked = connectionFailure(error);
+          events.push({ type: 'error', reason: output.stopReason, error: output });
+        } else {
+          // Host stop is NOT successful backend generation. Provisional calls
+          // must disappear from the terminal message before Pi can execute them.
+          endText();
+          output.content = output.content.filter(block => block.type !== 'toolCall');
+          output.diagnostics ??= [];
+          output.diagnostics.push({ type: 'possums_turn_warning', timestamp: Date.now(), details: {
+            message: output.errorMessage, backendGenerationComplete: false, toolsAuthorized: false,
+          } });
+          delete output.errorMessage;
+          output.stopReason = 'stop';
+          if (!started) { started = true; events.push({ type: 'start', partial: output }); }
+          events.push({ type: 'done', reason: 'stop', message: output });
+        }
       } finally {
         if (reconciliation && reconciliation === this.reconciliation) this.observeReconciliation(output);
         if (scope && --scope.owners === 0 && scope.idleCompaction && this.runScope === scope) {

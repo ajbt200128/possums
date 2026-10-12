@@ -30,16 +30,17 @@ export async function diagnosticChecks(m, check) {
   }
   await check('diagnostics distinguish missing authenticated stream terminals', async () => {
     await rejected([frame(role)], 'stream', 'finish_missing');
-    await rejected([frame(role), frame(finish)], 'stream', 'usage_missing');
+    await rejected([frame(role), frame(finish)], 'stream', 'done_missing');
     await rejected([frame(role), frame(finish), frame(usage)], 'stream', 'done_missing');
-    await rejected([frame(role), frame(finish), frame('[DONE]')], 'stream', 'usage_missing');
+    assert.equal((await m.consumeCompletion(stream([frame(role), frame(finish), frame('[DONE]')]), 'synthetic', () => {})).chargedMicrounits, undefined);
   });
   await check('diagnostics distinguish hostile stream encoding, JSON, choice, tool and receipt', async () => {
     await rejected([new Uint8Array([0xff])], 'stream', 'utf8');
     await rejected([frame(`{${secret}`)], 'stream', 'json');
     await rejected([frame({ ...role, choices: [{ index: 1, delta: { role: 'assistant' }, finish_reason: null }] })], 'stream', 'choice');
-    await rejected([frame(role), frame({ ...role, choices: [{ index: 0, delta: { tool_calls: [{ index: 0 }] }, finish_reason: null }] })], 'stream', 'tool');
-    await rejected([frame(role), frame(finish), frame({ ...usage, possums: { ...usage.possums, charged_microunits: secret } })], 'stream', 'receipt');
+    await rejected([frame(role), frame({ ...role, choices: [{ index: 0, delta: { tool_calls: [{ index: secret }] }, finish_reason: null }] })], 'stream', 'tool');
+    const unreadable = await m.consumeCompletion(stream([frame(role), frame(finish), frame({ ...usage, possums: { ...usage.possums, charged_microunits: secret } }), frame('[DONE]')]), 'synthetic', () => {});
+    assert.equal(unreadable.chargedMicrounits, undefined); assert(!JSON.stringify(unreadable).includes(secret));
     await rejected([frame({ ...role, model: secret })], 'stream', 'schema');
   });
   await check('read and hook failures stay closed, interrupted delivery does not confirm refund', async () => {
@@ -78,7 +79,8 @@ export async function diagnosticChecks(m, check) {
   });
   await check('missing authenticated EOF, invalid finish/usage/delta and closed carriers remain distinct', async () => {
     await rejected([frame(role), frame({ ...finish, choices: [{ ...finish.choices[0], finish_reason: secret }] })], 'stream', 'finish');
-    await rejected([frame(role), frame(finish), frame({ ...usage, usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 0 } })], 'stream', 'usage');
+    const inconsistent = await m.consumeCompletion(stream([frame(role), frame(finish), frame({ ...usage, usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 0 }, extra: secret }), frame('[DONE]')]), 'synthetic', () => {});
+    assert.equal(inconsistent.chargedMicrounits, '7'); assert.equal(inconsistent.totalTokens, 0); assert(!JSON.stringify(inconsistent).includes(secret));
     await rejected([frame(role), frame({ ...role, choices: [{ index: 0, delta: { content: { value: secret } }, finish_reason: null }] })], 'stream', 'delta');
     let pulled = false;
     const body = new ReadableStream({ pull(controller) {
@@ -119,9 +121,9 @@ export async function diagnosticChecks(m, check) {
       { ...wire, error: { ...wire.error, stage: 'stream' } },
       { ...wire, error: { ...wire.error, constraint: 'unknown' } },
       { ...wire, error: { ...wire.error, billing: 'refunded' } },
-      { ...wire, error: { ...wire.error, detail: secret } },
       { ...wire, error: { ...wire.error, message: null } },
     ]) assert.equal(new m.CatalogFailure('http', 'rejected', 503, altered).reason, undefined);
+    assert.equal(new m.CatalogFailure('http', 'rejected', 503, { ...wire, error: { ...wire.error, detail: secret } }).reason, 'service_quiescing');
     assert.equal(new m.CatalogFailure('http', 'rejected', 502, wire).reason, undefined);
     const fabricated = new m.GatewayError('service_quiescing', undefined, 'refunded', 503);
     assert.equal(fabricated.billing, 'unknown'); assert(!fabricated.message.includes('Reservation refunded'));

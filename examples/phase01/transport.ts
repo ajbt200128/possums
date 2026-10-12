@@ -1,7 +1,7 @@
 import { Identity, type RequestContext } from 'ehbp';
 import { CatalogFailure, GatewayError, gatewayError } from './client.js';
 import { PUBLISHER, qualifyApi, qualifyPublished, requireApiApproval, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';
-import { LIMITS, ChannelError, DiagnosticFailure, OperationFailure, type FailureConstraint, Operation, cleanup, collect, parseJSON, requireThat, serialize } from './limits.js';
+import { LIMITS, ChannelError, DiagnosticFailure, OperationFailure, type FailureConstraint, Operation, cleanup, collect, parseJSON, requireThat, serialize, utf8 } from './limits.js';
 import { admitInvocation, fields, type Chat } from './tools.js';
 export type { Chat, Invocation, Message, Tool, ToolChoice, ToolCall, JSONObject, JSONValue } from './tools.js';
 export type { LiveModel, Receipt, BalanceSnapshot, CompletionOptions, CompletionEvent, ChatOptions } from './client.js';
@@ -40,11 +40,11 @@ async function send(req: Request, op: Operation, observeStatus?: (status: number
 }
 export type Control = { challenge: string; credential: string } | { model: string; new_conversation: boolean };
 export function encodeChat(chat: Chat): Uint8Array<ArrayBuffer> {
-  return serialize(admitInvocation(chat, true), LIMITS.chat);
+  try { return utf8.encode(JSON.stringify(admitInvocation(chat, true))); }
+  catch (error) { throw error instanceof DiagnosticFailure ? error : new DiagnosticFailure('request', 'encoding'); }
 }
-// Frame-size validation precedes EHBP's 64-MiB per-ciphertext-chunk ceiling,
-// not a cumulative stream quota. This parses framing only; authentication and
-// decryption remain entirely published EHBP.
+// Check complete framing and the authentication-tag minimum only.
+// Authentication, decryption and native decoder limits remain published EHBP.
 function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation, onFailure: (failure: DiagnosticFailure) => void): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   let sawFrame = false, length = 0, prefix = 0, remaining = 0;
@@ -55,14 +55,16 @@ function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation, onFail
       try {
         op.check();
         const { done, value } = await op.wait(reader.read(), LIMITS.idleMs);
-        if (done) { requireThat(prefix === 0 && remaining === 0 && sawFrame); controller.close(); return; }
-        requireThat(value.length <= LIMITS.chunk);
+        if (done) {
+          if (prefix !== 0 || remaining !== 0 || !sawFrame) throw new DiagnosticFailure('transport', 'eof', 'uncertain');
+          controller.close(); return;
+        }
         for (let i = 0; i < value.length;) {
           if (remaining) { const consumed = Math.min(remaining, value.length - i); i += consumed; remaining -= consumed; }
           else {
             length = length * 256 + value[i++];
             if (++prefix === 4) {
-              requireThat(length >= 16 && length <= LIMITS.frame);
+              requireThat(length >= 16);
               sawFrame = true;
               remaining = length; length = 0; prefix = 0;
             }
@@ -85,7 +87,6 @@ export const hasByteReadTimeout = (body: ReadableStream<Uint8Array>): boolean =>
 function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean, frameFailure: () => DiagnosticFailure | undefined): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  let eventBytes = 0, lineBytes = 0;
   return new ReadableStream({
     async pull(controller) {
       let constraint: FailureConstraint = 'decryption';
@@ -94,22 +95,7 @@ function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean
         const { done, value } = await op.wait(reader.read(), null);
         constraint = 'utf8';
         if (done) { if (sse) decoder.decode(); op.close(); controller.close(); return; }
-        constraint = 'envelope';
-        requireThat(value.length <= LIMITS.frame);
-        if (sse) {
-          constraint = 'utf8';
-          decoder.decode(value, { stream: true });
-          constraint = 'envelope';
-          // Envelope budgets only. Ordered role/finish/usage/DONE/EOF semantics
-          // belong to the later client parser, not this transport qualification.
-          for (const byte of value) {
-            requireThat(++eventBytes <= LIMITS.sseEvent);
-            if (byte === 10) {
-              if (lineBytes === 0) eventBytes = 0;
-              lineBytes = 0;
-            } else if (byte !== 13) lineBytes++;
-          }
-        }
+        if (sse) decoder.decode(value, { stream: true });
         controller.enqueue(value);
       } catch (error) {
         const failure = frameFailure() ?? (error instanceof DiagnosticFailure ? error : new DiagnosticFailure('transport', error instanceof OperationFailure ? error.constraint : constraint, 'uncertain'));

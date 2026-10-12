@@ -1,7 +1,7 @@
 import { CatalogFailure, GatewayError, gatewayDetailLabel, type Receipt } from '../../examples/phase01/client.js';
 
 export function settlementDescription(receipt: Readonly<Receipt>): string {
-  return `Authenticated ${receipt.complete === false ? 'incomplete' : 'complete'} settlement: charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits} microunits. Settlement is not tool-execution authorization; a new submission may incur another charge.`;
+  return `Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits.${receipt.deliveryComplete === false ? ' Delivery incomplete; this does not establish successful completion.' : ''} Settlement is not tool-execution authorization; a new submission may incur another charge.`;
 }
 import { DiagnosticFailure } from '../../examples/phase01/limits.js';
 
@@ -62,7 +62,7 @@ const reasons = Object.freeze({
   catalog_request_failed: 'The catalog request failed before a response was available. ' + catalogAction,
   catalog_http_rejected: 'The catalog request received an HTTP rejection. ' + catalogAction,
   catalog_body_invalid: 'The catalog response body could not be read or decoded within client limits. ' + catalogAction,
-  catalog_validation_failed: 'The catalog response failed schema or reservation-quote validation. ' + catalogAction,
+  catalog_validation_failed: 'The catalog response required fields were unreadable or unsupported. ' + catalogAction,
   catalog_conversion_failed: 'The validated catalog could not be converted to Pi model metadata within supported limits. ' + catalogAction,
   service_quiescing: 'Gateway is quiescing. Wait for service availability before deliberately starting a new request; this diagnostic does not retry or establish prior billing.',
 });
@@ -107,6 +107,7 @@ export function approvalSummary(release?: Readonly<{ tag: string; expires: numbe
 // Construct only locally authored messages; never retain the original error/cause.
 export class ConnectionFailure extends Error {
   readonly observation?: EvidenceObservation;
+  readonly diagnostic?: DiagnosticFailure;
   constructor(readonly code: ConnectionFailureCode, catalog?: CatalogFailure | GatewayError | DiagnosticFailure | EvidenceObservation) {
     if (!Object.hasOwn(reasons, code)) throw new Error('possums_connection_diagnostic_invalid');
     // The immutable carrier validates these fields; never use its error.message.
@@ -118,6 +119,7 @@ export class ConnectionFailure extends Error {
       ` Stage: ${catalog instanceof CatalogFailure ? 'catalog' : 'connection'}; constraint: ${catalog instanceof CatalogFailure ? catalog.stage : code}.${catalog instanceof CatalogFailure && catalog.reason === 'service_quiescing' ? ' Gateway stage: admission; constraint: service_quiescing.' : ''}`;
     super(`${catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} No inference request was sent by this connection attempt. Cached models do not authorize inference. Prior billing outcomes are not established by this check.`);
     if (catalog instanceof EvidenceObservation) this.observation = catalog;
+    if (catalog instanceof DiagnosticFailure) this.diagnostic = catalog;
     Object.freeze(this);
   }
 }
