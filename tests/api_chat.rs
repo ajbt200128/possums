@@ -422,6 +422,46 @@ mod duplicate_usage_metrics;
 mod native_usage_contract;
 
 #[tokio::test]
+async fn upstream_http_rejection_returns_gateway_200_incomplete_refund_without_replay() {
+    for status in [400, 401, 403, 429, 500, 503] {
+        let (state, provider, bearer, submission) = fixture(5_000_000);
+        *provider.native_response.lock().unwrap() = Some(
+            http::Response::builder()
+                .status(status)
+                .body(reqwest::Body::from("PRIVATE_PROMPT_CREDENTIAL_HTTP_503"))
+                .unwrap()
+                .into(),
+        );
+        let response = send(&state, &bearer, &submission).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let events: Vec<Value> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["possums"]["status"], "incomplete");
+        assert_eq!(events[0]["possums"]["outcome"], "refunded");
+        assert_eq!(events[0]["possums"]["charged_microunits"], "0");
+        assert_eq!(
+            events[0]["possums"]["refunded_microunits"],
+            events[0]["possums"]["reserved_microunits"]
+        );
+        assert_eq!(events[0]["possums"]["evidence"], "none");
+        assert_eq!(events[1]["error"]["code"], "generation_failed");
+        assert_eq!(events[1]["error"]["detail"], "generation_http_failed");
+        assert!(text.ends_with("data: [DONE]\n\n"));
+        assert!(!text.contains("PRIVATE_PROMPT"));
+        terminal(&state, 5_000_000).await;
+        duplicate(&state, &bearer, &submission, "refunded").await;
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
 async fn downstream_native_metrics_require_single_opt_in_and_final_evidence() {
     for structured in [false, true] {
         for native in [false, true] {
