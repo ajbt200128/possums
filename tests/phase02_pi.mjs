@@ -1216,8 +1216,32 @@ await check('progress before receipt, hooks and submitted-rate cost',async()=>{
  const events=[];let observed=false;
  for await(const event of stream){events.push(event);if(event.type==='text_delta'){observed=true;assert.equal(events.some(x=>x.type==='done'),false);s.release();}}
  const result=await stream.result();assert(observed);assert.equal(payload,1);assert.equal(response,1);assert.equal(raw,2);
- assert.equal(result.usage.totalTokens,5);assert.equal(result.usage.cost.total,7/1e6);assert.equal(result.usage.cost.input,2/1e6);
- assert(Math.abs(result.usage.cost.input+result.usage.cost.output-result.usage.cost.total)<1e-15);
+ assert.equal(result.usage.totalTokens,5);assert.equal(result.usage.cost.total,7/1e6);
+ assert.equal(result.usage.cost.input,0);assert.equal(result.usage.cost.output,0);
+ assert.equal(result.diagnostics[0].details.quotedCostComponents,false);
+ assert.equal(result.diagnostics[0].details.cacheUsageAvailable,false);
+});
+await check('cache usage availability and exact components preserve actual totals without warming',async()=>{
+ const cases=[
+  {value:{...receipt('stop'),cachedTokens:0},cache:true,components:false},
+  {value:{...receipt('stop'),inputTokens:20,outputTokens:10,totalTokens:30,cachedTokens:10,quotedCachedInputMicrounitsPerMillion:'0',chargedMicrounits:'26',refundedMicrounits:'26'},cache:true,components:true},
+  {value:{...receipt('stop'),inputTokens:20,outputTokens:10,totalTokens:30,cachedTokens:10,quotedCachedInputMicrounitsPerMillion:undefined,chargedMicrounits:'39',refundedMicrounits:'13'},cache:true,components:true},
+  {value:{...receipt('stop'),inputTokens:20,outputTokens:10,totalTokens:30,cachedTokens:10,quotedCachedInputMicrounitsPerMillion:'0',chargedMicrounits:'2',refundedMicrounits:'0'},cache:true,components:false},
+  {value:{...receipt('stop'),quotedInputMicrounitsPerMillion:undefined,quotedOutputMicrounitsPerMillion:undefined},cache:false,components:false},
+ ];
+ for(const {value,cache,components} of cases){
+  const s=await setup(['stop']);const chat=s.client.chat;
+  s.client.chat=async(...args)=>{await chat(...args);return value;};
+  s.provider.beginRun();const {message}=await drain(s.provider.streamSimple(s.selected,context(false)));
+  assert.equal(message.stopReason,'stop');assert.equal(s.sends(),1);
+  assert.equal(message.usage.input+message.usage.cacheRead,value.inputTokens);
+  assert.equal(message.usage.totalTokens,value.totalTokens);assert.equal(message.usage.cacheWrite,0);
+  assert.equal(message.usage.cost.total,Number(value.chargedMicrounits)/1e6);
+  assert.equal(message.diagnostics[0].details.cacheUsageAvailable,cache);
+  assert.equal(message.diagnostics[0].details.quotedCostComponents,components);
+  if(components)assert(Math.abs(message.usage.cost.input+message.usage.cost.output+message.usage.cost.cacheRead-message.usage.cost.total)<1e-15);
+  else assert.equal(message.usage.cost.input+message.usage.cost.output+message.usage.cost.cacheRead,0);
+ }
 });
 await check('provider leaves subsequent invocation policy to native Pi after uncertain or length failure',async()=>{
  for(const mode of ['uncertain','length']){const s=await setup([mode,'stop']);s.provider.beginRun();const first=await drain(s.provider.streamSimple(s.selected,context(false)));
@@ -2621,7 +2645,7 @@ await check('native one/two-summary prompts, previous checkpoint, files, advisor
   const f=await compactionFixture(['stop','stop'],split,true),nativeRequests=[],hints=[];
   const expected=await coding.compact(f.event.preparation,f.ctx.model,requestMarker,{},f.event.customInstructions,f.event.signal,'off',async(model,context,options)=>{
    nativeRequests.push(structuredClone(m.invocation(model,context).messages));hints.push(options.maxTokens);
-   const stream=ai.createAssistantMessageEventStream(),message={...syntheticAssistant([{type:'text',text:'progressive'}]),usage:{...syntheticAssistant().usage,cost:{input:2/1e6,output:5/1e6,cacheRead:0,cacheWrite:0,total:7/1e6}}};
+   const stream=ai.createAssistantMessageEventStream(),message={...syntheticAssistant([{type:'text',text:'progressive'}]),usage:{...syntheticAssistant().usage,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:7/1e6}}};
    stream.push({type:'done',reason:'stop',message});stream.end();return stream;
   });
   const result=await f.run();assert.deepEqual(result.compaction,expected);assert.equal(f.s.sends(),split?2:1);

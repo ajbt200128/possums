@@ -221,11 +221,12 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
       }
       if (value.possums.outcome === 'refunded') requireThat(amount(value.possums.charged_microunits) === 0n);
       amount(value.possums.charged_microunits); amount(value.possums.refunded_microunits);
-      const cached = counts.cached_tokens ?? counts.prompt_tokens_details?.cached_tokens ?? 0;
+      const reportedCached = counts.cached_tokens ?? counts.prompt_tokens_details?.cached_tokens;
+      const cached = reportedCached ?? 0;
       requireThat(Number.isSafeInteger(cached) && cached >= 0 && cached <= input);
       receipt = { finish: finish ?? 'stop', inputTokens: input, outputTokens: output, totalTokens: sum,
         chargedMicrounits: value.possums.charged_microunits, refundedMicrounits: value.possums.refunded_microunits,
-        complete, outcome: value.possums.outcome, reservedMicrounits: value.possums.reserved_microunits, cachedTokens: cached,
+        complete, outcome: value.possums.outcome, reservedMicrounits: value.possums.reserved_microunits, cachedTokens: reportedCached,
         quotedCachedInputMicrounitsPerMillion: value.possums.quoted_cached_input_microunits_per_million_tokens, evidence: value.possums.evidence };
       const quotedInput = value.possums.quoted_input_microunits_per_million_tokens;
       const quotedOutput = value.possums.quoted_output_microunits_per_million_tokens;

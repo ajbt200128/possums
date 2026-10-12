@@ -39,16 +39,27 @@ function safeNumber(value: string, stage: 'catalog' | 'settlement' = 'catalog'):
   if (!Number.isSafeInteger(result) || result < 0) throw new DiagnosticFailure(stage, 'precision');
   return result;
 }
+function receiptComponents(receipt: Readonly<Receipt>): bigint[] | undefined {
+  if (receipt.quotedInputMicrounitsPerMillion === undefined || receipt.quotedOutputMicrounitsPerMillion === undefined) return;
+  const cached = receipt.cachedTokens ?? 0, denominator = 100_000_000n;
+  const components = [
+    BigInt(receipt.inputTokens - cached) * BigInt(receipt.quotedInputMicrounitsPerMillion) * 130n,
+    BigInt(receipt.outputTokens) * BigInt(receipt.quotedOutputMicrounitsPerMillion) * 130n,
+    BigInt(cached) * BigInt(receipt.quotedCachedInputMicrounitsPerMillion ?? receipt.quotedInputMicrounitsPerMillion) * 130n,
+  ];
+  // Do not assign rounding residue or absorbed reservation caps to output.
+  if (components.every(value => value % denominator === 0n) &&
+      components.reduce((sum, value) => sum + value, 0n) === BigInt(receipt.chargedMicrounits) * denominator) {
+    return components.map(value => value / denominator);
+  }
+}
 function receiptUsage(receipt: Readonly<Receipt>): AssistantMessage['usage'] {
-  const charged = BigInt(receipt.chargedMicrounits), cached = receipt.cachedTokens ?? 0;
-  const quoted = receipt.quotedInputMicrounitsPerMillion !== undefined && receipt.quotedOutputMicrounitsPerMillion !== undefined;
-  const proposedInput = quoted ? BigInt(receipt.inputTokens - cached) * BigInt(receipt.quotedInputMicrounitsPerMillion!) * 130n / 100_000_000n : 0n;
-  const input = proposedInput < charged ? proposedInput : charged;
-  const proposedCache = quoted ? BigInt(cached) * BigInt(receipt.quotedCachedInputMicrounitsPerMillion ?? receipt.quotedInputMicrounitsPerMillion!) * 130n / 100_000_000n : 0n;
-  const cache = proposedCache < charged - input ? proposedCache : charged - input;
+  const cached = receipt.cachedTokens ?? 0;
+  // Pi requires numbers: zeros are unavailable fallbacks, not free components.
+  const [input, output, cache] = receiptComponents(receipt) ?? [0n, 0n, 0n];
   const usd = (value: bigint) => safeNumber(value.toString(), 'settlement') / 1_000_000;
   return { input: receipt.inputTokens - cached, output: receipt.outputTokens, cacheRead: cached, cacheWrite: 0, totalTokens: receipt.totalTokens,
-    cost: { input: usd(input), cacheRead: usd(cache), cacheWrite: 0, output: quoted ? usd(charged - input - cache) : 0, total: usd(charged) } };
+    cost: { input: usd(input), cacheRead: usd(cache), cacheWrite: 0, output: usd(output), total: usd(BigInt(receipt.chargedMicrounits)) } };
 }
 function dollars(microunits: string): string {
   const value = BigInt(microunits);
@@ -61,7 +72,8 @@ function model(entry: LiveModel): Model<typeof API> {
     input: ['text'], reasoning: false,
     contextWindow: safeNumber(entry.context_tokens), maxTokens: safeNumber(entry.max_output_tokens),
     cost: { input: safeNumber(entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000,
-      output: safeNumber(entry.output_microunits_per_million_tokens) * 1.3 / 1_000_000, cacheRead: 0, cacheWrite: 0 },
+      output: safeNumber(entry.output_microunits_per_million_tokens) * 1.3 / 1_000_000,
+      cacheRead: safeNumber(entry.cached_input_microunits_per_million_tokens ?? entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000, cacheWrite: 0 },
   };
 }
 function catalogModels(entries: readonly LiveModel[]): readonly Model<typeof API>[] {
@@ -932,11 +944,11 @@ export class PossumsProvider implements Provider {
           }
         } finally { prepared.close(); }
         failureStage = 'settlement';
-        const quoted = receipt.quotedInputMicrounitsPerMillion !== undefined && receipt.quotedOutputMicrounitsPerMillion !== undefined;
         // Record authenticated accounting before local display/precision conversion.
         output.diagnostics = [{ type: 'possums_settled_receipt', timestamp: Date.now(), details: {
           chargedMicrounits: receipt.chargedMicrounits, refundedMicrounits: receipt.refundedMicrounits,
-          quotedCostComponents: quoted, finish: receipt.finish,
+          quotedCostComponents: receiptComponents(receipt) !== undefined, cacheUsageAvailable: receipt.cachedTokens !== undefined,
+          finish: receipt.finish,
         } }, ...(uncertainControl ? [{ type: 'possums_billing_unknown' as const, timestamp: Date.now(),
           details: { receipt: false, stage: 'submission' } }] : [])];
         if (!summary && epoch === this.epoch) this.newConversation = false;
@@ -974,6 +986,7 @@ export class PossumsProvider implements Provider {
           output.diagnostics = [{ type: 'possums_settled_receipt', timestamp: Date.now(), details: {
             chargedMicrounits: partial.chargedMicrounits, refundedMicrounits: partial.refundedMicrounits,
             complete: partial.complete !== false, evidence: partial.evidence ?? 'none',
+            quotedCostComponents: receiptComponents(partial) !== undefined, cacheUsageAvailable: partial.cachedTokens !== undefined,
           } }, ...(uncertainControl ? [{ type: 'possums_billing_unknown' as const, timestamp: Date.now(),
             details: { receipt: false, stage: 'submission' } }] : [])];
           try { output.usage = receiptUsage(partial); } catch { /* Confirmed money survives local display failure. */ }
