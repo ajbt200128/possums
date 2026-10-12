@@ -23,13 +23,16 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       source: ${{ steps.source.outputs.source }}
+      rollout: ${{ steps.source.outputs.rollout }}
     steps:
       # Trusted workflow implementation, NOT workflow_run.head_sha or PR artifacts.
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - id: source
         name: Validate originating event, exact checks and current main
@@ -40,6 +43,7 @@ jobs:
 
   build:
     needs: source-checks
+    if: needs.source-checks.outputs.rollout == 'true'
     strategy:
       matrix:
         build: [a, b]
@@ -91,6 +95,7 @@ jobs:
   publish:
     timeout-minutes: 180
     needs: [source-checks, build]
+    if: needs.source-checks.outputs.rollout == 'true'
     runs-on: ubuntu-latest
     env:
       SOURCE: ${{ needs.source-checks.outputs.source }}

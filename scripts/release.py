@@ -33,6 +33,7 @@ CODES = {
     "event": ("source", "Use successful check.yml on an exact main push or current-main manual dispatch."),
     "checks": ("source", "Complete successful checks on the exact eligible commit/ref."),
     "stale": ("eligibility", "Use the newest main candidate; no update was requested by this check."),
+    "rollout_lookup": ("source-rollout", "PR/publication evidence could not be read or validated; no skip or publication was admitted. Check GitHub read permissions/availability, then rerun source admission or explicitly dispatch current-main publication."),
     "transform": ("configuration", "Review the one-line gateway digest template and release-only tree."),
     "identity": ("build", "Resolve the source/release image derivation mismatch."),
     "collision": ("publication", "Manually reconcile existing immutable tags/releases; never delete or repoint them."),
@@ -189,6 +190,125 @@ def source_event(event, kind, context_sha, context_ref, workflow_id):
     return source
 
 
+# Only non-Cargo client files and Markdown: Rust tests, scripts, fixtures and
+# all workflow/build/deployment inputs deliberately remain outside this list.
+NO_ROLLOUT_LABEL = "no-rollout-needed"
+CLIENT_SUFFIXES = {".ts", ".js", ".mjs", ".json", ".md", ".sh"}
+ROOT_DOCUMENTS = {"AGENTS.md", "PRIVACY.md", "SPEC.md", "OVERALL_PLAN.md"}
+ROLLOUT_REASONS = {
+    "manual": "Explicit manual publication; labels do not block rollout.",
+    "ineligible": "Label absent or complete change set/linkage not eligible; normal publication remains required.",
+    "baseline": "No bounded successful publication baseline was established; normal publication remains required.",
+    "eligible": "All intervening mainline changes and complete labeled PR diffs are eligible; automatic publication and deployment skipped.",
+}
+
+
+def rollout_path(path):
+    if not isinstance(path, str) or not path or any(part in {"", ".", ".."} for part in path.split("/")):
+        return False
+    if path in ROOT_DOCUMENTS:
+        return True
+    if path.startswith("docs/"):
+        return path.endswith(".md")
+    return path.startswith("clients/pi/") and (Path(path).suffix in CLIENT_SUFFIXES
+                                               or path == "clients/pi/.gitignore")
+
+
+def rollout_api(path):
+    try:
+        return api(path)
+    except (Stop, KeyError, TypeError, ValueError):
+        raise Stop("rollout_lookup") from None
+
+
+def rollout_diff(base, head):
+    # No rename detection: both old and new paths are checked, including deletes.
+    paths = git("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, head).split(b"\0")
+    return all(rollout_path(path.decode("utf-8")) for path in paths if path)
+
+
+def labeled_pr(commit):
+    associated = rollout_api(f"commits/{commit}/pulls?per_page=100")
+    require(isinstance(associated, list), "rollout_lookup")
+    # Missing, truncated or ambiguous linkage is ineligible, not permission to skip.
+    if len(associated) != 1:
+        return None
+    number = associated[0]["number"]
+    require(type(number) is int and number > 0, "rollout_lookup")
+    pr = rollout_api(f"pulls/{number}")
+    if not (type(pr["merged"]) is bool and pr["merged"] and pr["merge_commit_sha"] == commit
+            and pr["base"]["ref"] == "main" and pr["base"]["repo"]["full_name"] == REPO):
+        return None
+    if NO_ROLLOUT_LABEL not in [label["name"] for label in pr["labels"]]:
+        return None
+    count = pr["changed_files"]
+    require(type(count) is int and count >= 0, "rollout_lookup")
+    # GitHub's PR files endpoint cannot demonstrate completeness above 3000 files.
+    if count == 0 or count > 3000:
+        return None
+    files = []
+    for page in range(1, (count + 99) // 100 + 1):
+        batch = rollout_api(f"pulls/{number}/files?per_page=100&page={page}")
+        require(isinstance(batch, list) and len(batch) == min(100, count - len(files)), "rollout_lookup")
+        files.extend(batch)
+    require(len({file["filename"] for file in files}) == count, "rollout_lookup")
+    for file in files:
+        require(file["status"] in {"added", "removed", "modified", "renamed", "copied", "changed", "unchanged"}, "rollout_lookup")
+        if not rollout_path(file["filename"]):
+            return None
+        if file["status"] in {"renamed", "copied"} and not rollout_path(file["previous_filename"]):
+            return None
+    return pr
+
+
+def publication_baseline(source):
+    runs = rollout_api("actions/workflows/publish-image.yml/runs?branch=main&status=success&per_page=100")["workflow_runs"]
+    require(isinstance(runs, list) and len(runs) <= 100, "rollout_lookup")
+    for run in runs:
+        # A skipped source-checks run may itself conclude success: it is NOT a baseline.
+        validate_run(run, "publish-image.yml", run["head_sha"], "main", {"workflow_run", "workflow_dispatch"})
+        match = re.fullmatch(r"Image source (" + SHA + r")", run["display_title"])
+        if match is None:
+            raise Stop("rollout_lookup")
+        run_id, attempt = run["id"], run["run_attempt"]
+        require(type(run_id) is int and run_id > 0 and type(attempt) is int and attempt > 0, "rollout_lookup")
+        jobs = rollout_api(f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+        require(jobs["total_count"] == len(jobs["jobs"]) <= 100, "rollout_lookup")
+        required_jobs = [[job for job in jobs["jobs"] if job["name"] == name]
+                         for name in ("source-checks", "build (a)", "build (b)", "publish")]
+        if all(len(matches) == 1 and matches[0]["conclusion"] == "success" for matches in required_jobs):
+            baseline = match[1]
+            if run["event"] == "workflow_dispatch":
+                require(run["head_sha"] == baseline, "rollout_lookup")
+            ancestors = git("rev-list", "--first-parent", source).decode().splitlines()
+            return baseline if baseline in ancestors and baseline != source else None
+    return None
+
+
+def automatic_rollout_skip(source):
+    try:
+        if labeled_pr(source) is None:
+            return False, "ineligible"
+        baseline = publication_baseline(source)
+        if baseline is None:
+            return False, "baseline"
+        commits = git("rev-list", "--first-parent", "--reverse", f"{baseline}..{source}").decode().splitlines()
+        # Large backlogs keep normal publication, rather than an unbounded lookup sweep.
+        if not commits or len(commits) > 100:
+            return False, "baseline"
+        if not rollout_diff(baseline, source):
+            return False, "ineligible"
+        for commit in commits:
+            parents = git("show", "-s", "--format=%P", commit).decode().split()
+            if len(parents) not in {1, 2} or not rollout_diff(parents[0], commit):
+                return False, "ineligible"
+            if commit != source and labeled_pr(commit) is None:
+                return False, "ineligible"
+        return True, "eligible"
+    except (Stop, KeyError, TypeError, ValueError, UnicodeError):
+        raise Stop("rollout_lookup") from None
+
+
 def select_source():
     require(os.environ.get("RELEASE_AUTOMATION_ENABLED") == "true", "disabled")
     require(os.environ["GITHUB_REPOSITORY"] == REPO, "event")
@@ -204,7 +324,12 @@ def select_source():
         require(live["workflow_id"] == workflow["id"], "event")
     checks(source, "main")
     latest(source)
-    output(source=source)
+    skip, reason = (automatic_rollout_skip(source) if os.environ["GITHUB_EVENT_NAME"] == "workflow_run"
+                    else (False, "manual"))
+    latest(source)
+    output(source=source, rollout="false" if skip else "true")
+    print(json.dumps({"code": "RELEASE_ROLLOUT_" + reason.upper(), "stage": "source-rollout",
+                      "action": ROLLOUT_REASONS[reason], "rollout": not skip}))
 
 
 def transform(config, image):
