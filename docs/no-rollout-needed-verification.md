@@ -27,6 +27,32 @@ that is not hosted qualification of this subsequent simplification.
 The existing `workflow_run` auxiliary scanner advisory remains: the source job
 keeps its trusted `github.sha` checkout and consumes no PR artifacts/code.
 
+## Hosted qualification (2026-10-12)
+
+The simplified feature [PR #63](https://github.com/ajbt200128/possums/pull/63)
+merged as `9401de51bf21dd88da6ce5e1b659766ce9ed848f` after successful updated
+[PR CI 38299992345](https://github.com/ajbt200128/possums/actions/runs/38299992345).
+Independent read-only review of the simplification found no actionable issues.
+
+Labeled [PR #62](https://github.com/ajbt200128/possums/pull/62) then merged as
+`c26772f72ff6bc89b456c567a5d4035e33e83f69`. It superseded the feature's main check
+[38300418454](https://github.com/ajbt200128/possums/actions/runs/38300418454), which
+was canceled by existing check concurrency. Its downstream publication
+[38300586467](https://github.com/ajbt200128/possums/actions/runs/38300586467)
+rejected source admission; build/publish were skipped. This is rejection of
+unsuccessful source CI, not a successful label-skip test.
+
+For current main `c26772f`, required
+[push CI 38300512743](https://github.com/ajbt200128/possums/actions/runs/38300512743)
+passed all three jobs. The downstream
+[publication gate 38301507760](https://github.com/ajbt200128/possums/actions/runs/38301507760)
+succeeded with `RELEASE_ROLLOUT_LABELED`, stage `source-rollout`, `rollout=false`:
+`source-checks` passed, `build` and `publish` were skipped. This exercises native
+GitHub-token PR reads and the actual post-merge skip graph, including a
+client-production change with backend/root test additions under the operator's
+discretionary policy. No image/tag/release or production candidate is created
+by those skipped jobs, and no deployment was approved for this test.
+
 ## Trust, privacy and remaining limits
 
 Only a directly queried, unambiguously associated merged main PR whose
@@ -50,7 +76,8 @@ Synthetic hostile evidence cannot escape the closed diagnostic. No request data,
 credential inspection, telemetry changes, inference or deployment is included.
 GitHub retains native workflow history; no whole-process transience is claimed.
 
-Hosted token PR-read permissions and the actual labeled skip graph still require
-qualification after merge. Source tests do not execute GitHub Actions. No
-production deployment is approved for the feature release. Existing native V3
-CLI signer and legacy-V2 freshness limitations are unchanged.
+The labeled hosted path is qualified above; unlabeled publication and manual
+label bypass are covered by existing release behavior/offline tests, not new
+live dispatches in this test. No production deployment is approved for the
+feature release. Existing native V3 CLI signer and legacy-V2 freshness
+limitations are unchanged.

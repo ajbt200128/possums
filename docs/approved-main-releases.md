@@ -1,13 +1,13 @@
 # Automatic paid releases and approved production deployment
 
-**Automatic publication qualified; simplified protected deployment pending.**
-The operator configured production approval and privately supplied the admin key.
-Automatic `v0.0.22` passed; production is disabled while the simplified gate is
-qualified. No supplemental PAT is needed. Defaults remain off; current scoped
-results are in [hosted qualification](approved-main-release-qualification.md).
-Historical
-[v0.0.20 rollout evidence](timeout-renewal-v20-rollout.md) is not qualification of
-these new workflows.
+**Release flow guide, not a live activation or deployment-status report.**
+The [2026-10-10 hosted qualification record](approved-main-release-qualification.md)
+records automatic `v0.0.22` and the then-pending simplified deployment gate;
+its disabled/pending statements describe that checkpoint, not current settings.
+Both activation switches default off in code; their effective repository values
+and exact run outcomes must be checked separately. No supplemental PAT is needed.
+Historical [v0.0.20 rollout evidence](timeout-renewal-v20-rollout.md) does not
+qualify later workflows or establish the currently served release.
 
 ## Release and approval flow
 
