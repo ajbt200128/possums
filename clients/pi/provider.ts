@@ -136,7 +136,6 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_constrained_sampling_unsupported: 'Constrained sampling unsupported; remove the option.',
   possums_custom_tools_unsupported: 'Custom tools unsupported; remove the option.',
   possums_images_unsupported: 'Images unsupported; remove images before sending.',
-  possums_mixed_provider_history: 'Mixed provider history unsupported; start a new session.',
 });
 // A failed turn is reserved for an unconfirmed backend identity/authenticity.
 // Other failures stop host control flow with a warning, never native replay.
