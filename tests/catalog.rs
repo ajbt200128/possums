@@ -1,4 +1,5 @@
 use possums::catalog::{actual_cost, Catalog, CatalogError, Model};
+use serde_json::json;
 
 fn catalog() -> Catalog {
     Catalog::parse_authenticated(
@@ -97,6 +98,9 @@ fn rejects_cost_overflow() {
     let catalog = Catalog {
         models: vec![Model {
             id: "x".into(),
+            public_name: None,
+            reasoning: None,
+            reasoning_params: None,
             context_tokens: u64::MAX,
             max_output_tokens: u64::MAX,
             input_microunits_per_million_tokens: u64::MAX,
@@ -244,6 +248,37 @@ fn unusable_catalog_fields_fail_closed() {
             Err(CatalogError::Invalid)
         );
     }
+}
+
+#[test]
+fn public_display_name_is_bounded_and_falls_back_to_id() {
+    let with_name = |name: serde_json::Value| {
+        let mut value = serde_json::json!({"object":"list","data":[{
+            "id":"m", "type":"chat", "context_window":100,
+            "endpoints":["/v1/chat/completions"],
+            "pricing":{"inputTokenPricePer1M":2,"outputTokenPricePer1M":3,"requestPrice":0}
+        }]});
+        if !name.is_null() {
+            value["data"][0]["name"] = name;
+        }
+        Catalog::parse_authenticated(&serde_json::to_vec(&value).unwrap(), 0)
+            .unwrap()
+            .models
+            .remove(0)
+            .public_name
+    };
+    // Valid names are retained; missing, empty, oversized and control/escape/
+    // bidi-format names are dropped without affecting availability.
+    assert_eq!(
+        with_name(json!("DeepSeek V4.1 Flash")),
+        Some("DeepSeek V4.1 Flash".into())
+    );
+    assert_eq!(with_name(serde_json::Value::Null), None);
+    assert_eq!(with_name(json!("")), None);
+    assert_eq!(with_name(json!("x".repeat(129))), None);
+    assert_eq!(with_name(json!("bad\u{001b}[31m")), None);
+    assert_eq!(with_name(json!("spoof\u{202e}gnirts")), None);
+    assert_eq!(with_name(json!(42)), None);
 }
 
 #[test]

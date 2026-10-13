@@ -76,6 +76,9 @@ fn request() -> (Model, [Message; 1]) {
     (
         Model {
             id: "fixture".into(),
+            public_name: None,
+            reasoning: None,
+            reasoning_params: None,
             context_tokens: 32,
             max_output_tokens: 16,
             input_microunits_per_million_tokens: 1,

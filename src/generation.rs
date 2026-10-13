@@ -50,6 +50,7 @@ pub(crate) struct Generation<'a> {
 // this core neither decodes wire input nor copies complete histories.
 pub(crate) struct GenerationInput {
     pub model: String,
+    pub reasoning_options: crate::catalog::ReasoningOptions,
     pub history: Vec<Message>,
     pub prompt: String,
 }
@@ -62,6 +63,7 @@ pub(crate) struct Submission<'a> {
 
 pub(crate) struct PreparedGeneration {
     pub model: Model,
+    pub reasoning_options: crate::catalog::ReasoningOptions,
     pub history: Vec<Message>,
     pub prompt: String,
     /// Original maximum, not the context-legal allowance or a refreshed price.
@@ -71,11 +73,13 @@ pub(crate) struct PreparedGeneration {
 
 pub(crate) struct StructuredGenerationInput {
     pub model: String,
+    pub reasoning_options: crate::catalog::ReasoningOptions,
     pub invocation: ToolInvocation,
 }
 
 pub(crate) struct PreparedStructuredGeneration {
     pub model: Model,
+    pub reasoning_options: crate::catalog::ReasoningOptions,
     pub invocation: ToolInvocation,
     pub reserved_microunits: u64,
     pub cache_scope: crate::auth::CacheScope,
@@ -90,6 +94,12 @@ impl RequestInput {
         match self {
             Self::Text(input) => &input.model,
             Self::Structured(input) => &input.model,
+        }
+    }
+    fn reasoning_options(&self) -> &crate::catalog::ReasoningOptions {
+        match self {
+            Self::Text(input) => &input.reasoning_options,
+            Self::Structured(input) => &input.reasoning_options,
         }
     }
     fn profile(&self, inference: &SharedInference) -> Result<Option<ToolProfile>, Rejection> {
@@ -117,6 +127,7 @@ pub(crate) enum Rejection {
     Unavailable,
     Upstream(InferenceFailure),
     InvalidModel,
+    InvalidReasoning,
     Admission(AdmissionError),
     Duplicate(Outcome),
     Context,
@@ -134,7 +145,7 @@ impl Generation<'_> {
     fn reject(&self, rejection: Rejection, model: AdmissionModel) -> Rejection {
         use telemetry::Rejection as R;
         let reason = match &rejection {
-            Rejection::InvalidModel => R::Input,
+            Rejection::InvalidModel | Rejection::InvalidReasoning => R::Input,
             Rejection::Admission(AdmissionError::Auth(_)) => R::Auth,
             Rejection::Admission(AdmissionError::Accounting(
                 crate::accounting::AccountingError::InsufficientCredit,
@@ -247,6 +258,9 @@ impl Generation<'_> {
         let quote = catalog
             .reservation_quote(input.model())
             .map_err(|_| self.reject(Rejection::InvalidModel, AdmissionModel::Unknown))?;
+        if !quote.model.allows_reasoning(input.reasoning_options()) {
+            return Err(self.reject(Rejection::InvalidReasoning, AdmissionModel::Unknown));
+        }
         let model = QualifiedModel::from_authenticated_quote(&quote);
         let admission_model = AdmissionModel::Qualified(model);
         // The caller already owns the defensive heavy-memory lease. Generation
@@ -327,16 +341,16 @@ impl Generation<'_> {
                                 .resources
                                 .input("preflight", &input.history, &input.prompt);
                             let tokens = inference
-                                .count_tokens(&input.model, &input.history, work_heavy.clone())
+                                .count_request_tokens(&input.model, (&input.history, None, &input.reasoning_options), work_heavy.clone())
                                 .await
                                 .map_err(|error| Rejection::Upstream(error.failure()))?;
                             input.prompt = input.history.pop().expect("preflight prompt").content;
                             tokens
                         }
                         RequestInput::Structured(input) => inference
-                            .count_invocation_tokens(
+                            .count_request_tokens(
                                 &input.model,
-                                &input.invocation,
+                                (&[], Some(&input.invocation), &input.reasoning_options),
                                 work_heavy.clone(),
                             )
                             .await
@@ -373,6 +387,7 @@ impl Generation<'_> {
                 let prepared = match job.input {
                     RequestInput::Text(input) => Prepared::Text(PreparedGeneration {
                         model: quote.model,
+                        reasoning_options: input.reasoning_options,
                         history: input.history,
                         prompt: input.prompt,
                         reserved_microunits,
@@ -381,6 +396,7 @@ impl Generation<'_> {
                     RequestInput::Structured(input) => {
                         Prepared::Structured(PreparedStructuredGeneration {
                             model: quote.model,
+                            reasoning_options: input.reasoning_options,
                             invocation: input.invocation,
                             reserved_microunits,
                             cache_scope: admission.cache_scope,

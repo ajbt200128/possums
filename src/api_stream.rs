@@ -33,7 +33,12 @@ pub(crate) fn compose(
         heavy,
         input.model,
         input.reserved_microunits,
-        (input.cache_scope, input.history, None),
+        (
+            input.cache_scope,
+            input.history,
+            None,
+            input.reasoning_options,
+        ),
         inference,
         usage_metrics,
     )
@@ -50,7 +55,12 @@ pub(crate) fn compose_structured(
         heavy,
         input.model,
         input.reserved_microunits,
-        (input.cache_scope, Vec::new(), Some(input.invocation)),
+        (
+            input.cache_scope,
+            Vec::new(),
+            Some(input.invocation),
+            input.reasoning_options,
+        ),
         inference,
         usage_metrics,
     )
@@ -64,11 +74,12 @@ fn compose_core(
         crate::auth::CacheScope,
         Vec<Message>,
         Option<ToolInvocation>,
+        crate::catalog::ReasoningOptions,
     ),
     inference: SharedInference,
     usage_metrics: bool,
 ) -> DeliveryBody {
-    let (scope, messages, invocation) = input;
+    let (scope, messages, invocation, options) = input;
     let disconnect = owner.disconnect();
     let (tx, body) = delivery(
         heavy.clone(),
@@ -88,7 +99,7 @@ fn compose_core(
             let result = tokio::select! {
                 biased;
                 _ = disconnect.cancelled() => Err(InferenceFailure::StreamTransportFailed.into()),
-                result = inference.generate_forwarded_stream(&model, &messages, invocation.as_ref(), &scope, heavy, &mut sink) => result,
+                result = inference.generate_forwarded_request(&model, (&messages, invocation.as_ref(), &options), &scope, heavy, &mut sink) => result,
             };
             (result, sink.evidence)
         };

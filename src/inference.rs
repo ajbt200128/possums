@@ -103,6 +103,24 @@ pub trait Inference: Send + Sync {
         messages: &[Message],
         heavy: Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError>;
+    async fn count_request_tokens(
+        &self,
+        model: &str,
+        input: (
+            &[Message],
+            Option<&ToolInvocation>,
+            &crate::catalog::ReasoningOptions,
+        ),
+        heavy: Arc<crate::telemetry::hooks::Lease>,
+    ) -> Result<u64, InferenceError> {
+        if !input.2.is_empty() {
+            return Err(InferenceFailure::RequestEncodingFailed.into());
+        }
+        match input.1 {
+            Some(invocation) => self.count_invocation_tokens(model, invocation, heavy).await,
+            None => self.count_tokens(model, input.0, heavy).await,
+        }
+    }
     /// Stream only after trust/catalog/reservation and context preflight.
     /// `model` carries the full context-legal output allowance. Successful usage
     /// is terminal, withheld until validated finish, final usage and transport EOF.
@@ -167,6 +185,27 @@ pub trait Inference: Send + Sync {
         _on_delta: &mut dyn DeltaSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
         Err(InferenceError::Unavailable)
+    }
+
+    /// Catalog-admitted options only; legacy implementations cannot silently
+    /// discard an explicitly requested control.
+    async fn generate_forwarded_request(
+        &self,
+        model: &Model,
+        input: (
+            &[Message],
+            Option<&ToolInvocation>,
+            &crate::catalog::ReasoningOptions,
+        ),
+        scope: &crate::auth::CacheScope,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
+        sink: &mut dyn forward::ForwardSink,
+    ) -> Result<stream::StreamCompletion, InferenceError> {
+        if !input.2.is_empty() {
+            return Err(InferenceFailure::RequestEncodingFailed.into());
+        }
+        self.generate_forwarded_stream(model, input.0, input.1, scope, heavy, sink)
+            .await
     }
 
     /// Native forwarding entry point. Scope is server-owned session memory and
@@ -322,6 +361,14 @@ impl TinfoilInference {
         heavy: Option<Arc<crate::telemetry::hooks::Lease>>,
     ) -> Result<u64, InferenceError> {
         let (body, released) = tokenizer_request_body(model, messages, heavy)?;
+        self.send_tokenizer(body, released).await
+    }
+
+    async fn send_tokenizer(
+        &self,
+        body: reqwest::Body,
+        released: upload::UploadReleased,
+    ) -> Result<u64, InferenceError> {
         let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
         let url = format!("{}/v1/chat/completions/input_tokens", self.origin);
         let request = self
@@ -1035,6 +1082,36 @@ impl Inference for TinfoilInference {
         heavy: Arc<crate::telemetry::hooks::Lease>,
         sink: &mut dyn forward::ForwardSink,
     ) -> Result<stream::StreamCompletion, InferenceError> {
+        self.generate_forwarded_request(
+            model,
+            (
+                messages,
+                invocation,
+                &crate::catalog::ReasoningOptions::default(),
+            ),
+            scope,
+            heavy,
+            sink,
+        )
+        .await
+    }
+
+    async fn generate_forwarded_request(
+        &self,
+        model: &Model,
+        input: (
+            &[Message],
+            Option<&ToolInvocation>,
+            &crate::catalog::ReasoningOptions,
+        ),
+        scope: &crate::auth::CacheScope,
+        heavy: Arc<crate::telemetry::hooks::Lease>,
+        sink: &mut dyn forward::ForwardSink,
+    ) -> Result<stream::StreamCompletion, InferenceError> {
+        let (messages, invocation, options) = input;
+        if !model.allows_reasoning(options) {
+            return Err(InferenceFailure::RequestEncodingFailed.into());
+        }
         let builder = match invocation {
             Some(invocation) => {
                 self.tool_profile(&model.id)
@@ -1043,7 +1120,12 @@ impl Inference for TinfoilInference {
             }
             None => text_request(&model.id, messages)?,
         };
-        let body = stream::builder_body(builder, model.max_output_tokens, scope, heavy.clone())?;
+        let body = stream::builder_body(
+            options.apply(builder),
+            model.max_output_tokens,
+            scope,
+            heavy.clone(),
+        )?;
         let url = format!("{}/v1/chat/completions", self.origin);
         let request = self
             .authenticate(self.http()?.post(&url))
@@ -1075,6 +1157,33 @@ impl Inference for TinfoilInference {
         heavy: Arc<crate::telemetry::hooks::Lease>,
     ) -> Result<u64, InferenceError> {
         self.count_tokens_owned(model, messages, Some(heavy)).await
+    }
+
+    async fn count_request_tokens(
+        &self,
+        model: &str,
+        input: (
+            &[Message],
+            Option<&ToolInvocation>,
+            &crate::catalog::ReasoningOptions,
+        ),
+        heavy: Arc<crate::telemetry::hooks::Lease>,
+    ) -> Result<u64, InferenceError> {
+        let builder = match input.1 {
+            Some(invocation) => {
+                self.tool_profile(model)
+                    .ok_or(InferenceFailure::ToolProfileUnqualified)?;
+                invocation_request(model, invocation)?
+            }
+            None => text_request(model, input.0)?,
+        };
+        let bytes = crate::bounded_json::to_vec(
+            &input.2.apply(builder).build(),
+            MAX_TOKENIZER_REQUEST_BYTES,
+        )
+        .map_err(|_| InferenceFailure::RequestEncodingFailed)?;
+        let (body, released) = upload::body(bytes, Some(heavy));
+        self.send_tokenizer(body, released).await
     }
 
     async fn generate_stream(
@@ -1110,22 +1219,7 @@ impl Inference for TinfoilInference {
         self.tool_profile(model)
             .ok_or(InferenceFailure::ToolProfileUnqualified)?;
         let (body, released) = invocation_tokenizer_body(model, invocation, heavy)?;
-        let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
-        let url = format!("{}/v1/chat/completions/input_tokens", self.origin);
-        let request = self
-            .authenticate(self.http()?.post(&url))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body);
-        let response = tokio::time::timeout_at(deadline, request.send())
-            .await
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendFailed))?
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendFailed))?;
-        if response.url().as_str() != url {
-            return Err(InferenceError::Detailed(
-                InferenceFailure::EndpointBindingFailed,
-            ));
-        }
-        finish_tokenizer(response, released, deadline).await
+        self.send_tokenizer(body, released).await
     }
 
     async fn generate_invocation_stream(

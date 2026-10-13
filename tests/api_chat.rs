@@ -35,6 +35,8 @@ struct Provider {
     revoke_qualification: AtomicBool,
     qualification_checks: AtomicUsize,
     invocation: Mutex<Option<Value>>,
+    reasoning_params: Mutex<Value>,
+    reasoning_controls: Mutex<Vec<possums::catalog::ReasoningOptions>>,
     tokens: AtomicU64,
     tokenizer_calls: AtomicUsize,
     generation_calls: AtomicUsize,
@@ -80,6 +82,45 @@ impl EvidenceVerifier for Provider {
 }
 #[async_trait]
 impl Inference for Provider {
+    async fn count_request_tokens(
+        &self,
+        model: &str,
+        input: (
+            &[Message],
+            Option<&ToolInvocation>,
+            &possums::catalog::ReasoningOptions,
+        ),
+        heavy: Arc<possums::telemetry::hooks::Lease>,
+    ) -> Result<u64, InferenceError> {
+        self.reasoning_controls
+            .lock()
+            .unwrap()
+            .push(input.2.clone());
+        match input.1 {
+            Some(invocation) => self.count_invocation_tokens(model, invocation, heavy).await,
+            None => self.count_tokens(model, input.0, heavy).await,
+        }
+    }
+    async fn generate_forwarded_request(
+        &self,
+        model: &Model,
+        input: (
+            &[Message],
+            Option<&ToolInvocation>,
+            &possums::catalog::ReasoningOptions,
+        ),
+        scope: &possums::auth::CacheScope,
+        heavy: Arc<possums::telemetry::hooks::Lease>,
+        sink: &mut dyn possums::inference::forward::ForwardSink,
+    ) -> Result<StreamCompletion, InferenceError> {
+        assert!(model.allows_reasoning(input.2));
+        self.reasoning_controls
+            .lock()
+            .unwrap()
+            .push(input.2.clone());
+        self.generate_forwarded_stream(model, input.0, input.1, scope, heavy, sink)
+            .await
+    }
     async fn generate_forwarded_stream(
         &self,
         model: &Model,
@@ -191,7 +232,7 @@ impl Inference for Provider {
         } else {
             "other"
         };
-        Ok(json!({"object":"list","data":[{"id":id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"cachedInputTokenPricePer1M":self.cache_price.load(Ordering::SeqCst).then_some(0),"requestPrice":0}}]}).to_string().into_bytes())
+        Ok(json!({"object":"list","data":[{"id":id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"reasoning":true,"reasoning_params":self.reasoning_params.lock().unwrap().clone(),"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"cachedInputTokenPricePer1M":self.cache_price.load(Ordering::SeqCst).then_some(0),"requestPrice":0}}]}).to_string().into_bytes())
     }
     async fn count_tokens(
         &self,
@@ -342,6 +383,8 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         revoke_qualification: false.into(),
         qualification_checks: 0.into(),
         invocation: Mutex::new(None),
+        reasoning_params: Mutex::new(Value::Null),
+        reasoning_controls: Mutex::new(Vec::new()),
         tokens: 2.into(),
         tokenizer_calls: 0.into(),
         generation_calls: 0.into(),
@@ -417,6 +460,76 @@ async fn duplicate(state: &AppState, bearer: &str, submission: &str, expected: &
     let value: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(value["error"]["code"] == "duplicate_request");
     assert!(value["error"]["outcome"] == expected);
+}
+
+#[tokio::test]
+async fn reasoning_controls_are_catalog_gated_before_tokenization_and_reserved_once() {
+    let metadata = json!({"effort_map":{"low":"low","medium":"high","high":"xhigh"},"params":{
+        "/v1/chat/completions":{"enable":{"chat_template_kwargs":{"thinking":true,"reasoning_effort":"$EFFORT"}},"disable":{"chat_template_kwargs":{"thinking":false}}}
+    }});
+    for (control, structured) in [
+        json!({"chat_template_kwargs":{"thinking":true,"reasoning_effort":"high"}}),
+        json!({"chat_template_kwargs":{"thinking":false}}),
+        json!({}),
+    ]
+    .into_iter()
+    .flat_map(|control| [(control.clone(), false), (control, true)])
+    {
+        let (state, provider, bearer, submission) = fixture(100);
+        *provider.reasoning_params.lock().unwrap() = metadata.clone();
+        provider.qualified.store(structured, Ordering::SeqCst);
+        let mut input = json!({"model":"m","stream":true,"submission":submission,"messages":[{"role":"user","content":"synthetic"}]});
+        if structured {
+            input["tools"] = json!([{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]);
+        }
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(control.as_object().unwrap().clone());
+        let response = router(state.clone())
+            .oneshot(json_request(&bearer, input))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        provider.finish.notify_one();
+        response.into_body().collect().await.unwrap();
+        let expected: possums::catalog::ReasoningOptions = serde_json::from_value(control).unwrap();
+        assert_eq!(
+            *provider.reasoning_controls.lock().unwrap(),
+            vec![expected.clone(), expected]
+        );
+        assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
+        terminal(&state, 93).await;
+        duplicate(&state, &bearer, &submission, "settled").await;
+    }
+    for control in [
+        json!({"reasoning_effort":"high"}),
+        json!({"reasoning_effort":null}),
+        json!({"chat_template_kwargs":null}),
+        json!({"chat_template_kwargs":{"thinking":true,"reasoning_effort":"PRIVATE_HOSTILE_VALUE"}}),
+        json!({"chat_template_kwargs":{"thinking":true,"extra":"PRIVATE_HOSTILE_VALUE"}}),
+        json!({"chat_template_kwargs":{"thinking":true,"reasoning_effort":"medium"}}),
+        json!({"chat_template_kwargs":{}}),
+    ] {
+        let (state, provider, bearer, submission) = fixture(100);
+        *provider.reasoning_params.lock().unwrap() = metadata.clone();
+        let mut input = json!({"model":"m","stream":true,"submission":submission,"messages":[{"role":"user","content":"PRIVATE_PROMPT"}]});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(control.as_object().unwrap().clone());
+        let response = router(state.clone())
+            .oneshot(json_request(&bearer, input))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE"));
+        assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.accounting.available("demo"), Some(100));
+    }
 }
 
 #[path = "support/duplicate_usage_metrics.rs"]

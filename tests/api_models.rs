@@ -139,6 +139,46 @@ fn no_prompt_or_credit_work(state: &AppState, provider: &Provider) {
 }
 
 #[tokio::test]
+async fn reasoning_metadata_is_opt_in_and_default_exact_wire_is_unchanged() {
+    let params = json!({"effort_map":{"low":"low","medium":"high","high":"xhigh"},"params":{
+        "/v1/chat/completions":{"enable":{"chat_template_kwargs":{"thinking":true,"reasoning_effort":"$EFFORT"}},"disable":{"chat_template_kwargs":{"thinking":false}}}
+    }});
+    let mut upstream = model("synthetic", 100, json!(1), json!(1));
+    upstream["name"] = json!("Synthetic Display");
+    upstream["reasoning"] = json!(true);
+    upstream["reasoning_params"] = params.clone();
+    let (state, provider, _, bearer) = fixture(bytes(vec![upstream]));
+    let expected = json!({"object":"list","data":[{"object":"model","id":"synthetic","context_tokens":"100","max_output_tokens":"100","input_microunits_per_million_tokens":"1000000","output_microunits_per_million_tokens":"1000000","maximum_reservation_microunits":"260"}]});
+    assert_eq!(
+        discover(&state, Some(&bearer), StatusCode::OK).await,
+        expected
+    );
+    for values in [vec!["true"], vec!["false"], vec!["true", "true"]] {
+        let mut request =
+            Request::get("/v1/models").header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+        for value in &values {
+            request = request.header("x-possums-reasoning-metadata", *value);
+        }
+        let response = router(state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let result: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let mut opted = expected.clone();
+        if values == ["true"] {
+            opted["data"][0]["name"] = json!("Synthetic Display");
+            opted["data"][0]["reasoning"] = json!(true);
+            opted["data"][0]["reasoning_params"] = params.clone();
+        }
+        assert_eq!(result, opted);
+    }
+    no_prompt_or_credit_work(&state, &provider);
+}
+
+#[tokio::test]
 async fn complete_models_exact_prices_and_maximum_quotes_ignore_affordability() {
     let raw = bytes(vec![
         model("org/cheap:v1", 20, json!(0.1234567), json!(1.2345678)),
