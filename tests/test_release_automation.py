@@ -55,7 +55,8 @@ def view(tag="v1.2.2") -> dict:
     data.update(repo=r.REPO, current_tag=tag, status="running", update_tag=None,
                 debug=False, disable_cc_mode=False, held=False,
                 variables={"private": "SYNTHETIC-SECRET"}, secrets=sorted(d.REQUIRED_REFS),
-                ssh_keys=[], cpus=2, gpus=0, memory_mb=8192, domain=d.DOMAIN)
+                ssh_keys=[], cpus=2, gpus=0, memory_mb=8192, domain=d.DOMAIN,
+                id="11111111-1111-1111-1111-111111111111", name=d.NAME)
     return data
 
 
@@ -364,11 +365,72 @@ class ProvenanceTest(StopTest):
             self.stop("signature", r.verify_statement, changed, manifest, digest, R, V)
 
 
+class ReadOnlyPlanTest(StopTest):
+    def fixture(self):
+        data = plan()
+        data.update(instance_id=view()["id"], name=d.NAME)
+        return json.dumps(data).encode()
+
+    def check(self, raw):
+        with patch.dict(os.environ, {"TINFOIL_ADMIN_KEY": "SYNTHETIC-SECRET"}), \
+                patch.object(d.urllib.request, "build_opener") as build:
+            build.return_value.open.return_value = io.BytesIO(raw)
+            d.plan_update(view(), V)
+            request = build.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, "https://api.tinfoil.sh/api/containers/" + view()["id"] + "/update/plan")
+            self.assertEqual(json.loads(request.data), {"tag": V, "custom_domain": d.DOMAIN})
+            self.assertEqual(build.return_value.open.call_args.kwargs, {"timeout": 30})
+            self.assertIsInstance(build.call_args.args[0], d.urllib.request.ProxyHandler)
+            self.assertIsInstance(build.call_args.args[1], d.NoPlanRedirect)
+
+    def test_supported_read_only_route_has_only_fixed_update_fields(self):
+        self.check(self.fixture())
+        self.assertIsNone(d.NoPlanRedirect().redirect_request(None, None, None, None, None, None))
+
+    def test_wrong_instance_resources_or_hostile_plan_are_rejected(self):
+        for field, value in (("instance_id", "SYNTHETIC-SECRET"), ("name", "other"),
+                             ("current", {"tag": "v1.2.2", "cpus": 99, "gpus": 0, "memory_mb": 8192}),
+                             ("read_only", False)):
+            data = json.loads(self.fixture())
+            data[field] = value
+            self.stop("plan_rejected", self.check, json.dumps(data).encode())
+        self.stop("plan_rejected", self.check, b"SYNTHETIC-SECRET")
+        with patch.object(d, "LIMIT", 32):
+            self.stop("plan_rejected", self.check, self.fixture())
+
+    def test_http_and_transport_failures_keep_safe_categories(self):
+        for status in (302, 403, 500):
+            with patch.dict(os.environ, {"TINFOIL_ADMIN_KEY": "synthetic"}), \
+                    patch.object(d.urllib.request, "build_opener") as build:
+                build.return_value.open.side_effect = d.urllib.error.HTTPError("private-url", status, "SYNTHETIC-SECRET", {}, None)
+                with self.assertRaises(r.Stop) as caught:
+                    d.plan_update(view(), V)
+                self.assertEqual(caught.exception.code, "plan_http")
+                self.assertEqual(caught.exception.status, status)
+                self.assertNotIn("SYNTHETIC-SECRET", json.dumps(r.diagnostic(caught.exception.code, caught.exception.status)))
+        with patch.dict(os.environ, {"TINFOIL_ADMIN_KEY": "synthetic"}), \
+                patch.object(d.urllib.request, "build_opener") as build:
+            build.return_value.open.side_effect = OSError("SYNTHETIC-SECRET")
+            self.stop("plan_fetch", d.plan_update, view(), V)
+        error = d.urllib.error.HTTPError("private-url", 403, "SYNTHETIC-SECRET", {}, None)
+        with patch.dict(os.environ, {"TINFOIL_ADMIN_KEY": "synthetic"}), \
+                patch.object(d.urllib.request, "build_opener") as build, \
+                patch.object(error, "close", side_effect=OSError("SYNTHETIC-SECRET")):
+            build.return_value.open.side_effect = error
+            with self.assertRaises(r.Stop) as caught:
+                d.plan_update(view(), V)
+            self.assertEqual((caught.exception.code, caught.exception.status), ("plan_http", 403))
+        error.close()
+
+
 class MutationTest(StopTest):
     def setUp(self):
         self.environment = patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "TINFOIL_ADMIN_KEY": "synthetic"})
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        planning = patch.object(d, "plan_update")
+        self.planning = planning.start()
+        self.addCleanup(planning.stop)
 
     def result(self):
         return subprocess.CompletedProcess([], 0, b"opaque", json.dumps(plan()).encode())
@@ -452,6 +514,12 @@ class MutationTest(StopTest):
                      subprocess.CompletedProcess([], 0, json.dumps(after).encode(), b"")]
         with patch.object(d, "call", side_effect=responses):
             self.stop("configuration_changed", d.update_once, "unused", V, lambda: None)
+
+    def test_rejected_read_only_plan_sends_zero_updates(self):
+        self.planning.side_effect = r.Stop("plan_rejected")
+        with patch.object(d, "get", return_value=view()), patch.object(d, "call") as call:
+            self.stop("plan_rejected", d.update_once, "unused", V, lambda: None)
+            call.assert_not_called()
 
     def test_stale_after_approval_sends_zero_updates(self):
         with patch.object(d, "get", return_value=view()), patch.object(d, "call") as call:

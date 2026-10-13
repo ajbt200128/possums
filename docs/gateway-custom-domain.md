@@ -126,7 +126,10 @@ focused offline tests and documentation:
 - `scripts/deploy.py` passes `--custom-domain gateway.possums.dev` to its existing
   official checksum-pinned CLI `0.19.0` update. It accepts only the known old/new
   production source hostnames and requires the new hostname at completion.
-- The initial post-call plan must report only `custom_domain` in changed settings;
+- A read-only Admin API plan is validated before invocation, including instance
+  identity, current resources and the same approved target/configuration
+  constraints as the post-call CLI plan. The initial plans must report only
+  `custom_domain` in changed settings;
   subsequent releases at the new hostname must report no setting changes. All
   other existing opaque configuration comparisons and release/current-main,
   protected environment, approval, no-replay and no-downtime gates remain.
@@ -136,15 +139,27 @@ focused offline tests and documentation:
   the hostname itself. This repository's normal reviewed current-main release
   path remains the rollout mechanism; no local admin mutation is repeated.
 
-The ordinary wrapper still reviews the CLI plan **after** the call. This change
-is not a claim of independent pre-mutation plan approval or transactional
-head/configuration admission. CLI closed stdin and absence of `--yes` still
-refuse downtime or changed-review confirmation. Plan setting spelling remains
-an actual-server qualification boundary: an unsupported shape/name must fail
-acceptance, never be guessed from raw error text or trigger a replay.
+Independent review found no confirmed defect but identified unverified spelling
+of the server's hostname-change plan label. A credentialed local request to the
+documented read-only plan route returned HTTP 403; no deployment was submitted,
+and neither a missing permission nor another root cause is inferred from that
+status. The existing saved CLI login was consumed in memory for this fixed-host,
+TLS-protected request and was not printed, copied to CI, or persisted elsewhere.
+
+The candidate resolves this admission gap by acquiring and validating the
+read-only plan using the existing production environment credential after
+approval, before the one CLI mutation. HTTP failures retain their observed
+status through cleanup; transport and plan validation fail closed in separate
+content-free categories. The request uses fixed HTTPS control-plane routing,
+no proxies/redirects, bounded response reading and no automatic retry. The CLI
+also retains its own planning and post-call review. Unsupported setting spelling
+stops **before** mutation; never widen it from an exception string or replay.
+This is not transactional head/configuration admission or a reservation: main
+and policy are rechecked immediately before invocation, and CLI closed stdin
+and absence of `--yes` still refuse downtime/changed-review confirmation.
 
 Offline backend qualification: `python3 -m unittest discover -s tests -p
- 'test_release*.py'` passed 57 tests; the focused Go serving-verifier tests passed.
+ 'test_release*.py'` passed 61 tests; the focused Go serving-verifier tests passed.
 Fixtures cover the exact old-to-new transition, unapproved/missing source
 hostnames, extra/duplicate/wrong plan settings, unchanged old-host terminal
 state, hostile post-update hostname, and unchanged one-mutation/current-main,
@@ -172,8 +187,10 @@ Reviewed [PRIVACY.md mandatory change control](../PRIVACY.md#mandatory-reference
 [data handling boundaries](../PRIVACY.md#data-handling-boundaries), and
 [telemetry restrictions](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data).
 Only public DNS/control-plane provisioning metadata is recorded here. Existing
-CLI credentials were not read or exported; CLI control-plane responses and
-errors were captured in memory and reduced to selected fields/local categories.
+CLI credentials were not printed/exported or copied to CI; the existing login
+was read only in memory for the separately documented read-only Admin API plan
+check. CLI/API control-plane responses and errors were captured in memory and
+reduced to selected fields/local categories.
 No diagnostic logs, telemetry, collector, request tracing or support bundle was
 added. Native host/tool conversation persistence remains a separate boundary;
 this is not a whole-process transience claim. DNS-only configuration avoids

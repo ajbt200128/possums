@@ -36,9 +36,12 @@ qualify later workflows or establish the currently served release.
 8. The official checksum-pinned CLI updates once, preserving opaque settings and
    secret references except the explicitly approved hostname transition from
    `possum-phase0.possums.containers.tinfoil.dev` to `gateway.possums.dev`. Other
-   source hostnames are rejected. The update explicitly requests the new domain;
-   post-call plan review permits only that `custom_domain` setting change on the
-   initial transition and no setting changes thereafter. Bounded readback requires
+   source hostnames are rejected. A bounded, redirect-free read-only Admin API
+   plan is checked before the CLI invocation using the production credential;
+   it must identify this instance/current resources and only the approved
+   `custom_domain` setting change on the initial transition, with no setting
+   changes thereafter. The update explicitly requests the new domain and repeats
+   the plan constraints in post-call review. Bounded readback requires
    the new hostname, target running/no pending, confidential mode on and debug off.
    A separate credential-free public serving check at the new hostname uses the
    already-pinned Go SDK's V3 appraisal and TLS-key-bound client. See
@@ -161,8 +164,9 @@ approval. Approval alone does not establish that deployment or serving succeeded
 
 - No automatic inference, mutation retry, rollback or downtime confirmation.
   Closed stdin and no `--yes` leave the official CLI's pre-mutation plan checks
-  intact. Our detailed plan inspection is **post-call**, not independent
-  pre-mutation human plan review or proof of uninterrupted availability.
+  intact. The Admin API plan is checked before mutation; the CLI's plan is also
+  inspected **post-call**. Neither is a transactional reservation, independent
+  pre-mutation human plan review, or proof of uninterrupted availability.
 - Mutating workflow reruns are refused (`run_attempt` must be 1). A new run is not
   a safe retry merely because it has a new ID. On an uncertain update, stop
   approvals, inspect production read-only and reconcile privately before any

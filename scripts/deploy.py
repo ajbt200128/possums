@@ -11,6 +11,9 @@ import re
 import sys
 import tarfile
 import time
+import urllib.error
+import urllib.request
+from contextlib import suppress
 from pathlib import Path
 
 import release as r
@@ -48,6 +51,9 @@ r.CODES.update({
     "control_read": ("control-plane", "Inspect the production state privately; no update was replayed."),
     "control_shape": ("control-plane", "Resolve the unsupported control-plane response without sharing its contents."),
     "not_stable": ("plan", "Reconcile pending, held, debug, non-confidential or non-running production state before a new request."),
+    "plan_http": ("pre-update-plan", "Check production admin planning access and the observed HTTP status; no update was sent."),
+    "plan_fetch": ("pre-update-plan", "The read-only plan could not be acquired; cause unknown. Check control-plane connectivity; no update was sent."),
+    "plan_rejected": ("pre-update-plan", "The read-only plan did not match the approved hostname-only configuration change and release; no update was sent."),
     "plan_missing": ("post-call-plan", "The update may have happened. Privately reconcile the missing CLI plan; never replay automatically."),
     "plan_strategy": ("post-call-plan", "Privately reconcile the unexpected strategy, hold or downtime policy; no replay or rollback."),
     "plan_target": ("post-call-plan", "Privately reconcile the unexpected source or target; no replay or rollback."),
@@ -246,6 +252,46 @@ def inspect_plan(raw, previous, tag, previous_domain=DOMAIN):
         raise r.Stop("plan_missing") from None
 
 
+class NoPlanRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def plan_update(before, tag):
+    """The documented Admin API has a read-only plan route; the CLI has no plan-only command."""
+    try:
+        r.require(isinstance(before["id"], str) and re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", before["id"]), "plan_rejected")
+        body = json.dumps({"tag": tag, "custom_domain": DOMAIN}).encode()
+        request = urllib.request.Request("https://api.tinfoil.sh/api/containers/" + before["id"] + "/update/plan",
+            data=body, headers={"Authorization": "Bearer " + os.environ["TINFOIL_ADMIN_KEY"],
+                               "Content-Type": "application/json"}, method="POST")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoPlanRedirect())
+        with opener.open(request, timeout=30) as response:
+            raw = response.read(LIMIT + 1)
+        r.require(len(raw) <= LIMIT, "plan_rejected")
+        plan = json.loads(raw)
+        r.require(isinstance(plan, dict), "plan_rejected")
+        r.require(plan.get("instance_id") == before["id"] and plan.get("name") == NAME, "plan_rejected")
+        r.require(all(plan.get("current", {}).get(field) == before[field]
+                      for field in ("cpus", "gpus", "memory_mb")), "plan_rejected")
+        try:
+            inspect_plan(raw, before["current_tag"], tag, before["domain"])
+        except r.Stop:
+            raise r.Stop("plan_rejected") from None
+    except urllib.error.HTTPError as error:
+        status = error.code
+        # Cleanup must not erase the observed HTTP failure or expose raw errors.
+        with suppress(Exception):
+            error.close()
+        raise r.Stop("plan_http", status) from None
+    except r.Stop:
+        raise
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise r.Stop("plan_rejected") from None
+    except Exception:
+        raise r.Stop("plan_fetch") from None
+
+
 def update_once(cli, tag, final_gate):
     """Testable mutation primitive; entry point verifies policy and public provenance.
 
@@ -259,7 +305,8 @@ def update_once(cli, tag, final_gate):
     r.require(before.get("domain") in (OLD_DOMAIN, DOMAIN), "domain_source")
     r.require(isinstance(previous, str) and re.fullmatch(r.VERSION, previous) is not None
               and previous != tag and stable_running(before, previous), "not_stable")
-    final_gate()  # Main/policy recheck AFTER approval, immediately before invocation.
+    plan_update(before, tag)
+    final_gate()  # Main/policy recheck AFTER approval and read-only planning, immediately before invocation.
     try:
         result = call(cli, ["container", "update", NAME, "--tag", tag,
                             "--custom-domain", DOMAIN, "--output", "json"], timeout=1800)
