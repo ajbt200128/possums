@@ -12,7 +12,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 def load(name):
@@ -379,6 +379,11 @@ class ReadOnlyPlanTest(StopTest):
             request = build.return_value.open.call_args.args[0]
             self.assertEqual(request.full_url, "https://api.tinfoil.sh/api/containers/" + view()["id"] + "/update/plan")
             self.assertEqual(json.loads(request.data), {"tag": V, "custom_domain": d.DOMAIN})
+            self.assertEqual(request.get_method(), "POST")
+            self.assertEqual(request.get_header("Authorization"), "Bearer SYNTHETIC-SECRET")
+            self.assertEqual(request.get_header("Content-type"), "application/json")
+            self.assertEqual(request.get_header("Accept"), "application/json")
+            self.assertEqual(request.get_header("User-agent"), "possums-release-verifier/1")
             self.assertEqual(build.return_value.open.call_args.kwargs, {"timeout": 30})
             self.assertIsInstance(build.call_args.args[0], d.urllib.request.ProxyHandler)
             self.assertIsInstance(build.call_args.args[1], d.NoPlanRedirect)
@@ -397,6 +402,18 @@ class ReadOnlyPlanTest(StopTest):
             self.stop("plan_rejected", d.update_once, "unused", V, lambda: None)
             call.assert_not_called()
         self.stop("plan_configuration", d.inspect_plan, json.dumps(data).encode(), "v1.2.2", V)
+
+    def test_plan_http_refusal_never_reaches_update_or_final_admission(self):
+        with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "TINFOIL_ADMIN_KEY": "synthetic"}), \
+                patch.object(d.urllib.request, "build_opener") as build, \
+                patch.object(d, "get", return_value=view()), patch.object(d, "call") as call:
+            build.return_value.open.side_effect = d.urllib.error.HTTPError("private-url", 403, "SYNTHETIC-SECRET", {}, None)
+            gate = Mock()
+            with self.assertRaises(r.Stop) as caught:
+                d.update_once("unused", V, gate)
+            self.assertEqual((caught.exception.code, caught.exception.status), ("plan_http", 403))
+            call.assert_not_called()
+            gate.assert_not_called()
 
     def test_documented_secret_refresh_metadata_remains_supported(self):
         data = json.loads(self.fixture())
