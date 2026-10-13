@@ -6,6 +6,7 @@ use crate::{
     accounting::Accounting,
     attestation::{EvidenceVerifier, GatewayEvidence},
     auth::Auth,
+    failures::InterfaceError,
     generation::Generation,
     inference::SharedInference,
 };
@@ -18,6 +19,7 @@ use axum::{
     routing::get,
     Router,
 };
+use futures_util::FutureExt;
 use hyper::server::conn::http1;
 use hyper_util::{
     rt::{TokioIo, TokioTimer},
@@ -41,7 +43,11 @@ use tower_http::catch_panic::CatchPanicLayer;
 #[cfg(test)]
 mod admission_tests;
 #[cfg(test)]
+mod cause_tests;
+#[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod observer_tests;
 #[cfg(test)]
 pub(crate) mod resource_streaming_tests;
 #[cfg(test)]
@@ -152,13 +158,14 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
     let app = Router::new()
         .merge(crate::api::routes())
         .route("/attestation", get(attestation))
+        .fallback(not_found)
         .method_not_allowed_fallback(wrong_method)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             move |state, request, next| total_body_deadline(state, request, next, body_deadline),
         ))
-        .layer(CatchPanicLayer::new())
+        .layer(CatchPanicLayer::custom(panic_response))
         .layer(middleware::from_fn(header_size_limit))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -181,6 +188,49 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
             }
         }),
     )
+}
+
+/// Closed, content-free serving failures behind the public `io::Result` shape.
+/// No OS, join, panic or peer detail is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ServerFailure {
+    #[error("code=listener_accept_unknown stage=serving constraint=listener_accept cause=unknown action=check_gateway_listener; not replayed; accepted-work outcomes require verified reconciliation")]
+    Accept,
+    #[error("code=connection_task_unknown stage=serving constraint=task_completion cause=unknown action=check_gateway_service; not replayed; accepted-work outcomes require verified reconciliation")]
+    ConnectionTask,
+    #[error("code=shutdown_integrity_failed stage=cleanup constraint=accepted_work_drain action=verify_account_reconciliation; not replayed; charge/refund outcomes are unknown without verified evidence")]
+    ShutdownIntegrity,
+}
+
+impl ServerFailure {
+    fn into_io(self) -> std::io::Error {
+        std::io::Error::other(self)
+    }
+}
+
+/// Closed source and legacy rejection projection for the connection owner.
+struct ConnectionFailure {
+    rejection: MetricRejection,
+    cause: InterfaceError,
+}
+
+fn classify_connection_error(error: &hyper::Error) -> ConnectionFailure {
+    if error.is_timeout() {
+        ConnectionFailure {
+            rejection: MetricRejection::ConnectionDeadline,
+            cause: InterfaceError::ConnectionDeadline,
+        }
+    } else if error.is_parse() {
+        ConnectionFailure {
+            rejection: MetricRejection::HeaderProtocol,
+            cause: InterfaceError::HeaderProtocol,
+        }
+    } else {
+        ConnectionFailure {
+            rejection: MetricRejection::TransportUnknown,
+            cause: InterfaceError::ConnectionUnknown,
+        }
+    }
 }
 
 fn connection_builder(header_deadline: Duration) -> http1::Builder {
@@ -240,7 +290,10 @@ async fn serve_until_with_header_deadline(
             _ = &mut shutdown => break Ok(()),
             result = tasks.join_next(), if !tasks.is_empty() => {
                 if !matches!(result, Some(Ok(()))) {
-                    break Err(std::io::Error::other("gateway connection task failed"));
+                    if let Some(metrics) = &telemetry {
+                        metrics.interface_error(InterfaceError::LifecycleServeUnknown);
+                    }
+                    break Err(ServerFailure::ConnectionTask.into_io());
                 }
             }
             result = async {
@@ -259,11 +312,17 @@ async fn serve_until_with_header_deadline(
             } => {
                 let (stream, _) = match result {
                     Ok(accepted) => accepted,
-                    Err(error) => break Err(error),
+                    Err(_) => {
+                        if let Some(metrics) = &telemetry {
+                            metrics.interface_error(InterfaceError::LifecycleServeUnknown);
+                        }
+                        break Err(ServerFailure::Accept.into_io());
+                    }
                 };
                 let Ok(permit) = connections.clone().try_acquire_owned() else {
                     if let Some(metrics) = &telemetry {
                         metrics.reject(None, AdmissionModel::NotApplicable, MetricRejection::ConnectionCapacity);
+                        metrics.interface_error(InterfaceError::ConnectionCapacity);
                     }
                     drop(stream);
                     continue;
@@ -272,10 +331,13 @@ async fn serve_until_with_header_deadline(
                 let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let seen = entered.clone();
                 let service = TowerToHyperService::new(app.clone());
+                let io_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let request_io_failed = io_failed.clone();
                 let disconnect = crate::stream_owner::Disconnect::default();
                 let request_disconnect = disconnect.clone();
                 let service = hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
                     request.extensions_mut().insert(request_disconnect.clone());
+                    request.extensions_mut().insert(ConnectionIoFailure(request_io_failed.clone()));
                     seen.store(true, std::sync::atomic::Ordering::Release);
                     let service = service.clone();
                     async move { hyper::service::Service::call(&service, request).await }
@@ -293,7 +355,7 @@ async fn serve_until_with_header_deadline(
                     }
                     let builder = connection_builder(header_deadline);
                     let _disconnect_guard = crate::stream_owner::DisconnectGuard(Some(disconnect.clone()));
-                    let connection = builder.serve_connection(TokioIo::new(DisconnectIo { stream, disconnect }), service);
+                    let connection = builder.serve_connection(TokioIo::new(DisconnectIo { stream, disconnect: disconnect.clone(), io_failed: io_failed.clone() }), service);
                     tokio::pin!(connection);
                     let result = if *closing.borrow_and_update() {
                         connection.as_mut().graceful_shutdown();
@@ -308,15 +370,27 @@ async fn serve_until_with_header_deadline(
                             result = &mut connection => result,
                         }
                     };
+                    let io_failed = io_failed.load(std::sync::atomic::Ordering::Acquire);
+                    if io_failed {
+                        if let Some(metrics) = &metrics {
+                            metrics.interface_error(InterfaceError::ConnectionUnknown);
+                        }
+                    }
                     if !entered.load(std::sync::atomic::Ordering::Acquire) {
-                        let reason = match result {
-                            Err(error) if error.is_timeout() => Some(MetricRejection::ConnectionDeadline),
-                            Err(error) if error.is_parse() => Some(MetricRejection::HeaderProtocol),
-                            Err(_) => Some(MetricRejection::TransportUnknown),
-                            Ok(()) => None,
-                        };
-                        if let (Some(metrics), Some(reason)) = (&metrics, reason) {
-                            metrics.reject(None, AdmissionModel::NotApplicable, reason);
+                        if let Err(error) = &result {
+                            // Peer EOF during an unfinished header is ordinary
+                            // disconnect, not a fabricated framing fault.
+                            let failure = classify_connection_error(error);
+                            let peer_ended = failure.cause == InterfaceError::ConnectionUnknown
+                                && !io_failed && disconnect.cancelled().now_or_never().is_some();
+                            if !peer_ended {
+                                if let Some(metrics) = &metrics {
+                                    metrics.reject(None, AdmissionModel::NotApplicable, failure.rejection);
+                                    if !io_failed || failure.cause != InterfaceError::ConnectionUnknown {
+                                        metrics.interface_error(failure.cause);
+                                    }
+                                }
+                            }
                         }
                     }
                     drop(permit);
@@ -340,21 +414,49 @@ async fn serve_until_with_header_deadline(
     let (drain, connections) = tokio::join!(lifecycle.wait_drained(), async {
         let mut failed = false;
         while let Some(result) = tasks.join_next().await {
-            failed |= result.is_err();
+            if result.is_err() {
+                failed = true;
+                if let Some(metrics) = &telemetry {
+                    metrics.interface_error(InterfaceError::LifecycleServeUnknown);
+                }
+            }
         }
         failed
     });
     serving_result?;
     if drain.is_err() || connections {
-        return Err(std::io::Error::other("gateway shutdown integrity failed"));
+        return Err(ServerFailure::ShutdownIntegrity.into_io());
     }
     Ok(())
 }
+
+/// Non-authorizing propagation marker for the connection's sole I/O owner.
+#[derive(Clone)]
+struct ConnectionIoFailure(Arc<std::sync::atomic::AtomicBool>);
 
 /// Notify request ownership on actual socket EOF/error as well as body drop.
 struct DisconnectIo {
     stream: tokio::net::TcpStream,
     disconnect: crate::stream_owner::Disconnect,
+    io_failed: Arc<std::sync::atomic::AtomicBool>,
+}
+impl DisconnectIo {
+    fn failed(&self, error: &std::io::Error) {
+        // Supported connection-end kinds do not establish a separate fault.
+        // Other I/O failures are observed once by the connection owner; raw
+        // OS errors and peer metadata never leave this polling boundary.
+        if !matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::UnexpectedEof
+        ) {
+            self.io_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
 }
 impl tokio::io::AsyncRead for DisconnectIo {
     fn poll_read(
@@ -364,6 +466,9 @@ impl tokio::io::AsyncRead for DisconnectIo {
     ) -> Poll<std::io::Result<()>> {
         let before = buf.filled().len();
         let result = Pin::new(&mut self.stream).poll_read(cx, buf);
+        if let Poll::Ready(Err(error)) = &result {
+            self.failed(error);
+        }
         if matches!(result, Poll::Ready(Err(_)))
             || matches!(result, Poll::Ready(Ok(())))
                 && buf.remaining() > 0
@@ -381,6 +486,9 @@ impl tokio::io::AsyncWrite for DisconnectIo {
         bytes: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let result = Pin::new(&mut self.stream).poll_write(cx, bytes);
+        if let Poll::Ready(Err(error)) = &result {
+            self.failed(error);
+        }
         if matches!(result, Poll::Ready(Err(_)) | Poll::Ready(Ok(0))) && !bytes.is_empty() {
             self.disconnect.cancel();
         }
@@ -388,7 +496,8 @@ impl tokio::io::AsyncWrite for DisconnectIo {
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let result = Pin::new(&mut self.stream).poll_flush(cx);
-        if matches!(result, Poll::Ready(Err(_))) {
+        if let Poll::Ready(Err(error)) = &result {
+            self.failed(error);
             self.disconnect.cancel();
         }
         result
@@ -398,9 +507,37 @@ impl tokio::io::AsyncWrite for DisconnectIo {
     }
 }
 
-async fn wrong_method(Extension(observation): Extension<RequestContext>) -> StatusCode {
+async fn wrong_method(Extension(observation): Extension<RequestContext>) -> Response {
     observation.reject(AdmissionModel::NotApplicable, MetricRejection::Input);
-    StatusCode::METHOD_NOT_ALLOWED
+    route_refused(StatusCode::METHOD_NOT_ALLOWED)
+}
+
+// Explicit missing-route fallback: attach the typed source here rather than
+// inferring a cause from the 404 status at normalization.
+async fn not_found() -> Response {
+    route_refused(StatusCode::NOT_FOUND)
+}
+
+fn route_refused(status: StatusCode) -> Response {
+    let mut response = (status, InterfaceError::RouteRefused.message()).into_response();
+    response
+        .extensions_mut()
+        .insert(InterfaceError::RouteRefused);
+    response
+}
+
+// Locally authored panic response. The payload is never inspected, retained or
+// logged; process-level panic suppression remains in effect.
+fn panic_response(_: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    let mut response = (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        InterfaceError::RequestDispatchUnknown.message(),
+    )
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(InterfaceError::RequestDispatchUnknown);
+    response
 }
 
 async fn request_admission(
@@ -449,12 +586,14 @@ async fn admitted_request(state: AppState, mut request: Request<Body>, next: Nex
         };
     let response = if api && (request.uri().query().is_some() || request.method() == Method::HEAD) {
         context.reject(AdmissionModel::Unknown, MetricRejection::Input);
-        crate::api::error(StatusCode::BAD_REQUEST)
+        crate::api::failure(StatusCode::BAD_REQUEST, InterfaceError::InputRefused)
     } else {
         next.run(request).await
     };
     // Normalize even framework, panic, header and body-limit failures, while
-    // retaining the SAME lifetime marker through the replacement response.
+    // retaining the SAME lifetime marker through the replacement response. A
+    // typed source attached at the originating handler survives; an unclassified
+    // framework response is dispatch-stage cause-unknown, never a guessed cause.
     let response = if api
         && !response.status().is_success()
         && response
@@ -462,10 +601,35 @@ async fn admitted_request(state: AppState, mut request: Request<Body>, next: Nex
             .get::<crate::api::SafeError>()
             .is_none()
     {
-        crate::api::error(response.status())
+        // Preserve any typed source attached at the originating handler and the
+        // terminal-owner marker, so HTTP propagation never recounts a fault the
+        // original operation already owns.
+        let cause = response
+            .extensions()
+            .get::<InterfaceError>()
+            .copied()
+            .unwrap_or(InterfaceError::RequestDispatchUnknown);
+        let owned = response
+            .extensions()
+            .get::<crate::api::FailureOwned>()
+            .is_some();
+        let mut normalized = crate::api::failure(response.status(), cause);
+        if owned {
+            normalized.extensions_mut().insert(crate::api::FailureOwned);
+        }
+        normalized
     } else {
         response
     };
+    if response
+        .extensions()
+        .get::<crate::api::FailureOwned>()
+        .is_none()
+    {
+        if let Some(cause) = response.extensions().get::<InterfaceError>().copied() {
+            context.interface_error(cause);
+        }
+    }
     observed_response(response, lease, observation)
 }
 
@@ -576,13 +740,55 @@ async fn total_body_deadline(
     let (parts, body) = request.into_parts();
     let bytes = match tokio::time::timeout(deadline, collect_request(body, limit)).await {
         Ok(Ok(bytes)) => bytes,
-        Ok(Err(())) => {
+        Ok(Err(failure)) => {
+            let io_failed = parts
+                .extensions
+                .get::<ConnectionIoFailure>()
+                .is_some_and(|fault| fault.0.load(std::sync::atomic::Ordering::Acquire));
+            if failure == RequestBodyFailure::Disconnected && !io_failed {
+                return if crate::api::is_api(parts.uri.path()) {
+                    crate::api::interrupted()
+                } else {
+                    let mut response =
+                        (StatusCode::SERVICE_UNAVAILABLE, REQUEST_INTERRUPTED_MESSAGE)
+                            .into_response();
+                    response.extensions_mut().insert(crate::api::FailureOwned);
+                    response
+                };
+            }
             observation.reject(AdmissionModel::Unknown, MetricRejection::Input);
-            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+            let (status, cause) = match failure {
+                RequestBodyFailure::Limit => {
+                    (StatusCode::PAYLOAD_TOO_LARGE, InterfaceError::BodyLimit)
+                }
+                RequestBodyFailure::ReadUnknown | RequestBodyFailure::Disconnected => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    InterfaceError::RequestReadUnknown,
+                ),
+            };
+            let io_owned = matches!(
+                failure,
+                RequestBodyFailure::ReadUnknown | RequestBodyFailure::Disconnected
+            ) && io_failed;
+            let mut response = body_failure_response(
+                status,
+                if io_owned {
+                    InterfaceError::ConnectionUnknown
+                } else {
+                    cause
+                },
+            );
+            if io_owned {
+                response.extensions_mut().insert(crate::api::FailureOwned);
+            }
+            return response;
         }
         Err(_) => {
             observation.reject(AdmissionModel::Unknown, MetricRejection::Input);
-            return (StatusCode::REQUEST_TIMEOUT, "request body timed out").into_response();
+            return body_failure_response(
+                StatusCode::REQUEST_TIMEOUT,
+                InterfaceError::BodyDeadline,
+            );
         }
     };
     let bytes = match ingress {
@@ -601,16 +807,55 @@ async fn total_body_deadline(
         .await
 }
 
-async fn collect_request(mut body: Body, limit: usize) -> Result<Bytes, ()> {
+/// Closed request-body acquisition outcome. The frame, underlying error and
+/// collected bytes are never retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestBodyFailure {
+    Limit,
+    ReadUnknown,
+    Disconnected,
+}
+
+pub(crate) const REQUEST_INTERRUPTED_MESSAGE: &str = "[request_interrupted] Stage: request_body; constraint: incomplete_upload. Observed disconnect/cancellation ended upload; no generation started by this incomplete submission. Not replayed. Prior accepted-work outcomes require authenticated receipts; a deliberate new submission may incur another charge. Check connection/service before a deliberate new submission.";
+
+fn body_failure_response(status: StatusCode, cause: InterfaceError) -> Response {
+    let mut response = (status, cause.message()).into_response();
+    response.extensions_mut().insert(cause);
+    response
+}
+
+async fn collect_request(mut body: Body, limit: usize) -> Result<Bytes, RequestBodyFailure> {
     // Do not collect a list of frames: a 32-MiB one-byte-fragmented request
     // otherwise retains millions of frame headers before coalescing. One fixed
     // allocation, one borrowed incoming frame, no growth/copy-overlap or queue.
     let mut bytes = Vec::with_capacity(limit);
     while let Some(frame) = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
-        let frame = frame.map_err(|_| ())?;
+        let frame = frame.map_err(|error| {
+            let inner = error.into_inner();
+            if inner.downcast_ref::<hyper::Error>().is_some_and(|error| {
+                error.is_incomplete_message()
+                    || error.is_canceled()
+                    || std::error::Error::source(error)
+                        .and_then(|source| source.downcast_ref::<std::io::Error>())
+                        .is_some_and(|source| {
+                            matches!(
+                                source.kind(),
+                                std::io::ErrorKind::UnexpectedEof
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::NotConnected
+                            )
+                        })
+            }) {
+                RequestBodyFailure::Disconnected
+            } else {
+                RequestBodyFailure::ReadUnknown
+            }
+        })?;
         if let Ok(data) = frame.into_data() {
             if data.len() > limit - bytes.len() {
-                return Err(());
+                return Err(RequestBodyFailure::Limit);
             }
             bytes.extend_from_slice(&data);
         }
@@ -631,11 +876,15 @@ async fn header_size_limit(request: Request<Body>, next: Next) -> Response {
         if let Some(observation) = request.extensions().get::<RequestContext>() {
             observation.reject(AdmissionModel::Unknown, MetricRejection::Input);
         }
-        return (
+        let mut response = (
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "request headers too large",
         )
             .into_response();
+        response
+            .extensions_mut()
+            .insert(InterfaceError::HeaderLimit);
+        return response;
     }
     next.run(request).await
 }
@@ -673,16 +922,24 @@ async fn attestation(
 ) -> Response {
     let gateway = match verified_gateway_evidence(&state).await {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
             observation.reject(AdmissionModel::NotApplicable, MetricRejection::Verification);
-            return unavailable();
+            return unavailable(evidence_cause(error));
         }
     };
     let upstream = match state.inference.verification_document() {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
             observation.reject(AdmissionModel::NotApplicable, MetricRejection::Internal);
-            return unavailable();
+            return unavailable(match error.failure() {
+                crate::inference::InferenceFailure::RequestEncodingFailed => {
+                    InterfaceError::ResponseEncodingUnknown
+                }
+                crate::inference::InferenceFailure::InferenceUnavailable => {
+                    InterfaceError::EvidenceUnavailable
+                }
+                failure => failure.into(),
+            });
         }
     };
     let bytes = match crate::bounded_json::to_vec(
@@ -693,9 +950,9 @@ async fn attestation(
         MAX_ATTESTATION_RESPONSE_BYTES,
     ) {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
             observation.reject(AdmissionModel::NotApplicable, MetricRejection::Internal);
-            return unavailable();
+            return unavailable(encoding_cause(error));
         }
     };
     let mut response = Body::from(bytes).into_response();
@@ -712,6 +969,26 @@ async fn verified_gateway_evidence(
     state.generation().evidence().await
 }
 
-fn unavailable() -> Response {
-    (StatusCode::SERVICE_UNAVAILABLE, "service unavailable").into_response()
+fn evidence_cause(error: crate::attestation::EvidenceError) -> InterfaceError {
+    match error {
+        crate::attestation::EvidenceError::Unavailable => InterfaceError::EvidenceUnavailable,
+        crate::attestation::EvidenceError::Invalid => InterfaceError::EvidenceInvalid,
+    }
+}
+
+fn encoding_cause(error: crate::bounded_json::EncodingFailure) -> InterfaceError {
+    match error {
+        crate::bounded_json::EncodingFailure::LimitExceeded => {
+            InterfaceError::ResponseEncodingLimit
+        }
+        crate::bounded_json::EncodingFailure::CauseUnknown => {
+            InterfaceError::ResponseEncodingUnknown
+        }
+    }
+}
+
+fn unavailable(cause: InterfaceError) -> Response {
+    let mut response = (StatusCode::SERVICE_UNAVAILABLE, cause.message()).into_response();
+    response.extensions_mut().insert(cause);
+    response
 }

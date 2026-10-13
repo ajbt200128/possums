@@ -601,7 +601,15 @@ async fn fatal_accept_failure_fences_but_waits_for_original_owner() {
     drop(client);
     gate.release.send(()).unwrap();
     let result = bounded(server).await.unwrap().unwrap_err();
-    assert_eq!(result.to_string(), "injected listener failure");
+    assert_eq!(
+        result
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<ServerFailure>()),
+        Some(&ServerFailure::Accept)
+    );
+    assert!(result
+        .to_string()
+        .starts_with("code=listener_accept_unknown stage=serving"));
     let balance = state.accounting.snapshot("demo").unwrap();
     assert_eq!(balance.in_flight, 0);
     assert_eq!(balance.completed_requests, 1);
