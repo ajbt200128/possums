@@ -160,6 +160,14 @@ integer run/environment IDs:
 The protected workflow still checks main and actual review evidence after this
 approval. Approval alone does not establish that deployment or serving succeeded.
 
+## Read-only planning client headers
+
+The Python planning request sends fixed `Accept: application/json` and accurately identifies itself as `possums-release-verifier/1`, instead of urllib's default user agent. The [pinned CLI client](https://github.com/tinfoilsh/tinfoil-cli/blob/v0.19.0/controlplane.go) also sets JSON acceptance and an explicit client identity; the [documented Admin API](https://docs.tinfoil.sh/admin/admin-api) confirms the same read-only plan route and update action permission.
+
+Credential-free, read-only investigation reproduced HTTP 403 with the default Python user agent and expected unauthenticated HTTP 401 with explicit release-client or pinned CLI headers, including a synthetic-instance planning request. Only status/content-type categories were inspected; response bodies and credentials were not collected. This establishes a header-dependent rejection, not a guaranteed authenticated deployment fix or its server-side root cause. Do not rotate credentials, broaden access or weaken planning/provenance checks based on that observation.
+
+Offline release tests assert the fixed method, headers, body, timeout and redirect/proxy restrictions, and that an observed planning HTTP refusal never invokes the update or final admission. The first v0.0.39 attempt stopped at `RELEASE_PLAN_HTTP` with HTTP 403 before the update invocation. A fresh attempt requires separate authorization; the operator authorized this header correction and one fresh protected attempt. A new approval still requires verified current-main release pins; no mutating workflow rerun or uncertain update replay is permitted.
+
 ## Interrupted or uncertain operations
 
 - No automatic inference, mutation retry, rollback or downtime confirmation.

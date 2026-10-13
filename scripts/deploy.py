@@ -266,7 +266,9 @@ def plan_update(before, tag):
         body = json.dumps({"tag": tag, "custom_domain": DOMAIN}).encode()
         request = urllib.request.Request("https://api.tinfoil.sh/api/containers/" + before["id"] + "/update/plan",
             data=body, headers={"Authorization": "Bearer " + os.environ["TINFOIL_ADMIN_KEY"],
-                               "Content-Type": "application/json"}, method="POST")
+                               "Content-Type": "application/json",
+                               "Accept": "application/json",
+                               "User-Agent": "possums-release-verifier/1"}, method="POST")
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoPlanRedirect())
         with opener.open(request, timeout=30) as response:
             raw = response.read(LIMIT + 1)
