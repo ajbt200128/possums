@@ -15,9 +15,11 @@ import time
 import uuid
 from pathlib import Path
 
-
 ACCOUNTS = '[{"id":"startup-canary","credential_sha256":"g80hPkaKL7rbUpYj1pvTaDr7jxOh8KvDFn00a94wNxk","demo_microunits":1000}]'
-FAILURE = b"healthcheck_failed: local readiness unavailable\n"
+FAILURES = {
+    "probe_quiescing": b"healthcheck_failed: code=not_ready stage=status constraint=non_204 action=verify_local_gateway_readiness\n",
+    "probe_isolated": b"healthcheck_failed: code=connect_unknown stage=connect constraint=loopback_connect action=verify_gateway_listening\n",
+}
 OPTIONS = ["--read-only", "--tmpfs", os.path.join(os.sep, "tmp") + ":rw,size=64m,mode=1777", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
 IMAGES = ("possums-gateway:phase0", "possums-gateway-smoke:phase0")
 MAX_OUTPUT = 8192
@@ -134,7 +136,9 @@ def probe(name, network, expected_code, stage):
     except (ValueError, TypeError):
         raise QualificationError(stage) from None
     code, out, err = docker(["logs", name], stage)
-    require(code == 0 and out == b"" and err == (b"" if expected_code == 0 else FAILURE), stage)
+    expected_diagnostic = b"" if expected_code == 0 else FAILURES.get(stage)
+    require(expected_diagnostic is not None, stage)
+    require(code == 0 and out == b"" and err == expected_diagnostic, stage)
     if expected_code != 0:
         elapsed(state, stage)
 
