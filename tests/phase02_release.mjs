@@ -47,7 +47,8 @@ assert(!(await readFile(path.join(output, 'production.mjs'), 'utf8')).includes('
 const bytes = value => new TextEncoder().encode(JSON.stringify(value));
 const sha = value => createHash('sha256').update(value).digest('hex');
 const b64 = value => Buffer.from(value).toString('base64');
-const host = 'possum-phase0.possums.containers.tinfoil.dev';
+const host = 'gateway.possums.dev';
+const oldHost = 'possum-phase0.possums.containers.tinfoil.dev';
 const repo = 'ajbt200128/possums';
 const origin = `https://${host}`;
 const tag = 'v0.0.99';
@@ -211,6 +212,12 @@ async function certificateChainChecks() {
 try {
   await certificateChainChecks();
   assert.equal(prod.API_APPROVALS[0].expires, NativeDate.parse('2026-10-11T00:00:00Z'));
+  // Hostname migration: the published/verified origin is the custom domain, while
+  // the historical compiled approval keeps its original, already-verified origin
+  // and expiry. It must not be silently rebound to a hostname whose serving
+  // evidence it never pinned.
+  assert.equal(prod.PUBLISHER.origin, origin);
+  assert.equal(prod.API_APPROVALS[0].origin, `https://${oldHost}`); passed++;
   await rejects('compiled admin expiry unchanged', () => prod.Channel.api(bytes(base), bytes(manifest), key));
   await rejects('real hardware crypto rejects synthetic report', () => prod.Channel.published(bytes(base), bytes(manifest), key));
   await rejects('production fixture disabled', () => prod.Channel.fixture('https://localhost:18443', key, '07'.repeat(32)));
@@ -238,6 +245,7 @@ try {
   for (const [name, mutate] of [
     ['raw manifest hash', b => { b.digest = '0'.repeat(64); }],
     ['domain', b => { b.domain = 'HOSTILE.invalid'; }],
+    ['old-origin domain evidence', b => { b.domain = oldHost; }],
     ['tag', b => { b.releaseTag = 'v0.0.100'; }],
     ['report format', b => { b.enclaveAttestationReport.format = 'https://tinfoil.sh/predicate/dummy/v2'; }],
     ['gzip bomb', b => { b.enclaveAttestationReport.body = b64(gzipSync(Buffer.alloc(1024 * 1024))); }],

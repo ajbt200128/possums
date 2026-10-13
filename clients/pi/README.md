@@ -2,6 +2,30 @@
 
 The catalog-wide gateway tool profile is deployed as **v0.0.15** (the official gateway v3 helper compatibility fix is included; the separate 16-KiB tool-description cap remains removed, while other limits and the shared tool profile are unchanged). All authenticated catalog models advertise the assumed shared OpenAI-functions wire profile; this is not per-model compatibility qualification. A real Kimi Pi round with local `ls`/`read` execution and a correct final continuation was observed on v0.0.10; exact live billing/balance reconciliation remains unverified. See [release scope](../../docs/phase02-pi-release.md).
 
+## Renewed gateway.possums.dev cutover (source only; not installed)
+
+The paired source candidate restores PR #67's published/verified origin change
+to `https://gateway.possums.dev`, on top of the current thinking-capable client.
+`PUBLISHER.origin`, provider origin and model `baseUrl` agree; exact serving
+hostname/key checks are unchanged. Old-host evidence is rejected, old-origin
+public cache entries are re-acquired, and old-origin discovery models are
+excluded. No fallback, redirect, inference replay or trust relaxation is added.
+
+The historical compiled `v0.0.15` approval keeps its original old hostname,
+release pins and elapsed `2026-10-11` expiry; it is neither rebound nor refreshed.
+The explicit compiled-manifest path still fails closed before evidence fetch.
+Legacy-v2 freshness limits and native CLI v3 signer mismatch remain unresolved.
+
+Fresh DNS is configured/verified, but production readback still showed the old
+hostname running `v0.0.37`. This source and scratch build are **not installed or
+activated**, and new-host TLS/attestation/serving is not established. Existing
+shipped old-host clients may fail closed after the operator-accepted breaking
+cutover; simultaneous old-host serving is unconfirmed. Matching client
+qualification, separately authorized installation and user-controlled activation
+must precede switching the gateway contract. Preparation authorizes neither
+production deployment nor paid inference. See [fresh evidence, protected rollout
+and rollback requirements](../../docs/gateway-custom-domain.md#renewed-operator-authorized-cutover-source-candidate-not-deployed).
+
 ## Current client source policy (not installed)
 
 The operator-approved [client failure policy](../../docs/pi-client-failure-policy.md) supersedes the historical retry/terminal-error, duplicate admission, parser-quota and price-recomputation descriptions below. Only unconfirmed backend identity/authenticity is fatal and blocks later dispatch. Other failures produce transient warnings and a graceful Pi host `done/stop`, retain text/authenticated money, suppress provisional tools, and initiate no inference retry. Host stop does not prove backend success or billing. A deliberate next turn can proceed on the same verified session. See [offline scoped verification](../../docs/pi-client-simplification-verification.md).
