@@ -2,6 +2,7 @@
 use crate::{
     accounting::Outcome,
     catalog::Model,
+    failures::InterfaceError,
     generation::{PreparedGeneration, PreparedStructuredGeneration},
     generation_owner::{ReservedGeneration, Settlement},
     inference::{
@@ -9,9 +10,10 @@ use crate::{
         tools::ToolInvocation,
         InferenceError, InferenceFailure, Message, SharedInference,
     },
-    stream_owner::{delivery, DeliveryBody, DeliveryTx, Limits},
+    stream_owner::{delivery, DeliveryBody, DeliveryError, DeliveryTx, Disconnect, Limits},
 };
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -92,13 +94,26 @@ fn compose_core(
     let body = body
         .observed(owner.delivery_observation())
         .disconnected(disconnect.clone());
+    // This Arc retains only the aggregator, not a reservation/observation lease.
+    // Terminal delivery can fail after settlement consumes its observation.
+    let metrics = owner.metrics();
     let observer = owner.spawn_settling(tx, move |tx, mut settlement| async move {
-        let mut output = Output { tx, model: &model.id };
+        let mut output = Output {
+            tx,
+            model: &model.id,
+            metrics,
+            disconnect: disconnect.clone(),
+            encoding_failure: None,
+            delivery_failed: false,
+        };
         let (result, evidence) = {
             let mut sink = Sink { output: &mut output, settlement: &mut settlement, evidence: None };
             let result = tokio::select! {
                 biased;
-                _ = disconnect.cancelled() => Err(InferenceFailure::StreamTransportFailed.into()),
+                _ = disconnect.cancelled() => {
+                    sink.settlement.expected_interruption();
+                    Err(InferenceFailure::StreamTransportFailed.into())
+                },
                 result = inference.generate_forwarded_request(&model, (&messages, invocation.as_ref(), &options), &scope, heavy, &mut sink) => result,
             };
             (result, sink.evidence)
@@ -126,7 +141,7 @@ fn compose_core(
                     "provider_cost_usd":evidence.as_ref().and_then(|e| e.provider_cost_usd.as_deref()),
                 }})).await;
                 if !complete { let _ = output.failure(result.as_ref().err().map_or(InferenceFailure::SettlementFailed, |e|e.failure()), "unknown").await; }
-                let _ = output.tx.send(b"data: [DONE]\n\n").await;
+                let _ = output.send(b"data: [DONE]\n\n").await;
             }
             _ => { let _ = output.failure(InferenceFailure::SettlementFailed, "unknown").await; }
         }
@@ -144,34 +159,87 @@ fn compose_core(
 struct Output<'a> {
     tx: DeliveryTx,
     model: &'a str,
+    metrics: Option<Arc<crate::telemetry::AggregateMetrics>>,
+    disconnect: Disconnect,
+    encoding_failure: Option<InterfaceError>,
+    delivery_failed: bool,
 }
 impl Output<'_> {
+    fn disconnected(&self) -> bool {
+        self.disconnect.cancelled().now_or_never().is_some()
+    }
+
+    fn encoding_error(
+        &mut self,
+        failure: crate::bounded_json::EncodingFailure,
+        projection: InferenceFailure,
+    ) -> InferenceError {
+        if self.encoding_failure.is_none() {
+            let failure = match failure {
+                crate::bounded_json::EncodingFailure::LimitExceeded => {
+                    InterfaceError::ResponseEncodingLimit
+                }
+                crate::bounded_json::EncodingFailure::CauseUnknown => {
+                    InterfaceError::ResponseEncodingUnknown
+                }
+            };
+            self.encoding_failure = Some(failure);
+            if let Some(metrics) = &self.metrics {
+                metrics.interface_error(failure);
+            }
+        }
+        projection.into()
+    }
+
+    async fn send(&mut self, frame: &[u8]) -> Result<(), InferenceError> {
+        if let Err(error) = self.tx.send(frame).await {
+            if error == DeliveryError::TooLarge {
+                return Err(self.encoding_error(
+                    crate::bounded_json::EncodingFailure::LimitExceeded,
+                    InferenceFailure::StreamTransportFailed,
+                ));
+            }
+            if !self.delivery_failed && !self.disconnected() {
+                self.delivery_failed = true;
+                if let Some(metrics) = &self.metrics {
+                    metrics.interface_error(InterfaceError::ResponseDeliveryUnknown);
+                }
+            }
+            return Err(InferenceFailure::StreamTransportFailed.into());
+        }
+        Ok(())
+    }
+
     async fn event(&mut self, mut event: Value) -> Result<(), InferenceError> {
         event["object"] = json!("chat.completion.chunk");
         event["model"] = json!(self.model);
-        let bytes = crate::bounded_json::to_vec(&event, CHUNK_BYTES - 8)
-            .map_err(|_| InferenceFailure::StreamEventSchemaInvalid)?;
+        let bytes = crate::bounded_json::to_vec(&event, CHUNK_BYTES - 8).map_err(|error| {
+            self.encoding_error(error, InferenceFailure::StreamEventSchemaInvalid)
+        })?;
         let mut frame = b"data: ".to_vec();
         frame.extend_from_slice(&bytes);
         frame.extend_from_slice(b"\n\n");
-        self.tx
-            .send(&frame)
-            .await
-            .map_err(|_| InferenceFailure::StreamTransportFailed.into())
+        self.send(&frame).await
     }
     async fn failure(
         &mut self,
         failure: InferenceFailure,
         billing: &'static str,
     ) -> Result<(), InferenceError> {
-        let bytes = serde_json::to_vec(&json!({"error":{"code":"generation_failed","detail":failure,"message":failure.to_string(),"billing":billing}})).map_err(|_| InferenceFailure::RequestEncodingFailed)?;
+        let cause = self
+            .encoding_failure
+            .or_else(|| {
+                self.delivery_failed
+                    .then_some(InterfaceError::ResponseDeliveryUnknown)
+            })
+            .unwrap_or_else(|| failure.into());
+        let message = format!("{failure} {}", cause.message());
+        let bytes = crate::bounded_json::to_vec(&json!({"error":{"code":"generation_failed","detail":failure,"message":message,"billing":billing}}), CHUNK_BYTES - 8)
+            .map_err(|error| self.encoding_error(error, InferenceFailure::RequestEncodingFailed))?;
         let mut frame = b"data: ".to_vec();
         frame.extend_from_slice(&bytes);
         frame.extend_from_slice(b"\n\n");
-        self.tx
-            .send(&frame)
-            .await
-            .map_err(|_| InferenceFailure::StreamTransportFailed.into())
+        self.send(&frame).await
     }
 }
 struct Sink<'a, 'b> {
@@ -193,10 +261,21 @@ impl ForwardSink for Sink<'_, '_> {
         {
             self.settlement.first_output();
         }
-        self.output.event(event).await
+        let result = self.output.event(event).await;
+        if let Err(error) = &result {
+            self.settlement.local_failure(error.failure());
+            if self.output.disconnected() {
+                self.settlement.expected_interruption();
+            }
+        }
+        result
     }
     fn evidence(&mut self, evidence: Evidence) {
         self.settlement.evidence(evidence.clone());
         self.evidence = Some(evidence);
     }
 }
+
+#[cfg(test)]
+#[path = "api_stream_tests.rs"]
+mod tests;

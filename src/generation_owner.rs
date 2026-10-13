@@ -9,7 +9,8 @@
 use crate::telemetry::{hooks::Lease, GenerationTerminal, OwnedObservation, QualifiedModel};
 use crate::{
     accounting::{Accounting, AccountingError, FinalUsage, Outcome},
-    inference::{stream::StreamUsage, InferenceError},
+    failures::InterfaceError,
+    inference::{stream::StreamUsage, InferenceError, InferenceFailure},
     stream_owner::DeliveryTx,
 };
 use std::{
@@ -29,6 +30,9 @@ struct Terminal {
     evidence: Option<crate::inference::forward::Evidence>,
     observation: Option<OwnedObservation>,
     failure: Option<GenerationTerminal>,
+    primary: Option<InterfaceError>,
+    expected_interruption: bool,
+    worker_handoff: bool,
     model: Option<QualifiedModel>,
     lifecycle: Option<crate::lifecycle::Lifecycle>,
 }
@@ -54,7 +58,28 @@ impl Terminal {
                 lifecycle.accounting_failed();
             }
         }
-        // Accounting has returned and released its lock. Telemetry never retries it.
+        // Accounting has returned and released its lock. Numeric observations
+        // belong to the terminal window, even when the original record retired.
+        if let Some(observation) = &self.observation {
+            let metrics = observation.metrics();
+            if let Some(primary) = self.primary {
+                metrics.interface_error(primary);
+            }
+            if result.is_err() {
+                metrics.interface_error(InterfaceError::SettlementFailed);
+            }
+            if let (Some(model), Some(usage)) = (self.model, usage) {
+                metrics.observed_usage(
+                    model,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.total_tokens,
+                    self.evidence
+                        .as_ref()
+                        .and_then(|e| e.cache_usage_available.then_some(e.cached_tokens)),
+                );
+            }
+        }
         let terminal = match (&result, usage.is_some(), self.failure) {
             (Ok(Outcome::Settled { .. }), _, Some(failure)) => failure,
             (Ok(Outcome::Settled { .. }), true, None) => GenerationTerminal::Success,
@@ -73,6 +98,13 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         if self.armed {
             self.failure.get_or_insert(GenerationTerminal::Unknown);
+            if !self.expected_interruption {
+                self.primary.get_or_insert(if self.worker_handoff {
+                    InterfaceError::GenerationUnknown
+                } else {
+                    InterfaceError::PreflightUnknown
+                });
+            }
             let _ = self.finish(None);
         }
     }
@@ -85,9 +117,20 @@ impl Drop for Terminal {
 pub(crate) struct Settlement {
     terminal: Terminal,
     first_output_seen: bool,
+    local_failure: Option<InferenceFailure>,
 }
 
 impl Settlement {
+    pub(crate) fn expected_interruption(&mut self) {
+        self.terminal.expected_interruption = true;
+    }
+
+    /// The sink owns this failure; its legacy upstream projection must not count
+    /// again at settlement. A different upstream failure remains independent.
+    pub(crate) fn local_failure(&mut self, failure: InferenceFailure) {
+        self.local_failure.get_or_insert(failure);
+    }
+
     pub(crate) fn evidence(&mut self, evidence: crate::inference::forward::Evidence) {
         self.terminal.evidence = Some(evidence);
     }
@@ -108,7 +151,15 @@ impl Settlement {
     /// Accounting rechecks arithmetic and refunds invalid usage. No error text
     /// is retained or formatted. Even accounting failure is a single attempt.
     pub(crate) fn finish(mut self, result: &Result<StreamUsage, InferenceError>) -> SettledReceipt {
-        self.terminal.failure = result.as_ref().err().map(|e| e.failure().into());
+        if let Err(error) = result {
+            let failure = error.failure();
+            self.terminal.failure.get_or_insert(failure.into());
+            let expected_disconnect = self.terminal.expected_interruption
+                && failure == InferenceFailure::StreamTransportFailed;
+            if !expected_disconnect && self.local_failure != Some(failure) {
+                self.terminal.primary.get_or_insert(failure.into());
+            }
+        }
         SettledReceipt {
             completion: self
                 .terminal
@@ -190,6 +241,9 @@ impl ReservedGeneration {
                 evidence: None,
                 observation: None,
                 failure: None,
+                primary: None,
+                expected_interruption: false,
+                worker_handoff: false,
                 model: None,
                 lifecycle: None,
             },
@@ -226,8 +280,18 @@ impl ReservedGeneration {
         self.terminal.model = Some(model);
         self
     }
-    pub(crate) fn failure(&mut self, failure: GenerationTerminal) {
-        self.terminal.failure = Some(failure);
+    pub(crate) fn failure(&mut self, failure: GenerationTerminal, primary: InterfaceError) {
+        self.terminal.failure.get_or_insert(failure);
+        self.terminal.primary.get_or_insert(primary);
+    }
+    pub(crate) fn expected_interruption(&mut self) {
+        self.terminal.expected_interruption = true;
+    }
+    pub(crate) fn metrics(&self) -> Option<Arc<crate::telemetry::AggregateMetrics>> {
+        self.terminal
+            .observation
+            .as_ref()
+            .map(OwnedObservation::metrics)
     }
     pub(crate) fn delivery_observation(&self) -> Option<OwnedObservation> {
         Some(
@@ -310,9 +374,12 @@ impl ReservedGeneration {
             _ticket,
             disconnect: _,
         } = self;
+        let mut terminal = terminal;
+        terminal.worker_handoff = true;
         let settlement = Settlement {
             terminal,
             first_output_seen: false,
+            local_failure: None,
         };
         tokio::spawn(Worker {
             // The SAME guard moves into Worker before the factory can run.

@@ -77,12 +77,19 @@ async fn read(res: Response) -> Value {
         return Value::Null;
     }
     assert!(bytes.len() <= 4096);
-    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let mut value: Value = serde_json::from_slice(&bytes).unwrap();
     if !status.is_success() {
         assert_eq!(value.as_object().unwrap().len(), 1);
-        assert_eq!(value["error"].as_object().unwrap().len(), 1);
+        assert_eq!(value["error"].as_object().unwrap().len(), 2);
         assert!(value["error"]["code"].is_string());
-        assert!(bytes.len() < 100);
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("Stage:"));
+        assert!(message.contains("constraint:"));
+        assert!(message.contains("Not replayed."));
+        assert!(bytes.len() < 1024);
+        // Check the bounded optional diagnostic above, then retain exact legacy
+        // code projections in the assertions below.
+        value["error"].as_object_mut().unwrap().remove("message");
     }
     value
 }
