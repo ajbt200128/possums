@@ -20,6 +20,9 @@ fn quote(model: &str) -> Quote {
     Quote {
         model: Model {
             id: model.into(),
+            public_name: None,
+            reasoning: None,
+            reasoning_params: None,
             context_tokens: 20,
             max_output_tokens: 10,
             input_microunits_per_million_tokens: 1_000_000,

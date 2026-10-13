@@ -56,7 +56,8 @@ try {
     assert.deepEqual(await restored.getAvailable('possums'), []); passed++;
   } else {
     const selected = (await restored.getAvailable('possums'))[0]; assert(selected);
-    assert.match(selected.name, /last-known.*prices\/limits not current.*inference unavailable/);
+    // Discovery reuses the validated public name (here absent), falling back to id.
+    assert.equal(selected.name, 'synthetic');
     assert.equal(provider.client, undefined); assert.deepEqual(provider.catalog, []);
     const failed = await restored.streamSimple(selected, { messages: [{ role: 'user', content: 'Synthetic diagnostic input', timestamp: 1 }] }).result();
     assert.match(failed.errorMessage, /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/);
@@ -88,7 +89,22 @@ try {
     const strippedStore = new ai.InMemoryModelsStore();
     await strippedStore.write('possums', { models: [{ ...authenticated, name: hostile, headers: { Authorization: key }, failure: hostile }] });
     const stripped = await runtime(new m.PossumsProvider(async () => { throw primary; }), strippedStore, credentials);
-    assertClosed(await stripped.getAvailable('possums')); passed++;
+    assert.equal((await stripped.getAvailable('possums'))[0].name, 'synthetic'); assertClosed(await stripped.getAvailable('possums')); passed++;
+    // A bounded cached display name is reused; inference stays unavailable.
+    const namedStore = new ai.InMemoryModelsStore();
+    await namedStore.write('possums', { models: [{ ...authenticated, name: 'Synthetic Display' }] });
+    const namedProvider = new m.PossumsProvider(async () => { throw primary; });
+    const named = await runtime(namedProvider, namedStore, credentials);
+    assert.equal((await named.getAvailable('possums'))[0].name, 'Synthetic Display');
+    assert.equal(namedProvider.getModels()[0].name, 'Synthetic Display'); assert.deepEqual(namedProvider.catalog, []); passed++;
+    // A valid name flows from the live authenticated catalog into the provider
+    // list; it is presentation-only and does not change availability.
+    const liveNamed = await candidate([{ ...entry, name: 'Synthetic Display' }]);
+    const liveProvider = new m.PossumsProvider(async () => liveNamed); liveProvider.newSession();
+    const liveRuntime = await runtime(liveProvider, new ai.InMemoryModelsStore(), credentials);
+    await liveRuntime.login('possums', 'api_key', interaction);
+    assert.equal(liveProvider.getModels()[0].name, 'Synthetic Display');
+    assert.deepEqual(liveProvider.getModels().map(e => e.id), ['synthetic']); passed++;
     const noStore = await runtime(new m.PossumsProvider(async () => { throw primary; }), new ai.InMemoryModelsStore(), credentials);
     assert.deepEqual(await noStore.getAvailable('possums'), []); passed++;
     await restored.logout('possums'); assert.deepEqual(await restored.getAvailable('possums'), []); assert.equal(provider.currentFailure, undefined); passed++;
@@ -165,7 +181,7 @@ export default function(pi) {
       }
       assert(models.some(e => e.provider === 'possums' && e.id === 'synthetic'));
       const selected = await rpc.setModel('possums', 'synthetic');
-      assert.equal(selected.id, 'synthetic'); assert.match(selected.name, /last-known/);
+      assert.equal(selected.id, 'synthetic'); assert.equal(selected.name, 'synthetic');
       await rpc.promptAndWait('Synthetic diagnostic input', undefined, 5000);
       const message = (await rpc.getMessages()).findLast(e => e.role === 'assistant');
       const expected = { evidence: /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/, auth: /possums_authentication_http.*HTTP status: 401/, catalog: /possums_catalog_http_rejected.*HTTP status: 503/, 'quiescing-challenge': /possums_service_quiescing.*HTTP status: 503/, 'quiescing-catalog': /possums_service_quiescing.*HTTP status: 503/, key: /possums_trust_key_config/, provenance: /possums_trust_provenance/, hostile: /possums_verification_failed/, 'ui-failure': /possums_evidence_unavailable.*release_discovery.*rate_limited.*HTTP status: 403/ };

@@ -5,18 +5,205 @@ use thiserror::Error;
 
 pub const MAX_CATALOG_BYTES: usize = 256 * 1024;
 pub const MAX_MODELS: usize = 256;
+const MAX_DISPLAY_NAME_CHARS: usize = 128;
 const PRICE_SCALE: u128 = 1_000_000;
 const MARKUP_PERCENT: u128 = 130;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Model {
     pub id: String,
+    /// Authenticated upstream display name, already bounded and sanitized. It is
+    /// presentation-only and never authorizes availability, pricing or tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_params: Option<ReasoningParams>,
     pub context_tokens: u64,
     pub max_output_tokens: u64,
     pub input_microunits_per_million_tokens: u64,
     pub output_microunits_per_million_tokens: u64,
     #[serde(default)]
     pub cached_input_microunits_per_million_tokens: Option<u64>,
+}
+
+/// Only the supported chat-completions vocabulary; unknown catalog shapes do
+/// not prevent ordinary inference and never authorize arbitrary passthrough.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningParams {
+    #[serde(
+        default,
+        deserialize_with = "non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effort_map: Option<std::collections::BTreeMap<String, String>>,
+    pub params: std::collections::BTreeMap<String, ReasoningTemplates>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningTemplates {
+    #[serde(
+        default,
+        deserialize_with = "non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enable: Option<ReasoningOptions>,
+    #[serde(
+        default,
+        deserialize_with = "non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disable: Option<ReasoningOptions>,
+}
+
+#[derive(Clone, Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningOptions {
+    #[serde(
+        default,
+        deserialize_with = "non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_effort: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub chat_template_kwargs: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+}
+
+fn non_null<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    decoder: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(decoder).map(Some)
+}
+
+/// An unexpected display-name type must not invalidate the whole authenticated
+/// catalog: it is treated as absent and consumers fall back to the model id.
+fn optional_name<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(decoder)? {
+        serde_json::Value::String(value) => Some(value),
+        _ => None,
+    })
+}
+
+fn effort(value: &str) -> bool {
+    matches!(
+        value,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+impl ReasoningOptions {
+    pub fn is_empty(&self) -> bool {
+        self.reasoning_effort.is_none() && self.chat_template_kwargs.is_none()
+    }
+    fn supported(&self, placeholder: bool) -> bool {
+        let valid_effort = |value: &str| effort(value) || (placeholder && value == "$EFFORT");
+        !self.is_empty()
+            && self.reasoning_effort.as_deref().is_none_or(valid_effort)
+            && self.chat_template_kwargs.as_ref().is_none_or(|kwargs| {
+                !kwargs.is_empty()
+                    && kwargs.iter().all(|(key, value)| match key.as_str() {
+                        "thinking" | "enable_thinking" => value.is_boolean(),
+                        "reasoning_effort" => value.as_str().is_some_and(valid_effort),
+                        _ => false,
+                    })
+            })
+    }
+    pub fn resolve(&self, value: Option<&str>) -> Option<Self> {
+        let mut resolved = self.clone();
+        if resolved.reasoning_effort.as_deref() == Some("$EFFORT") {
+            resolved.reasoning_effort = Some(value?.to_owned());
+        }
+        if let Some(kwargs) = &mut resolved.chat_template_kwargs {
+            if kwargs
+                .get("reasoning_effort")
+                .and_then(serde_json::Value::as_str)
+                == Some("$EFFORT")
+            {
+                kwargs.insert("reasoning_effort".into(), serde_json::json!(value?));
+            }
+        }
+        Some(resolved)
+    }
+    pub fn apply(
+        &self,
+        mut builder: tinfoil::relaxed::RelaxedChatRequestBuilder,
+    ) -> tinfoil::relaxed::RelaxedChatRequestBuilder {
+        if let Some(value) = &self.reasoning_effort {
+            builder = builder.set("reasoning_effort", serde_json::json!(value));
+        }
+        if let Some(value) = &self.chat_template_kwargs {
+            builder = builder.set("chat_template_kwargs", serde_json::json!(value));
+        }
+        builder
+    }
+}
+impl ReasoningParams {
+    fn supported(mut value: serde_json::Value) -> Option<Self> {
+        // Other endpoints are outside this gateway's request contract.
+        let params = value.get_mut("params")?.as_object_mut()?;
+        params.retain(|key, _| key == "/v1/chat/completions");
+        let parsed: Self = serde_json::from_value(value).ok()?;
+        if parsed.params.len() != 1
+            || parsed.effort_map.as_ref().is_some_and(|map| {
+                map.is_empty()
+                    || map.iter().any(|(key, value)| {
+                        !matches!(key.as_str(), "low" | "medium" | "high") || !effort(value)
+                    })
+            })
+        {
+            return None;
+        }
+        let templates = parsed.params.get("/v1/chat/completions")?;
+        if templates.enable.is_none() && templates.disable.is_none() {
+            return None;
+        }
+        if templates
+            .enable
+            .as_ref()
+            .is_some_and(|v| !v.supported(true))
+            || templates
+                .disable
+                .as_ref()
+                .is_some_and(|v| !v.supported(false))
+        {
+            return None;
+        }
+        Some(parsed)
+    }
+    pub fn allows(&self, options: &ReasoningOptions) -> bool {
+        if !options.supported(false) {
+            return false;
+        }
+        let Some(templates) = self.params.get("/v1/chat/completions") else {
+            return false;
+        };
+        [templates.enable.as_ref(), templates.disable.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|template| {
+                template.resolve(None).as_ref() == Some(options)
+                    || self.effort_map.as_ref().is_some_and(|map| {
+                        map.values()
+                            .any(|effort| template.resolve(Some(effort)).as_ref() == Some(options))
+                    })
+            })
+    }
+}
+impl Model {
+    pub fn allows_reasoning(&self, options: &ReasoningOptions) -> bool {
+        options.is_empty()
+            || (self.reasoning == Some(true)
+                && self
+                    .reasoning_params
+                    .as_ref()
+                    .is_some_and(|params| params.allows(options)))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,12 +239,16 @@ struct TinfoilCatalog {
 #[derive(Deserialize)]
 struct TinfoilModel {
     id: String,
+    #[serde(default, deserialize_with = "optional_name")]
+    name: Option<String>,
     #[serde(rename = "type")]
     kind: String,
     context_window: Option<u64>,
     #[serde(default)]
     endpoints: Vec<String>,
     pricing: TinfoilPricing,
+    reasoning: Option<serde_json::Value>,
+    reasoning_params: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -115,8 +306,16 @@ impl Catalog {
             if cached_input.is_some_and(|cached| cached > input_price) {
                 return Err(CatalogError::Invalid);
             }
+            // A missing or malformed display name must not affect availability or
+            // trust: it is dropped and consumers fall back to the model id.
+            let public_name = upstream_model.name.filter(|name| valid_display_name(name));
             let model = Model {
                 id: upstream_model.id,
+                public_name,
+                reasoning: upstream_model.reasoning.and_then(|value| value.as_bool()),
+                reasoning_params: upstream_model
+                    .reasoning_params
+                    .and_then(ReasoningParams::supported),
                 context_tokens,
                 // No separate output bound is advertised by this catalog schema.
                 // M=C is an operational assumption, not a proven billing bound.
@@ -199,6 +398,26 @@ pub fn actual_cost(quote: &Quote, output_tokens: u64) -> Result<u64, CatalogErro
         quote.model.input_microunits_per_million_tokens,
         quote.model.output_microunits_per_million_tokens,
     )
+}
+
+/// Display names are untrusted presentation text. Reject empty, oversized or
+/// control/escape/bidi-format strings so they cannot spoof terminal output or
+/// silently reorder surrounding text; invalid names fall back to the model id.
+fn valid_display_name(value: &str) -> bool {
+    let mut count = 0;
+    for character in value.chars() {
+        count += 1;
+        if count > MAX_DISPLAY_NAME_CHARS
+            || character.is_control()
+            || matches!(
+                character,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+        {
+            return false;
+        }
+    }
+    count > 0
 }
 
 fn valid_model(model: &Model) -> bool {

@@ -400,6 +400,9 @@ fn owned_conversion_moves_the_key_and_armed_drop_remains_unknown() {
     let quote = Quote {
         model: Model {
             id: "kimi-k3".into(),
+            public_name: None,
+            reasoning: None,
+            reasoning_params: None,
             context_tokens: 10,
             max_output_tokens: 9,
             input_microunits_per_million_tokens: 1,

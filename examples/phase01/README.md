@@ -8,6 +8,12 @@ Pi integration is documented in [`docs/pi-client.md`](../../docs/pi-client.md);
 current API-only development instructions are in
 [`docs/development.md`](../../docs/development.md).
 
+## Catalog-driven thinking (current source candidate only)
+
+The updated source opts in to supported upstream `reasoning`/`reasoning_params` metadata with `X-Possums-Reasoning-Metadata: true`; absent metadata from an older gateway leaves controls unavailable without blocking default inference. Default gateway catalog JSON remains unchanged for old strict clients. Raw callers may supply optional `reasoning_effort` and `chat_template_kwargs` in `ChatOptions`, only as concrete configurations advertised by the authenticated selected model. Unknown keys/values, unmapped placeholders and mixed/partial templates are not arbitrary passthrough. Hooks and refreshed catalogs are revalidated before dispatch; the gateway independently gates parameters before prompt transmission.
+
+**Raw omission preserves upstream defaults**, never implicitly disables reasoning. Pi-only native off adaptation is documented in [the Pi README](../../clients/pi/README.md#catalog-driven-thinking-source-candidate-not-installeddeployed). `onEvent` carries separate nullable/empty-valid reasoning fields for caller-owned display; neither reasoning nor provisional tool fragments authorize execution. No reasoning replay or inference retry is introduced. See [source-only verification and exact old decoder evidence](../../docs/catalog-thinking-verification.md). This candidate is not installed/deployed and does not update the historical acceptance claims below.
+
 ## Client flow
 
 For historical replay only, import `ReferenceClient` from a scratch-built `channel-node.mjs` or

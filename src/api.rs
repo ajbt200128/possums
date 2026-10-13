@@ -392,6 +392,11 @@ async fn balance(State(state): State<AppState>, headers: HeaderMap, bytes: Bytes
 struct ModelEntry {
     object: &'static str,
     id: String,
+    // Public display name is presentation-only, non-authorizing metadata. It is
+    // exposed only under the same opt-in as reasoning metadata so the default
+    // catalog stays byte-for-byte identical for older strict decoders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     // All u64 values are decimal strings, including context/output limits, so
     // catalog changes cannot silently lose precision in JavaScript consumers.
     context_tokens: String,
@@ -403,6 +408,10 @@ struct ModelEntry {
     cached_input_microunits_per_million_tokens: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_protocol: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_params: Option<crate::catalog::ReasoningParams>,
 }
 
 async fn models(
@@ -432,6 +441,15 @@ async fn models(
         };
         data.push(ModelEntry {
             object: "model",
+            name: reasoning_metadata_requested(&headers)
+                .then(|| model.public_name.clone())
+                .flatten(),
+            reasoning: reasoning_metadata_requested(&headers)
+                .then_some(model.reasoning)
+                .flatten(),
+            reasoning_params: reasoning_metadata_requested(&headers)
+                .then(|| model.reasoning_params.clone())
+                .flatten(),
             tool_protocol: state
                 .inference
                 .tool_profile(&model.id)
@@ -486,6 +504,10 @@ struct ChatRequest {
     tools: Option<Vec<Tool>>,
     #[serde(default, deserialize_with = "present")]
     tool_choice: Option<ToolChoice>,
+    #[serde(default, deserialize_with = "present")]
+    reasoning_effort: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    chat_template_kwargs: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -499,6 +521,11 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     decoder: D,
 ) -> Result<Option<T>, D::Error> {
     T::deserialize(decoder).map(Some)
+}
+
+fn reasoning_metadata_requested(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all("x-possums-reasoning-metadata").iter();
+    values.next().is_some_and(|value| value == "true") && values.next().is_none()
 }
 
 fn usage_metrics_requested(headers: &HeaderMap) -> bool {
@@ -537,6 +564,10 @@ async fn chat(
     {
         return reject(StatusCode::BAD_REQUEST, MetricRejection::Input);
     }
+    let reasoning_options = crate::catalog::ReasoningOptions {
+        reasoning_effort: input.reasoning_effort.take(),
+        chat_template_kwargs: input.chat_template_kwargs.take(),
+    };
     let usage_metrics = usage_metrics_requested(&headers);
     let inference = state.inference.clone();
     let delivery_heavy = heavy.clone();
@@ -562,6 +593,7 @@ async fn chat(
                 submission,
                 StructuredGenerationInput {
                     model: input.model,
+                    reasoning_options,
                     invocation,
                 },
                 heavy,
@@ -601,6 +633,7 @@ async fn chat(
                 submission,
                 GenerationInput {
                     model: input.model,
+                    reasoning_options,
                     history,
                     prompt,
                 },
@@ -644,6 +677,18 @@ async fn chat(
                 axum::Json(
                     serde_json::json!({"error":{"code":"duplicate_request","outcome":outcome}}),
                 ),
+            )
+                .into_response();
+            response.extensions_mut().insert(SafeError);
+            response
+        }
+        Err(Rejection::InvalidReasoning) => {
+            let mut response = (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({"error": {
+                    "code": "invalid_request", "detail": "reasoning_parameters_unsupported",
+                    "message": "Stage: request; constraint: authenticated_catalog_configuration. Reasoning controls are unsupported. Omit controls or refresh model metadata; this attempt sent no upstream prompt."
+                }})),
             )
                 .into_response();
             response.extensions_mut().insert(SafeError);

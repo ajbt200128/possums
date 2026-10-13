@@ -48,7 +48,11 @@ export function invocation(model: Model<'openai-completions'>, context: Transcri
   catch { throw new DiagnosticFailure('request', 'conversion'); }
   // Pi represents text-only user blocks as an array. Collapse only those; do not
   // stringify multimodal/structured content into something the model can execute.
-  const messages = converted.map((message: ReturnType<typeof convertMessages>[number]) => {
+  const messages = converted.map((convertedMessage: ReturnType<typeof convertMessages>[number]) => {
+    // Thinking is display-only, including signed native history.
+    const { reasoning: _reasoning, reasoning_content: _reasoningContent,
+      reasoning_text: _reasoningText, reasoning_details: _reasoningDetails, ...message } = convertedMessage as typeof convertedMessage & {
+        reasoning?: unknown; reasoning_content?: unknown; reasoning_text?: unknown; reasoning_details?: unknown };
     if (Array.isArray(message.content)) {
       if (message.content.some((block: { type: string }) => block.type !== 'text')) throw new Error('possums_images_unsupported');
       return { ...message, content: message.content.map((block: { type: string; text?: string }) => block.text ?? '').join('') };

@@ -98,6 +98,15 @@ for (const n of [-0, 0, 1, -1.5, 1e-7, 1e308]) {
 for (const n of [NaN, Infinity, -Infinity, 1n]) bad(() => m.serialize({ n }, 100));
 check(m.validateModels({ object: 'list', data: [model] })[0].tool_protocol === 'openai-functions-v1');
 for (const protocol of [null, true, 'openai-functions-v2', '']) bad(() => m.validateModels({ object: 'list', data: [{ ...model, tool_protocol: protocol }] }));
+// Optional display names are untrusted presentation data: a valid name is kept
+// and sanitized in place, while an absent, empty, oversized or control/escape/
+// bidi-format name is dropped without failing catalog availability.
+check(m.validateModels({ object: 'list', data: [{ ...model, name: 'DeepSeek V4.1 Flash' }] })[0].name === 'DeepSeek V4.1 Flash');
+check(m.validateModels({ object: 'list', data: [model] })[0].name === undefined);
+for (const name of ['', 'x'.repeat(129), 'bad\u001b[31m', 'spoof\u202egnirts', 42, null, { name: 'x' }]) {
+  const entry = m.validateModels({ object: 'list', data: [{ ...model, name }] })[0];
+  check(entry.name === undefined && entry.id === 'fixture');
+}
 
 const event = fields => 'data: ' + JSON.stringify({ object: 'chat.completion.chunk', model: 'fixture', ...fields }) + '\n\n';
 const delta = value => event({ choices: [{ index: 0, delta: value, finish_reason: null }] });

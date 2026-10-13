@@ -30,6 +30,7 @@ export function diagnosticDescription(failure: DiagnosticFailure): string {
     history: 'History must use supported text messages and function-call records within the request envelope. Correct the history structure; do not share its contents.',
     history_order: 'Tool calls/results must have unique call IDs and complete, matching result batches before the next turn. Correct the history ordering.',
     tool_arguments: 'Historical function arguments must be a JSON object with finite numbers and unique keys within parser limits. Correct the stored arguments.',
+    reasoning: 'Reasoning controls must match a configuration in the current authenticated model catalog. Omit unsupported controls or refresh model metadata; no effort or disable configuration is inferred.',
     conversion: 'Pi SDK history/tool conversion did not complete; the underlying cause is unknown. Check custom context transformations; share only this code/stage/constraint for support.',
   };
   const requestDescription = failure.stage === 'request' ? requestConstraints[failure.constraint] : undefined;

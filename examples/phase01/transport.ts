@@ -169,6 +169,7 @@ export class Channel {
     const catalog = path === '/v1/models';
     try {
       const req = request(this.#origin + path, op, 'GET', undefined, bearer);
+      if (catalog) req.headers.set('x-possums-reasoning-metadata', 'true');
       constraint = 'fetch';
       sent = true; res = await send(req, op, value => { status = value; constraint = 'http'; });
       if (!res.ok && (catalog || status === 503)) {

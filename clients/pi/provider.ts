@@ -8,10 +8,12 @@ import {
   type TranscriptContext, type ToolCall,
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
-import { ReferenceClient, PreparedChat, BalanceFailure, CatalogFailure, GatewayError, CompletionFailure, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent, type Completion, type Receipt } from '../../examples/phase01/client.js';
+import { ReferenceClient, PreparedChat, BalanceFailure, CatalogFailure, GatewayError, CompletionFailure, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent, type Receipt } from '../../examples/phase01/client.js';
 import { ChannelError, DiagnosticFailure, OperationFailure, LIMITS, Operation, parseJSON, serialize, requireThat, type FailureStage } from '../../examples/phase01/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure, diagnosticDescription, settlementDescription } from './diagnostics.js';
 import { invocation } from './wire.js';
+import { simpleThinking, thinkingMetadata } from './thinking.js';
+import { reasoningOptions, type ReasoningOptions } from '../../examples/phase01/reasoning.js';
 
 export const PROVIDER_ID = 'possums';
 const API = 'openai-completions';
@@ -20,7 +22,7 @@ const LEGACY_AUTH = 'possums-memory-only-session';
 const REQUEST_AUTH = 'possums-verified-memory-session';
 const recoveryAuth = envApiKeyAuth('Possums recovery credential', ['POSSUMS_RECOVERY_CREDENTIAL']);
 const isRecoveryKey = (key: string | undefined): key is string => !!key && key !== LEGACY_AUTH && key !== REQUEST_AUTH;
-type RequestOptions = StreamOptions & { reasoning?: unknown; reasoningEffort?: unknown; toolChoice?: unknown };
+type RequestOptions = StreamOptions & { reasoning?: unknown; reasoningEffort?: unknown; chatTemplateKwargs?: unknown; toolChoice?: unknown };
 type RecoveryScope = { account: number; attempts: number; pending?: Promise<void>; renewalPending?: Promise<number>;
   terminal?: ConnectionFailure; controller: AbortController; waiters: number; owners: number; idleCompaction?: boolean };
 const recoveryDelays = [0, 250, 1000] as const;
@@ -53,11 +55,19 @@ function dollars(microunits: string): string {
   const value = BigInt(microunits);
   return `${value / 1_000_000n}.${(value % 1_000_000n).toString().padStart(6, '0')}`;
 }
+// Cached/store display text is untrusted. Reuse only bounded, control/escape/
+// bidi-free names; anything else falls back to the model id.
+const displayName = (value: unknown): value is string => typeof value === 'string' && value.length > 0 &&
+  [...value].length <= 128 && !/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(value);
 function model(entry: LiveModel): Model<typeof API> {
+  // The clean display name no longer renders the reservation amount, so the
+  // conversion stage validates it explicitly: a malformed amount must fail the
+  // catalog rather than silently reaching cost display.
+  requireThat(typeof entry.maximum_reservation_microunits === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(entry.maximum_reservation_microunits));
   return {
     id: entry.id, provider: PROVIDER_ID, api: API, baseUrl: ORIGIN,
-    name: `${entry.id} · ${entry.tool_protocol ? 'tools' : 'text only'} · max $${dollars(entry.maximum_reservation_microunits)} (indicative)`,
-    input: ['text'], reasoning: false,
+    name: entry.name ?? entry.id,
+    input: ['text'], ...thinkingMetadata(entry),
     contextWindow: Number(entry.context_tokens), maxTokens: Number(entry.max_output_tokens),
     cost: { input: Number(entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000,
       output: Number(entry.output_microunits_per_million_tokens) * 1.3 / 1_000_000,
@@ -83,7 +93,10 @@ function discoveryModels(value: unknown): readonly Model<typeof API>[] {
       const cost = entry.cost;
       requireThat(cost && ['input', 'output', 'cacheRead', 'cacheWrite'].every(key => typeof cost[key] === 'number' && Number.isFinite(cost[key]) && cost[key] >= 0));
       return Object.freeze({ id: entry.id, provider: PROVIDER_ID, api: API, baseUrl: ORIGIN,
-        name: `${entry.id} · last-known metadata · prices/limits not current · inference unavailable`,
+        // Reuse only the already-validated public name; a missing/invalid name
+        // falls back to the id. Non-name inference-unavailable disclosure and
+        // enforcement are unchanged and do not depend on this label.
+        name: displayName(entry.name) ? entry.name : entry.id,
         input: ['text'] as ['text'], reasoning: false, contextWindow: entry.contextWindow, maxTokens: entry.maxTokens,
         cost: Object.freeze({ input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite }) });
     }));
@@ -154,6 +167,7 @@ function safeFailure(error: unknown, stage: FailureStage = 'provider', beforeSub
     const label = gatewayDetailLabel(error.detail);
     const known = Object.hasOwn(reason, error.reason);
     const detailStages: Readonly<Record<string, string>> = {
+      reasoning_parameters_unsupported: 'gateway_request_validation',
       settlement_failed: 'settlement', sdk_stream_decode_failed: 'gateway_sdk_decoding',
       endpoint_binding_failed: 'gateway_verified_transport', verification_failed: 'gateway_verification',
       catalog_failed: 'gateway_catalog', request_encoding_failed: 'gateway_request_encoding',
@@ -757,7 +771,7 @@ export class PossumsProvider implements Provider {
   }
 
   streamSimple(selected: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions): AssistantMessageEventStream {
-    return this.perform(selected as Model<typeof API>, context, options);
+    return this.perform(selected as Model<typeof API>, context, options, undefined, true);
   }
 
   // Native compaction has a separate scope and no retry policy. It must not
@@ -794,7 +808,7 @@ export class PossumsProvider implements Provider {
         // Only this closed-over native callback drops the SDK's advisory cap.
         // The gateway still reserves/grants the selected model's full allowance.
         const { maxTokens: _nativeHint, ...rest } = (options ?? {}) as RequestOptions;
-        const stream = this.perform(selected as Model<typeof API>, context, { ...rest, signal: event.signal }, requireScope);
+        const stream = this.perform(selected as Model<typeof API>, context, { ...rest, signal: event.signal }, requireScope, true);
         const result = await stream.result();
         for (const diagnostic of result.diagnostics ?? []) {
           if ((diagnostic.type === 'possums_settled_receipt' || diagnostic.type === 'possums_gateway_charge') && typeof diagnostic.details?.chargedMicrounits === 'string') {
@@ -827,7 +841,7 @@ export class PossumsProvider implements Provider {
     } finally { closed = true; if (--scope.owners === 0 && scope.idleCompaction && this.runScope === scope) { scope.controller.abort(); this.runScope = undefined; } }
   }
 
-  private perform(selected: Model<typeof API>, context: TranscriptContext, options: RequestOptions = {}, summary?: () => void): AssistantMessageEventStream {
+  private perform(selected: Model<typeof API>, context: TranscriptContext, options: RequestOptions = {}, summary?: () => void, simple = false): AssistantMessageEventStream {
     const events = createAssistantMessageEventStream();
     const output = blank(selected);
     const epoch = this.epoch;
@@ -840,6 +854,13 @@ export class PossumsProvider implements Provider {
     let submitted = false;
     let uncertainControl = false;
     let textIndex: number | undefined;
+    let thinkingIndex: number | undefined;
+    const endThinking = () => {
+      if (thinkingIndex === undefined) return;
+      const block = output.content[thinkingIndex];
+      if (block.type === 'thinking') events.push({ type: 'thinking_end', contentIndex: thinkingIndex, content: block.thinking, partial: output });
+      thinkingIndex = undefined;
+    };
     const endText = () => {
       if (textIndex === undefined) return;
       const block = output.content[textIndex];
@@ -852,7 +873,7 @@ export class PossumsProvider implements Provider {
         if (this.recoveryBlocked) throw this.recoveryBlocked;
         if (this.failure) throw this.failure;
         if (!this.client || options.signal?.aborted) throw new Error('possums_session_unavailable');
-        if (selected.provider !== PROVIDER_ID || selected.api !== API || selected.baseUrl !== ORIGIN || options.fetch || options.maxTokens !== undefined || options.samplingParams || options.temperature !== undefined || options.reasoning !== undefined || options.reasoningEffort !== undefined) {
+        if (selected.provider !== PROVIDER_ID || selected.api !== API || selected.baseUrl !== ORIGIN || options.fetch || options.maxTokens !== undefined || options.samplingParams || options.temperature !== undefined || (!simple && options.reasoning !== undefined) || (simple && (options.reasoningEffort !== undefined || options.chatTemplateKwargs !== undefined))) {
           throw new Error('possums_request_options_unsupported');
         }
         const payload = invocation(selected, context);
@@ -874,6 +895,12 @@ export class PossumsProvider implements Provider {
           if (!renewed) throw new Error('possums_model_unavailable');
           if (payload.tools?.length && renewed.tool_protocol !== 'openai-functions-v1') throw new Error('possums_tools_unsupported');
         }
+        const current = this.catalog.find(value => value.id === selected.id);
+        if (!current) throw new Error('possums_model_unavailable');
+        const controls: ReasoningOptions = simple ? simpleThinking(current, options.reasoning) : reasoningOptions({
+          ...(options.reasoningEffort !== undefined ? { reasoning_effort: options.reasoningEffort } : {}),
+          ...(options.chatTemplateKwargs !== undefined ? { chat_template_kwargs: options.chatTemplateKwargs } : {}),
+        });
         failureStage = 'provider';
         const originalClient = this.client;
         const guard = () => {
@@ -882,19 +909,8 @@ export class PossumsProvider implements Provider {
             throw new DiagnosticFailure('request', 'interrupted', 'uncertain');
           }
         };
-        const prepared: PreparedChat = await originalClient.prepareChat(selected.id, payload.messages, text => {
-          if (!started) { started = true; events.push({ type: 'start', partial: output }); }
-          if (textIndex === undefined) {
-            textIndex = output.content.length;
-            output.content.push({ type: 'text', text: '' });
-            events.push({ type: 'text_start', contentIndex: textIndex, partial: output });
-          }
-          const block = output.content[textIndex];
-          if (block.type !== 'text') throw new Error('possums_invalid_stream');
-          block.text += text;
-          events.push({ type: 'text_delta', contentIndex: textIndex, delta: text, partial: output });
-        }, summary ? true : this.newConversation, {
-          signal: options.signal, tools: payload.tools, tool_choice: payload.tool_choice,
+        const prepared: PreparedChat = await originalClient.prepareChat(selected.id, payload.messages, () => {}, summary ? true : this.newConversation, {
+          signal: options.signal, tools: payload.tools, tool_choice: payload.tool_choice, ...controls,
           onPayload: options.onPayload ? value => options.onPayload!(value, selected) : undefined,
           onResponse: options.onResponse ? value => options.onResponse!({ status: value.status, headers: value.contentType ? { 'content-type': value.contentType } : {} }, selected) : undefined,
           onEvent: async (value: CompletionEvent) => {
@@ -904,8 +920,35 @@ export class PossumsProvider implements Provider {
               started = true;
               events.push({ type: 'start', partial: output });
             }
-            for (const call of delta?.tool_calls ?? []) {
+            // Match Pi's native first-nonempty-field rule, avoiding duplicated
+            // reasoning when an endpoint supplies both aliases.
+            const thinking = delta?.reasoning_content || delta?.reasoning;
+            if (thinking) {
               endText();
+              if (thinkingIndex === undefined) {
+                thinkingIndex = output.content.length;
+                output.content.push({ type: 'thinking', thinking: '' });
+                events.push({ type: 'thinking_start', contentIndex: thinkingIndex, partial: output });
+              }
+              const block = output.content[thinkingIndex];
+              if (block.type !== 'thinking') throw new Error('possums_invalid_stream');
+              block.thinking += thinking;
+              events.push({ type: 'thinking_delta', contentIndex: thinkingIndex, delta: thinking, partial: output });
+            }
+            if (delta?.content) {
+              endThinking();
+              if (textIndex === undefined) {
+                textIndex = output.content.length;
+                output.content.push({ type: 'text', text: '' });
+                events.push({ type: 'text_start', contentIndex: textIndex, partial: output });
+              }
+              const block = output.content[textIndex];
+              if (block.type !== 'text') throw new Error('possums_invalid_stream');
+              block.text += delta.content;
+              events.push({ type: 'text_delta', contentIndex: textIndex, delta: delta.content, partial: output });
+            }
+            for (const call of delta?.tool_calls ?? []) {
+              endText(); endThinking();
               let pending = args.get(call.index);
               if (!pending) {
                 const block: ToolCall = { type: 'toolCall', id: call.id ?? '', name: call.function?.name ?? '', arguments: {} };
@@ -961,7 +1004,7 @@ export class PossumsProvider implements Provider {
         } });
         if (!summary && epoch === this.epoch) this.newConversation = false;
         if (!started) throw new Error('possums_invalid_stream');
-        endText();
+        endText(); endThinking();
         output.usage = receiptUsage(receipt);
         if (epoch !== this.epoch || options.signal?.aborted) throw new Error('possums_run_replaced');
         if (summary) {
@@ -989,6 +1032,7 @@ export class PossumsProvider implements Provider {
         }
         events.push({ type: 'done', reason: output.stopReason, message: output });
       } catch (error) {
+        endText(); endThinking();
         output.stopReason = options.signal?.aborted ? 'aborted' : 'error';
         if (!output.diagnostics && (error instanceof GatewayError || error instanceof CompletionFailure) && error.settlement) {
           const partial = error.settlement;
