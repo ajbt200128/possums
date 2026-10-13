@@ -6,6 +6,10 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
+## Catalog-driven thinking source candidate
+
+[Scoped implementation and offline verification](catalog-thinking-verification.md) records opt-in supported upstream catalog metadata, closed catalog-gated request parameters, Pi-only thinking-level/off adaptation, balanced display and no reasoning replay. Pinned Rust/Go and full Pi 1.0.4 scratch checks passed, including exact previously shipped strict/default decoder and request-omission fixtures. This is not complete old-client E2E, client installation/activation, gateway deployment or live control/billing acceptance. Maximum reservations, settlement/disconnect, no inference replay and authenticated tool gates remain unchanged. Privacy references and hostile-value diagnostic evidence are in that record; no telemetry is added.
+
 ## Pi native steering/retry source candidate
 
 The operator-approved client-only relaxation and its local qualification status are recorded in [Pi steering/retry verification](pi-steering-retry-verification.md). It does not change gateway idempotency/settlement, establish live balance reconciliation, or update historical no-replay evidence. Installation and live qualification remain separate.
