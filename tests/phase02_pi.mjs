@@ -252,14 +252,14 @@ await check('native AuthStorage persists recovery key; cold extension start rest
  assert.deepEqual(credential,{type:'api_key',key:recoveryKey});
  assert.deepEqual(JSON.parse(fs.readFileSync(authPath,'utf8')),{possums:credential});
  assert.equal(fs.statSync(authPath).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(authPath)).mode&0o777,0o700);
- const discovery=await modelsStore.read('possums');assert.equal(discovery.models.length,1);assert.match(discovery.models[0].name,/last-known/);assert(!JSON.stringify(discovery).includes(recoveryKey));
+ const discovery=await modelsStore.read('possums');assert.equal(discovery.models.length,1);assert.equal(discovery.models[0].name,'synthetic');assert(!JSON.stringify(discovery).includes(recoveryKey));
  provider.logout();
  const extension=fixtureExtension(fixture.establish);
  assert(!extension.commands.has('possums-logout'));
  const restored=await nativeRuntime(extension.provider,NativeAuthStorage.create(authPath),modelsStore);
  const registry=new coding.ModelRegistry(restored);
  const before=structuredClone(fixture.trace);
- assert(await restored.checkAuth('possums'));assert.match((await restored.getAvailable('possums'))[0].name,/last-known/);assert.deepEqual(extension.provider.catalog,[]);
+ assert(await restored.checkAuth('possums'));assert.equal((await restored.getAvailable('possums'))[0].name,'synthetic');assert.deepEqual(extension.provider.catalog,[]);
  assert.deepEqual(fixture.trace,before,'availability is offline even with a saved key');
  await extension.handlers.get('session_start')({}, {modelRegistry:registry});
  assert.equal(registry.getAvailable().filter(value=>value.provider==='possums').length,1);
@@ -1074,7 +1074,7 @@ await check('native later catalog failures clear usable models, deduplicate, and
  const original=fixture.s.client.models;
  fixture.s.client.models=async()=>{throw new Error(hostileConnection);};
  for(let i=0;i<2;i++)await registry.refresh({providers:['possums'],allowNetwork:true});
- assert.deepEqual(extension.provider.catalog,[]);assert.match(extension.provider.getModels()[0].name,/last-known/);assert.equal(notices.length,1);
+ assert.deepEqual(extension.provider.catalog,[]);assert.equal(extension.provider.getModels()[0].name,'synthetic');assert.equal(notices.length,1);
  assert.match(notices[0],/possums_catalog_unavailable/);
  await extension.commands.get('possums-status').handler('',ctx);assert.equal(notices.at(-1),notices[0]);
  fixture.s.client.models=original;
@@ -1415,7 +1415,7 @@ await check('modest nested schema passes ordinary JSON without an artificial inf
 await check('failed catalog refresh removes prior usable list',async()=>{
  const s=await setup(['stop']);assert.equal(s.provider.getModels().length,1);s.failModels();
  await assert.rejects(s.provider.refreshModels({credential:{type:'api_key',key:requestMarker},allowNetwork:true,signal:new AbortController().signal,publish:async value=>{value.update?.();return true;}}),/possums_catalog_unavailable/);
- assert.equal(s.provider.catalog.length,0);assert.equal(s.provider.listed.length,0);assert.match(s.provider.getModels()[0].name,/last-known/);
+ assert.equal(s.provider.catalog.length,0);assert.equal(s.provider.listed.length,0);assert.equal(s.provider.getModels()[0].name,'synthetic');
 });
 await check('length after tool deltas never authorizes tool execution',async()=>{
  const s=await setup(['tool_length']);s.provider.beginRun();const result=await drain(s.provider.streamSimple(s.selected,context(true)));

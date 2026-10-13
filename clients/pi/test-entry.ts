@@ -6,6 +6,8 @@ export { publicEvidence, evidenceDirectory } from './evidence-cache.js';
 export { ConnectionFailure, EvidenceObservation, connectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
 export { API_APPROVALS, PUBLISHER, qualifyPublished } from '../../examples/phase01/approval.js';
 export { invocation } from './wire.js';
+export { thinkingMetadata, simpleThinking } from './thinking.js';
+export { reasoningOptions, reasoningParams, admitReasoning } from '../../examples/phase01/reasoning.js';
 export { Channel } from '../../examples/phase01/transport.js';
 export { ReferenceClient, BalanceFailure, CatalogFailure, GatewayError, CompletionFailure, consumeCompletion, validateModels } from '../../examples/phase01/client.js';
 export { ChannelError, DiagnosticFailure, OperationFailure, Operation, LIMITS, JSONDepthError } from '../../examples/phase01/limits.js';

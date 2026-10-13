@@ -41,6 +41,7 @@ run('phase01_stream_limits.mjs', { PHASE01_BUILD: output, PHASE02_CLIENT_INSTALL
 run('tinfoil_forwarding_client.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs') });
 run('phase02_release.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
 run('phase02_cache.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs') });
+run('phase02_thinking.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), POSSUMS_PI_ROOT: piRoot });
 run('phase02_pi.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), PHASE02_SCRATCH: path.join(scratch, 'checks/pi-cases'), POSSUMS_PI_ROOT: piRoot });
 run('phase02_discovery.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), PHASE02_SCRATCH: path.join(scratch, 'checks/discovery-cases'), POSSUMS_PI_ROOT: piRoot });
 const text = await readFile(path.join(testSource, 'phase01_transport.mjs'), 'utf8');

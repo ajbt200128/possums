@@ -1,6 +1,7 @@
 import { Channel, hasByteReadTimeout, type ResponseOptions } from './transport.js';
 import { ChannelError, DiagnosticFailure, LIMITS, Operation, OperationFailure, cleanup, parseJSON, requireThat, serialize,
   type FailureConstraint, type FailureStage } from './limits.js';
+import { admitReasoning, reasoningParams, type ReasoningParams, type ReasoningOptions } from './reasoning.js';
 import { fields, freezeJSON, snapshotInvocation,
   type Chat, type Invocation, type Tool, type ToolChoice } from './tools.js';
 
@@ -9,6 +10,7 @@ import { fields, freezeJSON, snapshotInvocation,
 export type CompletionEvent = Readonly<{
   object: 'chat.completion.chunk'; model: string;
   choices: readonly Readonly<{ index: 0; delta: Readonly<{ role?: 'assistant' | null; content?: string | null;
+    reasoning?: string | null; reasoning_content?: string | null;
     tool_calls?: readonly Readonly<{ index: number; id?: string | null; type?: 'function' | null;
       function?: Readonly<{ name?: string | null; arguments?: string | null }> | null }>[] | null }>;
     finish_reason?: Receipt['finish'] | null }>[];
@@ -18,12 +20,13 @@ export type CompletionEvent = Readonly<{
 }>;
 export type CompletionOptions = { signal?: AbortSignal; tools?: Tool[];
   onEvent?: (event: CompletionEvent) => void | Promise<void> };
-export type ChatOptions = ResponseOptions & CompletionOptions & { tool_choice?: ToolChoice;
+export type ChatOptions = ResponseOptions & CompletionOptions & ReasoningOptions & { tool_choice?: ToolChoice;
   onPayload?: (payload: Readonly<Invocation>) => unknown | Promise<unknown> };
 
-export type LiveModel = { object: 'model'; id: string; context_tokens: string; max_output_tokens: string;
+export type LiveModel = { object: 'model'; id: string; name?: string; context_tokens: string; max_output_tokens: string;
   input_microunits_per_million_tokens: string; output_microunits_per_million_tokens: string; maximum_reservation_microunits: string;
-  tool_protocol?: 'openai-functions-v1'; cached_input_microunits_per_million_tokens?: string | null };
+  tool_protocol?: 'openai-functions-v1'; cached_input_microunits_per_million_tokens?: string | null;
+  reasoning?: boolean; reasoning_params?: ReasoningParams };
 export type Receipt = { finish?: 'stop' | 'length' | 'tool_calls'; inputTokens: number; outputTokens: number; totalTokens: number;
   chargedMicrounits: string; refundedMicrounits?: string;
   quotedInputMicrounitsPerMillion?: string; quotedOutputMicrounitsPerMillion?: string;
@@ -72,13 +75,18 @@ function optionalAmount(value: unknown): string | undefined {
   try { amount(value); return value as string; } catch { return undefined; }
 }
 const count = (value: unknown): number | undefined => Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined;
+// Optional upstream display text is untrusted presentation data. Reject empty,
+// oversized or control/escape/bidi-format strings; invalid names fall back to id.
+const displayName = (value: unknown): value is string => typeof value === 'string' && value.length > 0 &&
+  [...value].length <= 128 && !/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(value);
 export function validateModels(value: any): readonly LiveModel[] {
   value = parseJSON(serialize(value, LIMITS.catalog), LIMITS.catalog);
   keys(value, ['object', 'data']);
   requireThat(value.object === 'list' && Array.isArray(value.data) && value.data.length > 0 && value.data.length <= LIMITS.models);
   const ids = new Set<string>();
-  value.data = value.data.map((model: unknown) => responseFields(model, ['object', 'id', 'context_tokens', 'max_output_tokens', 'input_microunits_per_million_tokens', 'output_microunits_per_million_tokens', 'maximum_reservation_microunits'], ['tool_protocol', 'cached_input_microunits_per_million_tokens']));
+  value.data = value.data.map((model: unknown) => responseFields(model, ['object', 'id', 'context_tokens', 'max_output_tokens', 'input_microunits_per_million_tokens', 'output_microunits_per_million_tokens', 'maximum_reservation_microunits'], ['name', 'tool_protocol', 'cached_input_microunits_per_million_tokens', 'reasoning', 'reasoning_params']));
   for (const model of value.data) {
+    if (Object.hasOwn(model, 'name') && !displayName(model.name)) delete model.name;
     if (Object.hasOwn(model, 'tool_protocol')) requireThat(model.tool_protocol === 'openai-functions-v1');
     requireThat(model.object === 'model' && typeof model.id === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(model.id) && !ids.has(model.id));
     ids.add(model.id);
@@ -87,6 +95,10 @@ export function validateModels(value: any): readonly LiveModel[] {
     requireThat(context > 0n && output > 0n);
     if (model.cached_input_microunits_per_million_tokens != null) amount(model.cached_input_microunits_per_million_tokens);
     amount(model.maximum_reservation_microunits);
+    if (typeof model.reasoning !== 'boolean') delete model.reasoning;
+    const metadata = reasoningParams(model.reasoning_params);
+    delete model.reasoning_params;
+    if (metadata) model.reasoning_params = freezeJSON(metadata);
     Object.freeze(model);
   }
   return Object.freeze(value.data);
@@ -94,7 +106,7 @@ export function validateModels(value: any): readonly LiveModel[] {
 
 // This list is the closed gateway detail vocabulary. Never render server-provided
 // messages or an unrecognized detail, even when it resembles an internal code.
-const details = new Set(`inference_unavailable upstream_response_invalid verification_failed catalog_failed request_encoding_failed
+const details = new Set(`reasoning_parameters_unsupported inference_unavailable upstream_response_invalid verification_failed catalog_failed request_encoding_failed
   tool_profile_unqualified tokenizer_send_failed tokenizer_http_failed tokenizer_response_invalid tokenizer_upload_incomplete
   generation_send_failed generation_http_failed endpoint_binding_failed stream_content_type_invalid stream_transport_failed
   stream_idle_timeout stream_deadline_exceeded sdk_stream_decode_failed upstream_error_event stream_event_schema_invalid
@@ -474,7 +486,7 @@ export class ReferenceClient {
     try {
       requireThat(this.#bearer && typeof newConversation === 'boolean' && typeof onDelta === 'function');
       // Copy option descriptors once. No arbitrary request options / fetch / headers.
-      opts = fields(options, [], ['signal', 'tools', 'tool_choice', 'onPayload', 'onResponse', 'onEvent']);
+      opts = fields(options, [], ['signal', 'tools', 'tool_choice', 'reasoning_effort', 'chat_template_kwargs', 'onPayload', 'onResponse', 'onEvent']);
       for (const key of ['onPayload', 'onResponse', 'onEvent'] as const) requireThat(opts[key] === undefined || typeof opts[key] === 'function');
       op = new Operation(null, opts.signal);
     } catch { throw new DiagnosticFailure('request', 'schema'); }
@@ -482,7 +494,9 @@ export class ReferenceClient {
     try {
       op.check();
       let payload = snapshotInvocation({ model, messages, stream: true,
-        ...(opts.tools !== undefined ? { tools: opts.tools } : {}), ...(opts.tool_choice !== undefined ? { tool_choice: opts.tool_choice } : {}) });
+        ...(opts.tools !== undefined ? { tools: opts.tools } : {}), ...(opts.tool_choice !== undefined ? { tool_choice: opts.tool_choice } : {}),
+        ...(opts.reasoning_effort !== undefined ? { reasoning_effort: opts.reasoning_effort } : {}),
+        ...(opts.chat_template_kwargs !== undefined ? { chat_template_kwargs: opts.chat_template_kwargs } : {}) });
       if (opts.onPayload) {
         stage = 'hook'; constraint = 'unexpected';
         let replacement: unknown;
@@ -527,6 +541,9 @@ export class ReferenceClient {
       constraint = 'schema';
       const entry = validateModels(catalog).find(entry => entry.id === model);
       requireThat(entry);
+      stage = 'request'; constraint = 'schema';
+      admitReasoning(entry, { ...(Object.hasOwn(payload!, 'reasoning_effort') ? { reasoning_effort: payload!.reasoning_effort } : {}),
+        ...(Object.hasOwn(payload!, 'chat_template_kwargs') ? { chat_template_kwargs: payload!.chat_template_kwargs } : {}) });
       const usesTools = payload!.tools !== undefined || payload!.messages.some(message => message.role === 'tool' || (message.role === 'assistant' && message.tool_calls !== undefined));
       requireThat(!usesTools || entry.tool_protocol === 'openai-functions-v1');
       op.check(); requireThat(!state.closed); issued = true; stage = 'submission'; constraint = 'fetch';

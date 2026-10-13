@@ -1,3 +1,4 @@
+import type { ReasoningOptions } from './reasoning.js';
 import { DiagnosticFailure, mapData, requireThat } from './limits.js';
 
 export type JSONObject = { [key: string]: JSONValue };
@@ -8,7 +9,7 @@ export type ToolCall = { id: string; type: 'function'; function: { name: string;
 export type Message = { role: 'system' | 'user'; content: string } |
   { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] } |
   { role: 'tool'; content: string; tool_call_id: string };
-export type Invocation = { model: string; stream: true; messages: Message[]; tools?: Tool[]; tool_choice?: ToolChoice };
+export type Invocation = ReasoningOptions & { model: string; stream: true; messages: Message[]; tools?: Tool[]; tool_choice?: ToolChoice };
 export type Chat = Invocation & { submission: string };
 
 // Validate own descriptors before touching values, including optional fields.
@@ -31,7 +32,7 @@ export function freezeJSON<T>(value: T): T {
 // Only the dispatch envelope is client authority. Transcript/tool semantics are
 // owned by Pi (or the reference caller) and the gateway, not admitted again here.
 export function admitInvocation(value: unknown, withSubmission = false): any {
-  const chat = fields(value, withSubmission ? ['model', 'stream', 'submission', 'messages'] : ['model', 'stream', 'messages'], ['tools', 'tool_choice']);
+  const chat = fields(value, withSubmission ? ['model', 'stream', 'submission', 'messages'] : ['model', 'stream', 'messages'], ['tools', 'tool_choice', 'reasoning_effort', 'chat_template_kwargs']);
   requireThat(chat.stream === true && typeof chat.model === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(chat.model));
   if (withSubmission) requireThat(typeof chat.submission === 'string' && /^[A-Za-z0-9_-]{43}$/.test(chat.submission));
   requireThat(Array.isArray(chat.messages), 'history');
@@ -41,7 +42,7 @@ export function snapshotInvocation(value: unknown): Invocation {
   // Hooks receive JSON data, never credentials/submission or mutable dispatch
   // authority. Recheck the encoded envelope so a nested toJSON cannot change it.
   try {
-    const envelope = fields(value, ['model', 'stream', 'messages'], ['tools', 'tool_choice']);
+    const envelope = fields(value, ['model', 'stream', 'messages'], ['tools', 'tool_choice', 'reasoning_effort', 'chat_template_kwargs']);
     return freezeJSON(admitInvocation(JSON.parse(JSON.stringify(envelope))));
   } catch (error) {
     throw error instanceof DiagnosticFailure ? error : new DiagnosticFailure('request', 'encoding');
