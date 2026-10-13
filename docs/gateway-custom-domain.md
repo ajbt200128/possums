@@ -1,4 +1,104 @@
-# Gateway custom domain: historical attempt (reverted)
+# Gateway custom domain: renewed source candidate and historical attempts
+
+## Renewed operator-authorized cutover (source candidate; not deployed)
+
+The operator requested preparing the paired backend/Pi PR again and explicitly
+accepted restart and breaking-hostname risk. This is authorization to prepare
+and review source, not to deploy, install/activate the client, send paid inference,
+or replay any previous mutation. PR #67 remains historical and reverted.
+
+Fresh [Tinfoil custom-domain documentation](https://docs.tinfoil.sh/containers/custom-domains)
+now says custom domains are included with every container subscription; the
+previous enterprise-enablement prerequisite is no longer documented. This does
+not establish that the previous HTTP 403 planning failure is resolved. The
+read-only plan route remains documented and gated by the corresponding update
+permission. Production admission must still acquire and validate it before any
+CLI update; failure stops without mutation or automatic replay.
+
+### Fresh DNS/control-plane evidence
+
+- All three current Tinfoil-issued records were created in Cloudflare and read
+  back: traffic CNAME, ownership TXT and `_acme-challenge` certificate CNAME.
+  Public DNS at `1.1.1.1` returned all expected values. TTL is 300 seconds;
+  both CNAMEs have `proxied: false` and `flatten_cname: false`. No Cloudflare
+  HTTP/TLS proxy was enabled. Ownership nonce is not copied into this document.
+- The official CLI domain verification returned `verified: true`,
+  `cname_configured: true`, and `used_by: []`. The installed CLI did not return
+  a certificate-readiness field; public certificate-CNAME resolution is DNS
+  evidence only, not issued-TLS or serving evidence.
+- Fresh container readback reported `possum-phase0` running `v0.0.37`, no pending
+  tag, confidential mode enabled and debug disabled. Both `domain` and
+  `internal_domain` remained `possum-phase0.possums.containers.tinfoil.dev`.
+- No container mutation, restart, release dispatch, gateway credential-bearing
+  probe, client installation/activation, live attestation or inference was
+  performed during this renewed preparation.
+
+### Paired source and rollout contract
+
+Restore the previously reviewed domain-only deployment exception and pre-update
+plan guard, alongside exact new-host serving verification and matching Pi source.
+The candidate is based on current main and retains the later authenticated
+thinking controls and clean model names. Opaque variables, secret references,
+resources, security settings and existing provenance/current-main/operator
+approval/single-mutation gates remain unchanged. The initial plan permits only
+`custom_domain`; subsequent releases at the new domain permit no setting changes.
+
+Pi's published path and model origin target `https://gateway.possums.dev` with
+unchanged exact hostname/key checks. Old-origin public cache/discovery entries
+are discarded. The expired compiled `v0.0.15` approval remains bound to the old
+origin and is not refreshed or rebound. No redirect, old-host fallback, trust
+relaxation or inference retry is added. This is source qualification, not an
+installed/activated client or established new-host serving contract.
+
+Old-host simultaneous serving is still unconfirmed. Existing shipped clients
+bound to the old hostname may fail closed after the accepted breaking cutover;
+the matching new client must be separately qualified, installed and deliberately
+activated before switching the gateway contract. Scratch artifacts do not count
+as installation. No old-client/new-gateway live compatibility claim is made.
+
+After review and required CI, merge only when separately authorized. Use the
+normal exact-current-main protected release/approval path, then distinguish
+observed deployment from credential-free new-host serving acceptance. Do not
+apply `no-rollout-needed`. Stop on a rejected plan or uncertain update; never
+rerun the mutating job or automatically roll back. A separately approved rollback
+must clear `custom_domain`, restore old-host deployment/serving/client policy,
+and retain DNS while reconciling. An image rollback alone does not undo the
+hostname configuration. A restart may discard memory-only sessions and in-flight
+state; delivery interruption does not prove cancellation/refund or safe replay.
+
+Privacy scope is [data handling boundaries](../PRIVACY.md#data-handling-boundaries)
+and [forbidden telemetry](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data).
+Only public DNS/selected control-plane state is recorded. Credentials and raw
+control-plane errors/configuration remain unprinted and outside repository
+artifacts. No logs/traces/support collection or telemetry changes are added.
+Native host history is a separate persistence boundary. DNS-only configuration
+avoids Cloudflare TLS termination but does not eliminate network metadata or
+timing-correlation risk. Native CLI v3 signer mismatch, Pi legacy-v2 freshness
+limits and live billing/runtime privacy unknowns remain unresolved.
+
+### Renewed offline verification
+
+- `python3 -m unittest discover -s tests -p 'test_release*.py'`: 63 passed,
+  including hostname-only plan admission, zero-mutation rejection, preserved
+  HTTP failure through cleanup and opaque-configuration checks.
+- Focused serving-verifier Go tests passed using the repository's pinned
+  `attestation-go` build with `GOTOOLCHAIN=local`; no live serving check ran.
+- Node 24.13.0/Pi 1.0.4 scratch TypeScript build and complete offline checks
+  passed: release 179, public evidence cache 40, Pi 160 and native discovery 31,
+  plus thinking, diagnostics and reference transport/stream/request fixtures.
+  Fixtures reject old-host evidence, cache/discovery reuse and compiled-approval
+  rebinding without inference. Synthetic crypto boundaries do not prove hardware
+  authenticity, runtime privacy, billing or old-client live compatibility.
+- Changed-path LSP probes were clean for deployment Python, Go and test entry.
+  In-checkout client/approval probes lack intentionally scratch-installed Pi and
+  verifier dependencies and report module/dependent-type errors; the authoritative
+  pinned scratch TypeScript build passed. No repository dependencies were installed.
+- `git diff --check` passed. Independent review found no confirmed blockers.
+  The initial held-plan objection was independently refuted: the separate blocked
+  future held-review path does not govern this existing ordinary protected update.
+  Changing hold/latest policy is outside this domain-only PR. The second reviewer
+  independently reran all 63 release tests successfully. Historical results below
+  do not qualify this candidate.
 
 ## Operator-requested revert — 2026-10-13
 
