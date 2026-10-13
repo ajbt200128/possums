@@ -34,9 +34,15 @@ qualify later workflows or establish the currently served release.
    actual review history, immutable public provenance and current main before
    admitting one update. Only the latest main candidate may deploy at admission.
 8. The official checksum-pinned CLI updates once, preserving opaque settings and
-   secret references. Bounded readback requires the target running/no pending,
-   confidential mode on and debug off. A separate credential-free public serving
-   check uses the already-pinned Go SDK's V3 appraisal and TLS-key-bound client.
+   secret references except the explicitly approved hostname transition from
+   `possum-phase0.possums.containers.tinfoil.dev` to `gateway.possums.dev`. Other
+   source hostnames are rejected. The update explicitly requests the new domain;
+   post-call plan review permits only that `custom_domain` setting change on the
+   initial transition and no setting changes thereafter. Bounded readback requires
+   the new hostname, target running/no pending, confidential mode on and debug off.
+   A separate credential-free public serving check at the new hostname uses the
+   already-pinned Go SDK's V3 appraisal and TLS-key-bound client. See
+   [domain migration evidence and breaking-cutover approval](gateway-custom-domain.md).
 
 Superseded candidates may leave old approvals visible; approving them cannot pass
 postapproval current-main checks. Checks/preparation rejection is not rollback.

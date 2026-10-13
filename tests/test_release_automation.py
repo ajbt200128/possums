@@ -55,7 +55,7 @@ def view(tag="v1.2.2") -> dict:
     data.update(repo=r.REPO, current_tag=tag, status="running", update_tag=None,
                 debug=False, disable_cc_mode=False, held=False,
                 variables={"private": "SYNTHETIC-SECRET"}, secrets=sorted(d.REQUIRED_REFS),
-                ssh_keys=[], cpus=2, gpus=0, memory_mb=8192)
+                ssh_keys=[], cpus=2, gpus=0, memory_mb=8192, domain=d.DOMAIN)
     return data
 
 
@@ -380,8 +380,55 @@ class MutationTest(StopTest):
             self.assertEqual(len(gates), 1)  # No cancellation/recheck loop after admission.
             self.assertEqual(result["mutationCommandCount"], 1)
             self.assertFalse(result["servingVerified"])
-            self.assertEqual(call.call_args.args[1], ["container", "update", d.NAME, "--tag", V, "--output", "json"])
+            self.assertEqual(call.call_args.args[1], ["container", "update", d.NAME, "--tag", V,
+                                                     "--custom-domain", d.DOMAIN, "--output", "json"])
+            self.assertTrue(result["approvedDomainConfirmed"])
             call.assert_called_once()
+
+    def test_only_approved_old_to_new_hostname_transition_is_admitted(self):
+        before = view()
+        before["domain"] = d.OLD_DOMAIN
+        migration = plan()
+        migration["configuration_changes"]["settings"] = ["custom_domain"]
+        result = subprocess.CompletedProcess([], 0, b"opaque", json.dumps(migration).encode())
+        with patch.object(d, "get", side_effect=[before, view(V)]), patch.object(d, "call", return_value=result) as call:
+            self.assertTrue(d.update_once("unused", V, lambda: None)["approvedDomainConfirmed"])
+            call.assert_called_once()
+        for domain in (None, "hostile.example", "https://gateway.possums.dev"):
+            bad = view()
+            bad["domain"] = domain
+            with patch.object(d, "get", return_value=bad), patch.object(d, "call") as call:
+                self.stop("domain_source", d.update_once, "unused", V, lambda: None)
+                call.assert_not_called()
+
+    def test_hostname_migration_plan_cannot_hide_other_settings(self):
+        for settings in ([], ["domain"], ["custom_domain", "debug"], ["custom_domain", "custom_domain"]):
+            changed = plan()
+            changed["configuration_changes"]["settings"] = settings
+            self.stop("plan_configuration", d.inspect_plan, json.dumps(changed).encode(),
+                      "v1.2.2", V, d.OLD_DOMAIN)
+        changed = plan()
+        changed["configuration_changes"]["settings"] = ["custom_domain"]
+        self.stop("plan_configuration", d.inspect_plan, json.dumps(changed).encode(),
+                  "v1.2.2", V, d.DOMAIN)
+
+    def test_old_hostname_is_not_accepted_as_successful_completion(self):
+        before, after = view(), view(V)
+        before["domain"] = after["domain"] = d.OLD_DOMAIN
+        migration = plan()
+        migration["configuration_changes"]["settings"] = ["custom_domain"]
+        result = subprocess.CompletedProcess([], 0, b"opaque", json.dumps(migration).encode())
+        with patch.object(d, "get", side_effect=[before, after]), patch.object(d, "call", return_value=result) as call:
+            self.stop("domain_completion", d.update_once, "unused", V, lambda: None)
+            call.assert_called_once()
+        after["domain"] = "hostile.example"
+        with patch.object(d, "get", side_effect=[view(), after]), patch.object(d, "call", return_value=self.result()):
+            self.stop("configuration_changed", d.update_once, "unused", V, lambda: None)
+
+    def test_deployment_and_serving_hostnames_match(self):
+        source = (ROOT / "scripts/verify-serving/main.go").read_text()
+        self.assertIn('host       = "' + d.DOMAIN + '"', source)
+        self.assertNotIn(d.OLD_DOMAIN, source)
 
     def test_official_cli_omitted_empty_volume_fields_allow_update(self):
         def response(tag):

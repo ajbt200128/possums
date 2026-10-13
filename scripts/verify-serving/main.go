@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	host       = "possum-phase0.possums.containers.tinfoil.dev"
+	host       = "gateway.possums.dev"
 	repository = "ajbt200128/possums"
 	publicURL  = "https://" + host + "/.well-known/tinfoil-certificate"
 )
