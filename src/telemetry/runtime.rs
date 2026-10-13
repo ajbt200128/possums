@@ -116,14 +116,32 @@ impl Runtime {
 
     /// True acknowledges joined disposal and cleared local state, not backend
     /// deletion or recall of bytes already accepted by the transport.
-    pub async fn shutdown(mut self) -> bool {
+    pub async fn shutdown(self) -> bool {
+        self.checked_shutdown().await.is_ok()
+    }
+
+    /// Typed acknowledgement; telemetry failures never recursively emit metrics.
+    pub async fn checked_shutdown(mut self) -> Result<(), ShutdownFailure> {
         self.stop.send_replace(true);
         match self.task.take() {
-            Some(task) => task.await.unwrap_or(false),
-            None => true,
+            Some(task) => match task.await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(ShutdownFailure::DisposalUnconfirmed),
+                Err(_) => Err(ShutdownFailure::ControllerTaskUnknown),
+            },
+            None => Ok(()),
         }
     }
 }
+/// Locally authored acknowledgement failures, without join/panic/SDK payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ShutdownFailure {
+    #[error("code=telemetry_controller_unknown stage=cleanup constraint=controller_task_completion cause=unknown action=check_service_shutdown; remote deletion is not established")]
+    ControllerTaskUnknown,
+    #[error("code=telemetry_disposal_unconfirmed stage=cleanup constraint=joined_local_disposal action=check_service_shutdown; remote deletion is not established")]
+    DisposalUnconfirmed,
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.stop.send_replace(true);

@@ -12,9 +12,10 @@ use crate::{
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::{AdmissionError, Auth},
     catalog::Model,
+    failures::InterfaceError,
     generation_owner::ReservedGeneration,
     inference::{
-        authenticated_catalog,
+        authenticated_catalog_checked,
         tools::{ToolInvocation, ToolProfile},
         InferenceFailure, Message, SharedInference,
     },
@@ -109,9 +110,9 @@ impl RequestInput {
                 inference
                     .tool_profile(&input.model)
                     .map(Some)
-                    .ok_or(Rejection::Upstream(
-                        InferenceFailure::ToolProfileUnqualified,
-                    ))
+                    .ok_or_else(|| {
+                        Rejection::upstream(InferenceFailure::ToolProfileUnqualified, false)
+                    })
             }
         }
     }
@@ -124,13 +125,70 @@ enum Prepared {
 /// Fixed, content-free failures; adapters own their protocol/status mappings.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Rejection {
-    Unavailable,
-    Upstream(InferenceFailure),
-    InvalidModel,
-    InvalidReasoning,
+    Failure {
+        failure: InterfaceError,
+        projection: FailureProjection,
+        owned: bool,
+    },
     Admission(AdmissionError),
     Duplicate(Outcome),
+    Cancelled,
+}
+
+/// Legacy adapter projection, separate from the preserved typed cause/owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailureProjection {
+    Unavailable,
+    Upstream(InferenceFailure),
+    Catalog(crate::inference::CatalogFailure),
+    InvalidModel,
+    InvalidReasoning,
     Context,
+}
+
+impl Rejection {
+    fn upstream(failure: InferenceFailure, owned: bool) -> Self {
+        let cause = match failure {
+            InferenceFailure::InferenceUnavailable if owned => InterfaceError::PreflightUnknown,
+            InferenceFailure::InferenceUnavailable => InterfaceError::CatalogAcquisitionUnknown,
+            _ => failure.into(),
+        };
+        Self::Failure {
+            failure: cause,
+            projection: FailureProjection::Upstream(failure),
+            owned,
+        }
+    }
+
+    pub(crate) fn interface_error(&self) -> Option<InterfaceError> {
+        use crate::{accounting::AccountingError as A, auth::AuthError as H};
+        Some(match self {
+            Self::Failure { failure, .. } => *failure,
+            Self::Admission(AdmissionError::Auth(error)) => match error {
+                H::Invalid => InterfaceError::AuthenticationRefused,
+                H::Conflict => InterfaceError::ConflictRefused,
+                H::Configuration => InterfaceError::ConfigurationInvalid,
+                H::StateUnavailable => InterfaceError::AuthStateUnknown,
+                H::Capacity => InterfaceError::StateCapacityRefused,
+            },
+            Self::Admission(AdmissionError::Accounting(error)) => match error {
+                A::UnknownAccount => InterfaceError::AccountUnavailable,
+                A::InsufficientCredit => InterfaceError::CreditRefused,
+                A::Concurrency => InterfaceError::AccountLimitRefused,
+                A::AlteredDuplicate => InterfaceError::ConflictRefused,
+                A::Capacity => InterfaceError::StateCapacityRefused,
+                A::InvalidTransition | A::StateUnavailable => {
+                    InterfaceError::AccountingStateUnknown
+                }
+                A::Cost => InterfaceError::QuoteOverflow,
+            },
+            Self::Duplicate(_) | Self::Cancelled => return None,
+        })
+    }
+
+    pub(crate) fn owned_failure(&self) -> bool {
+        matches!(self, Self::Failure { owned: true, .. })
+    }
 }
 
 impl Generation<'_> {
@@ -145,7 +203,10 @@ impl Generation<'_> {
     fn reject(&self, rejection: Rejection, model: AdmissionModel) -> Rejection {
         use telemetry::Rejection as R;
         let reason = match &rejection {
-            Rejection::InvalidModel | Rejection::InvalidReasoning => R::Input,
+            Rejection::Failure {
+                projection: FailureProjection::InvalidModel | FailureProjection::InvalidReasoning,
+                ..
+            } => R::Input,
             Rejection::Admission(AdmissionError::Auth(_)) => R::Auth,
             Rejection::Admission(AdmissionError::Accounting(
                 crate::accounting::AccountingError::InsufficientCredit,
@@ -153,10 +214,28 @@ impl Generation<'_> {
             Rejection::Admission(AdmissionError::Accounting(
                 crate::accounting::AccountingError::Concurrency,
             )) => R::AccountLimit,
-            Rejection::Upstream(
-                InferenceFailure::VerificationFailed | InferenceFailure::EndpointBindingFailed,
-            ) => R::Verification,
-            Rejection::Upstream(InferenceFailure::CatalogFailed) => R::Catalog,
+            Rejection::Failure {
+                projection:
+                    FailureProjection::Upstream(
+                        InferenceFailure::VerificationFailed
+                        | InferenceFailure::EndpointBindingFailed,
+                    ),
+                ..
+            } => R::Verification,
+            Rejection::Failure {
+                projection: FailureProjection::Upstream(InferenceFailure::CatalogFailed),
+                ..
+            } => R::Catalog,
+            Rejection::Failure {
+                projection: FailureProjection::Catalog(failure),
+                ..
+            } => match failure.wire() {
+                InferenceFailure::VerificationFailed | InferenceFailure::EndpointBindingFailed => {
+                    R::Verification
+                }
+                InferenceFailure::CatalogFailed => R::Catalog,
+                _ => R::Internal,
+            },
             _ => R::Internal,
         };
         self.observation.reject(model, reason);
@@ -241,25 +320,47 @@ impl Generation<'_> {
         let profile = input
             .profile(self.inference)
             .map_err(|error| self.reject(error, AdmissionModel::Unknown))?;
-        self.evidence().await.map_err(|_| {
+        self.evidence().await.map_err(|error| {
             self.reject(
-                Rejection::Upstream(InferenceFailure::VerificationFailed),
+                Rejection::Failure {
+                    failure: error.into(),
+                    projection: FailureProjection::Upstream(InferenceFailure::VerificationFailed),
+                    owned: false,
+                },
                 AdmissionModel::Unknown,
             )
         })?;
-        let catalog = authenticated_catalog(self.inference.as_ref(), now_unix())
+        let catalog = authenticated_catalog_checked(self.inference.as_ref(), now_unix())
             .await
             .map_err(|error| {
                 self.reject(
-                    Rejection::Upstream(error.failure()),
+                    Rejection::Failure {
+                        failure: error.into(),
+                        projection: FailureProjection::Catalog(error),
+                        owned: false,
+                    },
                     AdmissionModel::Unknown,
                 )
             })?;
-        let quote = catalog
-            .reservation_quote(input.model())
-            .map_err(|_| self.reject(Rejection::InvalidModel, AdmissionModel::Unknown))?;
+        let quote = catalog.reservation_quote(input.model()).map_err(|error| {
+            self.reject(
+                Rejection::Failure {
+                    failure: error.into(),
+                    projection: FailureProjection::InvalidModel,
+                    owned: false,
+                },
+                AdmissionModel::Unknown,
+            )
+        })?;
         if !quote.model.allows_reasoning(input.reasoning_options()) {
-            return Err(self.reject(Rejection::InvalidReasoning, AdmissionModel::Unknown));
+            return Err(self.reject(
+                Rejection::Failure {
+                    failure: InterfaceError::InputRefused,
+                    projection: FailureProjection::InvalidReasoning,
+                    owned: false,
+                },
+                AdmissionModel::Unknown,
+            ));
         }
         let model = QualifiedModel::from_authenticated_quote(&quote);
         let admission_model = AdmissionModel::Qualified(model);
@@ -279,7 +380,7 @@ impl Generation<'_> {
             != profile
         {
             return Err(self.reject(
-                Rejection::Upstream(InferenceFailure::ToolProfileUnqualified),
+                Rejection::upstream(InferenceFailure::ToolProfileUnqualified, false),
                 admission_model,
             ));
         }
@@ -327,8 +428,8 @@ impl Generation<'_> {
             work: Box::pin(async move {
                 let result = tokio::select! {
                     biased;
-                    _ = disconnect.cancelled() => None,
-                    _ = job.sender.as_mut().expect("preflight observer").closed() => None,
+                    _ = disconnect.cancelled() => Err(Rejection::Cancelled),
+                    _ = job.sender.as_mut().expect("preflight observer").closed() => Err(Rejection::Cancelled),
                     result = tokio::time::timeout(PREFLIGHT_DEADLINE, async {
                     let tokens = match &mut job.input {
                         RequestInput::Text(input) => {
@@ -343,7 +444,7 @@ impl Generation<'_> {
                             let tokens = inference
                                 .count_request_tokens(&input.model, (&input.history, None, &input.reasoning_options), work_heavy.clone())
                                 .await
-                                .map_err(|error| Rejection::Upstream(error.failure()))?;
+                                .map_err(|error| Rejection::upstream(error.failure(), true))?;
                             input.prompt = input.history.pop().expect("preflight prompt").content;
                             tokens
                         }
@@ -354,27 +455,42 @@ impl Generation<'_> {
                                 work_heavy.clone(),
                             )
                             .await
-                            .map_err(|error| Rejection::Upstream(error.failure()))?,
+                            .map_err(|error| Rejection::upstream(error.failure(), true))?,
                     };
                     catalog
                         .quote(job.input.model(), tokens)
-                        .map_err(|_| Rejection::Context)
-                    }) => Some(result),
+                        .map_err(|error| Rejection::Failure {
+                            failure: error.into(),
+                            projection: FailureProjection::Context,
+                            owned: true,
+                        })
+                    }) => result.unwrap_or(Err(Rejection::Failure {
+                        failure: InterfaceError::PreflightDeadline,
+                        projection: FailureProjection::Unavailable,
+                        owned: true,
+                    })),
                 };
                 let quote = match result {
-                    Some(Ok(Ok(quote))) => quote,
-                    failure => {
-                        let rejection = match failure {
-                            Some(Ok(Err(error))) => error,
-                            _ => Rejection::Unavailable,
-                        };
+                    Ok(quote) => quote,
+                    Err(rejection) => {
                         let sender = job.sender.take().expect("preflight observer");
                         if let Some(owner) = &mut job.owner {
-                            owner.failure(match &rejection {
-                                Rejection::Upstream(failure) => (*failure).into(),
-                                Rejection::Context => GenerationTerminal::Admission,
-                                _ => GenerationTerminal::Internal,
-                            });
+                            if let Some(primary) = rejection.interface_error() {
+                                let terminal = match &rejection {
+                                    Rejection::Failure {
+                                        projection: FailureProjection::Upstream(failure),
+                                        ..
+                                    } => (*failure).into(),
+                                    Rejection::Failure {
+                                        projection: FailureProjection::Context,
+                                        ..
+                                    } => GenerationTerminal::Admission,
+                                    _ => GenerationTerminal::Internal,
+                                };
+                                owner.failure(terminal, primary);
+                            } else {
+                                owner.expected_interruption();
+                            }
                         }
                         drop(job); // Refund once BEFORE reporting rejection.
                         let _ = sender.send(Err(rejection));
@@ -417,7 +533,11 @@ impl Generation<'_> {
             _heavy: heavy,
             _ticket: ticket,
         });
-        receiver.await.unwrap_or(Err(Rejection::Unavailable))
+        receiver.await.unwrap_or(Err(Rejection::Failure {
+            failure: InterfaceError::PreflightUnknown,
+            projection: FailureProjection::Unavailable,
+            owned: true,
+        }))
     }
 }
 
@@ -451,3 +571,7 @@ pub(crate) fn now_unix() -> u64 {
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "generation_tests.rs"]
+mod tests;

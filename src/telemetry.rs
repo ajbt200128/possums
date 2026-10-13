@@ -1,11 +1,13 @@
 //! Bounded local aggregation with complete, coherent five-minute request families.
 //! Runtime export ownership is independent of inference/accounting.
+mod errors;
 pub mod hooks;
 mod infrastructure;
 mod labels;
 mod process;
 pub mod runtime;
 mod tables;
+mod tokens;
 pub use infrastructure::*;
 pub use labels::*;
 use std::sync::{
@@ -421,6 +423,7 @@ impl<C: Clock> AggregateMetrics<C> {
                 + SECOND
         {
             state.requests.active.valid = false;
+            state.requests.active.window_valid = false;
         }
         // Unsent local slots expire without replay; exporter timing remains 2C.
         if state
@@ -617,6 +620,45 @@ impl<C: Clock> AggregateMetrics<C> {
             + reason as usize;
         let table = &mut state.requests.active;
         increment(&mut table.rejected[index], &mut table.valid);
+    }
+    /// Sole boundary owner supplies a closed category, outside application locks.
+    #[allow(dead_code)] // Boundary owner wiring is a separate parent-owned packet.
+    pub(crate) fn interface_error(&self, error: crate::failures::InterfaceError) {
+        let Some(mut state) = self.lock() else {
+            return;
+        };
+        let Some((_, mapped)) = self.time(&mut state) else {
+            return;
+        };
+        if !self.advance_observation(&mut state, mapped) || mapped < state.requests.eligible {
+            return;
+        }
+        state.requests.active.errors.observe(error);
+    }
+    /// Numeric projection only; the terminal owner enforces once-only usage.
+    #[allow(dead_code)] // Boundary owner wiring is a separate parent-owned packet.
+    pub(crate) fn observed_usage(
+        &self,
+        model: QualifiedModel,
+        input: u64,
+        output: u64,
+        total: u64,
+        cached: Option<u64>,
+    ) {
+        let Some(mut state) = self.lock() else {
+            return;
+        };
+        let Some((_, mapped)) = self.time(&mut state) else {
+            return;
+        };
+        if !self.advance_observation(&mut state, mapped) || mapped < state.requests.eligible {
+            return;
+        }
+        state
+            .requests
+            .active
+            .tokens
+            .observe(model, input, output, total, cached);
     }
     fn update(&self, key: u64, update: Update) {
         if key == 0 {
@@ -996,6 +1038,11 @@ impl<C: Clock> Observation<'_, C> {
     }
 }
 impl<C: Clock> OwnedObservation<C> {
+    /// Numeric terminal/failure observations use the current complete window,
+    /// not the original request-start window. This retains no application data.
+    pub(crate) fn metrics(&self) -> std::sync::Arc<AggregateMetrics<C>> {
+        self.owner.clone()
+    }
     fn update(&mut self, update: Update) {
         self.owner.update(self.key, update);
     }

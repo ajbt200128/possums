@@ -9,7 +9,7 @@ use possums::{
     attestation::{EvidenceError, EvidenceVerifier, GatewayEvidence},
     auth::Auth,
     catalog::{Catalog, Model, MAX_CATALOG_BYTES, MAX_MODELS},
-    inference::{stream, Inference, InferenceError, Message},
+    inference::{stream, CatalogFailure, Inference, InferenceError, Message},
     server::{router, AppState},
 };
 use serde_json::{json, Value};
@@ -22,6 +22,7 @@ use tower::ServiceExt;
 
 struct Provider {
     catalog: Mutex<Vec<u8>>,
+    checked_failure: Mutex<Option<CatalogFailure>>,
     unavailable: AtomicBool,
     catalog_calls: AtomicUsize,
     tokenizer_calls: AtomicUsize,
@@ -35,6 +36,14 @@ impl Inference for Provider {
             return Err(InferenceError::Unavailable);
         }
         Ok(self.catalog.lock().unwrap().clone())
+    }
+    async fn catalog_checked(&self) -> Result<Vec<u8>, CatalogFailure> {
+        let failure = *self.checked_failure.lock().unwrap();
+        if let Some(failure) = failure {
+            self.catalog_calls.fetch_add(1, Ordering::SeqCst);
+            return Err(failure);
+        }
+        self.catalog().await.map_err(CatalogFailure::from)
     }
     async fn count_tokens(
         &self,
@@ -95,6 +104,7 @@ fn fixture(catalog: Vec<u8>) -> (AppState, Arc<Provider>, Arc<Evidence>, String)
         .unwrap();
     let provider = Arc::new(Provider {
         catalog: Mutex::new(catalog),
+        checked_failure: Mutex::new(None),
         unavailable: AtomicBool::new(false),
         catalog_calls: AtomicUsize::new(0),
         tokenizer_calls: AtomicUsize::new(0),
@@ -126,9 +136,17 @@ async fn discover(state: &AppState, bearer: Option<&str>, expected: StatusCode) 
     assert!(!response.headers().contains_key(header::SET_COOKIE));
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(bytes.len() <= MAX_CATALOG_BYTES);
-    let result = serde_json::from_slice(&bytes).unwrap();
+    let mut result: Value = serde_json::from_slice(&bytes).unwrap();
     if !expected.is_success() {
         assert!(bytes.len() < 512); // Fixed detail/message/billing, never provider text.
+        let error = result["error"].as_object_mut().unwrap();
+        let message = error.remove("message").unwrap();
+        let message = message.as_str().unwrap();
+        assert!(message.contains("Stage:"));
+        assert!(message.contains("constraint:"));
+        assert!(message.contains("Not replayed."));
+        assert!(!message.contains("provider-canary"));
+        // The remaining code/detail/billing projection is unchanged.
     }
     result
 }
@@ -136,6 +154,48 @@ fn no_prompt_or_credit_work(state: &AppState, provider: &Provider) {
     assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 0);
     assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 0);
     assert_eq!(state.accounting.available("demo"), Some(5_000_000));
+}
+
+#[tokio::test]
+async fn catalog_source_diagnostics_reach_api_without_new_wire_fields_or_work() {
+    let (state, provider, _, bearer) = fixture(bytes(vec![model("m", 20, json!(1), json!(1))]));
+    for failure in [
+        CatalogFailure::SendUnknown,
+        CatalogFailure::SendDeadline,
+        CatalogFailure::HttpRefused(403),
+        CatalogFailure::BodyUnknown,
+        CatalogFailure::BodyDeadline,
+        CatalogFailure::BodyLimit,
+        CatalogFailure::Validation(possums::catalog::CatalogError::Invalid),
+        CatalogFailure::Legacy(possums::inference::InferenceFailure::UpstreamResponseInvalid),
+    ] {
+        *provider.checked_failure.lock().unwrap() = Some(failure);
+        let response = router(state.clone())
+            .oneshot(
+                Request::get("/v1/models")
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.len() < 512);
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 1);
+        let error = value["error"].as_object().unwrap();
+        assert_eq!(error.len(), 4);
+        assert_eq!(error["code"], "unavailable");
+        assert_eq!(
+            error["detail"],
+            serde_json::to_value(failure.wire()).unwrap()
+        );
+        assert_eq!(error["billing"], "unknown");
+        assert_eq!(error["message"], failure.message());
+        no_prompt_or_credit_work(&state, &provider);
+    }
+    assert_eq!(provider.catalog_calls.load(Ordering::SeqCst), 8);
 }
 
 #[tokio::test]
@@ -267,7 +327,7 @@ async fn authentication_gateway_and_catalog_fail_closed_without_stale_fallback()
     provider.unavailable.store(true, Ordering::SeqCst);
     assert_eq!(
         discover(&state, Some(&bearer), StatusCode::SERVICE_UNAVAILABLE).await,
-        json!({"error":{"code":"unavailable","detail":"inference_unavailable","message":"Verified inference is unavailable.","billing":"unknown"}})
+        json!({"error":{"code":"unavailable","detail":"inference_unavailable","billing":"unknown"}})
     );
     provider.unavailable.store(false, Ordering::SeqCst);
     for invalid in [
@@ -281,7 +341,7 @@ async fn authentication_gateway_and_catalog_fail_closed_without_stale_fallback()
         *provider.catalog.lock().unwrap() = invalid;
         assert_eq!(
             discover(&state, Some(&bearer), StatusCode::SERVICE_UNAVAILABLE).await,
-            json!({"error":{"code":"unavailable","detail":"catalog_failed","message":"The authenticated model catalog is unavailable or invalid.","billing":"unknown"}})
+            json!({"error":{"code":"unavailable","detail":"catalog_failed","billing":"unknown"}})
         );
     }
     *provider.catalog.lock().unwrap() = raw;

@@ -1,5 +1,11 @@
-//! Fixed storage and the single linked-family release predicate.
-use super::labels::*;
+//! Fixed storage, linked request integrity and independently qualified extensions.
+use super::{errors::ErrorTotals, labels::*, tokens::TokenTotals};
+use crate::failures::InterfaceError;
+
+// Boundary coverage, compatibility and artifact qualification remain parent-owned.
+const INTERFACE_ERRORS_QUALIFIED: bool = false;
+const OBSERVED_TOKENS_QUALIFIED: bool = false;
+pub const EXTENSION_POINTS: usize = InterfaceError::ALL.len() + 3 * 3;
 
 pub const REQUEST_SERIES: usize = 8 + 144 + 144 + 3 + 36 + 36 + 36 + 9 + 630 + 5;
 pub const REQUEST_CELLS: usize = 8 + 144 + 1584 + 3 + 36 + 396 + 396 + 9 + 630 + 50;
@@ -34,7 +40,12 @@ pub struct RequestTables {
     pub(super) dispositions: [[u64; 5]; 144],
     pub(super) contributors: [u64; 5],
     pub(super) valid: bool,
+    pub(super) window_valid: bool,
     pub(super) ticks: u16,
+    pub(super) errors: ErrorTotals,
+    pub(super) tokens: TokenTotals,
+    #[cfg(test)]
+    pub(super) extension_qualification: [bool; 2],
 }
 impl Default for RequestTables {
     fn default() -> Self {
@@ -52,7 +63,12 @@ impl Default for RequestTables {
             dispositions: [[0; 5]; 144],
             contributors: [0; 5],
             valid: true,
+            window_valid: true,
             ticks: 0,
+            errors: ErrorTotals::default(),
+            tokens: TokenTotals::default(),
+            #[cfg(test)]
+            extension_qualification: [false; 2],
         }
     }
 }
@@ -73,8 +89,35 @@ pub(super) fn generation_index(e: Endpoint, m: QualifiedModel) -> Option<usize> 
     Some(e.chat()? * 3 + m.0 as usize)
 }
 impl RequestTables {
+    pub(super) fn errors_qualified(&self) -> bool {
+        #[cfg(test)]
+        if self.extension_qualification[0] {
+            return true;
+        }
+        INTERFACE_ERRORS_QUALIFIED
+    }
+    pub(super) fn tokens_qualified(&self) -> bool {
+        #[cfg(test)]
+        if self.extension_qualification[1] {
+            return true;
+        }
+        OBSERVED_TOKENS_QUALIFIED
+    }
+    pub(super) fn complete(&self) -> bool {
+        self.window_valid && self.ticks == 300
+    }
     pub(super) fn releasable(&self) -> bool {
-        if !self.valid || self.ticks != 300 {
+        self.complete()
+            && (self.request_families_releasable()
+                || (self.errors_qualified()
+                    && InterfaceError::ALL
+                        .iter()
+                        .any(|e| self.errors.get(*e).is_some()))
+                || (self.tokens_qualified()
+                    && (0..3).any(|m| self.tokens.input(QualifiedModel(m)).is_some())))
+    }
+    pub(super) fn request_families_releasable(&self) -> bool {
+        if !self.valid || !self.complete() {
             return false;
         }
         // Complete aggregates have no minimum population. The linked family

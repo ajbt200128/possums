@@ -1,5 +1,6 @@
 //! Supported SDK table conversion. The borrowed aggregation views are inspection,
 //! not send authority; callers must drop them before any network await.
+use crate::telemetry::tokens::TokenTotals;
 use crate::telemetry::{
     AdmissionModel, DeliveryTerminal, Endpoint, GenerationTerminal, HttpTerminal, Infrastructure,
     Lane, QualifiedModel, Rejection, RequestTables, ResourceMetric, ResourceScope, Status, Window,
@@ -257,11 +258,61 @@ pub(super) fn request_paused(
     window: Window,
     #[cfg(test)] checkpoint: Option<Checkpoint>,
 ) -> Option<ResourceMetrics> {
-    if !request_window(window) || !t.releasable() || !wire_representable(t) {
+    if !request_window(window) || !t.releasable() {
         return None;
     }
-    // The table predicate validates arithmetic and thresholds; this additional
-    // check rejects impossible typed rejection combinations before any allocation.
+    let mut metrics = Vec::with_capacity(14);
+    if t.request_families_releasable() && wire_representable(t) && rejection_pairs_valid(t) {
+        append_requests(
+            &mut metrics,
+            t,
+            window,
+            #[cfg(test)]
+            checkpoint,
+        )?;
+    }
+    if t.errors_qualified() {
+        let mut points = Vec::new();
+        for error in crate::failures::InterfaceError::ALL {
+            point(
+                &mut points,
+                &[("error_type", error.label())],
+                t.errors.get(error),
+            );
+        }
+        append(
+            &mut metrics,
+            "possums.interface.errors",
+            "{error}",
+            points,
+            window,
+        );
+    }
+    if t.tokens_qualified() {
+        for (name, get) in [
+            (
+                "possums.tokens.input",
+                TokenTotals::input as fn(&TokenTotals, QualifiedModel) -> Option<u64>,
+            ),
+            ("possums.tokens.output", TokenTotals::output),
+            ("possums.tokens.cached", TokenTotals::cached),
+        ] {
+            let mut points = Vec::new();
+            for (label, model) in MODELS {
+                point(
+                    &mut points,
+                    &[("possums.model", label)],
+                    get(&t.tokens, model),
+                );
+            }
+            append(&mut metrics, name, "{token}", points, window);
+        }
+    }
+    (!metrics.is_empty()).then(|| envelope(metrics))
+}
+
+fn rejection_pairs_valid(t: &RequestTables) -> bool {
+    // Reject impossible typed combinations without invalidating other families.
     for e in ENDPOINTS
         .iter()
         .map(|(_, e)| Some(*e))
@@ -275,12 +326,20 @@ pub(super) fn request_paused(
                     || (e.is_some_and(|e| e.chat().is_none()) && mi != 4))
                     && t.rejected(e, *model, *reason).is_some()
                 {
-                    return None;
+                    return false;
                 }
             }
         }
     }
-    let mut metrics = Vec::with_capacity(10);
+    true
+}
+
+fn append_requests(
+    metrics: &mut Vec<Metric>,
+    t: &RequestTables,
+    window: Window,
+    #[cfg(test)] checkpoint: Option<Checkpoint>,
+) -> Option<()> {
     let mut starts = Vec::new();
     let mut completed = Vec::new();
     let mut duration = Vec::new();
@@ -300,21 +359,21 @@ pub(super) fn request_paused(
         }
     }
     append(
-        &mut metrics,
+        metrics,
         "possums.http.requests",
         "{request}",
         starts,
         window,
     );
     append(
-        &mut metrics,
+        metrics,
         "possums.http.completed",
         "{request}",
         completed,
         window,
     );
     append(
-        &mut metrics,
+        metrics,
         "possums.http.duration.bucket",
         "{observation}",
         duration,
@@ -359,35 +418,35 @@ pub(super) fn request_paused(
         }
     }
     append(
-        &mut metrics,
+        metrics,
         "possums.generation.started",
         "{generation}",
         started,
         window,
     );
     append(
-        &mut metrics,
+        metrics,
         "possums.generation.completed",
         "{generation}",
         terminal,
         window,
     );
     append(
-        &mut metrics,
+        metrics,
         "possums.generation.duration.bucket",
         "{observation}",
         gen_duration,
         window,
     );
     append(
-        &mut metrics,
+        metrics,
         "possums.generation.first_output.bucket",
         "{observation}",
         output,
         window,
     );
     append(
-        &mut metrics,
+        metrics,
         "possums.delivery.completed",
         "{delivery}",
         delivery,
@@ -411,7 +470,7 @@ pub(super) fn request_paused(
         }
     }
     append(
-        &mut metrics,
+        metrics,
         "possums.admission.rejected",
         "{rejection}",
         rejected,
@@ -422,13 +481,13 @@ pub(super) fn request_paused(
         bins(&mut occupancy, &[("lane", lane)], t.occupancy(l));
     }
     append(
-        &mut metrics,
+        metrics,
         "possums.admission.occupancy.bucket",
         "{observation}",
         occupancy,
         window,
     );
-    Some(envelope(metrics))
+    Some(())
 }
 
 /// Independent minute, end timestamp only; absent/invalid source points stay absent.

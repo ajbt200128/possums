@@ -1,4 +1,5 @@
 mod adversarial;
+pub(super) mod extensions;
 
 use super::*;
 use std::sync::atomic::AtomicBool;
@@ -42,6 +43,23 @@ impl AggregateMetrics<SystemClock> {
         assert!(state.anchor.is_some());
         assert_eq!(state.requests.active.ticks, 0);
         state.requests.eligible = state.requests.start;
+    }
+
+    pub(crate) fn interface_error_count(
+        &self,
+        error: crate::failures::InterfaceError,
+    ) -> Option<u64> {
+        self.state.lock().unwrap().requests.active.errors.get(error)
+    }
+
+    pub(crate) fn usage_counts(&self, model: QualifiedModel) -> [Option<u64>; 3] {
+        let state = self.state.lock().unwrap();
+        let tokens = &state.requests.active.tokens;
+        [
+            tokens.input(model),
+            tokens.output(model),
+            tokens.cached(model),
+        ]
     }
 
     // HTTP starts/completions/durations/dispositions, generation starts/
@@ -898,6 +916,12 @@ fn infrastructure_six_intervals_and_availability() {
 fn frozen_cardinality_and_layout_ceilings() {
     assert_eq!(REQUEST_SERIES, 1051);
     assert_eq!(REQUEST_CELLS, 3256);
+    assert_eq!(EXTENSION_POINTS, 63);
+    assert_eq!(REQUEST_SERIES + EXTENSION_POINTS, 1114);
+    assert_eq!(REQUEST_CELLS + EXTENSION_POINTS, 3319);
+    assert_eq!(std::mem::size_of::<errors::ErrorTotals>(), 440);
+    assert_eq!(std::mem::size_of::<tokens::TokenTotals>(), 80);
+    assert_eq!(std::mem::size_of::<RequestTables>(), 32_376);
     assert_eq!(INFRASTRUCTURE_SERIES, 19);
     assert!(std::mem::size_of::<RequestTables>() <= 67_456);
     assert!(std::mem::size_of::<Infrastructure>() <= 2048);

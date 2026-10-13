@@ -1,11 +1,11 @@
 """Offline negative checks for the local image health runner; Docker never invoked."""
+
 import importlib.util
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
 
 spec = importlib.util.spec_from_file_location("image_health", Path(__file__).with_name("image_health.py"))
 assert spec is not None and spec.loader is not None
@@ -58,8 +58,18 @@ class HealthRunnerTests(unittest.TestCase):
         with patch.object(health, "container"), patch.object(health, "checked", side_effect=[b"", b"1\n", SENTINEL.encode()]):
             self.fails("probe_isolated", health.probe, "synthetic", "none", 1, "probe_isolated")
         state = b'{"ExitCode":1,"Running":false,"StartedAt":"2026-10-10T00:00:00Z","FinishedAt":"2026-10-10T00:00:04Z"}'
-        with patch.object(health, "container"), patch.object(health, "checked", side_effect=[b"", b"1\n", state]), patch.object(health, "docker", return_value=(0, b"", health.FAILURE)):
+        with patch.object(health, "container"), patch.object(health, "checked", side_effect=[b"", b"1\n", state]), patch.object(health, "docker", return_value=(0, b"", health.FAILURES["probe_isolated"])):
             self.fails("probe_isolated", health.probe, "synthetic", "none", 1, "probe_isolated")
+
+    def test_closed_stage_diagnostics_match_without_generic_or_cross_stage_fallback(self):
+        state = b'{"ExitCode":1,"Running":false,"StartedAt":"2026-10-10T00:00:00Z","FinishedAt":"2026-10-10T00:00:01Z"}'
+        for stage, diagnostic in health.FAILURES.items():
+            with self.subTest(stage=stage), patch.object(health, "container"), patch.object(health, "checked", side_effect=[b"", b"1\n", state]), patch.object(health, "docker", return_value=(0, b"", diagnostic)):
+                health.probe("synthetic", "none", 1, stage)
+            other = health.FAILURES["probe_isolated" if stage == "probe_quiescing" else "probe_quiescing"]
+            for wrong in (b"healthcheck_failed\n", other):
+                with patch.object(health, "container"), patch.object(health, "checked", side_effect=[b"", b"1\n", state]), patch.object(health, "docker", return_value=(0, b"", wrong)):
+                    self.fails(stage, health.probe, "synthetic", "none", 1, stage)
 
     def test_elapsed_requires_valid_process_clock(self):
         healthy = {"StartedAt": "2026-10-10T00:00:00.000000000Z", "FinishedAt": "2026-10-10T00:00:02.900000000Z"}
@@ -68,7 +78,7 @@ class HealthRunnerTests(unittest.TestCase):
 
     def test_hostile_probe_logs_and_cleanup_on_failure(self):
         state = b'{"ExitCode":1,"Running":false}'
-        with patch.object(health, "container"), patch.object(health, "checked", side_effect=[b"", b"1\n", state]), patch.object(health, "docker", return_value=(0, SENTINEL.encode(), health.FAILURE)):
+        with patch.object(health, "container"), patch.object(health, "checked", side_effect=[b"", b"1\n", state]), patch.object(health, "docker", return_value=(0, SENTINEL.encode(), health.FAILURES["probe_quiescing"])):
             self.fails("probe_quiescing", health.probe, "synthetic", "none", 1, "probe_quiescing")
         with patch.object(health, "load"), patch.object(health, "container", side_effect=health.QualificationError("container_create")), patch.object(health, "docker", return_value=(0, b"", b"")) as docker:
             self.fails("container_create", health.qualify, "production", "fixture")

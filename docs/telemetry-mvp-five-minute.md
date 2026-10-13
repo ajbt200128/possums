@@ -6,6 +6,8 @@ The operator explicitly selected **Five-minute aggregates only** after disclosur
 
 Policy: [reviewed MVP release scope](../PRIVACY.md#reviewed-mvp-release-scope), [aggregation and residual risks](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [forbidden data](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [processors/retention](../PRIVACY.md#processors-retention-access-and-shutdown), [synthetic testing](../PRIVACY.md#synthetic-testing-exception), [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).
 
+**Subsequent scope extension:** [typed interface failures and token aggregates](interface-error-token-metrics-plan.md) now have operator-requested policy/planning approval. That plan does not change this historical qualification/rollout evidence or activate new families; its narrower token authorization supersedes the blanket exclusion below only after its own qualification.
+
 ## Current contract
 
 - Keep all existing request metric names, units, closed labels and exact duration/occupancy bucket boundaries from [the schema](telemetry-schema.md#exported-tables-and-encoding). Keep the deployed `.bucket` integer-delta encoding, not native histogram percentile claims.

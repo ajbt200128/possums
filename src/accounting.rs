@@ -69,6 +69,8 @@ pub enum AccountingError {
     Capacity,
     #[error("invalid accounting transition")]
     InvalidTransition,
+    #[error("accounting state unavailable; cause unknown")]
+    StateUnavailable,
     #[error("cost cannot be represented")]
     Cost,
 }
@@ -117,7 +119,7 @@ impl Accounting {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| AccountingError::InvalidTransition)?;
+            .map_err(|_| AccountingError::StateUnavailable)?;
         state.submissions.retain(|_, submission| {
             !is_terminal(&submission.outcome) || submission.token_expires_at > Instant::now()
         });
@@ -176,7 +178,7 @@ impl Accounting {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| AccountingError::InvalidTransition)?;
+            .map_err(|_| AccountingError::StateUnavailable)?;
         let State {
             accounts,
             submissions,
@@ -249,7 +251,7 @@ impl Accounting {
         let state = self
             .state
             .lock()
-            .map_err(|_| AccountingError::InvalidTransition)?;
+            .map_err(|_| AccountingError::StateUnavailable)?;
         let account = state
             .accounts
             .get(account_id)
@@ -502,6 +504,20 @@ mod tests {
         }
     }
 
+    // Poisoning is the only synthetic way to reach the state-unavailable path.
+    // The panic text is a sentinel that must never surface in a typed error.
+    fn poison<T>(mutex: &Mutex<T>) {
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().unwrap();
+            panic!("synthetic-poison-sentinel");
+        }));
+        assert!(poisoned.is_err());
+    }
+
+    fn assert_locally_authored(error: &AccountingError) {
+        assert!(!format!("{error:?} {error}").contains("synthetic-poison-sentinel"));
+    }
+
     #[test]
     fn snapshot_unknown_account_and_poison_fail_closed() {
         let ledger = Accounting::new([("a".into(), 100)]);
@@ -510,15 +526,63 @@ mod tests {
             Err(AccountingError::UnknownAccount)
         );
         assert_eq!(ledger.available("missing"), None);
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = ledger.state.lock().unwrap();
-            panic!("synthetic lock poison");
-        });
+        poison(&ledger.state);
+        let error = ledger.snapshot("a").unwrap_err();
+        assert_eq!(error, AccountingError::StateUnavailable);
+        assert_locally_authored(&error);
+        assert_eq!(ledger.available("a"), None);
+    }
+
+    #[test]
+    fn poisoned_state_is_unavailable_not_a_business_transition() {
+        let ledger = Accounting::new([("a".into(), 100)]);
+        let expiry = Instant::now() + Duration::from_secs(60);
+        ledger
+            .reserve("a", [1; 32], [2; 32], quote(), expiry)
+            .unwrap();
+        poison(&ledger.state);
+        let mut errors = vec![
+            ledger
+                .reserve("a", [3; 32], [2; 32], quote(), expiry)
+                .unwrap_err(),
+            ledger
+                .finish(
+                    [1; 32],
+                    Some(FinalUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        total_tokens: 2,
+                    }),
+                )
+                .unwrap_err(),
+            ledger.finish_cached([1; 32], None, 0).unwrap_err(),
+            ledger.snapshot("a").unwrap_err(),
+        ];
+        for error in errors.drain(..) {
+            // A poisoned mutex must never fabricate settlement/refund/success
+            // nor masquerade as an ordinary transition/expiration/cost refusal.
+            assert_eq!(error, AccountingError::StateUnavailable);
+            assert_locally_authored(&error);
+        }
+        assert_eq!(ledger.available("a"), None);
+    }
+
+    #[test]
+    fn legitimate_invalid_transition_stays_a_typed_business_refusal() {
+        let ledger = Accounting::new([("a".into(), 100)]);
         assert_eq!(
-            ledger.snapshot("a"),
+            ledger.finish([9; 32], None),
             Err(AccountingError::InvalidTransition)
         );
-        assert_eq!(ledger.available("a"), None);
+        let expiry = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            ledger.reserve("a", [1; 32], [2; 32], quote(), expiry),
+            Err(AccountingError::InvalidTransition)
+        );
+        assert_eq!(
+            ledger.snapshot("missing"),
+            Err(AccountingError::UnknownAccount)
+        );
     }
 
     #[test]

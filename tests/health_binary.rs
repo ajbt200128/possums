@@ -43,13 +43,27 @@ async fn with_reply(listener: &TcpListener, reply: &[u8]) -> Output {
     bounded(child.wait_with_output()).await.unwrap()
 }
 
-fn assert_failed(output: Output) {
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        output.stderr,
-        b"healthcheck_failed: local readiness unavailable\n"
+fn assert_failed_with(label: &str, output: Output, code: &str, stage: &str) {
+    assert!(!output.status.success(), "{label}: status");
+    assert!(output.stdout.is_empty(), "{label}: stdout");
+    let stderr = String::from_utf8(output.stderr).expect("stderr is closed ascii diagnostics");
+    let diagnostic = stderr
+        .strip_prefix("healthcheck_failed: ")
+        .and_then(|line| line.strip_suffix('\n'))
+        .expect("closed healthcheck diagnostic prefix");
+    assert!(
+        diagnostic.contains(&format!("code={code}")),
+        "{label}: {diagnostic}"
     );
+    assert!(
+        diagnostic.contains(&format!("stage={stage}")),
+        "{label}: {diagnostic}"
+    );
+    assert!(diagnostic.contains("constraint="), "{label}: {diagnostic}");
+    assert!(diagnostic.contains("action="), "{label}: {diagnostic}");
+    for sentinel in ["synthetic", "invalid", "malformed response"] {
+        assert!(!diagnostic.contains(sentinel), "{label}: {diagnostic}");
+    }
 }
 
 #[tokio::test]
@@ -68,14 +82,52 @@ async fn built_healthcheck_uses_fixed_loopback_before_config_or_secrets() {
     assert!(ready.stdout.is_empty());
     assert!(ready.stderr.is_empty());
 
-    assert_failed(
+    assert_failed_with(
+        "non-204",
         with_reply(
             &listener,
             b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
         )
         .await,
+        "not_ready",
+        "status",
     );
-    assert_failed(with_reply(&listener, b"malformed response\r\n").await);
+    assert_failed_with(
+        "malformed",
+        with_reply(&listener, b"malformed response\r\n").await,
+        "request_send_unknown",
+        "request",
+    );
+    assert_failed_with(
+        "declared-body",
+        with_reply(
+            &listener,
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 1\r\n\r\nx",
+        )
+        .await,
+        "protocol_constraint",
+        "response",
+    );
     drop(listener);
-    assert_failed(bounded(probe().output()).await.unwrap());
+    // A foreign listener on fixed port 8080 is an environment blocker: the
+    // probe can no longer observe a refused connection, so only require the
+    // typed connect stage when loopback is actually closed. The ephemeral-port
+    // unit test always covers the refused classification.
+    let refused = bounded(probe().output()).await.unwrap();
+    if std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:8080".parse().unwrap(),
+        Duration::from_millis(250),
+    )
+    .is_err()
+    {
+        assert_failed_with("refused", refused, "connect_unknown", "connect");
+    } else {
+        eprintln!("Health fixture limit: an external fixed-port listener prevents refused-connection coverage here; the ephemeral-port unit test covers it.");
+        assert!(!refused.status.success(), "refused: status");
+        assert!(refused.stdout.is_empty(), "refused: stdout");
+        assert!(
+            refused.stderr.starts_with(b"healthcheck_failed: code="),
+            "refused: closed code"
+        );
+    }
 }

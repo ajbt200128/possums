@@ -121,8 +121,12 @@ pub enum AdmissionError {
 pub enum AuthError {
     #[error("invalid credentials")]
     Invalid,
+    #[error("conversation model conflict")]
+    Conflict,
     #[error("authentication configuration invalid")]
     Configuration,
+    #[error("authentication state unavailable; cause unknown")]
+    StateUnavailable,
     #[error("authentication state capacity reached")]
     Capacity,
 }
@@ -179,7 +183,7 @@ impl Auth {
         let mut challenges = self
             .login_challenges
             .lock()
-            .map_err(|_| AuthError::Configuration)?;
+            .map_err(|_| AuthError::StateUnavailable)?;
         challenges.retain(|_, challenge| challenge.expires_at > now);
         if challenges.len() >= MAX_LOGIN_CHALLENGES {
             return Err(AuthError::Capacity);
@@ -203,7 +207,7 @@ impl Auth {
         let challenge = self
             .login_challenges
             .lock()
-            .map_err(|_| AuthError::Configuration)?
+            .map_err(|_| AuthError::StateUnavailable)?
             .remove(login_challenge)
             .ok_or(AuthError::Invalid)?;
         if challenge.expires_at <= now {
@@ -236,7 +240,10 @@ impl Auth {
             cache_scope: CacheScope::default(),
             expires_at: now + SESSION_LIFETIME,
         };
-        let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::StateUnavailable)?;
         sessions.retain(|_, session| session.expires_at > now);
         if sessions.len() >= MAX_SESSIONS {
             return Err(AuthError::Capacity);
@@ -245,15 +252,30 @@ impl Auth {
         Ok((session_id, session))
     }
 
+    /// Compatibility wrapper for callers that only need presence. Missing and
+    /// expired sessions and unavailable state all collapse to `None`.
     pub fn api_session(&self, id: &str) -> Option<Session> {
+        self.checked_api_session(id).ok()
+    }
+
+    /// Checked session lookup: a missing or expired session is `Invalid`, while
+    /// a poisoned session lock is `StateUnavailable` (cause unknown), so the
+    /// caller never mistakes unavailable authentication state for bad credentials.
+    pub fn checked_api_session(&self, id: &str) -> Result<Session, AuthError> {
         let now = Instant::now();
-        let mut sessions = self.sessions.lock().ok()?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::StateUnavailable)?;
         sessions.retain(|_, session| session.expires_at > now);
-        sessions.get(id).cloned()
+        sessions.get(id).cloned().ok_or(AuthError::Invalid)
     }
 
     pub fn logout_api(&self, id: &str) -> Result<(), AuthError> {
-        let mut sessions = self.sessions.lock().map_err(|_| AuthError::Invalid)?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::StateUnavailable)?;
         let session = sessions.get(id).ok_or(AuthError::Invalid)?;
         if session.expires_at <= Instant::now() {
             return Err(AuthError::Invalid);
@@ -263,7 +285,7 @@ impl Auth {
         let mut tokens = self
             .submission_tokens
             .lock()
-            .map_err(|_| AuthError::Configuration)?;
+            .map_err(|_| AuthError::StateUnavailable)?;
         tokens.retain(|_, token| token.session_id != id);
         sessions.remove(id);
         Ok(())
@@ -288,16 +310,21 @@ impl Auth {
         model: &str,
         new_conversation: bool,
     ) -> Result<String, AuthError> {
-        let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::StateUnavailable)?;
         let session = sessions.get_mut(id).ok_or(AuthError::Invalid)?;
-        if session.expires_at <= Instant::now()
-            || (!new_conversation
-                && session
-                    .selected_model
-                    .as_deref()
-                    .is_some_and(|bound| bound != model))
-        {
+        if session.expires_at <= Instant::now() {
             return Err(AuthError::Invalid);
+        }
+        if !new_conversation
+            && session
+                .selected_model
+                .as_deref()
+                .is_some_and(|bound| bound != model)
+        {
+            return Err(AuthError::Conflict);
         }
         let mut next = session.clone();
         next.selected_model = Some(model.to_owned());
@@ -311,7 +338,7 @@ impl Auth {
         let mut tokens = self
             .submission_tokens
             .lock()
-            .map_err(|_| AuthError::Configuration)?;
+            .map_err(|_| AuthError::StateUnavailable)?;
         let now = Instant::now();
         tokens.retain(|_, token| token.expires_at > now);
         let retained = tokens
@@ -372,11 +399,14 @@ impl Auth {
         token: &str,
         quote: Quote,
     ) -> Result<Admission, AdmissionError> {
-        let mut sessions = self.sessions.lock().map_err(|_| AuthError::Configuration)?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::StateUnavailable)?;
         let mut tokens = self
             .submission_tokens
             .lock()
-            .map_err(|_| AuthError::Configuration)?;
+            .map_err(|_| AuthError::StateUnavailable)?;
         let now = Instant::now();
         let session = sessions.get_mut(session_id).ok_or(AuthError::Invalid)?;
         let issued = tokens.get_mut(token).ok_or(AuthError::Invalid)?;
@@ -1035,5 +1065,128 @@ mod tests {
             );
             assert_eq!(ledger.available("a"), Some(1000));
         }
+    }
+
+    // Poisoning is the only synthetic way to reach the state-unavailable path.
+    // The panic text is a sentinel that must never surface in a typed error.
+    fn poison<T>(mutex: &Mutex<T>) {
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().unwrap();
+            panic!("synthetic-poison-sentinel");
+        }));
+        assert!(poisoned.is_err());
+    }
+
+    fn assert_locally_authored(error: &AuthError) {
+        assert!(!format!("{error:?} {error}").contains("synthetic-poison-sentinel"));
+    }
+
+    #[test]
+    fn checked_session_lookup_separates_missing_expired_and_unavailable_state() {
+        let (auth, _, id, _, _) = fixture();
+        assert_eq!(
+            auth.checked_api_session("missing").unwrap_err(),
+            AuthError::Invalid
+        );
+        auth.sessions
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .expires_at = Instant::now();
+        assert_eq!(
+            auth.checked_api_session(&id).unwrap_err(),
+            AuthError::Invalid
+        );
+        poison(&auth.sessions);
+        let error = auth.checked_api_session(&id).unwrap_err();
+        assert_eq!(error, AuthError::StateUnavailable);
+        assert_locally_authored(&error);
+        // Compatibility wrapper collapses unavailable state to None.
+        assert!(auth.api_session(&id).is_none());
+    }
+
+    #[test]
+    fn poisoned_session_state_is_unavailable_not_invalid_or_configuration() {
+        let (auth, ledger, id, session, token) = fixture();
+        let credential = URL_SAFE_NO_PAD.encode([7; 32]);
+        let challenge = auth.issue_api_challenge().unwrap();
+        poison(&auth.sessions);
+        let admission = auth
+            .admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
+            .unwrap_err();
+        let AdmissionError::Auth(admission) = admission else {
+            panic!("expected auth failure");
+        };
+        for error in [
+            auth.issue_api_submission(&id, "m", false).unwrap_err(),
+            auth.logout_api(&id).unwrap_err(),
+            auth.authenticate_api(&credential, &challenge).unwrap_err(),
+            admission,
+        ] {
+            assert_eq!(error, AuthError::StateUnavailable);
+            assert_locally_authored(&error);
+        }
+    }
+
+    #[test]
+    fn poisoned_challenge_and_token_state_are_unavailable() {
+        let (auth, _, _, _, _) = fixture();
+        let credential = URL_SAFE_NO_PAD.encode([7; 32]);
+        let challenge = auth.issue_api_challenge().unwrap();
+        poison(&auth.login_challenges);
+        assert_eq!(
+            auth.issue_api_challenge().unwrap_err(),
+            AuthError::StateUnavailable
+        );
+        assert_eq!(
+            auth.authenticate_api(&credential, &challenge).unwrap_err(),
+            AuthError::StateUnavailable
+        );
+        let (auth, ledger, id, session, token) = fixture();
+        poison(&auth.submission_tokens);
+        let admission = auth
+            .admit_submission(&ledger, &id, &session.admission_binding, &token, quote())
+            .unwrap_err();
+        let AdmissionError::Auth(error) = admission else {
+            panic!("expected auth failure");
+        };
+        assert_eq!(error, AuthError::StateUnavailable);
+        assert_locally_authored(&error);
+        assert_eq!(
+            auth.issue_api_submission(&id, "m", false).unwrap_err(),
+            AuthError::StateUnavailable
+        );
+        assert_eq!(
+            auth.logout_api(&id).unwrap_err(),
+            AuthError::StateUnavailable
+        );
+    }
+
+    #[test]
+    fn issuance_splits_missing_expired_from_existing_model_conflict() {
+        let (auth, _, id, _, _) = fixture();
+        assert!(auth.issue_api_submission(&id, "m", false).is_ok());
+        assert_eq!(
+            auth.issue_api_submission(&id, "other", false).unwrap_err(),
+            AuthError::Conflict
+        );
+        // A reset resolves the conflict and rebinds the model.
+        assert!(auth.issue_api_submission(&id, "other", true).is_ok());
+        assert!(auth.issue_api_submission(&id, "other", false).is_ok());
+        auth.sessions
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .expires_at = Instant::now();
+        assert_eq!(
+            auth.issue_api_submission(&id, "other", false).unwrap_err(),
+            AuthError::Invalid
+        );
+        assert_eq!(
+            auth.issue_api_submission(&id, "m", false).unwrap_err(),
+            AuthError::Invalid
+        );
     }
 }

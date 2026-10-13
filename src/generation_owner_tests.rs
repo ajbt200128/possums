@@ -11,6 +11,9 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
+#[path = "generation_owner_observation_tests.rs"]
+mod observations;
+
 const ACCOUNT: &str = "a";
 const BINDING: [u8; 32] = [99; 32];
 
@@ -205,6 +208,7 @@ fn generation_tracking_retires_before_memory_handoff_in_both_owner_envelopes() {
             let settlement = Settlement {
                 terminal,
                 first_output_seen: false,
+                local_failure: None,
             };
             drop(Worker {
                 work: Box::pin(async move {
