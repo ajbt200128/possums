@@ -1310,6 +1310,28 @@ await check('unqualified tools and image history rejected before invocation',asy
  s.provider.beginRun();const image=ai.normalizeContext({messages:[{role:'user',timestamp:1,content:[{type:'image',data:'synthetic',mimeType:'image/png'}]}]});
  assert.match(messageText((await drain(s.provider.streamSimple(s.selected,image))).message), /\[possums_images_unsupported\].*remove images/);assert.equal(s.sends(),0);
 });
+await check('cross-provider history uses Pi conversion without replaying thinking or mutating history',async()=>{
+ for(const [provider,api,model] of [['anthropic','anthropic-messages','synthetic-claude'],['openai','openai-responses','synthetic-gpt'],['possums','openai-completions','other-model']]){
+  const s=await setup(['stop']);
+  const assistant={role:'assistant',provider,api,model,timestamp:2,stopReason:'toolUse',
+   content:[{type:'thinking',thinking:'PRIVATE_THINKING_SENTINEL',thinkingSignature:'PRIVATE_SIGNATURE_SENTINEL'},
+    {type:'text',text:'Synthetic prior answer'},
+    {type:'toolCall',id:'call_one',name:'echo',arguments:{value:'synthetic'},thoughtSignature:'PRIVATE_SIGNATURE_SENTINEL'}]};
+  const resultMessage={role:'toolResult',toolCallId:'call_one',toolName:'echo',content:[{type:'text',text:'Synthetic result'}],isError:false,timestamp:3};
+  const transcript=ai.normalizeContext({messages:[user,assistant,resultMessage,user],tools:[tool]});
+  const before=structuredClone(transcript);
+  const payload=m.snapshotInvocation(m.invocation(s.selected,transcript));
+  const prior=payload.messages.find(message=>message.role==='assistant');
+  assert.equal(prior.content,'Synthetic prior answer');
+  assert.equal(prior.tool_calls[0].function.name,'echo');
+  assert.deepEqual(JSON.parse(prior.tool_calls[0].function.arguments),{value:'synthetic'});
+  assert.equal(payload.messages.find(message=>message.role==='tool').tool_call_id,prior.tool_calls[0].id);
+  assert(!JSON.stringify(payload).includes('PRIVATE_THINKING_SENTINEL'));assert(!JSON.stringify(payload).includes('PRIVATE_SIGNATURE_SENTINEL'));
+  assert.deepEqual(transcript,before);
+  s.provider.beginRun();const result=await drain(s.provider.streamSimple(s.selected,transcript));
+  assert.equal(result.message.stopReason,'stop');assert.equal(s.sends(),1);
+ }
+});
 await check('tool-only parallel history uses empty text without altering calls or results',async()=>{
  const s=await setup([]);
  const calls=['one','two'].map(value=>({type:'toolCall',id:'call_'+value,name:'echo',arguments:{value}}));

@@ -22,9 +22,6 @@ export type Invocation = Omit<Chat, 'stream' | 'submission'>;
 export function invocation(model: Model<'openai-completions'>, context: TranscriptContext): Invocation {
   requireThat(Array.isArray(context?.messages), 'history');
   for (const message of context.messages) {
-    if (message.role === 'assistant' && (message.provider !== 'possums' || message.api !== 'openai-completions')) {
-      throw new Error('possums_mixed_provider_history');
-    }
     if (message.role === 'user' || message.role === 'toolResult') {
       if (Array.isArray(message.content) && message.content.some((block: { type: string }) => block.type !== 'text')) {
         throw new Error('possums_images_unsupported');
@@ -44,7 +41,10 @@ export function invocation(model: Model<'openai-completions'>, context: Transcri
     }
   }
   let converted: ReturnType<typeof convertMessages>;
-  try { converted = convertMessages(model, context, compat); }
+  // Cross-provider conversion turns thinking into text; keep it display-only.
+  const textHistory = { ...context, messages: context.messages.map(message => message.role === 'assistant'
+    ? { ...message, content: message.content.filter(block => block.type !== 'thinking') } : message) };
+  try { converted = convertMessages(model, textHistory, compat); }
   catch { throw new DiagnosticFailure('request', 'conversion'); }
   // Pi represents text-only user blocks as an array. Collapse only those; do not
   // stringify multimodal/structured content into something the model can execute.
