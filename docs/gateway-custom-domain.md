@@ -1,6 +1,45 @@
-# Gateway custom domain: backend provisioning
+# Gateway custom domain: historical attempt (reverted)
 
-## Completed live changes
+## Operator-requested revert — 2026-10-13
+
+The operator requested reverting PR #67 after the custom-domain documentation
+confirmed that custom domains require enterprise enablement and an organization
+suffix. The protected `v0.0.36` deployment run `38330572877` passed preflight and
+was approved, then stopped at the read-only pre-update plan with HTTP 403
+(`RELEASE_PLAN_HTTP`). No CLI update was sent by that run; the status alone does
+not establish the underlying cause.
+
+Fresh readback observed `possum-phase0` running `v0.0.34`, no pending tag, and both
+hostnames still `possum-phase0.possums.containers.tinfoil.dev`. The revert restores
+that hostname in deployment policy, public serving verification and client source,
+and removes the custom-domain argument and migration-only Admin API plan guard.
+Existing pre-migration release, approval, opaque configuration, CLI plan and
+no-replay safeguards remain. The migration review's rejection of unknown CLI
+plan change families is retained, including allowed `secrets_refreshed` metadata. No client installation or container mutation is
+part of this revert.
+
+The unused Tinfoil domain registration was deleted with the official CLI. The
+two migration-specific Cloudflare records (CNAME `gateway.possums.dev` and TXT
+`_tinfoil.gateway.possums.dev`) were deleted successfully (HTTP 200). Public
+release tags/assets are retained, not rewritten. DNS caches may take time to
+expire. A subsequent domain listing confirmed the registration absent. This
+source revert is not evidence of a new gateway deployment.
+
+Local verification passed: 54 release/deployment Python tests, focused Go
+serving-verifier tests with the pinned compiler, Node 24.13.0/Pi 1.0.4 scratch
+TypeScript build and the complete offline client checks (release 177, cache 39,
+Pi 159, discovery 28, plus reference transport/stream/request fixtures). No live
+attestation or inference was performed. These fixtures do not establish hardware,
+billing or runtime privacy properties. In-checkout LSP checks lack the intentionally
+scratch-installed Pi/verifier dependencies (module and dependent type errors);
+the authoritative scratch TypeScript build passed. One LSP probe timed out.
+
+The sections below preserve historical evidence, not current instructions or
+claims that the custom domain is still registered or configured. Privacy scope
+remains [data handling boundaries](../PRIVACY.md#data-handling-boundaries) and
+[forbidden telemetry](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data).
+
+## Completed live changes (historical)
 
 Operator authorized backend-first provisioning of `gateway.possums.dev`.
 The existing Tinfoil CLI organization login registered this custom domain.

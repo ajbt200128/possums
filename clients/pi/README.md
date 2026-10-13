@@ -2,49 +2,6 @@
 
 The catalog-wide gateway tool profile is deployed as **v0.0.15** (the official gateway v3 helper compatibility fix is included; the separate 16-KiB tool-description cap remains removed, while other limits and the shared tool profile are unchanged). All authenticated catalog models advertise the assumed shared OpenAI-functions wire profile; this is not per-model compatibility qualification. A real Kimi Pi round with local `ls`/`read` execution and a correct final continuation was observed on v0.0.10; exact live billing/balance reconciliation remains unverified. See [release scope](../../docs/phase02-pi-release.md).
 
-## Hostname migration to gateway.possums.dev (source candidate; NOT installed or deployed)
-
-This client source candidate retargets the **published/verified trust path** from
-`https://possum-phase0.possums.containers.tinfoil.dev` to the new custom domain
-`https://gateway.possums.dev`. `provider.ts` `ORIGIN`, `PUBLISHER.origin` and the
-Pi model `baseUrl` now use the new hostname; every exact-hostname check is
-otherwise unchanged. This is a source change only: it is **not** an installed Pi
-client, **not** an activated session, and **not** evidence that the gateway is
-serving the new hostname.
-
-Backend attachment is incomplete. DNS/ownership for `gateway.possums.dev` was
-verified and one installed official CLI `0.18.9` `container relaunch` attempt
-returned nonzero; bounded control-plane readback still reported the **old**
-hostname running `v0.0.34`, and a scratch serving check at the new hostname was
-not accepted. Reconciliation and the protected backend rollout are recorded in
-[the domain migration evidence](../../docs/gateway-custom-domain.md); this client
-change neither deploys nor retries it.
-
-- **The historical compiled approval is preserved, not rebound.**
-  `API_APPROVALS[0]` keeps its original `possum-phase0...` origin, tag, digests and
-  administrative expiry (`2026-10-11`, already elapsed). Rebinding its origin to
-  the new hostname would assert serving-evidence binding that was never verified.
-  The explicit `--possums-manifest` compiled path therefore fails closed as
-  `possums_approval_expired` before any evidence fetch; a new endpoint requires
-  separately reviewed, freshly pinned approval. Do not extend expiry or edit pins
-  locally.
-- **Published-path binding is unchanged and exact.** `PUBLISHER.origin` selects
-  the attestation/keys/certificate host and the returned bundle `domain` must
-  equal it, so old-hostname evidence is rejected for the new origin.
-- **The public evidence cache is origin-bound.** A cached entry written for the
-  old origin is a miss for the new one and is re-acquired, never reused; matching
-  new-origin entries are still independently re-verified in every process.
-- **Last-known discovery metadata is origin-bound.** A stored model whose
-  `baseUrl` is not the new origin is discarded rather than surfaced as selectable.
-- **No fallback, redirect, retry or v3 migration is introduced.** There is no old-
-  endpoint fallback and no hostname redirect; the legacy-v2 freshness limitations
-  and the unresolved native CLI v3 platform-signer mismatch are unchanged.
-
-Focused offline tests (synthetic evidence only, no inference, no credentials)
-assert the new-hostname binding, rejection of old/wrong-hostname evidence, the
-origin-bound cache/discovery metadata, and the preserved compiled-approval expiry.
-Diagnostics remain content-free and no telemetry is added.
-
 ## Current client source policy (not installed)
 
 The operator-approved [client failure policy](../../docs/pi-client-failure-policy.md) supersedes the historical retry/terminal-error, duplicate admission, parser-quota and price-recomputation descriptions below. Only unconfirmed backend identity/authenticity is fatal and blocks later dispatch. Other failures produce transient warnings and a graceful Pi host `done/stop`, retain text/authenticated money, suppress provisional tools, and initiate no inference retry. Host stop does not prove backend success or billing. A deliberate next turn can proceed on the same verified session. See [offline scoped verification](../../docs/pi-client-simplification-verification.md).

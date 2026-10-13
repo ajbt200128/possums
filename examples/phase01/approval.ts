@@ -10,11 +10,6 @@ export type Approval = { origin: string; repository: string; tag: string; manife
   image: string; commit: string; config: string; workflow: string; invocation: string; expires: number };
 // Independently checked release provenance and directly promoted production endpoint.
 // Administrative expiry is NOT v2 quote freshness or Phase 0.2 acceptance.
-// Historical compiled approval for the pre-custom-domain endpoint. Its origin is
-// deliberately NOT rebound to the new hostname: the serving evidence was verified
-// against this exact hostname, and its administrative expiry has already elapsed,
-// so the explicit compiled path fails closed (approval_expired) rather than
-// silently targeting a different endpoint without fresh independently reviewed pins.
 export const API_APPROVALS: readonly Approval[] = Object.freeze([Object.freeze({
   origin: 'https://possum-phase0.possums.containers.tinfoil.dev',
   repository: 'ajbt200128/possums', tag: 'v0.0.15',
@@ -28,7 +23,7 @@ export const API_APPROVALS: readonly Approval[] = Object.freeze([Object.freeze({
 })]);
 // Future-release authority is independent of the compiled administrative approvals.
 export const PUBLISHER = Object.freeze({
-  origin: 'https://gateway.possums.dev',
+  origin: 'https://possum-phase0.possums.containers.tinfoil.dev',
   repository: 'ajbt200128/possums',
   workflow: 'https://github.com/ajbt200128/possums/.github/workflows/tinfoil-release-publish.yml',
 });
