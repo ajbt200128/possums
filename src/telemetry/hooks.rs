@@ -83,6 +83,14 @@ pub(crate) struct RequestContext {
     parent: Option<(Arc<AggregateMetrics>, u64)>,
 }
 impl RequestContext {
+    /// Observe only at the originating HTTP boundary. This is independent of
+    /// the original lifecycle key; propagation and terminal-owned failures skip it.
+    pub(crate) fn interface_error(&self, failure: crate::failures::InterfaceError) {
+        if let Some((owner, _)) = &self.parent {
+            owner.interface_error(failure);
+        }
+    }
+
     pub(crate) fn disposition(&self, disposition: Disposition) {
         if let Some((owner, key)) = &self.parent {
             owner.update(*key, Update::Disposition(disposition));

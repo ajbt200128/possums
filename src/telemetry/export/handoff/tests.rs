@@ -1,3 +1,5 @@
+mod extensions;
+
 use super::super::{
     capture_header, clean_child, drain_request, materialize::tests as oracle, phase,
 };
@@ -446,6 +448,7 @@ async fn composed_allocation_co_closing_pressure_cancel() {
     {
         let mut state = m.state.lock().unwrap();
         oracle::fill_maximum(&mut state.requests.active);
+        oracle::fill_extension_maximum(&mut state.requests.active);
     }
     m.poll();
     let mut pool = Vec::with_capacity(agg::POOL);
@@ -738,7 +741,11 @@ async fn composed_tls_allocation_and_owned_cancel() {
     let m = Box::new(new());
     ready(&m);
     infrastructure(&m);
-    oracle::fill_maximum(&mut m.state.lock().unwrap().requests.active);
+    {
+        let mut state = m.state.lock().unwrap();
+        oracle::fill_maximum(&mut state.requests.active);
+        oracle::fill_extension_maximum(&mut state.requests.active);
+    }
     m.poll();
     let mut pool = Vec::with_capacity(agg::POOL);
     for _ in 0..agg::POOL {
@@ -751,7 +758,8 @@ async fn composed_tls_allocation_and_owned_cancel() {
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = acceptor.accept(stream).await.unwrap();
         let body = agg::runtime::tests::capture(&mut stream).await;
-        assert_eq!(body.len(), 372_968);
+        assert_eq!(oracle::points(&body).len(), 2813);
+        assert!(body.len() <= super::super::transport::MAX_OUTBOUND);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 65536\r\n\r\n")
             .await

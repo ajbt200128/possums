@@ -12,6 +12,53 @@ use tokio::{
     net::TcpListener,
 };
 
+#[tokio::test]
+async fn checked_shutdown_keeps_closed_acknowledgement_failures_without_export() {
+    let runtime = |task| {
+        let (stop, _) = watch::channel(false);
+        Runtime {
+            metrics: None,
+            stop,
+            task,
+        }
+    };
+    assert_eq!(runtime(None).checked_shutdown().await, Ok(()));
+    assert_eq!(
+        runtime(Some(tokio::spawn(async { true })))
+            .checked_shutdown()
+            .await,
+        Ok(())
+    );
+    assert_eq!(
+        runtime(Some(tokio::spawn(async { false })))
+            .checked_shutdown()
+            .await,
+        Err(ShutdownFailure::DisposalUnconfirmed)
+    );
+    let task = tokio::spawn(std::future::pending::<bool>());
+    task.abort();
+    assert_eq!(
+        runtime(Some(task)).checked_shutdown().await,
+        Err(ShutdownFailure::ControllerTaskUnknown)
+    );
+    assert!(
+        !runtime(Some(tokio::spawn(async { false })))
+            .shutdown()
+            .await
+    );
+    for failure in [
+        ShutdownFailure::DisposalUnconfirmed,
+        ShutdownFailure::ControllerTaskUnknown,
+    ] {
+        let message = failure.to_string();
+        assert!(message.contains("code="));
+        assert!(message.contains("stage=cleanup"));
+        assert!(message.contains("constraint="));
+        assert!(message.contains("action="));
+        assert!(message.contains("remote deletion is not established"));
+    }
+}
+
 fn tls(trust: bool) -> (rustls::ClientConfig, tokio_rustls::TlsAcceptor) {
     let rcgen::CertifiedKey { cert, key_pair } =
         rcgen::generate_simple_self_signed(vec!["api.honeycomb.io".into()]).unwrap();

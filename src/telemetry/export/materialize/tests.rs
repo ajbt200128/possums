@@ -1,3 +1,5 @@
+mod extensions;
+
 use super::super::{candidate, capture_header, clean_child};
 use super::*;
 use crate::telemetry::{tests::Vector, Histogram};
@@ -842,11 +844,24 @@ pub(in crate::telemetry) fn fill_maximum(t: &mut RequestTables) {
     }
     assert!(t.releasable());
 }
+pub(in crate::telemetry) fn fill_extension_maximum(t: &mut RequestTables) {
+    use crate::failures::InterfaceError;
+    t.extension_qualification = [true; 2];
+    t.errors = crate::telemetry::errors::ErrorTotals::with_counts(
+        [i64::MAX as u64 / InterfaceError::ALL.len() as u64; InterfaceError::ALL.len()],
+    );
+    for (_, model) in MODELS {
+        let value = i64::MAX as u64 / 6;
+        t.tokens
+            .observe(model, value, value, value * 2, Some(value));
+    }
+}
 #[tokio::test]
 async fn maximum_reachable_cardinality_actual_wire_and_allocations() {
     if !clean_child("telemetry::export::materialize::tests::maximum_reachable_cardinality_actual_wire_and_allocations") {return;}
     const LIMIT: usize = 8 * 1024 * 1024;
-    let t = maximum();
+    let mut t = maximum();
+    fill_extension_maximum(&mut t);
     let before = super::super::phase();
     let metrics = request(&t, W).unwrap();
     let after = crate::process_alloc_tests::ALLOCATOR.snapshot();
@@ -855,8 +870,22 @@ async fn maximum_reachable_cardinality_actual_wire_and_allocations() {
         eprintln!("materialize max requested_peak={peak}");
         assert!(peak <= LIMIT);
     }
-    let expected_points = 8 + 144 + 144 * 11 + 3 + 36 + 36 * 11 + 36 * 11 + 9 + 124 + 50;
-    assert_eq!(expected_points, crate::telemetry::REQUEST_CELLS - 630 + 124);
+    let expected_points = 8
+        + 144
+        + 144 * 11
+        + 3
+        + 36
+        + 36 * 11
+        + 36 * 11
+        + 9
+        + 124
+        + 50
+        + crate::telemetry::EXTENSION_POINTS;
+    assert_eq!(crate::telemetry::EXTENSION_POINTS, 63);
+    assert_eq!(
+        expected_points,
+        crate::telemetry::REQUEST_CELLS - 630 + 124 + 63
+    );
     assert_eq!(
         metrics.scope_metrics[0]
             .metrics
