@@ -170,6 +170,24 @@ optional `secrets_refreshed` metadata. Regression fixtures exercise both cases.
 Live new-host serving has not passed
 at this checkpoint. Client implementation/review and installation are separate.
 
+### Client source qualification
+
+DeepSeek Possums prepared the client patch; parent review corrected a new test's
+wall-clock dependency to use an explicit expiry fixture. Independent client
+review found no confirmed blocker. The parent independently rebuilt with Node
+24.13.0 and pinned Pi 1.0.4 and ran the complete offline scratch checks:
+release 179, cache 40, Pi 160 and native discovery 29 checks passed, alongside
+the existing reference transport/stream/request checks. TypeScript build passed.
+New fixtures reject old-hostname serving evidence and old-origin cache/discovery
+metadata. The historical v0.0.15 compiled approval remains bound to its original
+hostname and expiry; it is not newly authorized at this hostname.
+
+These tests use synthetic public evidence with mocked hardware/signature/X.509
+boundaries; they qualify policy and host integration, not live attestation.
+No client installation/activation or credential-bearing gateway/inference probe
+was performed. Client and backend source are separate logical commits in the
+same reviewed PR; final-head CI and protected rollout remain pending.
+
 Rollout order: review both source packets, pass required PR CI, merge, verify the
 exact successful current-main candidate and public release pins, approve the
 matching protected production environment/run, then inspect observed deployment
