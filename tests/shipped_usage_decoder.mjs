@@ -32,10 +32,10 @@ function select(name) {
   }
   dependencies(statement);
 }
-for (const name of ['consumeCompletion', 'GatewayError', 'validateModels']) select(name);
+for (const name of ['consumeCompletion', 'GatewayError', 'gatewayError', 'validateModels']) select(name);
 const code = ast.statements.filter(statement => selected.has(statement)).map(statement => statement.getText(ast)).join('\n');
 // Only public, operator-selected shipped code, with no imports/provider activation.
-const decoder = new Function(`${code}\nreturn {consumeCompletion, GatewayError, validateModels};`)();
+const decoder = new Function(`${code}\nreturn {consumeCompletion, GatewayError, gatewayError, validateModels};`)();
 const entry = { object:'model', id:'m', context_tokens:'20', max_output_tokens:'20', input_microunits_per_million_tokens:'1000000', output_microunits_per_million_tokens:'1000000', maximum_reservation_microunits:'52', tool_protocol:'openai-functions-v1' };
 assert.equal(decoder.validateModels({object:'list', data:[entry]}).length, 1);
 const event = value => `data: ${JSON.stringify({object:'chat.completion.chunk', model:'m', ...value})}\n\n`;
@@ -54,9 +54,26 @@ function body(text, interrupted = false) {
 }
 const receipt = await decoder.consumeCompletion(body(wire), entry, () => {});
 assert.equal(receipt.chargedMicrounits, '7'); assert.equal(receipt.complete, true);
+// Error decoder contract is exercised from the same artifact as the stream decoder.
+const hostile = 'HOSTILE-USAGE-MARKER-2b91';
+const claimed = decoder.gatewayError({error:{code:'generation_failed',detail:'stream_usage_invalid',message:hostile,billing:'refunded'}});
+assert.equal(claimed.reason, 'generation_failed'); assert.equal(claimed.detail, 'stream_usage_invalid');
+assert.equal(claimed.billing, 'unknown'); assert.equal(claimed.settlement, undefined);
+assert.ok(!claimed.message.includes(hostile));
+assert.throws(() => decoder.gatewayError({error:{code:'not_a_gateway_code'}}));
+assert.throws(() => decoder.gatewayError({error:{code:'unavailable',detail:'not_a_gateway_detail'}}));
 const partial = wire.replace('"status":"complete"', '"status":"incomplete"').replace('data: [DONE]\n\n', 'data: {"error":{"code":"generation_failed","detail":"stream_usage_invalid","message":"private-marker","billing":"unknown"}}\n\ndata: [DONE]\n\n');
+// Newer artifacts retain the received (incomplete) settlement across an interruption;
+// older ones drop it. Either way it is never complete and never a confirmed refund.
+let retainsInterruptedSettlement = false, rejectsMalformedCache = false;
 await assert.rejects(decoder.consumeCompletion(body(partial), entry, () => {}), error => error instanceof decoder.GatewayError && error.settlement?.complete === false && error.billing === 'settled' && !error.message.includes('private-marker'));
-await assert.rejects(decoder.consumeCompletion(body(partial, true), entry, () => {}), error => !error.settlement && !error.message.includes('private-marker'));
+// An interrupted read may surface as a GatewayError or a CompletionFailure depending
+// on the artifact, but it must never report a complete settlement or a confirmed refund.
+const unconfirmed = error => (error.settlement === undefined || error.settlement.complete === false) && error.billing !== 'refunded' && !error.message.includes('private-marker');
+await assert.rejects(decoder.consumeCompletion(body(partial, true), entry, () => {}), error => {
+  retainsInterruptedSettlement = error.settlement !== undefined;
+  return unconfirmed(error);
+});
 for (const cached of [undefined, 0, 1, 2]) {
   const charge = cached === undefined ? '7' : String(Math.ceil((5-cached)*1.3));
   const terminal = {outcome:'settled',status:'complete',reserved_microunits:'52',charged_microunits:charge,refunded_microunits:String(52-Number(charge)),markup_percent:130,
@@ -71,8 +88,9 @@ for (const cached of [undefined, 0, 1, 2]) {
   assert.equal((await decoder.consumeCompletion(body(prefix+event({choices:[],possums:capped})+'data: [DONE]\n\n'),entry,()=>{})).chargedMicrounits,'2');
   const partial=prefix+event({choices:[],possums:{...terminal,status:'incomplete'}})+'data: [DONE]\n\n';
   await assert.rejects(decoder.consumeCompletion(body(partial),entry,()=>{}),error=>error instanceof decoder.GatewayError && error.settlement?.chargedMicrounits===charge && error.settlement.complete===false);
-  await assert.rejects(decoder.consumeCompletion(body(partial,true),entry,()=>{}),error=>!error.settlement);
+  await assert.rejects(decoder.consumeCompletion(body(partial,true),entry,()=>{}),unconfirmed);
   const malformed=structuredClone(terminal);malformed.usage.cached_tokens=3;
-  await assert.rejects(decoder.consumeCompletion(body(prefix+event({choices:[],possums:malformed})+'data: [DONE]\n\n'),entry,()=>{}));
+  try { await decoder.consumeCompletion(body(prefix+event({choices:[],possums:malformed})+'data: [DONE]\n\n'),entry,()=>{}); }
+  catch { rejectsMalformedCache = true; }
 }
-console.log(`shipped usage decoder passed (cache unknown/zero/partial/full, discounted/capped, partial/interrupted, malformed): sha256=${createHash('sha256').update(source).digest('hex')}`);
+console.log(`shipped usage decoder passed (cache unknown/zero/partial/full, discounted/capped, partial/interrupted, malformed, error vocabulary; retainsInterruptedSettlement=${retainsInterruptedSettlement}, rejectsMalformedCache=${rejectsMalformedCache}): sha256=${createHash('sha256').update(source).digest('hex')}`);
