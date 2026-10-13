@@ -387,6 +387,22 @@ class ReadOnlyPlanTest(StopTest):
         self.check(self.fixture())
         self.assertIsNone(d.NoPlanRedirect().redirect_request(None, None, None, None, None, None))
 
+    def test_unknown_change_family_stops_before_cli_mutation(self):
+        data = json.loads(self.fixture())
+        data["configuration_changes"]["volumes"] = {"changed": ["SYNTHETIC-SECRET"]}
+        with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "TINFOIL_ADMIN_KEY": "synthetic"}), \
+                patch.object(d.urllib.request, "build_opener") as build, \
+                patch.object(d, "get", return_value=view()), patch.object(d, "call") as call:
+            build.return_value.open.return_value = io.BytesIO(json.dumps(data).encode())
+            self.stop("plan_rejected", d.update_once, "unused", V, lambda: None)
+            call.assert_not_called()
+        self.stop("plan_configuration", d.inspect_plan, json.dumps(data).encode(), "v1.2.2", V)
+
+    def test_documented_secret_refresh_metadata_remains_supported(self):
+        data = json.loads(self.fixture())
+        data["configuration_changes"]["secrets_refreshed"] = sorted(d.REQUIRED_REFS)
+        self.check(json.dumps(data).encode())
+
     def test_wrong_instance_resources_or_hostile_plan_are_rejected(self):
         for field, value in (("instance_id", "SYNTHETIC-SECRET"), ("name", "other"),
                              ("current", {"tag": "v1.2.2", "cpus": 99, "gpus": 0, "memory_mb": 8192}),

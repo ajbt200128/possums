@@ -236,6 +236,8 @@ def inspect_plan(raw, previous, tag, previous_domain=DOMAIN):
             r.require(plan.get("update_strategy") == "blue_green" and boolean(plan.get("downtime_required"), False)
                       and boolean(plan.get("hold"), False), "plan_strategy")
             changes = plan["configuration_changes"]
+            r.require(isinstance(changes, dict) and set(changes) <=
+                      {"variables", "secrets", "ssh_keys", "settings", "secrets_refreshed"}, "plan_configuration")
             expected_settings = ["custom_domain"] if previous_domain == OLD_DOMAIN else []
             r.require(changes.get("settings") == expected_settings, "plan_configuration")
             for family in ("variables", "secrets", "ssh_keys"):

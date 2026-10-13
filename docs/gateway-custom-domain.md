@@ -159,11 +159,15 @@ and policy are rechecked immediately before invocation, and CLI closed stdin
 and absence of `--yes` still refuse downtime/changed-review confirmation.
 
 Offline backend qualification: `python3 -m unittest discover -s tests -p
- 'test_release*.py'` passed 61 tests; the focused Go serving-verifier tests passed.
+ 'test_release*.py'` passed 63 tests; the focused Go serving-verifier tests passed.
 Fixtures cover the exact old-to-new transition, unapproved/missing source
 hostnames, extra/duplicate/wrong plan settings, unchanged old-host terminal
 state, hostile post-update hostname, and unchanged one-mutation/current-main,
-configuration and secret/privacy contracts. Live new-host serving has not passed
+configuration and secret/privacy contracts. A second independent review identified
+that unknown change families could be ignored. The guard now rejects unsupported
+families before mutation and in post-call review, while retaining the documented
+optional `secrets_refreshed` metadata. Regression fixtures exercise both cases.
+Live new-host serving has not passed
 at this checkpoint. Client implementation/review and installation are separate.
 
 Rollout order: review both source packets, pass required PR CI, merge, verify the
