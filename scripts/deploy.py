@@ -11,16 +11,11 @@ import re
 import sys
 import tarfile
 import time
-import urllib.error
-import urllib.request
-from contextlib import suppress
 from pathlib import Path
 
 import release as r
 
 NAME = "possum-phase0"
-OLD_DOMAIN = "possum-phase0.possums.containers.tinfoil.dev"
-DOMAIN = "gateway.possums.dev"
 CLI_SHA256 = "ef014c67a976b4b47941d084fb0a3837ba6eb59c9f4e662424c6826fb7a70f8c"
 CLI_URL = "https://github.com/tinfoilsh/tinfoil-cli/releases/download/v0.19.0/tinfoil-cli_0.19.0_linux_amd64.tar.gz"
 LIMIT = 16 << 20
@@ -51,17 +46,12 @@ r.CODES.update({
     "control_read": ("control-plane", "Inspect the production state privately; no update was replayed."),
     "control_shape": ("control-plane", "Resolve the unsupported control-plane response without sharing its contents."),
     "not_stable": ("plan", "Reconcile pending, held, debug, non-confidential or non-running production state before a new request."),
-    "plan_http": ("pre-update-plan", "Check production admin planning access and the observed HTTP status; no update was sent."),
-    "plan_fetch": ("pre-update-plan", "The read-only plan could not be acquired; cause unknown. Check control-plane connectivity; no update was sent."),
-    "plan_rejected": ("pre-update-plan", "The read-only plan did not match the approved hostname-only configuration change and release; no update was sent."),
     "plan_missing": ("post-call-plan", "The update may have happened. Privately reconcile the missing CLI plan; never replay automatically."),
     "plan_strategy": ("post-call-plan", "Privately reconcile the unexpected strategy, hold or downtime policy; no replay or rollback."),
     "plan_target": ("post-call-plan", "Privately reconcile the unexpected source or target; no replay or rollback."),
     "plan_configuration": ("post-call-plan", "Privately reconcile configuration/reference changes; no replay or rollback."),
     "cli_uncertain": ("mutation", "The update outcome is uncertain. Inspect state privately; never rerun or automatically roll back."),
     "configuration_changed": ("completion", "Privately reconcile changed opaque configuration; no replay or rollback."),
-    "domain_source": ("plan-domain", "Production must use the approved old or new hostname; reconcile its configuration before a new deployment."),
-    "domain_completion": ("completion-domain", "The release is running but the approved hostname was not confirmed; reconcile privately without replay or rollback."),
     "completion_timeout": ("completion", "Inspect the pending target privately; no replay or rollback."),
     "cli_checksum": ("tool", "Resolve the pinned official CLI archive mismatch before provisioning credentials."),
 })
@@ -224,7 +214,7 @@ def stable_running(view, tag):
             and all(field in view for field in STABLE))
 
 
-def inspect_plan(raw, previous, tag, previous_domain=DOMAIN):
+def inspect_plan(raw, previous, tag):
     try:
         text = raw.decode("utf-8").lstrip()
         plans = 0
@@ -238,8 +228,7 @@ def inspect_plan(raw, previous, tag, previous_domain=DOMAIN):
             changes = plan["configuration_changes"]
             r.require(isinstance(changes, dict) and set(changes) <=
                       {"variables", "secrets", "ssh_keys", "settings", "secrets_refreshed"}, "plan_configuration")
-            expected_settings = ["custom_domain"] if previous_domain == OLD_DOMAIN else []
-            r.require(changes.get("settings") == expected_settings, "plan_configuration")
+            r.require(not changes.get("settings"), "plan_configuration")
             for family in ("variables", "secrets", "ssh_keys"):
                 change = changes[family]
                 r.require(not any(change.get(kind) for kind in ("added", "changed", "removed")), "plan_configuration")
@@ -254,46 +243,6 @@ def inspect_plan(raw, previous, tag, previous_domain=DOMAIN):
         raise r.Stop("plan_missing") from None
 
 
-class NoPlanRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-
-def plan_update(before, tag):
-    """The documented Admin API has a read-only plan route; the CLI has no plan-only command."""
-    try:
-        r.require(isinstance(before["id"], str) and re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", before["id"]), "plan_rejected")
-        body = json.dumps({"tag": tag, "custom_domain": DOMAIN}).encode()
-        request = urllib.request.Request("https://api.tinfoil.sh/api/containers/" + before["id"] + "/update/plan",
-            data=body, headers={"Authorization": "Bearer " + os.environ["TINFOIL_ADMIN_KEY"],
-                               "Content-Type": "application/json"}, method="POST")
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoPlanRedirect())
-        with opener.open(request, timeout=30) as response:
-            raw = response.read(LIMIT + 1)
-        r.require(len(raw) <= LIMIT, "plan_rejected")
-        plan = json.loads(raw)
-        r.require(isinstance(plan, dict), "plan_rejected")
-        r.require(plan.get("instance_id") == before["id"] and plan.get("name") == NAME, "plan_rejected")
-        r.require(all(plan.get("current", {}).get(field) == before[field]
-                      for field in ("cpus", "gpus", "memory_mb")), "plan_rejected")
-        try:
-            inspect_plan(raw, before["current_tag"], tag, before["domain"])
-        except r.Stop:
-            raise r.Stop("plan_rejected") from None
-    except urllib.error.HTTPError as error:
-        status = error.code
-        # Cleanup must not erase the observed HTTP failure or expose raw errors.
-        with suppress(Exception):
-            error.close()
-        raise r.Stop("plan_http", status) from None
-    except r.Stop:
-        raise
-    except (ValueError, KeyError, TypeError, AttributeError):
-        raise r.Stop("plan_rejected") from None
-    except Exception:
-        raise r.Stop("plan_fetch") from None
-
-
 def update_once(cli, tag, final_gate):
     """Testable mutation primitive; entry point verifies policy and public provenance.
 
@@ -304,27 +253,21 @@ def update_once(cli, tag, final_gate):
     r.require(bool(os.environ.get("TINFOIL_ADMIN_KEY")), "credential")
     before = get(cli)
     previous = before.get("current_tag")
-    r.require(before.get("domain") in (OLD_DOMAIN, DOMAIN), "domain_source")
     r.require(isinstance(previous, str) and re.fullmatch(r.VERSION, previous) is not None
               and previous != tag and stable_running(before, previous), "not_stable")
-    plan_update(before, tag)
-    final_gate()  # Main/policy recheck AFTER approval and read-only planning, immediately before invocation.
+    final_gate()  # Main/policy recheck AFTER approval, immediately before invocation.
     try:
-        result = call(cli, ["container", "update", NAME, "--tag", tag,
-                            "--custom-domain", DOMAIN, "--output", "json"], timeout=1800)
+        result = call(cli, ["container", "update", NAME, "--tag", tag, "--output", "json"], timeout=1800)
     except Exception:
         raise r.Stop("cli_uncertain") from None
     r.require(result.returncode == 0, "cli_uncertain")
-    inspect_plan(result.stderr, previous, tag, before["domain"])
+    inspect_plan(result.stderr, previous, tag)
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         after = get(cli)
-        r.require(all(before[field] == after[field] for field in STABLE if field != "domain")
-                  and after.get("domain") in (before["domain"], DOMAIN), "configuration_changed")
+        r.require(all(before[field] == after[field] for field in STABLE), "configuration_changed")
         if stable_running(after, tag):
-            r.require(after["domain"] == DOMAIN, "domain_completion")
             return {"cliSucceeded": True, "postCallPlanReviewed": True, "opaqueConfigurationPreserved": True,
-                    "approvedDomainConfirmed": True,
                     "targetRunningNoPending": True, "mutationCommandCount": 1, "servingVerified": False}
         time.sleep(10)
     raise r.Stop("completion_timeout")

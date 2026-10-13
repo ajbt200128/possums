@@ -15,10 +15,7 @@ import { invocation } from './wire.js';
 
 export const PROVIDER_ID = 'possums';
 const API = 'openai-completions';
-// Verified custom domain. Must stay identical to PUBLISHER.origin; the published
-// trust path binds serving evidence to this exact hostname, and cached discovery
-// entries with a different baseUrl are discarded.
-const ORIGIN = 'https://gateway.possums.dev';
+const ORIGIN = 'https://possum-phase0.possums.containers.tinfoil.dev';
 const LEGACY_AUTH = 'possums-memory-only-session';
 const REQUEST_AUTH = 'possums-verified-memory-session';
 const recoveryAuth = envApiKeyAuth('Possums recovery credential', ['POSSUMS_RECOVERY_CREDENTIAL']);

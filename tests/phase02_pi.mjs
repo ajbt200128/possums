@@ -314,24 +314,6 @@ await check('local approval expiry and mismatched manifest fail before any evide
   assert.equal(calls,0);
  } finally {Date.now=now;globalThis.fetch=fetch;}
 });
-await check('custom-domain migration keeps compiled approval fail-closed and provider bound to the new hostname',async()=>{
- const now=Date.now,fetch=globalThis.fetch;let calls=0;
- globalThis.fetch=async()=>{calls++;throw new Error('PRIVATE_URL_CREDENTIAL');};
- try {
-  // Published/verified origin is the custom domain; the compiled approval is a
-  // historical pin for the previous endpoint and is NOT rebound to the new one.
-  assert.equal(m.PUBLISHER.origin,'https://gateway.possums.dev');
-  assert.equal(m.API_APPROVALS[0].origin,'https://possum-phase0.possums.containers.tinfoil.dev');
-  const provider=new m.PossumsProvider(async()=>{throw new Error('PRIVATE_URL_CREDENTIAL');});
-  assert.equal(provider.baseUrl,'https://gateway.possums.dev');
-  // The old compiled approval has elapsed and fails closed before any evidence
-  // fetch; no manifest is silently accepted against a different hostname.
-  Date.now=()=>m.API_APPROVALS[0].expires;
-  await assert.rejects(m.connect(new Uint8Array()),error=>error instanceof m.ConnectionFailure && error.code==='approval_expired');
-  await assert.rejects(m.recoverCompiled({channel:{}},new Uint8Array()),error=>error instanceof m.ConnectionFailure && error.code==='approval_expired');
-  assert.equal(calls,0);
- } finally {Date.now=now;globalThis.fetch=fetch;}
-});
 await check('manifest authority is selected after Pi loads flags, never silently converted to public latest',async()=>{
  let flag,provider,prompts=0,requests=0;
  const fetch=globalThis.fetch;
