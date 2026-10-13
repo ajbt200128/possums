@@ -17,7 +17,10 @@ import { reasoningOptions, type ReasoningOptions } from '../../examples/phase01/
 
 export const PROVIDER_ID = 'possums';
 const API = 'openai-completions';
-const ORIGIN = 'https://possum-phase0.possums.containers.tinfoil.dev';
+// Custom-domain target; serving acceptance is separate from DNS verification.
+// Must match PUBLISHER.origin for exact serving-evidence binding; cached
+// discovery entries with a different baseUrl are discarded.
+const ORIGIN = 'https://gateway.possums.dev';
 const LEGACY_AUTH = 'possums-memory-only-session';
 const REQUEST_AUTH = 'possums-verified-memory-session';
 const recoveryAuth = envApiKeyAuth('Possums recovery credential', ['POSSUMS_RECOVERY_CREDENTIAL']);

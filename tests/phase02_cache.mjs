@@ -68,6 +68,9 @@ if (process.env.CACHE_CHILD) {
     assert.equal(JSON.parse(await readFile(path.join(directory, 'entry.json'))).version, 2); passed++;
     assert.equal((await child()).filter(e => e.event === 'amd').length, 0); passed++;
     for (const bad of ['{', '{}', JSON.stringify({ ...record, hint, digest: '0'.repeat(64) }), JSON.stringify({ ...record, hint, repository: hostile }), JSON.stringify({ ...record, hint, credentials: hostile }),
+      // The cache is origin-bound: an entry acquired for the previous hostname is a
+      // miss for the new origin and must be re-acquired, never reused as-is.
+      JSON.stringify({ ...record, hint, origin: 'https://possum-phase0.possums.containers.tinfoil.dev' }),
       JSON.stringify({ ...withoutVcek, hint }), JSON.stringify({ ...record, hint, vcek: '' }),
       JSON.stringify({ ...record, hint, vcek: hostile }), JSON.stringify({ ...record, hint, vcek: Buffer.alloc(LIMITS.certificate + 1).toString('base64') }),
       JSON.stringify({ ...record, hint, version: 1 }), JSON.stringify({ ...record, hint, version: 3 })]) {

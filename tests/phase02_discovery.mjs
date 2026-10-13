@@ -81,7 +81,7 @@ try {
       assert.equal(setups, before); assertClosed(result); passed++;
     }
     // Restore is untrusted; arbitrary endpoint/header/name data is never used.
-    for (const bad of [{ ...authenticated, id: hostile }, { ...authenticated, baseUrl: 'https://secret.invalid' }, { ...authenticated, contextWindow: Infinity }]) {
+    for (const bad of [{ ...authenticated, id: hostile }, { ...authenticated, baseUrl: 'https://secret.invalid' }, { ...authenticated, baseUrl: 'https://possum-phase0.possums.containers.tinfoil.dev' }, { ...authenticated, contextWindow: Infinity }]) {
       const s = new ai.InMemoryModelsStore(); await s.write('possums', { models: [bad] });
       const p = new m.PossumsProvider(async () => { throw primary; });
       const r = await runtime(p, s, credentials); assert.deepEqual(await r.getAvailable('possums'), []); passed++;
