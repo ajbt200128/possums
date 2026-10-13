@@ -218,7 +218,7 @@ pub struct Quote {
     pub reserved_microunits: u64,
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CatalogError {
     #[error("catalog is malformed or outside limits")]
     Invalid,

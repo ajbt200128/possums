@@ -6,6 +6,10 @@ use thiserror::Error;
 use tinfoil::Client;
 use tokio::time::Instant;
 
+mod catalog_errors;
+pub use catalog_errors::CatalogFailure;
+#[cfg(test)]
+mod catalog_error_tests;
 mod errors;
 pub use errors::InferenceFailure;
 pub mod forward;
@@ -93,6 +97,10 @@ impl DeltaSink for TextSink<'_> {
 #[async_trait]
 pub trait Inference: Send + Sync {
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError>;
+    /// Preserve legacy implementations while allowing richer catalog-source evidence.
+    async fn catalog_checked(&self) -> Result<Vec<u8>, CatalogFailure> {
+        self.catalog().await.map_err(CatalogFailure::from)
+    }
     /// Success also certifies the serialized tokenizer upload has been released.
     /// Pass the SAME admitted heavy lease through both prompt-bearing calls.
     /// Implementations must attach it to serialized DATA, including transport
@@ -389,13 +397,19 @@ impl TinfoilInference {
         &self,
         request: tinfoil::verifier::tls::OriginBoundRequestBuilder,
         limit: usize,
-    ) -> Result<Vec<u8>, InferenceError> {
+    ) -> Result<Vec<u8>, CatalogFailure> {
         let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::CatalogFailed))?
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::CatalogFailed))?;
-        collect_bounded_response(response, limit, deadline).await
+            .map_err(|_| CatalogFailure::SendDeadline)?
+            .map_err(|error| {
+                if error.is_timeout() {
+                    CatalogFailure::SendDeadline
+                } else {
+                    CatalogFailure::SendUnknown
+                }
+            })?;
+        collect_catalog_response(response, limit, deadline).await
     }
 
     fn http(&self) -> Result<&tinfoil::verifier::tls::OriginBoundClient, InferenceError> {
@@ -414,18 +428,31 @@ impl TinfoilInference {
 
 #[doc(hidden)]
 pub async fn collect_bounded_response(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     limit: usize,
     deadline: Instant,
 ) -> Result<Vec<u8>, InferenceError> {
+    collect_catalog_response(response, limit, deadline)
+        .await
+        .map_err(|failure| match failure {
+            CatalogFailure::BodyLimit => InferenceError::InvalidResponse,
+            _ => InferenceError::Unavailable,
+        })
+}
+
+async fn collect_catalog_response(
+    mut response: reqwest::Response,
+    limit: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>, CatalogFailure> {
     if !response.status().is_success() {
-        return Err(InferenceError::Unavailable);
+        return Err(CatalogFailure::HttpRefused(response.status().as_u16()));
     }
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
     {
-        return Err(InferenceError::InvalidResponse);
+        return Err(CatalogFailure::BodyLimit);
     }
     let mut bytes = Vec::with_capacity(
         response
@@ -436,13 +463,19 @@ pub async fn collect_bounded_response(
     loop {
         let chunk = tokio::time::timeout_at(deadline, response.chunk())
             .await
-            .map_err(|_| InferenceError::Unavailable)?
-            .map_err(|_| InferenceError::Unavailable)?;
+            .map_err(|_| CatalogFailure::BodyDeadline)?
+            .map_err(|error| {
+                if error.is_timeout() {
+                    CatalogFailure::BodyDeadline
+                } else {
+                    CatalogFailure::BodyUnknown
+                }
+            })?;
         let Some(chunk) = chunk else {
             break;
         };
         if bytes.len().saturating_add(chunk.len()) > limit {
-            return Err(InferenceError::InvalidResponse);
+            return Err(CatalogFailure::BodyLimit);
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -1144,10 +1177,15 @@ impl Inference for TinfoilInference {
         forward::consume(response, &model.id, stream::STREAM_IDLE_TIMEOUT, sink).await
     }
     async fn catalog(&self) -> Result<Vec<u8>, InferenceError> {
-        let request = self.authenticate(self.http()?.get(format!("{}/v1/models", self.origin)));
-        self.bounded_response(request, MAX_CATALOG_BYTES)
+        self.catalog_checked()
             .await
-            .map_err(|_| InferenceFailure::CatalogFailed.into())
+            .map_err(|failure| failure.wire().into())
+    }
+
+    async fn catalog_checked(&self) -> Result<Vec<u8>, CatalogFailure> {
+        let http = self.http().map_err(CatalogFailure::from)?;
+        let request = self.authenticate(http.get(format!("{}/v1/models", self.origin)));
+        self.bounded_response(request, MAX_CATALOG_BYTES).await
     }
 
     async fn count_tokens(
@@ -1344,7 +1382,15 @@ pub async fn authenticated_catalog(
     inference: &dyn Inference,
     now_unix: u64,
 ) -> Result<Catalog, InferenceError> {
-    let bytes = inference.catalog().await?;
-    Catalog::parse_authenticated(&bytes, now_unix)
-        .map_err(|_| InferenceFailure::CatalogFailed.into())
+    authenticated_catalog_checked(inference, now_unix)
+        .await
+        .map_err(|failure| failure.wire().into())
+}
+
+pub async fn authenticated_catalog_checked(
+    inference: &dyn Inference,
+    now_unix: u64,
+) -> Result<Catalog, CatalogFailure> {
+    let bytes = inference.catalog_checked().await?;
+    Catalog::parse_authenticated(&bytes, now_unix).map_err(CatalogFailure::Validation)
 }
