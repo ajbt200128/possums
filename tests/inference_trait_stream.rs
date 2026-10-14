@@ -159,12 +159,12 @@ fn heavy() -> Arc<possums::telemetry::hooks::Lease> {
 
 #[tokio::test]
 async fn default_structured_methods_fail_closed_without_text_fallback() {
-    use possums::inference::tools::{ToolInvocation, ToolMessage};
+    use possums::inference::tools::{ToolInvocation, ToolMessage, UserContent};
     let inference: SharedInference = Arc::new(NoStreaming);
     let (model, _) = request();
     let input = ToolInvocation::new(
         vec![ToolMessage::User {
-            content: "fixture".into(),
+            content: UserContent::Text("fixture".into()),
         }],
         None,
         None,

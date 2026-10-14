@@ -6,7 +6,11 @@ export type JSONValue = null | boolean | number | string | JSONValue[] | JSONObj
 export type Tool = { type: 'function'; function: { name: string; description?: string; parameters: JSONObject } };
 export type ToolChoice = 'auto' | 'none' | 'required' | { type: 'function'; function: { name: string } };
 export type ToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } };
-export type Message = { role: 'system' | 'user'; content: string } |
+// Reviewed Tinfoil vision profile; catalog membership still gates dispatch.
+export const supportsImageInput = (model: string): boolean =>
+  ['deepseek-v4-1-flash', 'kimi-k3', 'gemma4-31b'].includes(model);
+export type UserContent = string | ({ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } })[];
+export type Message = { role: 'system'; content: string } | { role: 'user'; content: UserContent } |
   { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] } |
   { role: 'tool'; content: string; tool_call_id: string };
 export type Invocation = ReasoningOptions & { model: string; stream: true; messages: Message[]; tools?: Tool[]; tool_choice?: ToolChoice };

@@ -45,6 +45,7 @@ struct Provider {
     cache_price: AtomicBool,
     valid_catalog: AtomicBool,
     catalog_has_m: AtomicBool,
+    vision_catalog: AtomicBool,
     valid_evidence: AtomicBool,
     upstream_error: AtomicBool,
     invalid_usage: AtomicBool,
@@ -232,7 +233,18 @@ impl Inference for Provider {
         } else {
             "other"
         };
-        Ok(json!({"object":"list","data":[{"id":id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"reasoning":true,"reasoning_params":self.reasoning_params.lock().unwrap().clone(),"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"cachedInputTokenPricePer1M":self.cache_price.load(Ordering::SeqCst).then_some(0),"requestPrice":0}}]}).to_string().into_bytes())
+        let entry = json!({"id":id,"type":"chat","context_window":20,"endpoints":["/v1/chat/completions"],"reasoning":true,"reasoning_params":self.reasoning_params.lock().unwrap().clone(),"pricing":{"inputTokenPricePer1M":price,"outputTokenPricePer1M":price,"cachedInputTokenPricePer1M":self.cache_price.load(Ordering::SeqCst).then_some(0),"requestPrice":0}});
+        let mut entries = vec![entry.clone()];
+        if self.vision_catalog.load(Ordering::SeqCst) {
+            for model in ["deepseek-v4-1-flash", "kimi-k3", "gemma4-31b"] {
+                let mut vision = entry.clone();
+                vision["id"] = json!(model);
+                entries.push(vision);
+            }
+        }
+        Ok(json!({"object":"list","data":entries})
+            .to_string()
+            .into_bytes())
     }
     async fn count_tokens(
         &self,
@@ -252,7 +264,7 @@ impl Inference for Provider {
     }
     fn tool_profile(&self, model: &str) -> Option<ToolProfile> {
         let check = self.qualification_checks.fetch_add(1, Ordering::SeqCst);
-        (model == "m"
+        ((model == "m" || matches!(model, "deepseek-v4-1-flash" | "kimi-k3" | "gemma4-31b"))
             && self.qualified.load(Ordering::SeqCst)
             && !(check > 0 && self.revoke_qualification.load(Ordering::SeqCst)))
         .then_some(ToolProfile::OpenAiFunctionsV1)
@@ -393,6 +405,7 @@ fn fixture(credit: u64) -> (AppState, Arc<Provider>, String, String) {
         cache_price: false.into(),
         valid_catalog: true.into(),
         catalog_has_m: true.into(),
+        vision_catalog: false.into(),
         valid_evidence: true.into(),
         upstream_error: false.into(),
         invalid_usage: false.into(),
@@ -531,6 +544,9 @@ async fn reasoning_controls_are_catalog_gated_before_tokenization_and_reserved_o
         assert_eq!(state.accounting.available("demo"), Some(100));
     }
 }
+
+#[path = "support/api_images.rs"]
+mod api_images;
 
 #[path = "support/duplicate_usage_metrics.rs"]
 mod duplicate_usage_metrics;

@@ -2,6 +2,7 @@ import { getCurrentTools, type Model, type TranscriptContext, type Tool } from '
 import { convertMessages } from '@earendil-works/pi-ai/api/openai-completions';
 import type { Chat } from '../../examples/phase01/transport.js';
 import { DiagnosticFailure, requireThat } from '../../examples/phase01/limits.js';
+import { supportsImageInput } from '../../examples/phase01/tools.js';
 
 // Reuse Pi's supported conversion, but not its weaker completion/usage parser.
 // No inferred finish, cache markers, reasoning replay or synthetic image fallback.
@@ -21,9 +22,10 @@ export type Invocation = Omit<Chat, 'stream' | 'submission'>;
 
 export function invocation(model: Model<'openai-completions'>, context: TranscriptContext): Invocation {
   requireThat(Array.isArray(context?.messages), 'history');
+  const images = supportsImageInput(model.id);
   for (const message of context.messages) {
     if (message.role === 'user' || message.role === 'toolResult') {
-      if (Array.isArray(message.content) && message.content.some((block: { type: string }) => block.type !== 'text')) {
+      if (Array.isArray(message.content) && message.content.some((block: { type: string }) => block.type !== 'text' && !(images && block.type === 'image'))) {
         throw new Error('possums_images_unsupported');
       }
     }
@@ -44,17 +46,24 @@ export function invocation(model: Model<'openai-completions'>, context: Transcri
   // Cross-provider conversion turns thinking into text; keep it display-only.
   const textHistory = { ...context, messages: context.messages.map(message => message.role === 'assistant'
     ? { ...message, content: message.content.filter(block => block.type !== 'thinking') } : message) };
-  try { converted = convertMessages(model, textHistory, compat); }
+  // Pi's converter moves tool-result images into a user content array and keeps
+  // matching tool results as text. Do not duplicate that transcript adaptation.
+  try { converted = convertMessages({ ...model, input: images ? ['text', 'image'] : ['text'] }, textHistory, compat); }
   catch { throw new DiagnosticFailure('request', 'conversion'); }
-  // Pi represents text-only user blocks as an array. Collapse only those; do not
-  // stringify multimodal/structured content into something the model can execute.
+  // Preserve Pi's ordered multimodal user parts. Collapse only text-only arrays
+  // to retain the shipped text wire contract.
   const messages = converted.map((convertedMessage: ReturnType<typeof convertMessages>[number]) => {
     // Thinking is display-only, including signed native history.
     const { reasoning: _reasoning, reasoning_content: _reasoningContent,
       reasoning_text: _reasoningText, reasoning_details: _reasoningDetails, ...message } = convertedMessage as typeof convertedMessage & {
         reasoning?: unknown; reasoning_content?: unknown; reasoning_text?: unknown; reasoning_details?: unknown };
     if (Array.isArray(message.content)) {
-      if (message.content.some((block: { type: string }) => block.type !== 'text')) throw new Error('possums_images_unsupported');
+      if (message.content.some((block: { type: string }) => block.type !== 'text')) {
+        if (!images || message.role !== 'user' || message.content.some((block: { type: string }) => block.type !== 'text' && block.type !== 'image_url')) {
+          throw new Error('possums_images_unsupported');
+        }
+        return message;
+      }
       return { ...message, content: message.content.map((block: { type: string; text?: string }) => block.text ?? '').join('') };
     }
     // OpenAI permits null here, but the upstream tokenizer rejects tool-only
