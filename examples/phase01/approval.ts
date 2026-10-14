@@ -40,6 +40,9 @@ export function requireReleaseTag(value: unknown): asserts value is string {
 // Locally distributed denylist; no claim of AMD CRL/OCSP coverage.
 const REVOKED_MANIFESTS: ReadonlySet<string> = new Set();
 const REVOKED_KEYS: ReadonlySet<string> = new Set();
+export function requirePublishedKeys(manifest: string, hpke: string): void {
+  requireThat(!REVOKED_MANIFESTS.has(manifest) && !REVOKED_KEYS.has(hpke));
+}
 export function requireApiApproval(): Approval {
   requireThat(API_APPROVALS.length === 1);
   const approval = API_APPROVALS[0];

@@ -1,4 +1,5 @@
 import { Channel, hasByteReadTimeout, type ResponseOptions } from './transport.js';
+import type { V3Input } from '../../clients/pi/v3.js';
 import { ChannelError, DiagnosticFailure, LIMITS, Operation, OperationFailure, cleanup, parseJSON, requireThat, serialize,
   type FailureConstraint, type FailureStage } from './limits.js';
 import { admitReasoning, reasoningParams, type ReasoningParams, type ReasoningOptions } from './reasoning.js';
@@ -415,6 +416,9 @@ export class ReferenceClient {
   }
   static async published(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal): Promise<ReferenceClient> {
     return new ReferenceClient(await Channel.published(bundle, manifest, keyConfig, signal));
+  }
+  static async v3(input: V3Input, signal?: AbortSignal): Promise<ReferenceClient> {
+    return new ReferenceClient(await Channel.v3(input, signal));
   }
   get release() { return this.channel.release; }
   get authExpiresAt(): number | undefined { return this.#authExpiresAt; }

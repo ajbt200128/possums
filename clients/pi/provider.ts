@@ -520,6 +520,7 @@ export class PossumsProvider implements Provider {
           template = await op.wait(this.establish(op.controller.signal), LIMITS.bootstrapMs);
           this.requireCurrent(epoch, op.controller.signal);
           Channel.requireVerified(template.channel);
+          if (this.verifiedTemplate) template.channel.requireRenewal(this.verifiedTemplate.channel);
           // Existing compiled-manifest establishment still enforces its own
           // administrative expiry. Never change pins or extend certificates.
           if (template.release && Date.now() >= template.release.expires) throw new ConnectionFailure('verification_failed');
