@@ -2,9 +2,12 @@
 use super::{errors::ErrorTotals, labels::*, tokens::TokenTotals};
 use crate::failures::InterfaceError;
 
-// Boundary coverage, compatibility and artifact qualification remain parent-owned.
-const INTERFACE_ERRORS_QUALIFIED: bool = false;
-const OBSERVED_TOKENS_QUALIFIED: bool = false;
+// Qualified observed runtime coverage; exclusions and evidence are in docs/verification.md.
+const INTERFACE_ERRORS_QUALIFIED: bool = true;
+const OBSERVED_TOKENS_QUALIFIED: bool = true;
+#[cfg(test)]
+pub(super) const COMPILED_EXTENSION_QUALIFICATION: [bool; 2] =
+    [INTERFACE_ERRORS_QUALIFIED, OBSERVED_TOKENS_QUALIFIED];
 pub const EXTENSION_POINTS: usize = InterfaceError::ALL.len() + 3 * 3;
 
 pub const REQUEST_SERIES: usize = 8 + 144 + 144 + 3 + 36 + 36 + 36 + 9 + 630 + 5;
@@ -45,7 +48,7 @@ pub struct RequestTables {
     pub(super) errors: ErrorTotals,
     pub(super) tokens: TokenTotals,
     #[cfg(test)]
-    pub(super) extension_qualification: [bool; 2],
+    pub(super) extension_qualification: Option<[bool; 2]>,
 }
 impl Default for RequestTables {
     fn default() -> Self {
@@ -68,7 +71,7 @@ impl Default for RequestTables {
             errors: ErrorTotals::default(),
             tokens: TokenTotals::default(),
             #[cfg(test)]
-            extension_qualification: [false; 2],
+            extension_qualification: Some([false; 2]),
         }
     }
 }
@@ -91,15 +94,15 @@ pub(super) fn generation_index(e: Endpoint, m: QualifiedModel) -> Option<usize> 
 impl RequestTables {
     pub(super) fn errors_qualified(&self) -> bool {
         #[cfg(test)]
-        if self.extension_qualification[0] {
-            return true;
+        if let Some(gates) = self.extension_qualification {
+            return gates[0];
         }
         INTERFACE_ERRORS_QUALIFIED
     }
     pub(super) fn tokens_qualified(&self) -> bool {
         #[cfg(test)]
-        if self.extension_qualification[1] {
-            return true;
+        if let Some(gates) = self.extension_qualification {
+            return gates[1];
         }
         OBSERVED_TOKENS_QUALIFIED
     }
@@ -224,4 +227,26 @@ fn present(n: u64) -> Option<u64> {
 }
 fn histogram<const N: usize>(h: &Histogram<N>) -> Option<&Histogram<N>> {
     h.0.iter().any(|n| *n > 0).then_some(h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_fixture_gates_override_compiled_qualification_exactly() {
+        let mut table = RequestTables::default();
+        assert_eq!(table.extension_qualification, Some([false; 2]));
+        for gates in [[true, false], [false, true], [false; 2], [true; 2]] {
+            table.extension_qualification = Some(gates);
+            assert_eq!(table.errors_qualified(), gates[0]);
+            assert_eq!(table.tokens_qualified(), gates[1]);
+            table.ticks = 300;
+            assert!(!table.releasable()); // No fabricated inactive populations.
+        }
+        table.extension_qualification = None;
+        assert_eq!(table.errors_qualified(), INTERFACE_ERRORS_QUALIFIED);
+        assert_eq!(table.tokens_qualified(), OBSERVED_TOKENS_QUALIFIED);
+        assert!(!table.releasable());
+    }
 }

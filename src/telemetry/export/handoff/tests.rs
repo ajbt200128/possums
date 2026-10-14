@@ -159,6 +159,222 @@ async fn real_aggregation_wire_includes_complete_low_count_families() {
 }
 
 #[tokio::test]
+async fn compiled_gate_router_terminal_sdk_tls_join() {
+    if !clean_child("telemetry::export::handoff::tests::compiled_gate_router_terminal_sdk_tls_join")
+    {
+        return;
+    }
+    assert_eq!(agg::tables::COMPILED_EXTENSION_QUALIFICATION, [true; 2]);
+    // Component-joined offline fixture, not live SystemClock/runtime proof:
+    // real router and sole terminal owner collect observations with the concrete
+    // application clock. Move only their actual table into FakeClock for closure.
+    let application = std::sync::Arc::new(AggregateMetrics::new(
+        Deployment::Production,
+        SystemClock {
+            start: std::time::Instant::now(),
+            fixed: Some(ClockReading {
+                monotonic_ns: 300 * agg::SECOND,
+                wall_ns: 300 * agg::SECOND,
+            }),
+        },
+    ));
+    application.prime_synthetic_application_window();
+    let router_ledger = crate::server::authentication_refused_fixture(&application).await;
+    let terminal_ledger =
+        crate::generation_owner::completed_cached_usage_fixture(&application).await;
+    application.poll(); // Retire finished pool keys; fixed boundary is before the first tick.
+    for error in crate::failures::InterfaceError::ALL {
+        assert_eq!(
+            application.interface_error_count(error),
+            (error == crate::failures::InterfaceError::AuthenticationRefused).then_some(1),
+        );
+    }
+    for model in 0..3 {
+        assert_eq!(
+            application.usage_counts(QualifiedModel(model)),
+            if model == 2 {
+                [Some(5), Some(4), Some(2)]
+            } else {
+                [None; 3]
+            },
+        );
+    }
+    let router_balance = router_ledger.snapshot("a").unwrap();
+    let terminal_balance = terminal_ledger.snapshot("a").unwrap();
+    let m = new();
+    assert!(m.enable(Deployment::Production));
+    ready(&m);
+    {
+        let mut source = application.state.lock().unwrap();
+        assert!(source
+            .records
+            .iter()
+            .all(|record| record.kind == agg::Kind::Empty));
+        assert_eq!(source.requests.active.ticks, 0);
+        assert!(source.requests.active.valid && source.requests.active.window_valid);
+        let mut table = std::mem::take(&mut source.requests.active);
+        table.extension_qualification = None; // Actual compiled constants, never Some(true).
+        m.state.lock().unwrap().requests.active = table;
+    }
+    drive(&m, 600 * agg::SECOND); // 300 timely polls; no synthetic observations.
+    m.poll();
+    let permit = m.take_window().unwrap(); // Baseline still releases with gates false.
+    assert!(m.take_window().is_none());
+    let (listener, client, acceptor) = agg::runtime::tests::fixture(true, "api.honeycomb.io").await;
+    let evidence = client.evidence();
+    let peer = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = acceptor.accept(stream).await.unwrap();
+        let bytes = agg::runtime::tests::capture(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        bytes
+    };
+    let (result, bytes) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(send(permit, client, Pauses::default()), peer)
+    })
+    .await
+    .unwrap();
+    assert_eq!(result, Ok(()));
+    assert_eq!(oracle::points(&bytes), joined_compiled_gate_expected());
+    for sentinel in [
+        "HOSTILE_ROUTER_CANARY",
+        "credential",
+        "account_id",
+        "cache_scope",
+        "request_id",
+    ] {
+        assert!(!bytes
+            .windows(sentinel.len())
+            .any(|value| value == sentinel.as_bytes()));
+    }
+    assert_eq!(evidence.connections.load(SeqCst), 1);
+    assert_eq!(evidence.live_io.load(SeqCst), 0);
+    assert!(m.take_window().is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+    assert_eq!(router_ledger.snapshot("a").unwrap(), router_balance);
+    assert_eq!(terminal_ledger.snapshot("a").unwrap(), terminal_balance);
+    assert_eq!(terminal_balance.completed_requests, 1);
+    assert_eq!(terminal_balance.in_flight, 0);
+}
+
+fn joined_compiled_gate_expected() -> oracle::WirePoints {
+    let mut expected = std::collections::BTreeMap::new();
+    let window = Window {
+        start_ns: 300 * agg::SECOND,
+        end_ns: 600 * agg::SECOND,
+    };
+    for (endpoint, status) in [("models", "4xx"), ("chat_api", "2xx")] {
+        oracle::add_exact(
+            &mut expected,
+            "possums.http.requests",
+            "{request}",
+            &[("possums.endpoint", endpoint)],
+            1,
+            window,
+        );
+        let fields = [
+            ("possums.endpoint", endpoint),
+            ("status_class", status),
+            ("http_terminal", "eof"),
+        ];
+        oracle::add_exact(
+            &mut expected,
+            "possums.http.completed",
+            "{request}",
+            &fields,
+            1,
+            window,
+        );
+        oracle::exact_bins(
+            &mut expected,
+            "possums.http.duration.bucket",
+            &fields,
+            0,
+            1,
+            window,
+        );
+    }
+    let base = [("possums.endpoint", "chat_api"), ("possums.model", "other")];
+    oracle::add_exact(
+        &mut expected,
+        "possums.generation.started",
+        "{generation}",
+        &base,
+        1,
+        window,
+    );
+    let fields = [
+        ("possums.endpoint", "chat_api"),
+        ("possums.model", "other"),
+        ("outcome", "success"),
+        ("failure_stage", "none"),
+    ];
+    oracle::add_exact(
+        &mut expected,
+        "possums.generation.completed",
+        "{generation}",
+        &fields,
+        1,
+        window,
+    );
+    oracle::exact_bins(
+        &mut expected,
+        "possums.generation.duration.bucket",
+        &fields,
+        0,
+        1,
+        window,
+    );
+    oracle::add_exact(
+        &mut expected,
+        "possums.admission.rejected",
+        "{rejection}",
+        &[
+            ("possums.endpoint", "models"),
+            ("possums.model", "not_applicable"),
+            ("reason", "auth"),
+        ],
+        1,
+        window,
+    );
+    let [errors, tokens] = agg::tables::COMPILED_EXTENSION_QUALIFICATION;
+    if errors {
+        oracle::add_exact(
+            &mut expected,
+            "possums.interface.errors",
+            "{error}",
+            &[("error_type", "authentication_refused")],
+            1,
+            window,
+        );
+    }
+    if tokens {
+        for (name, value) in [
+            ("possums.tokens.input", 5),
+            ("possums.tokens.output", 4),
+            ("possums.tokens.cached", 2),
+        ] {
+            oracle::add_exact(
+                &mut expected,
+                name,
+                "{token}",
+                &[("possums.model", "other")],
+                value,
+                window,
+            );
+        }
+    }
+    expected
+}
+
+#[tokio::test]
 async fn sole_permit_expiry_watermark_and_stale_return() {
     if !clean_child(
         "telemetry::export::handoff::tests::sole_permit_expiry_watermark_and_stale_return",

@@ -49,6 +49,8 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod observer_tests;
 #[cfg(test)]
+pub(crate) use observer_tests::authentication_refused_fixture;
+#[cfg(test)]
 pub(crate) mod resource_streaming_tests;
 #[cfg(test)]
 mod timeout_tests;

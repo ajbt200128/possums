@@ -42,6 +42,29 @@ fn only(metrics: &AggregateMetrics, counts: &[(InterfaceError, u64)]) {
     }
 }
 
+pub(crate) async fn authentication_refused_fixture(
+    metrics: &Arc<AggregateMetrics>,
+) -> Arc<crate::accounting::Accounting> {
+    let state = state(metrics);
+    let accounting = state.accounting.clone();
+    let before = accounting.snapshot("a").unwrap();
+    let response = send(
+        &router(state),
+        Request::get("/v1/models")
+            .header("x-hostile", "HOSTILE_ROUTER_CANARY")
+            .body(Body::empty())
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert!(!response
+        .windows(b"HOSTILE_ROUTER_CANARY".len())
+        .any(|bytes| bytes == b"HOSTILE_ROUTER_CANARY"));
+    only(metrics, &[(InterfaceError::AuthenticationRefused, 1)]);
+    assert_eq!(accounting.snapshot("a").unwrap(), before);
+    accounting
+}
+
 #[tokio::test]
 async fn router_origins_are_counted_once_after_normalization() {
     let metrics = metrics();

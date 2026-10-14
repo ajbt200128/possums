@@ -4,7 +4,7 @@ use crate::{failures::InterfaceError, telemetry::errors::ErrorTotals};
 fn populated() -> RequestTables {
     let mut t = RequestTables {
         ticks: 300,
-        extension_qualification: [true; 2],
+        extension_qualification: Some([true; 2]),
         ..Default::default()
     };
     for error in InterfaceError::ALL {
@@ -165,18 +165,18 @@ async fn independent_withholding_and_population_wire() {
     }
     for (gates, count) in [([true, false], 54), ([false, true], 9)] {
         let mut t = populated();
-        t.extension_qualification = gates;
+        t.extension_qualification = Some(gates);
         assert_eq!(points(&wire(request(&t, W).unwrap()).await).len(), count);
     }
     let mut t = populated();
-    t.extension_qualification = [false; 2];
+    t.extension_qualification = Some([false; 2]);
     assert!(request(&t, W).is_none());
     t.http_starts[0] = 1;
     let p = points(&wire(request(&t, W).unwrap()).await);
     assert_eq!(p.len(), 1);
     assert_eq!(p.keys().next().unwrap().0, "possums.http.requests");
     let mut t = cohort(10, false, 0);
-    t.extension_qualification = [true; 2];
+    t.extension_qualification = Some([true; 2]);
     t.errors = ErrorTotals::with_counts([i64::MAX as u64; 54]);
     t.errors.observe(InterfaceError::BodyLimit);
     t.tokens.observe(QualifiedModel(0), 1, 1, 3, Some(0));
@@ -186,7 +186,7 @@ async fn independent_withholding_and_population_wire() {
     );
     let empty = RequestTables {
         ticks: 300,
-        extension_qualification: [true; 2],
+        extension_qualification: Some([true; 2]),
         ..Default::default()
     };
     assert!(request(&empty, W).is_none());
@@ -202,12 +202,52 @@ async fn independent_withholding_and_population_wire() {
 }
 
 #[tokio::test]
+async fn explicit_and_compiled_gates_resolve_exact_wire_families() {
+    if !clean_child("telemetry::export::materialize::tests::extensions::explicit_and_compiled_gates_resolve_exact_wire_families") { return; }
+    for qualification in [
+        Some([true, false]),
+        Some([false, true]),
+        Some([false; 2]),
+        None,
+    ] {
+        let [errors, tokens] =
+            qualification.unwrap_or(crate::telemetry::tables::COMPILED_EXTENSION_QUALIFICATION);
+        let mut t = populated();
+        t.extension_qualification = qualification;
+        t.http_starts[0] = 1; // Always exercise encoding, including both disabled.
+        let mut expected = exact_extensions();
+        expected.retain(|(name, _), _| {
+            if name == "possums.interface.errors" {
+                errors
+            } else {
+                tokens
+            }
+        });
+        add_exact(
+            &mut expected,
+            "possums.http.requests",
+            "{request}",
+            &[("possums.endpoint", "attestation")],
+            1,
+            W,
+        );
+        assert_eq!(points(&wire(request(&t, W).unwrap()).await), expected);
+        let empty = RequestTables {
+            ticks: 300,
+            extension_qualification: qualification,
+            ..Default::default()
+        };
+        assert!(request(&empty, W).is_none());
+    }
+}
+
+#[tokio::test]
 async fn signed_integer_limits_and_across_partition_overflow_wire() {
     if !clean_child("telemetry::export::materialize::tests::extensions::signed_integer_limits_and_across_partition_overflow_wire") { return; }
     for output in [false, true] {
         let mut t = RequestTables {
             ticks: 300,
-            extension_qualification: [true; 2],
+            extension_qualification: Some([true; 2]),
             ..Default::default()
         };
         let max = i64::MAX as u64;

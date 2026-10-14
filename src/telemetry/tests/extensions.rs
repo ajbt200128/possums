@@ -7,7 +7,7 @@ pub(in crate::telemetry) fn qualify(m: &Metrics) {
         .unwrap()
         .requests
         .active
-        .extension_qualification = [true; 2];
+        .extension_qualification = Some([true; 2]);
 }
 pub(in crate::telemetry) fn observe(m: &Metrics) {
     m.interface_error(InterfaceError::BodyLimit);
@@ -48,7 +48,7 @@ fn qualified_extensions_close_independently_without_request_lifecycles() {
     ready(&m);
     observe(&m);
     drive(&m, 600 * SECOND);
-    assert!(m.request().is_none()); // fixed production qualification remains withheld
+    assert!(m.request().is_none()); // explicit fixture qualification remains withheld
 }
 
 #[test]
