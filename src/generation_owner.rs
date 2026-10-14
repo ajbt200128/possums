@@ -432,3 +432,5 @@ fn supervise(worker: JoinHandle<Completion>) -> oneshot::Receiver<Completion> {
 #[cfg(test)]
 #[path = "generation_owner_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::completed_cached_usage_fixture;

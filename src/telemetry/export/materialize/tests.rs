@@ -90,7 +90,7 @@ pub(in crate::telemetry) fn decode(bytes: &[u8]) -> ExportMetricsServiceRequest 
     }
     decoded
 }
-type WirePoints =
+pub(in crate::telemetry) type WirePoints =
     std::collections::BTreeMap<(String, Vec<(String, String)>), (String, i64, u64, u64)>;
 pub(in crate::telemetry) fn points(bytes: &[u8]) -> WirePoints {
     points_in(bytes, W)
@@ -140,7 +140,7 @@ fn points_in(bytes: &[u8], window: Window) -> WirePoints {
     }
     out
 }
-fn add_exact(
+pub(in crate::telemetry) fn add_exact(
     out: &mut WirePoints,
     name: &str,
     unit: &str,
@@ -160,7 +160,7 @@ fn add_exact(
         )
         .is_none());
 }
-fn exact_bins(
+pub(in crate::telemetry) fn exact_bins(
     out: &mut WirePoints,
     name: &str,
     fields: &[(&str, &str)],
@@ -846,7 +846,7 @@ pub(in crate::telemetry) fn fill_maximum(t: &mut RequestTables) {
 }
 pub(in crate::telemetry) fn fill_extension_maximum(t: &mut RequestTables) {
     use crate::failures::InterfaceError;
-    t.extension_qualification = [true; 2];
+    t.extension_qualification = Some([true; 2]);
     t.errors = crate::telemetry::errors::ErrorTotals::with_counts(
         [i64::MAX as u64 / InterfaceError::ALL.len() as u64; InterfaceError::ALL.len()],
     );

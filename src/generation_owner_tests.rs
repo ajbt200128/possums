@@ -138,6 +138,52 @@ impl Fixture {
     }
 }
 
+// Join the existing real terminal owner to the export fixture without replacing
+// its settlement/usage observation with manufactured telemetry calls.
+pub(crate) async fn completed_cached_usage_fixture(
+    metrics: &Arc<crate::telemetry::AggregateMetrics>,
+) -> Arc<Accounting> {
+    use crate::{inference::forward::Evidence, telemetry::*};
+    let f = Fixture::new();
+    let model = QualifiedModel::from_authenticated_quote(&quote());
+    let mut http = metrics.http(Endpoint::ChatApi);
+    let observation = metrics.generation(&http, model).into_owned(metrics);
+    let owner = f.pending(1).observed(Some(observation), model);
+    let (tx, body) = f.delivery();
+    let completion = owner.spawn_settling(tx, |_, mut settlement| async move {
+        settlement.evidence(Evidence::sse(StreamUsage {
+            input_tokens: 7,
+            output_tokens: 6,
+            total_tokens: 13,
+        }));
+        let mut final_evidence = Evidence::sse(usage());
+        final_evidence.cache_usage_available = true;
+        final_evidence.cached_tokens = 2;
+        settlement.evidence(final_evidence);
+        settlement.finish(&Ok(StreamUsage {
+            input_tokens: 8,
+            output_tokens: 8,
+            total_tokens: 16,
+        }))
+    });
+    assert_eq!(
+        bounded(completion).await.unwrap(),
+        Ok(Outcome::Settled { charged: 29 })
+    );
+    http.finish_http(
+        Status::Success,
+        HttpTerminal::Eof,
+        Disposition::NewGeneration,
+    );
+    drop((http, body));
+    assert_eq!(metrics.usage_counts(model), [Some(5), Some(4), Some(2)]);
+    f.outcome(1, Outcome::Settled { charged: 29 }, 971);
+    assert_eq!(f.ledger.snapshot(ACCOUNT).unwrap().completed_requests, 1);
+    assert_eq!(f.ledger.snapshot(ACCOUNT).unwrap().in_flight, 0);
+    f.leases_returned();
+    f.ledger
+}
+
 async fn bounded<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(5), future)
         .await
