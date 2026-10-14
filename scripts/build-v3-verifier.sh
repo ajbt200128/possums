@@ -11,7 +11,7 @@ CGO_ENABLED=0 go build -mod=readonly -trimpath -buildvcs=false -ldflags='-s -w' 
 CGO_ENABLED=0 GOOS=js GOARCH=wasm go build -mod=readonly -trimpath -buildvcs=false -ldflags='-s -w' -o "$OUT/verifier.wasm" ./cmd/verifier-wasm
 cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$OUT/wasm_exec.cjs"
 cp "$REPO/clients/pi/GO-LICENSE" "$OUT/GO-LICENSE"
-cp "$REPO/clients/pi/verifier.mjs" "$REPO/clients/pi/verifier-worker.mjs" "$OUT/"
+cp "$REPO/clients/pi/verifier.mjs" "$REPO/clients/pi/verifier-worker.mjs" "$REPO/clients/pi/verifier.d.mts" "$OUT/"
 node --input-type=module - "$OUT" "$REPO" <<'JS'
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -28,7 +28,7 @@ for (const directory of ['attestation-helper', 'clients/pi']) {
       if (entry.isDirectory() && directory === 'attestation-helper') await visit(file);
       const publicSource = directory === 'attestation-helper'
         ? entry.name.endsWith('.go') || ['go.mod', 'go.sum'].includes(entry.name)
-        : ['verifier.mjs', 'verifier-worker.mjs'].includes(entry.name);
+        : ['verifier.mjs', 'verifier-worker.mjs', 'verifier.d.mts'].includes(entry.name);
       if (entry.isFile() && publicSource) sources[file] = await hash(path.join(repo, file));
     }
   }

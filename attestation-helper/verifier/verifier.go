@@ -4,11 +4,17 @@
 package verifier
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"reflect"
 	"regexp"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
@@ -19,6 +25,7 @@ import (
 const (
 	NonceBytes       = 32
 	MaxEvidenceBytes = 16 << 20
+	MaxManifestBytes = 512 << 10
 	Repository       = "ajbt200128/possums"
 	workflow         = "https://github.com/" + Repository + "/.github/workflows/tinfoil-release-publish.yml"
 )
@@ -56,7 +63,21 @@ type Result struct {
 // Verify requires a caller-owned nonce and workload reference. The return value
 // is not cached authorization: callers must bind their connection to its keys
 // and refuse new work at or after FreshnessExpiresAtUnix.
-func Verify(evidence, nonce []byte, repository string) (result Result, failure *Failure) {
+func Verify(evidence, nonce []byte, repository string) (Result, *Failure) {
+	return verifyEvidence(evidence, nonce, repository, nil)
+}
+
+// VerifyClient additionally binds the downloaded release manifest to the
+// authenticated subject digest and complete signed predicate. Native self-
+// appraisal has no separately downloaded manifest and retains Verify's contract.
+func VerifyClient(evidence, nonce []byte, repository string, manifest []byte) (Result, *Failure) {
+	if len(manifest) == 0 || len(manifest) > MaxManifestBytes {
+		return Result{}, fail("publisher", "manifest")
+	}
+	return verifyEvidence(evidence, nonce, repository, manifest)
+}
+
+func verifyEvidence(evidence, nonce []byte, repository string, manifest []byte) (result Result, failure *Failure) {
 	stage := "input"
 	defer func() {
 		if recover() != nil {
@@ -93,7 +114,7 @@ func Verify(evidence, nonce []byte, repository string) (result Result, failure *
 		return Result{}, fail(stage, "cause_unknown")
 	}
 	stage = "publisher"
-	if failure := qualifyPublisher(doc, verified); failure != nil {
+	if failure := qualifyPublisher(doc, verified, manifest); failure != nil {
 		return Result{}, failure
 	}
 	stage = "keys"
@@ -131,7 +152,7 @@ func project(verified *tinfoil.Verification, now time.Time) (Result, *Failure) {
 // repository. Preserve Possums' narrower existing client publication authority.
 // Parse the same authenticated leaf with supported Sigstore/X509 helpers; do not
 // implement a second signature, transparency-log or hardware verifier.
-func qualifyPublisher(doc *document.Document, verified *tinfoil.Verification) *Failure {
+func qualifyPublisher(doc *document.Document, verified *tinfoil.Verification, manifest []byte) *Failure {
 	ref, err := doc.SigstoreCode()
 	if err != nil {
 		return fail("publisher", "schema")
@@ -148,19 +169,106 @@ func qualifyPublisher(doc *document.Document, verified *tinfoil.Verification) *F
 	if err != nil || !publisherMatches(cert, ext, verified.CodeTag) {
 		return fail("publisher", "identity")
 	}
+	if manifest != nil {
+		if _, valid := decodeManifestJSON(b.GetDsseEnvelope().GetPayload()); !valid {
+			return fail("publisher", "manifest")
+		}
+	}
 	var statement struct {
 		Type    string `json:"_type"`
 		Subject []struct {
 			Name   string            `json:"name"`
 			Digest map[string]string `json:"digest"`
 		} `json:"subject"`
+		Predicate json.RawMessage `json:"predicate"`
 	}
 	if err := json.Unmarshal(b.GetDsseEnvelope().GetPayload(), &statement); err != nil ||
 		statement.Type != "https://in-toto.io/Statement/v1" || len(statement.Subject) != 1 ||
 		statement.Subject[0].Name != "tinfoil-deployment.json" || statement.Subject[0].Digest["sha256"] != verified.CodeDigest {
 		return fail("publisher", "artifact")
 	}
+	if manifest != nil && !manifestMatches(manifest, statement.Predicate, verified.CodeDigest) {
+		return fail("publisher", "manifest")
+	}
 	return nil
+}
+
+func manifestMatches(manifest, predicate []byte, digest string) bool {
+	hash := sha256.Sum256(manifest)
+	if len(manifest) == 0 || len(manifest) > MaxManifestBytes || hex.EncodeToString(hash[:]) != digest {
+		return false
+	}
+	actual, ok := decodeManifestJSON(manifest)
+	endorsed, valid := decodeManifestJSON(predicate)
+	// Preserve numbers exactly rather than rounding security-sensitive fields
+	// through float64; representation differences fail closed.
+	return ok && valid && reflect.DeepEqual(actual, endorsed)
+}
+
+// Keep the existing client's duplicate-key, UTF-8 and structural JSON gates.
+// Standard decoder tokens handle syntax; this adds only publication constraints.
+func decodeManifestJSON(raw []byte) (any, bool) {
+	const maxDepth, maxNodes = 32, 32768
+	if len(raw) == 0 || len(raw) > MaxManifestBytes || !utf8.Valid(raw) {
+		return nil, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	nodes := 0
+	var read func(int) (any, bool)
+	read = func(depth int) (any, bool) {
+		nodes++
+		if depth > maxDepth || nodes > maxNodes {
+			return nil, false
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, false
+		}
+		delimiter, container := token.(json.Delim)
+		if !container {
+			return token, true
+		}
+		switch delimiter {
+		case '{':
+			object := map[string]any{}
+			for decoder.More() {
+				key, err := decoder.Token()
+				name, text := key.(string)
+				if err != nil || !text {
+					return nil, false
+				}
+				if _, duplicate := object[name]; duplicate {
+					return nil, false
+				}
+				nodes++
+				value, valid := read(depth + 1)
+				if !valid {
+					return nil, false
+				}
+				object[name] = value
+			}
+			end, err := decoder.Token()
+			return object, err == nil && end == json.Delim('}')
+		case '[':
+			array := []any{}
+			for decoder.More() {
+				value, valid := read(depth + 1)
+				if !valid {
+					return nil, false
+				}
+				array = append(array, value)
+			}
+			end, err := decoder.Token()
+			return array, err == nil && end == json.Delim(']')
+		default:
+			return nil, false
+		}
+	}
+	value, valid := read(0)
+	_, object := value.(map[string]any)
+	_, end := decoder.Token()
+	return value, valid && object && end == io.EOF
 }
 
 func publisherMatches(cert *x509.Certificate, ext certificate.Extensions, tag string) bool {

@@ -8,7 +8,7 @@ const constraints = Object.freeze({
   input: ['size', 'nonce', 'workload', 'schema', 'cause_unknown'],
   envelope: ['rejected', 'cause_unknown'],
   verification: ['rejected', 'result', 'cause_unknown'],
-  publisher: ['schema', 'certificate', 'identity', 'artifact', 'cause_unknown'],
+  publisher: ['schema', 'certificate', 'identity', 'artifact', 'manifest', 'cause_unknown'],
   freshness: ['expired'], keys: ['tls', 'hpke', 'cause_unknown'],
   bridge: ['cause_unknown', 'cleanup_cause_unknown', 'interrupted', 'deadline', 'schema', 'artifact_unavailable'],
 });
@@ -58,16 +58,18 @@ function qualified(message) {
 // Returns facts, not a connection. The consuming channel must enforce expiry,
 // exact EHBP configuration equality and its actual TLS/HPKE transport binding.
 // A new worker is terminated on every outcome; no public evidence is persisted.
-export async function verifyV3(evidence, nonce, repository = 'ajbt200128/possums', signal) {
+export async function verifyV3(evidence, nonce, repository = 'ajbt200128/possums', signal, manifest) {
   if (!(evidence instanceof Uint8Array) || !evidence.length || evidence.length > MAX_EVIDENCE) throw new VerifierFailure('input', 'size');
   if (!(nonce instanceof Uint8Array) || nonce.length !== 32) throw new VerifierFailure('input', 'nonce');
   if (typeof repository !== 'string' || repository.length > 256) throw new VerifierFailure('input', 'workload');
   if (signal !== undefined && !(signal instanceof AbortSignal)) throw new VerifierFailure('input', 'schema');
+  if (manifest !== undefined && (!(manifest instanceof Uint8Array) || !manifest.length || manifest.length > 512 * 1024)) throw new VerifierFailure('publisher', 'manifest');
   if (signal?.aborted) throw new VerifierFailure('bridge', 'interrupted');
   let worker;
   try {
     worker = new Worker(new URL('./verifier-worker.mjs', import.meta.url), {
-      workerData: { evidence: Buffer.from(evidence).toString('base64'), nonce: Buffer.from(nonce).toString('base64'), repository },
+      workerData: { evidence: Buffer.from(evidence).toString('base64'), nonce: Buffer.from(nonce).toString('base64'), repository,
+        ...(manifest === undefined ? {} : { manifest: Buffer.from(manifest).toString('base64') }) },
       env: {}, execArgv: [], stdout: true, stderr: true,
     });
   } catch { throw new VerifierFailure('bridge', 'artifact_unavailable'); }

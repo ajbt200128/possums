@@ -34,6 +34,8 @@ await rejects(() => verifyV3(new Uint8Array(16*1024*1024+1), nonce), 'input', 's
 await rejects(() => verifyV3(encode('{}'), new Uint8Array(31)), 'input', 'nonce');
 await rejects(() => verifyV3(encode('{}'), nonce, 'hostile-secret/private'), 'input', 'workload');
 await rejects(() => verifyV3(encode('{}'), nonce, undefined, {}), 'input', 'schema');
+for (const manifest of [new Uint8Array(), new Uint8Array(512 * 1024 + 1), 'hostile-secret'])
+  await rejects(() => verifyV3(encode('{}'), nonce, undefined, undefined, manifest), 'publisher', 'manifest');
 for (const raw of ['{', '{}', '{"format":"hostile-secret"}', '{"format":"https://tinfoil.sh/predicate/sev-snp-guest/v2","body":"hostile-secret"}']) {
   await rejects(() => verifyV3(encode(raw), nonce), 'envelope', 'rejected');
 }
@@ -66,6 +68,15 @@ try {
   const result = { release_digest: 'a'.repeat(64), release_tag: 'v0.0.41', tls_key_sha256: 'b'.repeat(64), hpke_key: 'c'.repeat(64), freshness_expires_at_unix: Math.floor(Date.now()/1000)+3600 };
   await emit({ result });
   assert.deepEqual(await bridge.verifyV3(encode('{}'), nonce), result); checks++;
+  await worker(`import { parentPort, workerData } from 'node:worker_threads';
+    parentPort.postMessage(workerData.manifest === 'AQID' ? { result: ${JSON.stringify(result)} } :
+      { failure: { code: 'possums_v3_publisher_manifest', stage: 'publisher', constraint: 'manifest' } });`);
+  const manifest = new Uint8Array([1, 2, 3]);
+  const copied = bridge.verifyV3(encode('{}'), nonce, undefined, undefined, manifest);
+  manifest.fill(9);
+  assert.deepEqual(await copied, result); checks++;
+  await rejects(() => bridge.verifyV3(encode('{}'), nonce, undefined, undefined, new Uint8Array([9])), 'publisher', 'manifest');
+  await emit({ result });
   const terminate = Worker.prototype.terminate;
   const lateAbort = new AbortController();
   try {
