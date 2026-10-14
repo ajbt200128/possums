@@ -58,7 +58,7 @@
           pname = "possums-attestation";
           version = "0.1.0";
           src = ./attestation-helper;
-          vendorHash = "sha256-n2X/SxW2bmHG27bSiRVC2S55Pct3fQWwneZGIAozk9g=";
+          vendorHash = "sha256-Pas9DQwmcWs7NR830uvW2Px16hBBijB1pFau5TdVve4=";
           postInstall = ''
             mv $out/bin/attestation-helper $out/bin/possums-attestation
           '';
