@@ -143,6 +143,7 @@ pub(crate) enum FailureProjection {
     Catalog(crate::inference::CatalogFailure),
     InvalidModel,
     InvalidReasoning,
+    ImagesUnsupported,
     Context,
 }
 
@@ -204,7 +205,10 @@ impl Generation<'_> {
         use telemetry::Rejection as R;
         let reason = match &rejection {
             Rejection::Failure {
-                projection: FailureProjection::InvalidModel | FailureProjection::InvalidReasoning,
+                projection:
+                    FailureProjection::InvalidModel
+                    | FailureProjection::InvalidReasoning
+                    | FailureProjection::ImagesUnsupported,
                 ..
             } => R::Input,
             Rejection::Admission(AdmissionError::Auth(_)) => R::Auth,
@@ -352,6 +356,18 @@ impl Generation<'_> {
                 AdmissionModel::Unknown,
             )
         })?;
+        if matches!(&input, RequestInput::Structured(input) if input.invocation.has_images())
+            && !crate::inference::tools::supports_images(&quote.model.id)
+        {
+            return Err(self.reject(
+                Rejection::Failure {
+                    failure: InterfaceError::InputRefused,
+                    projection: FailureProjection::ImagesUnsupported,
+                    owned: false,
+                },
+                AdmissionModel::Unknown,
+            ));
+        }
         if !quote.model.allows_reasoning(input.reasoning_options()) {
             return Err(self.reject(
                 Rejection::Failure {

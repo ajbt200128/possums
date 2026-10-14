@@ -94,6 +94,67 @@ impl ToolCall {
     }
 }
 
+// Strict admission wrappers; the supported SDK owns the upstream image value.
+// No Debug/Clone: these values contain the transcript and inline attachments.
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum UserContent {
+    Text(String),
+    Parts(Vec<UserContentPart>),
+}
+impl UserContent {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Text(text) => text.is_empty(),
+            Self::Parts(parts) => parts.is_empty(),
+        }
+    }
+}
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UserContentPart {
+    Text {
+        text: String,
+    },
+    ImageUrl {
+        #[serde(deserialize_with = "inline_image")]
+        image_url: tinfoil::chat::ImageUrl,
+    },
+}
+fn inline_image<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<tinfoil::chat::ImageUrl, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct InlineImage {
+        url: String,
+        #[serde(default, deserialize_with = "present")]
+        detail: Option<tinfoil::chat::ImageDetail>,
+    }
+    let image = InlineImage::deserialize(decoder)?;
+    Ok(tinfoil::chat::ImageUrl {
+        url: image.url,
+        detail: image.detail,
+    })
+}
+fn valid_inline_image(url: &str) -> bool {
+    let Some((header, data)) = url.split_once(',') else {
+        return false;
+    };
+    matches!(
+        header,
+        "data:image/jpeg;base64"
+            | "data:image/png;base64"
+            | "data:image/gif;base64"
+            | "data:image/webp;base64"
+    ) && !data.is_empty()
+}
+
+// Capability policy is deliberately separate from authenticated availability/prices.
+pub(crate) fn supports_images(model: &str) -> bool {
+    matches!(model, "deepseek-v4-1-flash" | "kimi-k3" | "gemma4-31b")
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "role", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolMessage {
@@ -101,7 +162,7 @@ pub enum ToolMessage {
         content: String,
     },
     User {
-        content: String,
+        content: UserContent,
     },
     Assistant {
         // Required key, permitting null only for a nonempty call batch.
@@ -124,6 +185,9 @@ impl ToolMessage {
         matches!(
             self,
             Self::Tool { .. }
+                | Self::User {
+                    content: UserContent::Parts(_),
+                }
                 | Self::Assistant {
                     tool_calls: Some(_),
                     ..
@@ -133,7 +197,9 @@ impl ToolMessage {
     pub fn into_text(self) -> Result<Message, InferenceError> {
         let (role, content) = match self {
             Self::System { content } => ("system", content),
-            Self::User { content } => ("user", content),
+            Self::User {
+                content: UserContent::Text(content),
+            } => ("user", content),
             Self::Assistant {
                 content: Some(content),
                 tool_calls: None,
@@ -177,6 +243,12 @@ impl ToolInvocation {
     pub fn messages(&self) -> &[ToolMessage] {
         &self.messages
     }
+    pub(crate) fn has_images(&self) -> bool {
+        self.messages.iter().any(|message| {
+            matches!(message, ToolMessage::User { content: UserContent::Parts(parts) }
+                if parts.iter().any(|part| matches!(part, UserContentPart::ImageUrl { .. })))
+        })
+    }
     fn validate(&self) -> Result<(), InferenceError> {
         let invalid = || InferenceError::InvalidResponse;
         if self.messages.is_empty()
@@ -207,6 +279,20 @@ impl ToolInvocation {
                 return Err(invalid());
             }
             match message {
+                ToolMessage::User {
+                    content: UserContent::Parts(parts),
+                } => {
+                    if parts.is_empty()
+                        || parts.iter().any(|part| match part {
+                            UserContentPart::Text { text } => text.is_empty(),
+                            UserContentPart::ImageUrl { image_url } => {
+                                !valid_inline_image(&image_url.url)
+                            }
+                        })
+                    {
+                        return Err(invalid());
+                    }
+                }
                 ToolMessage::Assistant {
                     content,
                     tool_calls,
@@ -311,6 +397,100 @@ mod tests {
     }
 
     #[test]
+    fn image_capabilities_are_exact_ids_and_text_wire_is_unchanged() {
+        for id in ["deepseek-v4-1-flash", "kimi-k3", "gemma4-31b"] {
+            assert!(supports_images(id));
+        }
+        for id in [
+            "m",
+            "deepseek-v4-1-flash-latest",
+            "Kimi-k3",
+            "gemma4-31b ",
+            "",
+        ] {
+            assert!(!supports_images(id));
+        }
+        let wire = json!({"role":"user","content":"fixture"});
+        let message: ToolMessage = serde_json::from_value(wire.clone()).unwrap();
+        assert!(!message.is_structured());
+        assert_eq!(serde_json::to_value(&message).unwrap(), wire);
+        assert_eq!(message.into_text().unwrap().content, "fixture");
+        let array: ToolMessage = serde_json::from_value(
+            json!({"role":"user","content":[{"type":"text","text":"fixture"}]}),
+        )
+        .unwrap();
+        assert!(array.is_structured());
+        assert!(array.into_text().is_err());
+    }
+
+    #[tokio::test]
+    async fn ordered_images_reach_official_tokenizer_and_generation_serializers_unchanged() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let messages = json!([{"role":"user","content":[
+            {"type":"text","text":"before"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,YWJj"}},
+            {"type":"text","text":"between"},
+            {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,YQ==","detail":"auto"}},
+            {"type":"text","text":"after"}
+        ]}]);
+        let invocation = ToolInvocation::new(
+            serde_json::from_value(messages.clone()).unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+        let heavy: Arc<crate::telemetry::hooks::Lease> = Arc::new(
+            Arc::new(Semaphore::new(1))
+                .try_acquire_owned()
+                .unwrap()
+                .into(),
+        );
+        let (tokenizer, _) =
+            invocation_tokenizer_body("kimi-k3", &invocation, heavy.clone()).unwrap();
+        let generation = stream::builder_body(
+            crate::inference::invocation_request("kimi-k3", &invocation).unwrap(),
+            123,
+            &crate::auth::CacheScope::default(),
+            heavy,
+        )
+        .unwrap();
+        let mut values = Vec::new();
+        for body in [tokenizer, generation] {
+            let mut request = reqwest::Client::new()
+                .post("http://127.0.0.1/")
+                .body(body)
+                .build()
+                .unwrap();
+            assert!(request.try_clone().is_none());
+            let bytes = request
+                .body_mut()
+                .take()
+                .unwrap()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["messages"], messages);
+            values.push(value);
+        }
+        assert_eq!(values[0]["messages"], values[1]["messages"]);
+        assert_eq!(values[0].as_object().unwrap().len(), 2);
+        assert_eq!(values[1]["max_tokens"], 123);
+    }
+
+    #[test]
+    fn inline_admission_does_not_decode_or_inspect_image_payloads() {
+        // Transport/parser bounds remain authoritative; the upstream decoder
+        // owns base64 and image validity, including this synthetic non-image.
+        for mime in ["jpeg", "png", "gif", "webp"] {
+            assert!(valid_inline_image(&format!(
+                "data:image/{mime};base64,not decoded"
+            )));
+        }
+    }
+
+    #[test]
     fn production_profile_is_shared_assumption_not_per_model_evidence() {
         // Profile assignment is independent of catalog membership; submission
         // still requires an authenticated catalog match before prompt uploads.
@@ -321,6 +501,7 @@ mod tests {
 
     #[tokio::test]
     async fn tokenizer_and_generation_share_exact_borrowed_input_and_noncloneable_leased_data() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         for choice in [
             json!("auto"),
             json!("none"),

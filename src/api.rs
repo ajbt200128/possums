@@ -170,6 +170,30 @@ async fn unsupported_reasoning_keeps_main_wire_and_unowned_typed_refusal() {
     );
 }
 
+#[cfg(test)]
+#[tokio::test]
+async fn unsupported_images_preserve_unowned_input_refusal_and_safe_diagnostic() {
+    use http_body_util::BodyExt as _;
+    let response = rejection_response(Rejection::Failure {
+        failure: InterfaceError::InputRefused,
+        projection: FailureProjection::ImagesUnsupported,
+        owned: false,
+    });
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.extensions().get::<InterfaceError>(),
+        Some(&InterfaceError::InputRefused)
+    );
+    assert!(response.extensions().get::<FailureOwned>().is_none());
+    assert!(response.extensions().get::<SafeError>().is_some());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_request");
+    assert_eq!(value["error"]["detail"], "images_unsupported");
+    assert_eq!(value.as_object().unwrap().len(), 1);
+    assert_eq!(value["error"].as_object().unwrap().len(), 3);
+}
+
 fn rejection_response(rejection: Rejection) -> Response {
     let cause = rejection.interface_error();
     let owned = rejection.owned_failure();
@@ -185,6 +209,18 @@ fn rejection_response(rejection: Rejection) -> Response {
             }
             FailureProjection::Unavailable => {
                 inference_error_with_cause(InferenceFailure::InferenceUnavailable, Some(cause))
+            }
+            FailureProjection::ImagesUnsupported => {
+                let mut response = (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({"error": {
+                        "code": "invalid_request", "detail": "images_unsupported",
+                        "message": "Stage: request; constraint: model_image_capability. Images are unsupported for this model. Select deepseek-v4-1-flash, kimi-k3 or gemma4-31b from the authenticated catalog, or submit text only; this attempt reserved no credit and sent no upstream prompt."
+                    }})),
+                )
+                    .into_response();
+                response.extensions_mut().insert(SafeError);
+                response
             }
             FailureProjection::InvalidReasoning => {
                 let mut response = (
@@ -851,7 +887,10 @@ async fn chat(
             )
             .await
     } else {
-        let Some(ToolMessage::User { content: prompt }) = input.messages.pop() else {
+        let Some(ToolMessage::User {
+            content: crate::inference::tools::UserContent::Text(prompt),
+        }) = input.messages.pop()
+        else {
             return reject(StatusCode::BAD_REQUEST, MetricRejection::Input);
         };
         if prompt.is_empty() {
