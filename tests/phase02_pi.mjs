@@ -1328,6 +1328,56 @@ await check('unqualified tools and image history rejected before invocation',asy
  s.provider.beginRun();const image=ai.normalizeContext({messages:[{role:'user',timestamp:1,content:[{type:'image',data:'synthetic',mimeType:'image/png'}]}]});
  assert.match(messageText((await drain(s.provider.streamSimple(s.selected,image))).message), /\[possums_images_unsupported\].*remove images/);assert.equal(s.sends(),0);
 });
+await check('gateway image capability failures keep a closed actionable diagnostic without hostile text',async()=>{
+ const error=await terminalGatewayError('invalid_request','images_unsupported','unknown');
+ assert.equal(error.reason,'invalid_request');assert.equal(error.detail,'images_unsupported');
+ assert.match(error.message,/Stage: request; constraint: images_unsupported/);
+ assert.match(error.message,/remove images or deliberately select an image-capable model/);
+ assert(!error.message.includes('PRIVATE_PROMPT'));assert.equal(error.billing,'unknown');
+});
+await check('documented vision models preserve Pi image parts and text wire without mutating history',async()=>{
+ const s=await setup([]);
+ const ids=['deepseek-v4-1-flash','kimi-k3','gemma4-31b'];
+ s.client.models=async()=>m.validateModels({object:'list',data:[...ids,'glm-5-3','llama3-3-70b','gpt-oss-120b'].map(id=>({...entry(true),id}))});
+ const provider=new m.PossumsProvider(async()=>s.client);
+ await provider.auth.apiKey.login(interaction());
+ for(const selected of provider.getModels()){
+  const images=ids.includes(selected.id);
+  assert.deepEqual(selected.input,images?['text','image']:['text']);
+  const image={type:'image',data:'c3ludGhldGlj',mimeType:'image/png'};
+  const transcript=ai.normalizeContext({messages:[{role:'user',timestamp:1,content:[{type:'text',text:'Before'},image,{type:'text',text:'After'},image]}]});
+  const before=structuredClone(transcript);
+  if(images){
+   // Old cached/selected metadata must not make Pi silently drop tool images.
+   const payload=m.snapshotInvocation(m.invocation({...selected,input:['text']},transcript));
+   assert.deepEqual(payload.messages[0].content,[{type:'text',text:'Before'},{type:'image_url',image_url:{url:'data:image/png;base64,c3ludGhldGlj'}},{type:'text',text:'After'},{type:'image_url',image_url:{url:'data:image/png;base64,c3ludGhldGlj'}}]);
+  }else assert.throws(()=>m.invocation({...selected,input:['text','image']},transcript),/possums_images_unsupported/);
+  assert.deepEqual(transcript,before);
+  const text=ai.normalizeContext({messages:[{role:'user',timestamp:1,content:[{type:'text',text:'Before'},{type:'text',text:'After'}]}]});
+  assert.equal(m.invocation(selected,text).messages[0].content,'BeforeAfter');
+ }
+ assert.equal(s.sends(),0);
+});
+await check('Pi owns image tool-result conversion and preserves matching parallel calls',async()=>{
+ const s=await setup([]);
+ for(const id of ['deepseek-v4-1-flash','kimi-k3','gemma4-31b']){
+  const selected={...s.selected,id,input:['text']};
+  const calls=['one','two'].map(value=>({type:'toolCall',id:'call_'+value,name:'echo',arguments:{value}}));
+  const assistant={role:'assistant',provider:'possums',api:'openai-completions',model:id,timestamp:2,stopReason:'toolUse',content:calls,
+   usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+  const results=calls.map((call,index)=>({role:'toolResult',toolCallId:call.id,toolName:'echo',content:[...(index?[{type:'text',text:'Synthetic result'}]:[]),{type:'image',mimeType:'image/png',data:'c3ludGhldGlj'}],isError:false,timestamp:3}));
+  const transcript=ai.normalizeContext({messages:[user,assistant,...results],tools:[tool]});
+  const before=structuredClone(transcript);
+  const payload=m.snapshotInvocation(m.invocation(selected,transcript));
+  const prior=payload.messages.find(message=>message.role==='assistant');
+  assert.equal(prior.content,'');
+  assert.deepEqual(payload.messages.filter(message=>message.role==='tool').map(message=>message.tool_call_id),prior.tool_calls.map(call=>call.id));
+  assert.deepEqual(payload.messages.filter(message=>message.role==='tool').map(message=>message.content),['(see attached image)','Synthetic result']);
+  assert.deepEqual(payload.messages.at(-1),{role:'user',content:[{type:'text',text:'Attached image(s) from tool result:'},...results.map(()=>({type:'image_url',image_url:{url:'data:image/png;base64,c3ludGhldGlj'}}))]});
+  assert.deepEqual(transcript,before);
+ }
+ assert.equal(s.sends(),0);
+});
 await check('cross-provider history uses Pi conversion without replaying thinking or mutating history',async()=>{
  for(const [provider,api,model] of [['anthropic','anthropic-messages','synthetic-claude'],['openai','openai-responses','synthetic-gpt'],['possums','openai-completions','other-model']]){
   const s=await setup(['stop']);

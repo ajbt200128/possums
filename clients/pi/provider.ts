@@ -12,6 +12,7 @@ import { ReferenceClient, PreparedChat, BalanceFailure, CatalogFailure, GatewayE
 import { ChannelError, DiagnosticFailure, OperationFailure, LIMITS, Operation, parseJSON, serialize, requireThat, type FailureStage } from '../../examples/phase01/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure, diagnosticDescription, settlementDescription } from './diagnostics.js';
 import { invocation } from './wire.js';
+import { supportsImageInput } from '../../examples/phase01/tools.js';
 import { simpleThinking, thinkingMetadata } from './thinking.js';
 import { reasoningOptions, type ReasoningOptions } from '../../examples/phase01/reasoning.js';
 
@@ -70,7 +71,7 @@ function model(entry: LiveModel): Model<typeof API> {
   return {
     id: entry.id, provider: PROVIDER_ID, api: API, baseUrl: ORIGIN,
     name: entry.name ?? entry.id,
-    input: ['text'], ...thinkingMetadata(entry),
+    input: supportsImageInput(entry.id) ? ['text', 'image'] : ['text'], ...thinkingMetadata(entry),
     contextWindow: Number(entry.context_tokens), maxTokens: Number(entry.max_output_tokens),
     cost: { input: Number(entry.input_microunits_per_million_tokens) * 1.3 / 1_000_000,
       output: Number(entry.output_microunits_per_million_tokens) * 1.3 / 1_000_000,
@@ -100,7 +101,7 @@ function discoveryModels(value: unknown): readonly Model<typeof API>[] {
         // falls back to the id. Non-name inference-unavailable disclosure and
         // enforcement are unchanged and do not depend on this label.
         name: displayName(entry.name) ? entry.name : entry.id,
-        input: ['text'] as ['text'], reasoning: false, contextWindow: entry.contextWindow, maxTokens: entry.maxTokens,
+        input: (supportsImageInput(entry.id) ? ['text', 'image'] : ['text']) as Model<typeof API>['input'], reasoning: false, contextWindow: entry.contextWindow, maxTokens: entry.maxTokens,
         cost: Object.freeze({ input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite }) });
     }));
   } catch { return []; } // Untrusted cache cannot supply transport options or diagnostics.
@@ -135,7 +136,7 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_automatic_replay_blocked: 'Automatic replay blocked. Submit a deliberate new request if needed.',
   possums_constrained_sampling_unsupported: 'Constrained sampling unsupported; remove the option.',
   possums_custom_tools_unsupported: 'Custom tools unsupported; remove the option.',
-  possums_images_unsupported: 'Images unsupported; remove images before sending.',
+  possums_images_unsupported: 'Selected model does not support image input; remove images or deliberately select an image-capable model. No inference request sent.',
 });
 // A failed turn is reserved for an unconfirmed backend identity/authenticity.
 // Other failures stop host control flow with a warning, never native replay.

@@ -106,7 +106,7 @@ export function validateModels(value: any): readonly LiveModel[] {
 
 // This list is the closed gateway detail vocabulary. Never render server-provided
 // messages or an unrecognized detail, even when it resembles an internal code.
-const details = new Set(`reasoning_parameters_unsupported inference_unavailable upstream_response_invalid verification_failed catalog_failed request_encoding_failed
+const details = new Set(`images_unsupported reasoning_parameters_unsupported inference_unavailable upstream_response_invalid verification_failed catalog_failed request_encoding_failed
   tool_profile_unqualified tokenizer_send_failed tokenizer_http_failed tokenizer_response_invalid tokenizer_upload_incomplete
   generation_send_failed generation_http_failed endpoint_binding_failed stream_content_type_invalid stream_transport_failed
   stream_idle_timeout stream_deadline_exceeded sdk_stream_decode_failed upstream_error_event stream_event_schema_invalid
@@ -114,6 +114,7 @@ const details = new Set(`reasoning_parameters_unsupported inference_unavailable 
   tool_choice_violated tool_call_incomplete tool_arguments_too_large tool_state_too_large stream_finish_invalid stream_finish_missing
   stream_usage_invalid stream_usage_unexpected stream_usage_missing stream_output_after_finish settlement_failed`.split(/\s+/));
 export function gatewayDetailLabel(detail: string | undefined): string | undefined {
+  if (detail === 'images_unsupported') return '[images_unsupported] Image input is unsupported for this model; remove images or deliberately select an image-capable model';
   return detail !== undefined && details.has(detail) ? `[${detail}] ${detail.replaceAll('_', ' ')}` : undefined;
 }
 const gatewayReasons = new Set(['insufficient_credit', 'unauthorized', 'invalid_request', 'account_limit', 'duplicate_request', 'unavailable', 'generation_failed', 'service_quiescing']);
@@ -131,7 +132,7 @@ function gatewayDescription(reason: string, detail: string | undefined, refunded
   const label = gatewayDetailLabel(detail);
   const known = Object.hasOwn(reasons, reason);
   return `Possums: ${known ? `[${reason}] ${reasons[reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; cause unknown.'}` +
-    (label ? ` ${label}.` : '') + ` Stage: ${reason === 'service_quiescing' ? 'admission' : 'gateway'}; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (receipt ? ` Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits. Receipt alone does not establish successful generation or authorize tool execution. Not replayed. A new request may incur another charge.` : refunded ? ' Reservation refunded. Not replayed.' :
+    (label ? ` ${label}.` : '') + ` Stage: ${reason === 'service_quiescing' ? 'admission' : detail === 'images_unsupported' ? 'request' : 'gateway'}; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (receipt ? ` Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits. Receipt alone does not establish successful generation or authorize tool execution. Not replayed. A new request may incur another charge.` : refunded ? ' Reservation refunded. Not replayed.' :
       ' Charge unknown. Not replayed. A new request may incur another charge.');
 }
 export class GatewayError extends ChannelError {
