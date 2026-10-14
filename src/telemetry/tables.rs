@@ -2,9 +2,9 @@
 use super::{errors::ErrorTotals, labels::*, tokens::TokenTotals};
 use crate::failures::InterfaceError;
 
-// Boundary coverage, compatibility and artifact qualification remain parent-owned.
-const INTERFACE_ERRORS_QUALIFIED: bool = false;
-const OBSERVED_TOKENS_QUALIFIED: bool = false;
+// Qualified observed runtime coverage; exclusions and evidence are in docs/verification.md.
+const INTERFACE_ERRORS_QUALIFIED: bool = true;
+const OBSERVED_TOKENS_QUALIFIED: bool = true;
 #[cfg(test)]
 pub(super) const COMPILED_EXTENSION_QUALIFICATION: [bool; 2] =
     [INTERFACE_ERRORS_QUALIFIED, OBSERVED_TOKENS_QUALIFIED];

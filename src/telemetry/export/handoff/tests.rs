@@ -164,6 +164,7 @@ async fn compiled_gate_router_terminal_sdk_tls_join() {
     {
         return;
     }
+    assert_eq!(agg::tables::COMPILED_EXTENSION_QUALIFICATION, [true; 2]);
     // Component-joined offline fixture, not live SystemClock/runtime proof:
     // real router and sole terminal owner collect observations with the concrete
     // application clock. Move only their actual table into FakeClock for closure.
