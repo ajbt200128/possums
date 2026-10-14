@@ -2,6 +2,14 @@
 
 The catalog-wide gateway tool profile is deployed as **v0.0.15** (the official gateway v3 helper compatibility fix is included; the separate 16-KiB tool-description cap remains removed, while other limits and the shared tool profile are unchanged). All authenticated catalog models advertise the assumed shared OpenAI-functions wire profile; this is not per-model compatibility qualification. A real Kimi Pi round with local `ls`/`read` execution and a correct final continuation was observed on v0.0.10; exact live billing/balance reconciliation remains unverified. See [release scope](../../docs/phase02-pi-release.md).
 
+## Shared v3 verifier MVP (offline core; bootstrap migration pending)
+
+A separate public-evidence bridge, `verifier.mjs`, runs the same official-Go-backed v3 appraisal used by the native gateway helper in a disposable Node worker/WASM artifact. It accepts evidence, a caller-chosen 32-byte nonce and the fixed Possums workload reference; it returns qualified release/transport-key facts and authenticated expiry, or a closed content-free failure. It does not acquire evidence, authenticate, construct a connection, cache authorization or send inference. The caller must enforce expiry and bind the actual TLS/EHBP transport before credentials/prompts.
+
+Build scratch-only native/WASM artifacts with `nix develop --command sh scripts/build-v3-verifier.sh`; run `nix develop --command node tests/v3_verifier_wasm.mjs /absolute/path/printed/by/build` for the offline bridge checks. These commands do not install or load the Pi extension. The Go runtime support and its license accompany the WASM file; source/artifact hashes are recorded. Distribution/dependency-license review remains a release gate.
+
+**The existing Pi bootstrap still uses its accepted JavaScript legacy-v2 path.** This MVP does not switch that path, install/activate a client, qualify an actual Pi host or verify live gateway/application-key evidence. The backend helper's source uses the shared core, but no rebuilt gateway is deployed. Integration must preserve exact manifest/publisher policy, current pre-dispatch lifecycle/no-replay behavior, old-client default contracts and public-cache limits. See [scoped evidence and remaining migration gates](../../docs/v3-verifier-mvp.md) and [deferred shared-connection/client-engine ideas](../../docs/backlog.md#shared-verified-connection--possums-client-engine-after-the-v3-verifier-mvp).
+
 ## Renewed gateway.possums.dev cutover (source only; not installed)
 
 The paired source candidate restores PR #67's published/verified origin change
