@@ -53,9 +53,12 @@ async fn image_duplicate(state: &AppState, bearer: &str, input: &Value, outcome:
 #[tokio::test]
 async fn images_pure_user_and_mixed_tools_preserve_order_and_never_replay() {
     for model in ["deepseek-v4-1-flash", "kimi-k3", "gemma4-31b"] {
-        for tools in [false, true] {
+        for mode in ["user", "image_only", "tools"] {
             let (state, provider, bearer, submission) = vision_fixture(5_000_000, model);
-            let input = image_input(&submission, model, tools);
+            let mut input = image_input(&submission, model, mode == "tools");
+            if mode == "image_only" {
+                input["messages"][0]["content"] = json!([image_parts()[1].clone()]);
+            }
             let response = send_image(&state, &bearer, &input).await;
             assert_eq!(response.status(), StatusCode::OK);
             wait(&provider.started).await;
