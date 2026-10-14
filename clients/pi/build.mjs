@@ -37,12 +37,35 @@ if (diagnostics.length) {
   }));
   process.exit(1);
 }
+const verifierBuild = process.env.POSSUMS_VERIFIER_BUILD;
+if (!verifierBuild || !path.isAbsolute(verifierBuild)) throw new Error('matching scratch verifier build required');
+let verifierReport;
+try { verifierReport = JSON.parse(await readFile(path.join(verifierBuild, 'verifier-build-report.json'), 'utf8')); }
+catch { throw new Error('possums_build_verifier_report_invalid: verifier packaging report could not be read/decoded; cause unknown. Rebuild the matching scratch verifier.'); }
+if (verifierReport.go !== '1.27.2' || verifierReport.node !== process.version ||
+    verifierReport.sdk !== 'v0.17.0-rc.1.0.20261009012920-31c57af7d7b4') throw new Error('unqualified verifier toolchain');
 await mkdir(out, { recursive: true });
+const verifierArtifacts = {};
+for (const name of ['verifier.wasm', 'wasm_exec.cjs', 'GO-LICENSE']) {
+  const bytes = await readFile(path.join(verifierBuild, name));
+  if (sha(bytes) !== verifierReport.artifacts[name]?.sha256) throw new Error('verifier artifact hash mismatch');
+  await writeFile(path.join(out, name), bytes);
+  verifierArtifacts[name] = { sha256: sha(bytes) };
+}
+for (const name of ['verifier.mjs', 'verifier-worker.mjs', 'verifier.d.mts']) {
+  const bytes = await readFile(name);
+  if (sha(bytes) !== verifierReport.sources['clients/pi/' + name]) throw new Error('verifier source mismatch');
+  await writeFile(path.join(out, name), bytes);
+  verifierArtifacts[name] = { sha256: sha(bytes) };
+}
+await writeFile(path.join(out, 'verifier-build-report.json'), JSON.stringify(verifierReport, null, 2) + '\n');
 const peers = path.join(out, 'node_modules', '@earendil-works');
 await mkdir(peers, { recursive: true });
 for (const [name, directory] of Object.entries(runtimeRoots)) await symlink(directory, path.join(peers, name));
 const buildReport = { node: process.version, pi: '1.0.4', runtimePins, typescript: ts.version, esbuild: esbuildVersion,
-  lock: sha(await readFile('package-lock.json')), artifacts: {} };
+  lock: sha(await readFile('package-lock.json')), verifier: verifierReport,
+  legacyBootstrapFixture: { revision: '1b909881b468a2d5035ff2180ed5027fd2d8b9f6', sha256: sha(await readFile('legacy-bootstrap.ts')) },
+  artifacts: { ...verifierArtifacts } };
 const file = path.join(out, 'extension.mjs');
 const result = await build({ entryPoints: ['index.ts'], outfile: file, bundle: true, platform: 'node',
   format: 'esm', target: 'node24', treeShaking: true, metafile: true,

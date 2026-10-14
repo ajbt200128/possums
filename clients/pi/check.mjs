@@ -1,6 +1,6 @@
 // Run only from the scratch source tree printed by build.sh.
 import { build } from 'esbuild';
-import { readFile, writeFile, mkdir, readlink, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readlink, unlink, copyFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
@@ -13,6 +13,8 @@ const piRoot = process.env.POSSUMS_PI_ROOT;
 assert(piRoot && path.isAbsolute(piRoot), 'absolute pinned Pi release directory required');
 assert(process.version === 'v24.13.0' && path.basename(scratch).startsWith('possums-pi-build-'), 'run from fresh build scratch with Node 24.13.0');
 await mkdir(output, { recursive: true });
+for (const name of ['verifier.wasm', 'wasm_exec.cjs', 'verifier-worker.mjs'])
+  await copyFile(path.join(scratch, 'package', name), path.join(output, name));
 const common = { bundle: true, platform: 'node', format: 'esm', target: 'node24' };
 for (const [name, fixture] of [['channel-node', false], ['fixture-node', true]]) {
   await build({ ...common, entryPoints: [path.resolve(packageSource, '../../examples/phase01/transport.ts')],
@@ -40,6 +42,8 @@ run('phase02_client.mjs', { PHASE02_CLIENT_BUILD: output, PHASE02_CLIENT_INSTALL
 run('phase01_stream_limits.mjs', { PHASE01_BUILD: output, PHASE02_CLIENT_INSTALL: packageSource });
 run('tinfoil_forwarding_client.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs') });
 run('phase02_release.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
+run('phase02_v3.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
+run('phase02_v3_package.mjs', { PHASE02_PACKAGE: path.join(scratch, 'package'), POSSUMS_PI_ROOT: piRoot });
 run('phase02_cache.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs') });
 run('phase02_thinking.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), POSSUMS_PI_ROOT: piRoot });
 run('phase02_pi.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), PHASE02_SCRATCH: path.join(scratch, 'checks/pi-cases'), POSSUMS_PI_ROOT: piRoot });

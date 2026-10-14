@@ -12,6 +12,7 @@
   "devDependencies": {
     "typescript": "5.9.3",
     "esbuild": "0.25.10",
+    "@types/node": "22.19.19",
     "playwright": "1.61.1"
   }
 }
