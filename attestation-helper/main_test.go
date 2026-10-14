@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ajbt200128/possums/attestation-helper/verifier"
 	"github.com/tinfoilsh/tinfoil-go/document"
 )
 
@@ -121,13 +122,13 @@ func TestAppraiseEvidenceRejectsInvalidDocuments(t *testing.T) {
 		nonce    []byte
 		message  string
 	}{
-		{"malformed", []byte(`{`), nonce, "parsing attestation document"},
-		{"unsupported format", []byte(`{"format":"unsupported"}`), nonce, "unsupported document format"},
-		{"wrong nonce", untrusted, bytes.Repeat([]byte{0xcd}, nonceBytes), "challenge nonce does not match"},
-		{"missing provenance", untrusted, nonce, "reference-values entry"},
+		{"malformed", []byte(`{`), nonce, "possums_v3_envelope_rejected"},
+		{"unsupported format", []byte(`{"format":"unsupported"}`), nonce, "possums_v3_envelope_rejected"},
+		{"wrong nonce", untrusted, bytes.Repeat([]byte{0xcd}, nonceBytes), "possums_v3_envelope_rejected"},
+		{"missing provenance", untrusted, nonce, "possums_v3_verification_rejected"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			result, err := appraiseEvidence(test.evidence, test.nonce, "example/workload")
+			result, err := appraiseEvidence(test.evidence, test.nonce, verifier.Repository)
 			if err == nil || !strings.Contains(err.Error(), test.message) {
 				t.Fatalf("expected %q rejection, got %v", test.message, err)
 			}

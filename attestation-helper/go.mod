@@ -2,7 +2,16 @@ module github.com/ajbt200128/possums/attestation-helper
 
 go 1.27.2
 
-require github.com/tinfoilsh/tinfoil-go v0.17.0-rc.1.0.20261009012920-31c57af7d7b4
+require (
+	github.com/sigstore/sigstore-go v1.2.2
+	github.com/tinfoilsh/tinfoil-go v0.17.0-rc.1.0.20261009012920-31c57af7d7b4
+)
+
+// Match the pinned SDK's own portability replacements. Dependency replace
+// directives are not inherited by a consuming Go module.
+replace github.com/in-toto/in-toto-golang => github.com/tinfoilsh/in-toto-golang v0.0.0-20251028050300-aa5edaf95dd8
+
+replace github.com/google/logger => github.com/tinfoilsh/google-logger v0.0.0-20251028051824-44df5807cdb9
 
 require (
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
@@ -54,7 +63,6 @@ require (
 	github.com/sigstore/rekor v1.5.3 // indirect
 	github.com/sigstore/rekor-tiles/v2 v2.3.0 // indirect
 	github.com/sigstore/sigstore v1.10.8 // indirect
-	github.com/sigstore/sigstore-go v1.2.2 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.1.3 // indirect
 	github.com/theupdateframework/go-tuf/v2 v2.4.2 // indirect
 	github.com/tinfoilsh/go-sev-guest v0.0.0-20260818055935-bec7bdb637fd // indirect
