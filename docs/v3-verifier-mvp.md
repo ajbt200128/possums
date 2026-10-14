@@ -4,7 +4,7 @@
 
 Operator-approved first packet: one official-Go-backed offline verification core, reused by the native gateway helper and a standalone Node/WASM bridge. Broader connection/client-engine work is [deferred](backlog.md#shared-verified-connection--possums-client-engine-after-the-v3-verifier-mvp) until concrete bugs or development friction justify it; that backlog is not implementation authority.
 
-**This is a verifier-core MVP, not a completed Pi attestation migration or a production qualification.** The existing Pi bootstrap still uses its accepted pinned JavaScript legacy-v2 verifier. No client was installed/activated, provider loaded, gateway/application endpoint probed, inference submitted, secret accessed, gateway deployed or PR opened for this packet. Rust's separate upstream inference verifier is unchanged.
+**This is a verifier-core MVP, not a completed Pi attestation migration or a production qualification.** At completion of this first packet, Pi bootstrap still used its accepted pinned JavaScript legacy-v2 verifier. The subsequently authorized [bounded Pi v3 client candidate](pi-v3-client-verification.md) records migration/public-host evidence separately; it does not change this packet's historical scope. No client was installed/activated, provider loaded, gateway/application endpoint probed, inference submitted, secret accessed, gateway deployed or PR opened for this packet. Rust's separate upstream inference verifier is unchanged.
 
 ## Implementation
 
@@ -49,7 +49,7 @@ WASM/workers are **not a general security/privacy sandbox**: Node still grants h
 
 ## Required remaining migration gates
 
-These are necessary migration work, not optional broader-engine backlog:
+These were the remaining gates at first-packet completion, not optional broader-engine backlog. Subsequent client progress and unresolved installation/rollout/qualification limits are recorded in [client verification](pi-v3-client-verification.md):
 
 1. Positive authenticated hardware/Sigstore/publisher/freshness acceptance and negative conformance fixtures through both native and WASM paths, using reproducible authorized evidence. Compilation/rejection tests do not establish all crypto branches, performance, resource bounds or current live release acceptance. No positive WASM fixture, live application key or Linux/Windows runtime qualification was performed.
 2. Wire the current Pi/reference bootstrap to nonce-bound v3 acquisition and the packaged bridge; retain exact approved manifest/source/publisher checks, actual TLS/EHBP binding and the minimum of current 12-hour, certificate and authenticated freshness deadlines. Unchanged witnesses must not renew authorization; nonce-dependent report hashes must not become deployment/cache identity.
