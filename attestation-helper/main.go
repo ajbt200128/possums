@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/tinfoilsh/tinfoil-go/verify"
+	"github.com/ajbt200128/possums/attestation-helper/verifier"
 )
 
 const (
@@ -57,28 +57,16 @@ func main() {
 }
 
 func appraiseEvidence(document, nonce []byte, repo string) (verifiedEvidence, error) {
-	appraiser, err := verify.NewVerifier()
-	if err != nil {
-		return verifiedEvidence{}, err
+	verification, failure := verifier.Verify(document, nonce, repo)
+	if failure != nil {
+		return verifiedEvidence{}, failure
 	}
-	verification, err := appraiser.VerifyV3(document, nonce, repo)
-	if err != nil {
-		return verifiedEvidence{}, err
-	}
-	endpointKey, err := verification.TLSPublicKeyFP()
-	if err != nil {
-		return verifiedEvidence{}, err
-	}
-	if len(endpointKey) != 64 {
-		return verifiedEvidence{}, errors.New("invalid endpoint key length")
-	}
-
 	return verifiedEvidence{
 		Quote:                  json.RawMessage(document),
 		IssuedAtUnix:           time.Now().Unix(),
-		ReleaseDigest:          verification.CodeDigest,
-		EndpointKeySHA256:      endpointKey,
-		FreshnessExpiresAtUnix: verification.FreshnessExpiresAt.Unix(),
+		ReleaseDigest:          verification.ReleaseDigest,
+		EndpointKeySHA256:      verification.TLSKeySHA256,
+		FreshnessExpiresAtUnix: verification.FreshnessExpiresAtUnix,
 	}, nil
 }
 
