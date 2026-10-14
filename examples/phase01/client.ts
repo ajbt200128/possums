@@ -218,7 +218,9 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     }
     requireThat(state !== 'eof' && state !== 'error');
     constraint = 'json';
-    let value = JSON.parse(payload);
+    let value: any;
+    try { value = JSON.parse(payload); }
+    catch { throw new DiagnosticFailure('stream', 'json', 'uncertain'); }
     constraint = 'schema';
     requireThat(value && typeof value === 'object');
     if (Object.hasOwn(value, 'error')) { failure = gatewayError(value); state = receipt ? 'done' : 'error'; return; }
