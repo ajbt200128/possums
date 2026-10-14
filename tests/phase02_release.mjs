@@ -18,7 +18,8 @@ const { build } = await import(pathToFileURL(path.join(source, 'node_modules/esb
 const output = path.resolve(source, '../../../checks/release');
 await mkdir(output, { recursive: true });
 const entry = `
-export { connect, connectPublished, recoverPublished, recoverCompiled } from './bootstrap.ts';
+// Exact retained pre-v3 bootstrap fixture, copied only into build scratch.
+export { connect, connectPublished, recoverPublished, recoverCompiled } from './legacy-bootstrap.ts';
 export { evidenceDirectory } from './evidence-cache.ts';
 export { Channel, ReferenceClient, API_APPROVALS } from '../../examples/phase01/transport.ts';
 export { PUBLISHER, qualifyPublished, requireReleaseTag } from '../../examples/phase01/approval.ts';
@@ -497,7 +498,7 @@ try {
   const start = network;
   await rejects('cancel before acquisition', () => test.connectPublished(controller.signal), 'evidence_unavailable');
   assert.equal(network, start);
-  console.log(JSON.stringify({ passed, scope: 'synthetic/local release policy only',
+  console.log(JSON.stringify({ passed, scope: 'retained legacy-v2 bootstrap and current legacy factory policy only; candidate v3 acquisition is tested separately',
     actual: ['SDK orchestration', 'Sigstore identity policies', 'subject/tag/measurement matching', 'SAN decoding', 'SHA-256', 'gzip bounds', 'expiry', 'EHBP config'],
     mocked: ['AMD hardware verification', 'DSSE/Rekor crypto', 'X509 parsing', 'public network responses'], inference: 0, credentials: 0 }));
 } finally {

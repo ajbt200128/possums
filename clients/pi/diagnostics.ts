@@ -4,6 +4,7 @@ export function settlementDescription(receipt: Readonly<Receipt>): string {
   return `Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits.${receipt.deliveryComplete === false ? ' Delivery incomplete; this does not establish successful completion.' : ''} Settlement is not tool-execution authorization; a new submission may incur another charge.`;
 }
 import { DiagnosticFailure } from '../../examples/phase01/limits.js';
+import { VerifierFailure } from './verifier.mjs';
 
 export function diagnosticDescription(failure: DiagnosticFailure): string {
   const actions = {
@@ -109,7 +110,7 @@ export function approvalSummary(release?: Readonly<{ tag: string; expires: numbe
 export class ConnectionFailure extends Error {
   readonly observation?: EvidenceObservation;
   readonly diagnostic?: DiagnosticFailure;
-  constructor(readonly code: ConnectionFailureCode, catalog?: CatalogFailure | GatewayError | DiagnosticFailure | EvidenceObservation) {
+  constructor(readonly code: ConnectionFailureCode, catalog?: CatalogFailure | GatewayError | DiagnosticFailure | EvidenceObservation | VerifierFailure) {
     if (!Object.hasOwn(reasons, code)) throw new Error('possums_connection_diagnostic_invalid');
     // The immutable carrier validates these fields; never use its error.message.
     const observed = catalog instanceof CatalogFailure && catalog.stage === 'http'
@@ -118,7 +119,7 @@ export class ConnectionFailure extends Error {
       ? ` Stage: ${catalog.stage} (${evidenceStages[catalog.stage]}); constraint: ${catalog.constraint} (${evidenceConstraints[catalog.constraint]}).${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}${catalog.constraint === 'rate_limited' ? ' Wait before starting a new Pi session; re-entering credentials will not fix this.' : ''}` :
       catalog instanceof GatewayError ? ` Stage: admission; constraint: service_quiescing.${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}` :
       ` Stage: ${catalog instanceof CatalogFailure ? 'catalog' : 'connection'}; constraint: ${catalog instanceof CatalogFailure ? catalog.stage : code}.${catalog instanceof CatalogFailure && catalog.reason === 'service_quiescing' ? ' Gateway stage: admission; constraint: service_quiescing.' : ''}`;
-    super(`${catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} No inference request was sent by this connection attempt. Cached models do not authorize inference. Prior billing outcomes are not established by this check.`);
+    super(`${catalog instanceof VerifierFailure ? catalog.message : catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} No inference request was sent by this connection attempt. Cached models do not authorize inference. Prior billing outcomes are not established by this check.`);
     if (catalog instanceof EvidenceObservation) this.observation = catalog;
     if (catalog instanceof DiagnosticFailure) this.diagnostic = catalog;
     Object.freeze(this);
@@ -135,6 +136,7 @@ export function catalogConnectionFailure(error: unknown): ConnectionFailure {
 export function connectionFailure(error: unknown): ConnectionFailure {
   if (error instanceof ConnectionFailure) return error;
   if (error instanceof GatewayError && error.reason === 'service_quiescing') return new ConnectionFailure('service_quiescing', error);
+  if (error instanceof VerifierFailure) return new ConnectionFailure('verification_failed', error);
   if (error instanceof DiagnosticFailure) return new ConnectionFailure(error.stage === 'trust' ? error.constraint === 'expired' ? 'trust_expired' : 'verification_failed' : error.stage === 'authentication' || error.stage === 'challenge' ? 'authentication_diagnostic' : 'connection_diagnostic', error);
   return new ConnectionFailure('verification_failed');
 }

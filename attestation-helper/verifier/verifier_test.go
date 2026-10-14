@@ -2,7 +2,9 @@ package verifier
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"net/url"
 	"strings"
@@ -135,6 +137,45 @@ func TestExactPublisherPolicy(t *testing.T) {
 	}
 	if publisherMatches(cert, ext, "v0.0.40") {
 		t.Fatal("release substitution accepted")
+	}
+}
+
+func TestClientManifestMatchesWholeSignedPredicate(t *testing.T) {
+	manifest := []byte(`{"config":"public-config","hashes":{"version":"v0.14.12"},"count":9007199254740993}`)
+	hash := sha256.Sum256(manifest)
+	digest := hex.EncodeToString(hash[:])
+	if !manifestMatches(manifest, []byte(`{ "count":9007199254740993, "hashes":{"version":"v0.14.12"}, "config":"public-config" }`), digest) {
+		t.Fatal("reordered authentic JSON values rejected")
+	}
+	for _, predicate := range [][]byte{
+		[]byte(`{"config":"other","hashes":{"version":"v0.14.12"},"count":9007199254740993}`),
+		[]byte(`{"config":"public-config","hashes":{"version":"v0.14.12"},"count":9007199254740992}`),
+		[]byte(`{"config":"ignored","config":"public-config","hashes":{"version":"v0.14.12"},"count":9007199254740993}`),
+		[]byte(`{"config":"public-config"} {}`),
+		[]byte(`[]`),
+		[]byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'},
+	} {
+		if manifestMatches(manifest, predicate, digest) {
+			t.Fatal("manifest substitution accepted")
+		}
+	}
+	if manifestMatches(manifest, manifest, strings.Repeat("0", 64)) {
+		t.Fatal("wrong subject digest accepted")
+	}
+	for _, raw := range []string{
+		`{"x":` + strings.Repeat("[", 34) + `0` + strings.Repeat("]", 34) + `}`,
+		`{"x":[` + strings.Repeat("0,", 32768) + `0]}`,
+		strings.Repeat(" ", MaxManifestBytes+1),
+	} {
+		if _, valid := decodeManifestJSON([]byte(raw)); valid {
+			t.Fatal("unbounded manifest accepted")
+		}
+	}
+	for _, raw := range [][]byte{nil, bytes.Repeat([]byte{'x'}, MaxManifestBytes+1)} {
+		result, failure := VerifyClient([]byte("{}"), make([]byte, NonceBytes), Repository, raw)
+		if result != (Result{}) || failure == nil || failure.Code != "possums_v3_publisher_manifest" {
+			t.Fatal("client manifest gate omitted")
+		}
 	}
 }
 

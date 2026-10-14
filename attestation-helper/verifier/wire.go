@@ -12,6 +12,7 @@ type Request struct {
 	Evidence   []byte `json:"evidence"`
 	Nonce      []byte `json:"nonce"`
 	Repository string `json:"repository"`
+	Manifest   []byte `json:"manifest,omitempty"`
 }
 
 type Response struct {
@@ -19,7 +20,7 @@ type Response struct {
 	Failure *Failure `json:"failure,omitempty"`
 }
 
-const MaxRequestBytes = 4*((MaxEvidenceBytes+2)/3) + 1024
+const MaxRequestBytes = 4*((MaxEvidenceBytes+MaxManifestBytes+2)/3) + 1024
 
 // AppraiseJSON is the narrow WASM ABI. It never returns partial facts on failure.
 func AppraiseJSON(input string) (output string) {
@@ -35,7 +36,13 @@ func AppraiseJSON(input string) (output string) {
 		decoder := json.NewDecoder(bytes.NewBufferString(input))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&request) == nil && decoder.Decode(new(any)) == io.EOF {
-			result, failure := Verify(request.Evidence, request.Nonce, request.Repository)
+			var result Result
+			var failure *Failure
+			if request.Manifest == nil {
+				result, failure = Verify(request.Evidence, request.Nonce, request.Repository)
+			} else {
+				result, failure = VerifyClient(request.Evidence, request.Nonce, request.Repository, request.Manifest)
+			}
 			response = Response{Failure: failure}
 			if failure == nil {
 				response.Result = &result

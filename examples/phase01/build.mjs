@@ -24,8 +24,13 @@ for (const platform of ['node', 'browser']) {
       bundle: true, platform, format: 'esm', target: 'es2022', metafile: true,
       define: { __PHASE01_FIXTURE__: String(fixture) }, treeShaking: true,
       plugins: platform === 'browser' ? [{ name: 'reject-legacy-zlib', setup(b) {
+        // The retained browser reference factory cannot run the Node/WASM v3
+        // adapter. Keep legacy factories buildable; v3 itself fails closed.
+        b.onResolve({ filter: /\/clients\/pi\/v3\.js$/ }, () => ({ path: 'v3', namespace: 'unavailable' }));
         b.onResolve({ filter: /^zlib$/ }, () => ({ path: 'zlib', namespace: 'unavailable' }));
-        b.onLoad({ filter: /.*/, namespace: 'unavailable' }, () => ({ contents: 'export function gunzipSync(){throw new Error("DecompressionStream required")}' }));
+        b.onLoad({ filter: /.*/, namespace: 'unavailable' }, args => ({ resolveDir: root, contents: args.path === 'v3'
+          ? `import { DiagnosticFailure } from ${JSON.stringify(path.join(root, 'limits.ts'))}; export const V3_EVIDENCE_LIMIT = 16 * 1024 * 1024; export async function qualifyV3(){throw new DiagnosticFailure('trust','policy');}`
+          : 'export function gunzipSync(){throw new Error("DecompressionStream required")}' }));
       } }] : [],
     });
     const modules = [];
