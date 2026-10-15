@@ -9,6 +9,7 @@ import (
 // The bridge contains public evidence and caller-owned trust expectations only.
 // []byte fields use JSON base64, keeping the JS ABI independent of Go memory.
 type Request struct {
+	Action     string `json:"action,omitempty"`
 	Evidence   []byte `json:"evidence"`
 	Nonce      []byte `json:"nonce"`
 	Repository string `json:"repository"`
@@ -16,11 +17,14 @@ type Request struct {
 }
 
 type Response struct {
-	Result  *Result  `json:"result,omitempty"`
-	Failure *Failure `json:"failure,omitempty"`
+	Result    *Result    `json:"result,omitempty"`
+	TorResult *TorResult `json:"tor_result,omitempty"`
+	Failure   *Failure   `json:"failure,omitempty"`
 }
 
 const MaxRequestBytes = 4*((MaxEvidenceBytes+MaxManifestBytes+2)/3) + 1024
+
+const TorAction = "tor_endorsement_key_v1"
 
 // AppraiseJSON is the narrow WASM ABI. It never returns partial facts on failure.
 func AppraiseJSON(input string) (output string) {
@@ -35,17 +39,26 @@ func AppraiseJSON(input string) (output string) {
 		var request Request
 		decoder := json.NewDecoder(bytes.NewBufferString(input))
 		decoder.DisallowUnknownFields()
-		if decoder.Decode(&request) == nil && decoder.Decode(new(any)) == io.EOF {
-			var result Result
-			var failure *Failure
-			if request.Manifest == nil {
-				result, failure = Verify(request.Evidence, request.Nonce, request.Repository)
+		if decoder.Decode(&request) == nil && decoder.Decode(new(any)) == io.EOF &&
+			(request.Action == "" || request.Action == TorAction) {
+			if request.Action == TorAction {
+				result, failure := VerifyTorClient(request.Evidence, request.Nonce, request.Repository, request.Manifest)
+				response = Response{Failure: failure}
+				if failure == nil {
+					response.TorResult = &result
+				}
 			} else {
-				result, failure = VerifyClient(request.Evidence, request.Nonce, request.Repository, request.Manifest)
-			}
-			response = Response{Failure: failure}
-			if failure == nil {
-				response.Result = &result
+				var result Result
+				var failure *Failure
+				if request.Manifest == nil {
+					result, failure = Verify(request.Evidence, request.Nonce, request.Repository)
+				} else {
+					result, failure = VerifyClient(request.Evidence, request.Nonce, request.Repository, request.Manifest)
+				}
+				response = Response{Failure: failure}
+				if failure == nil {
+					response.Result = &result
+				}
 			}
 		}
 	} else {
