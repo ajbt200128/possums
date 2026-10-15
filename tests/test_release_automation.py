@@ -53,7 +53,7 @@ def branches() -> dict:
 def view(tag="v1.2.2") -> dict:
     data: dict = dict.fromkeys(d.STABLE)
     data.update(repo=r.REPO, current_tag=tag, status="running", update_tag=None,
-                debug=False, disable_cc_mode=False, held=False,
+                debug=False, disable_cc_mode=False, held=False, mark_latest_release=False,
                 variables={"private": "SYNTHETIC-SECRET"}, secrets=sorted(d.REQUIRED_REFS),
                 ssh_keys=[], cpus=2, gpus=0, memory_mb=8192, domain=d.DOMAIN,
                 id="11111111-1111-1111-1111-111111111111", name=d.NAME)
@@ -64,6 +64,7 @@ def plan() -> dict:
     return {"read_only": True, "current": {"tag": "v1.2.2", "cpus": 2, "gpus": 0, "memory_mb": 8192},
             "target": {"tag": V, "cpus": 2, "gpus": 0, "memory_mb": 8192},
             "update_strategy": "blue_green", "downtime_required": False, "hold": False,
+            "mark_latest_release": False,
             "configuration_changes": {"variables": {}, "secrets": {}, "ssh_keys": {}, "settings": []}}
 
 
@@ -378,7 +379,8 @@ class ReadOnlyPlanTest(StopTest):
             d.plan_update(view(), V)
             request = build.return_value.open.call_args.args[0]
             self.assertEqual(request.full_url, "https://api.tinfoil.sh/api/containers/" + view()["id"] + "/update/plan")
-            self.assertEqual(json.loads(request.data), {"tag": V, "custom_domain": d.DOMAIN})
+            self.assertEqual(json.loads(request.data), {"tag": V, "custom_domain": d.DOMAIN,
+                                                       "mark_latest_release": False})
             self.assertEqual(request.get_method(), "POST")
             self.assertEqual(request.get_header("Authorization"), "Bearer SYNTHETIC-SECRET")
             self.assertEqual(request.get_header("Content-type"), "application/json")
@@ -476,7 +478,8 @@ class MutationTest(StopTest):
             self.assertEqual(result["mutationCommandCount"], 1)
             self.assertFalse(result["servingVerified"])
             self.assertEqual(call.call_args.args[1], ["container", "update", d.NAME, "--tag", V,
-                                                     "--custom-domain", d.DOMAIN, "--output", "json"])
+                                                     "--custom-domain", d.DOMAIN, "--output", "json",
+                                                     "--mark-latest=false"])
             self.assertTrue(result["approvedDomainConfirmed"])
             call.assert_called_once()
 
@@ -654,9 +657,10 @@ class FirstTorActivationTest(StopTest):
                 result = d.update_once("unused", V, gate, first_tor_activation=True)
                 request = build.return_value.open.call_args.args[0]
                 self.assertEqual(json.loads(request.data), {
-                    "tag": V, "custom_domain": d.DOMAIN, "secrets": self.selection})
+                    "tag": V, "custom_domain": d.DOMAIN, "secrets": self.selection,
+                    "mark_latest_release": False})
                 self.assertEqual(call.call_args.args[1], ["container", "update", d.NAME, "--tag", V,
-                    "--custom-domain", d.DOMAIN, "--output", "json"] + [
+                    "--custom-domain", d.DOMAIN, "--output", "json", "--mark-latest=false"] + [
                         item for name in self.selection for item in ("--secret", name)])
                 self.assertEqual(call.call_args.kwargs, {"timeout": 1800})
                 self.assertNotIn("--yes", call.call_args.args[1])
@@ -841,6 +845,121 @@ class FirstTorActivationTest(StopTest):
             self.assertEqual(update.call_args.kwargs, {"first_tor_activation": True})
             update.call_args.args[2]()
             self.assertEqual(events[-2:], ["eligibility", "approved"])
+
+
+class LatestReleasePolicyTest(StopTest):
+    def setUp(self):
+        environment = patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "TINFOIL_ADMIN_KEY": "synthetic"})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def activation(self, flag=False):
+        before, after, data = view(), view(V), plan()
+        before["mark_latest_release"] = after["mark_latest_release"] = data["mark_latest_release"] = flag
+        after["secrets"] += sorted(d.TOR_REFS)
+        data.update(instance_id=before["id"], name=d.NAME)
+        data["configuration_changes"]["secrets"] = {"added": sorted(d.TOR_REFS)}
+        return before, after, data
+
+    def invalid_flags(self, data, flipped=True):
+        missing = copy.deepcopy(data)
+        missing.pop("mark_latest_release")
+        yield missing
+        for value in (None, 0, 1, 0.0, 1.0, "false", "SYNTHETIC-SECRET", [], {}):
+            yield {**data, "mark_latest_release": value}
+        if flipped:
+            yield {**data, "mark_latest_release": not data["mark_latest_release"]}
+
+    def test_both_boolean_snapshots_are_carried_without_defaulting(self):
+        for flag in (False, True):
+            before, after, data = self.activation(flag)
+            response = subprocess.CompletedProcess([], 0, b"opaque", json.dumps(data).encode())
+            with self.subTest(flag=flag), patch.object(d.urllib.request, "build_opener") as build, \
+                    patch.object(d, "get", side_effect=[before, after]), \
+                    patch.object(d, "call", return_value=response) as call:
+                build.return_value.open.return_value = io.BytesIO(json.dumps(data).encode())
+                gate = Mock()
+                result = d.update_once("unused", V, gate, True)
+                sent = json.loads(build.return_value.open.call_args.args[0].data)
+                self.assertIs(sent["mark_latest_release"], flag)
+                self.assertIn("--mark-latest=" + str(flag).lower(), call.call_args.args[1])
+                self.assertTrue(result["opaqueConfigurationPreserved"])
+                self.assertFalse(result["servingVerified"])
+                gate.assert_called_once_with()
+                call.assert_called_once()
+
+    def test_invalid_current_flags_never_plan_or_admit_an_update(self):
+        before, _, _ = self.activation()
+        for bad in self.invalid_flags(before, flipped=False):
+            self.assertFalse(d.stable_running(bad, bad["current_tag"]))
+            with patch.object(d, "get", return_value=bad), patch.object(d, "plan_update") as planning, \
+                    patch.object(d, "call") as call:
+                gate = Mock()
+                self.stop("control_shape", d.update_once, "unused", V, gate, True)
+                planning.assert_not_called()
+                gate.assert_not_called()
+                call.assert_not_called()
+            with patch.object(d.urllib.request, "build_opener") as build:
+                self.stop("plan_rejected", d.plan_update, bad, V, True)
+                build.assert_not_called()
+
+    def test_missing_untyped_or_lying_preplan_flags_never_admit(self):
+        for flag in (False, True):
+            before, _, data = self.activation(flag)
+            for bad in self.invalid_flags(data):
+                with patch.object(d.urllib.request, "build_opener") as build, \
+                        patch.object(d, "get", return_value=before), patch.object(d, "call") as call:
+                    build.return_value.open.return_value = io.BytesIO(json.dumps(bad).encode())
+                    gate = Mock()
+                    self.stop("plan_rejected", d.update_once, "unused", V, gate, True)
+                    gate.assert_not_called()
+                    call.assert_not_called()
+
+    def test_each_postcall_plan_flag_is_independently_checked_without_replay(self):
+        for flag in (False, True):
+            before, _, data = self.activation(flag)
+            for bad in self.invalid_flags(data):
+                # A valid first CLI review must not hide an invalid second review.
+                raw = json.dumps(data).encode() + b"\n" + json.dumps(bad).encode()
+                response = subprocess.CompletedProcess([], 0, b"opaque", raw)
+                with patch.object(d, "plan_update"), patch.object(d, "get", return_value=before) as get, \
+                        patch.object(d, "call", return_value=response) as call:
+                    gate = Mock()
+                    self.stop("plan_configuration", d.update_once, "unused", V, gate, True)
+                    gate.assert_called_once_with()
+                    call.assert_called_once()
+                    get.assert_called_once()
+        diagnostic = json.dumps(r.diagnostic("plan_configuration"))
+        self.assertIn("unknown", diagnostic)
+        self.assertIn("no replay", diagnostic)
+        self.assertNotIn("SYNTHETIC-SECRET", diagnostic)
+
+    def test_actual_control_decoder_preserves_uncertain_completion_for_invalid_flags(self):
+        for flag in (False, True):
+            before, after, data = self.activation(flag)
+            for bad in self.invalid_flags(after):
+                responses = [subprocess.CompletedProcess([], 0, json.dumps(before).encode(), b""),
+                             subprocess.CompletedProcess([], 0, b"opaque", json.dumps(data).encode()),
+                             subprocess.CompletedProcess([], 0, json.dumps(bad).encode(), b"")]
+                with patch.object(d, "plan_update"), patch.object(d, "call", side_effect=responses) as call:
+                    self.stop("configuration_changed", d.update_once, "unused", V, Mock(), True)
+                    self.assertEqual(call.call_count, 3)
+                    self.assertEqual(sum(item.args[1][1] == "update" for item in call.call_args_list), 1)
+        diagnostic = json.dumps(r.diagnostic("configuration_changed"))
+        self.assertIn("unknown", diagnostic)
+        self.assertIn("no replay", diagnostic)
+        self.assertNotIn("SYNTHETIC-SECRET", diagnostic)
+
+    def test_latest_policy_is_never_an_allowed_setting_change(self):
+        before, _, data = self.activation()
+        data["configuration_changes"]["settings"] = ["mark_latest_release"]
+        with patch.object(d.urllib.request, "build_opener") as build, \
+                patch.object(d, "get", return_value=before), patch.object(d, "call") as call:
+            build.return_value.open.return_value = io.BytesIO(json.dumps(data).encode())
+            gate = Mock()
+            self.stop("plan_rejected", d.update_once, "unused", V, gate, True)
+            gate.assert_not_called()
+            call.assert_not_called()
 
 
 class WorkflowTest(unittest.TestCase):

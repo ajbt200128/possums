@@ -6,6 +6,10 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
+## Deployment latest-release setting preservation — source candidate
+
+The [scoped planning record](deployment-latest-flag-verification.md) reproduces the current v0.0.47 read-only rejection: the omitted latest-marking flag would change the existing setting. Explicit snapshot preservation passed the original inspector without relaxing any gate. The candidate adds strict boolean preservation across current state, request, every pre/post-call plan and completion; 60 synthetic release/deployment tests passed with the documented test-process ZIP epoch workaround. Historical payload attribution and serving remain unqualified. No update, replay, tag replacement or deployment occurred.
+
 ## Verified upstream-client renewal — source candidate
 
 The operator authorized a durable fix after the [upstream pin lifetime investigation](tokenizer-failure-verification.md#subsequent-gateway-upstream-pin-investigation). [Scoped source evidence](upstream-client-renewal.md) records full supported-SDK re-verification on a later distinct operation, generation-owned client snapshots, failed/cancelled renewal coalescing and unchanged accounting/no-replay behavior. Pinned all-target/all-feature Rust tests: **565 passed, four live probes ignored**; strict package Clippy and formatting passed. Independent implementation review found no blocker; the historical finding was relabeled to distinguish pre-fix source. No deployment, inference or live rotation-recovery qualification is claimed here.
