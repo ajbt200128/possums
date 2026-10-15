@@ -235,7 +235,8 @@ def stable_running(view, tag, required_refs=REQUIRED_REFS):
     return (view.get("repo") == r.REPO and view.get("current_tag") == tag
             and str(view.get("status")).lower() == "running" and not view.get("update_tag")
             and boolean(view.get("debug"), False) and boolean(view.get("disable_cc_mode"), False)
-            and boolean(view.get("held"), False) and unique_names(view.get("secrets"))
+            and boolean(view.get("held"), False) and type(view.get("mark_latest_release")) is bool
+            and unique_names(view.get("secrets"))
             and required_refs.issubset(set(view["secrets"]))
             and all(field in view for field in STABLE))
 
@@ -253,6 +254,11 @@ def inspect_plan(raw, previous, tag, previous_domain=DOMAIN, approved_additions=
                       and plan.get("target", {}).get("tag") == tag, "plan_target")
             r.require(plan.get("update_strategy") == "blue_green" and boolean(plan.get("downtime_required"), False)
                       and boolean(plan.get("hold"), False), "plan_strategy")
+            r.require(type(plan.get("mark_latest_release")) is bool, "plan_configuration")
+            if current_resources is not None:
+                r.require(type(current_resources.get("mark_latest_release")) is bool
+                          and plan["mark_latest_release"] == current_resources["mark_latest_release"],
+                          "plan_configuration")
             changes = plan["configuration_changes"]
             r.require(isinstance(changes, dict) and set(changes) <=
                       {"variables", "secrets", "ssh_keys", "settings", "secrets_refreshed"}, "plan_configuration")
@@ -293,7 +299,9 @@ def plan_update(before, tag, first_tor_activation=False):
     try:
         selection = first_tor_selection(before) if first_tor_activation else None
         r.require(isinstance(before["id"], str) and re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", before["id"]), "plan_rejected")
-        fields = {"tag": tag, "custom_domain": DOMAIN}
+        r.require(type(before.get("mark_latest_release")) is bool, "plan_rejected")
+        fields = {"tag": tag, "custom_domain": DOMAIN,
+                  "mark_latest_release": before["mark_latest_release"]}
         if selection is not None:
             fields["secrets"] = selection
         body = json.dumps(fields).encode()
@@ -340,6 +348,7 @@ def update_once(cli, tag, final_gate, first_tor_activation=False):
     selection = first_tor_selection(before) if first_tor_activation else None
     if not first_tor_activation and unique_names(before.get("secrets")):
         r.require(not TOR_REFS.intersection(before["secrets"]), "tor_exclusive_publication")
+    r.require(type(before.get("mark_latest_release")) is bool, "control_shape")
     previous = before.get("current_tag")
     r.require(before.get("domain") in (OLD_DOMAIN, DOMAIN), "domain_source")
     r.require(isinstance(previous, str) and re.fullmatch(r.VERSION, previous) is not None
@@ -349,7 +358,8 @@ def update_once(cli, tag, final_gate, first_tor_activation=False):
     else:
         plan_update(before, tag)
     arguments = ["container", "update", NAME, "--tag", tag,
-                 "--custom-domain", DOMAIN, "--output", "json"]
+                 "--custom-domain", DOMAIN, "--output", "json",
+                 "--mark-latest=" + str(before["mark_latest_release"]).lower()]
     if selection is not None:
         for name in selection:
             arguments.extend(["--secret", name])
@@ -364,6 +374,8 @@ def update_once(cli, tag, final_gate, first_tor_activation=False):
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         after = get(cli)
+        r.require(type(after.get("mark_latest_release")) is bool
+                  and after["mark_latest_release"] == before["mark_latest_release"], "configuration_changed")
         if selection is not None:
             r.require(unique_names(after.get("secrets")) and set(after["secrets"]) == set(selection),
                       "tor_binding_completion")
