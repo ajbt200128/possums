@@ -219,6 +219,18 @@ mod enabled {
     }
 
     fn load_identity(path: &Path, approved: &HsId) -> Result<HsIdKeypair, TorStartupFailure> {
+        let mistrust = fs_mistrust::Mistrust::builder()
+            .ignore_environment()
+            .build()
+            .map_err(|_| TorStartupFailure::State)?;
+        load_identity_with_mistrust(path, approved, &mistrust)
+    }
+
+    fn load_identity_with_mistrust(
+        path: &Path,
+        approved: &HsId,
+        mistrust: &fs_mistrust::Mistrust,
+    ) -> Result<HsIdKeypair, TorStartupFailure> {
         match fs::metadata(path) {
             Ok(metadata) if metadata.is_dir() => {}
             Ok(_) => return Err(TorStartupFailure::IdentityFileInvalid),
@@ -236,11 +248,7 @@ mod enabled {
             KeyType::Ed25519PublicKey,
             false,
         )?;
-        let mistrust = fs_mistrust::Mistrust::builder()
-            .ignore_environment()
-            .build()
-            .map_err(|_| TorStartupFailure::State)?;
-        let source = ArtiNativeKeystore::from_path_and_mistrust(path, &mistrust)
+        let source = ArtiNativeKeystore::from_path_and_mistrust(path, mistrust)
             .map_err(|_| TorStartupFailure::Identity(Failure::IdentityRead))?;
         let manager = KeyMgrBuilder::default()
             .primary_store(Box::new(source))
