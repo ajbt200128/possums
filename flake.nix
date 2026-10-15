@@ -39,6 +39,7 @@
                 ./vendor/tinfoil/assets/trusted_root.json
                 ./vendor/tinfoil/assets/rekor_test_bundle.json
               ];
+              helperTestAssets = map toString [ ./tests/fixtures/attestation-helper.sh ];
               # Public RFC fixture and pure production decoder used by paired Tor tests.
               torTestAssets = map toString [
                 ./tests/fixtures/tor_grant_rfc8032.json
@@ -47,7 +48,7 @@
                 ./clients/pi/verifier.mjs
               ];
             in
-            (craneLib.filterCargoSources path type || builtins.elem (toString path) (sdkAssets ++ torTestAssets)) &&
+            (craneLib.filterCargoSources path type || builtins.elem (toString path) (sdkAssets ++ helperTestAssets ++ torTestAssets)) &&
             base != ".pi" && base != ".env";
         };
         common = {
