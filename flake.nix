@@ -39,8 +39,15 @@
                 ./vendor/tinfoil/assets/trusted_root.json
                 ./vendor/tinfoil/assets/rekor_test_bundle.json
               ];
+              # Public RFC fixture and pure production decoder used by paired Tor tests.
+              torTestAssets = map toString [
+                ./tests/fixtures/tor_grant_rfc8032.json
+                ./clients/pi/tor-setup.mjs
+                ./clients/pi/tor-endorsement.mjs
+                ./clients/pi/verifier.mjs
+              ];
             in
-            (craneLib.filterCargoSources path type || builtins.elem (toString path) sdkAssets) &&
+            (craneLib.filterCargoSources path type || builtins.elem (toString path) (sdkAssets ++ torTestAssets)) &&
             base != ".pi" && base != ".env";
         };
         common = {
@@ -49,9 +56,12 @@
           SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         };
         cargoArtifacts = craneLib.buildDepsOnly common;
-        # Tests have their own check; image builds should not compile/run them again.
-        gateway = craneLib.buildPackage (common // {
-          inherit cargoArtifacts;
+        torCommon = common // { cargoExtraArgs = "--locked --features tor"; };
+        torCargoArtifacts = craneLib.buildDepsOnly torCommon;
+        # The shipping binary supports Tor; runtime activation remains explicit.
+        # Tests have their own checks, not an image-build side effect.
+        gateway = craneLib.buildPackage (torCommon // {
+          cargoArtifacts = torCargoArtifacts;
           doCheck = false;
         });
         attestationHelper = buildGoModule {
@@ -139,8 +149,15 @@
             cargoClippyExtraArgs = "--all-targets --all-features -- -D warnings";
           });
           tests = craneLib.cargoTest (common // { inherit cargoArtifacts; });
+          tor-tests = craneLib.cargoTest (torCommon // {
+            cargoArtifacts = torCargoArtifacts;
+            nativeCheckInputs = [ unstablePkgs.nodejs_24 ];
+          });
           attestation-helper = attestationHelper;
         };
-        devShells.default = craneLib.devShell { checks = self.checks.${system}; };
+        devShells.default = craneLib.devShell {
+          checks = self.checks.${system};
+          packages = [ pkgs.tor ];
+        };
       });
 }
