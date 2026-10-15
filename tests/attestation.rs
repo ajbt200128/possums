@@ -137,7 +137,12 @@ mod helper {
         ));
         // The supplied request-start sample predates issuance; only a
         // validation-time sample after the helper exits can accept it.
-        assert!(verify(&file).await.is_ok());
+        let result = verify(&file).await;
+        assert!(
+            result.is_ok(),
+            "helper issuance acceptance: observed {}",
+            outcome(&result)
+        );
     }
 
     #[tokio::test]
@@ -150,7 +155,22 @@ mod helper {
             "printf '%s' '{}'",
             envelope_at(r#"{"format":"v3"}"#, now + 60, now + 360)
         ));
-        assert!(matches!(verify(&file).await, Err(EvidenceError::Invalid)));
+        let result = verify(&file).await;
+        assert!(
+            matches!(result, Err(EvidenceError::Invalid)),
+            "helper future issuance rejection: observed {}",
+            outcome(&result)
+        );
+    }
+
+    fn outcome(
+        result: &Result<possums::attestation::GatewayEvidence, EvidenceError>,
+    ) -> &'static str {
+        match result {
+            Ok(_) => "accepted",
+            Err(EvidenceError::Invalid) => "invalid",
+            Err(EvidenceError::Unavailable) => "unavailable",
+        }
     }
 
     #[tokio::test]
