@@ -6,6 +6,10 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
+## Verified upstream-client renewal — source candidate
+
+The operator authorized a durable fix after the [upstream pin lifetime investigation](tokenizer-failure-verification.md#subsequent-gateway-upstream-pin-investigation). [Scoped source evidence](upstream-client-renewal.md) records full supported-SDK re-verification on a later distinct operation, generation-owned client snapshots, failed/cancelled renewal coalescing and unchanged accounting/no-replay behavior. Pinned all-target/all-feature Rust tests: **565 passed, four live probes ignored**; strict package Clippy and formatting passed. Independent implementation review found no blocker; the historical finding was relabeled to distinguish pre-fix source. No deployment, inference or live rotation-recovery qualification is claimed here.
+
 ## Tokenizer send diagnostics and aggregate readback — 2026-10-15
 
 [Scoped verification](tokenizer-failure-verification.md) records read-only production error-family ingestion, a two-category tokenizer send refinement with unchanged shipped wire detail, pinned offline regression/SDK-allocation qualification and exact shipped-decoder compatibility. No tokenizer series was returned in the inspected aggregate window; this is not zero errors or request attribution. The source-only refinement is not deployed; Pi's native warning remains coarse. The enclosing preflight deadline and live transport/processor limits remain explicit. No inference probe, client installation, board change or deployment occurred.
