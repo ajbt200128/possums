@@ -2,7 +2,7 @@
 import { build, version as esbuildVersion } from 'esbuild';
 import ts from 'typescript';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir, realpath, access, symlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, realpath, access, symlink, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -59,11 +59,39 @@ for (const name of ['verifier.mjs', 'verifier-worker.mjs', 'verifier.d.mts']) {
   verifierArtifacts[name] = { sha256: sha(bytes) };
 }
 await writeFile(path.join(out, 'verifier-build-report.json'), JSON.stringify(verifierReport, null, 2) + '\n');
+const nativeBuild = process.env.POSSUMS_TOR_NATIVE_BUILD;
+if (!nativeBuild || !path.isAbsolute(nativeBuild)) throw new Error('possums_build_tor_native_missing: provide the matching native helper build before packaging.');
+let nativeReport;
+try { nativeReport = JSON.parse(await readFile(path.join(nativeBuild, 'tor-native-build-report.json'), 'utf8')); }
+catch { throw new Error('possums_build_tor_native_report: native helper report could not be read/decoded; cause unknown. Rebuild the matching helper.'); }
+if (!nativeReport || typeof nativeReport !== 'object' || Array.isArray(nativeReport))
+  throw new Error('possums_build_tor_native_schema: helper report must be an object; rebuild the matching helper.');
+if (nativeReport.rust !== '1.92.0' || nativeReport.tor !== '0.47.0' ||
+    nativeReport.platform !== process.platform || nativeReport.arch !== process.arch)
+  throw new Error('possums_build_tor_native_platform: helper toolchain/platform differs from this package; rebuild for the intended host.');
+for (const name of ['Cargo.toml', 'Cargo.lock', 'src/main.rs']) {
+  const key = 'clients/pi/tor-native/' + name;
+  let bytes;
+  try { bytes = await readFile(path.join(source, key)); }
+  catch { throw new Error('possums_build_tor_native_source_read: helper source could not be read; cause unknown. Restore the matching source tree.'); }
+  if (sha(bytes) !== nativeReport.sources?.[key]) throw new Error('possums_build_tor_native_source_hash: helper source changed; rebuild before packaging.');
+}
+let nativeBytes;
+try { nativeBytes = await readFile(path.join(nativeBuild, 'possums-tor-native')); }
+catch { throw new Error('possums_build_tor_native_artifact_read: helper artifact could not be read; cause unknown. Rebuild for this host.'); }
+if (sha(nativeBytes) !== nativeReport.artifacts?.['possums-tor-native']?.sha256)
+  throw new Error('possums_build_tor_native_artifact_hash: helper artifact differs from its report; rebuild before packaging.');
+try {
+  await writeFile(path.join(out, 'possums-tor-native'), nativeBytes);
+  await chmod(path.join(out, 'possums-tor-native'), 0o755);
+  await writeFile(path.join(out, 'tor-native-build-report.json'), JSON.stringify(nativeReport, null, 2) + '\n');
+} catch { throw new Error('possums_build_tor_native_output: helper packaging failed; cause unknown. Check the scratch output directory before rebuilding.'); }
+verifierArtifacts['possums-tor-native'] = { sha256: sha(nativeBytes) };
 const peers = path.join(out, 'node_modules', '@earendil-works');
 await mkdir(peers, { recursive: true });
 for (const [name, directory] of Object.entries(runtimeRoots)) await symlink(directory, path.join(peers, name));
 const buildReport = { node: process.version, pi: '1.0.4', runtimePins, typescript: ts.version, esbuild: esbuildVersion,
-  lock: sha(await readFile('package-lock.json')), verifier: verifierReport,
+  lock: sha(await readFile('package-lock.json')), verifier: verifierReport, torNative: nativeReport,
   legacyBootstrapFixture: { revision: '1b909881b468a2d5035ff2180ed5027fd2d8b9f6', sha256: sha(await readFile('legacy-bootstrap.ts')) },
   artifacts: { ...verifierArtifacts } };
 const file = path.join(out, 'extension.mjs');

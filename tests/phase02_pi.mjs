@@ -337,7 +337,7 @@ await check('manifest authority is selected after Pi loads flags, never silently
  const fetch=globalThis.fetch;
  globalThis.fetch=async()=>{requests++;throw Error(hostileConnection);};
  try{
-  m.extension({registerFlag:()=>{},getFlag:()=>flag,registerProvider:value=>{provider=value;},on:()=>{},registerCommand:()=>{}});
+  m.extension({registerFlag:()=>{},getFlag:name=>name==='possums-manifest'?flag:undefined,registerProvider:value=>{provider=value;},on:()=>{},registerCommand:()=>{}});
   flag=path.join(root,'PRIVATE_LATE_FLAG_missing.json');provider.newSession();
   await assert.rejects(provider.auth.apiKey.login({...interaction(),prompt:async()=>{prompts++;return recoveryKey;}}),
    error=>error.code==='manifest_unavailable'&&!error.message.includes('PRIVATE_LATE_FLAG'));
@@ -349,7 +349,7 @@ await check('manifest authority is selected after Pi loads flags, never silently
 await check('extension reports missing or invalid manifest paths without revealing them or prompting',async()=>{
  for(const manifest of ['PRIVATE_PATH',path.join(root,'PRIVATE_PATH_missing.json')]) {
   let provider,prompts=0;
-  m.extension({registerFlag:()=>{},getFlag:()=>manifest,registerProvider:value=>{provider=value;},on:()=>{},registerCommand:()=>{}});
+  m.extension({registerFlag:()=>{},getFlag:name=>name==='possums-manifest'?manifest:undefined,registerProvider:value=>{provider=value;},on:()=>{},registerCommand:()=>{}});
   provider.newSession();
   await assert.rejects(provider.auth.apiKey.login({...interaction(),prompt:async()=>{prompts++;return recoveryKey;}}),
    error=>error.code==='manifest_unavailable' && !error.message.includes('PRIVATE_PATH'));
