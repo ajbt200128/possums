@@ -11,7 +11,7 @@ networks:
     egress: open
 containers:
   - name: gateway
-    image: ghcr.io/ajbt200128/possums-gateway@sha256:5d44220e468b53a99f0dc52ca5168bf392de4850fb29a9082185ce62fd85fb2e
+    image: ghcr.io/ajbt200128/possums-gateway@sha256:951b17fc903a9f0f8e6177eb672393ea7438db1324b3122d6369a89ee4e40c69
     env:
       - HOME: "/tmp"
       - POSSUMS_BIND: "0.0.0.0:8080"
