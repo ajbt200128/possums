@@ -126,7 +126,14 @@ async fn actual_helper_owner_uses_raw_stdin_bounds_and_suppresses_hostile_output
     let helper = scratch.path().join("helper");
     // Shell fixture checks actual stdin count. No network or Go-authentication
     // success is fabricated; only closed negative RPC transport is qualified.
-    std::fs::write(&helper, "#!/bin/sh\nn=$(wc -c | tr -d ' ')\n[ \"$n\" = 32 ] || exit 1\nprintf 'HOSTILE_SECRET' >&2\nprintf '%s' '{\"failure\":{\"code\":\"possums_v3_envelope_rejected\",\"stage\":\"envelope\",\"constraint\":\"rejected\"}}'\n").unwrap();
+    let write_helper = |body: &str| {
+        std::fs::write(
+            &helper,
+            format!("#!/bin/sh\nn=$(wc -c | tr -d ' ')\n[ \"$n\" = 32 ] || exit 1\n{body}\n"),
+        )
+        .unwrap();
+    };
+    write_helper("printf 'HOSTILE_SECRET' >&2\nprintf '%s' '{\"failure\":{\"code\":\"possums_v3_envelope_rejected\",\"stage\":\"envelope\",\"constraint\":\"rejected\"}}'");
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
     let verifier = TinfoilEvidenceVerifier::new(helper.to_string_lossy(), "synthetic");
     let failure = verifier
@@ -139,22 +146,22 @@ async fn actual_helper_owner_uses_raw_stdin_bounds_and_suppresses_hostile_output
         TorEvidenceError::Verification(TorVerificationFailure::EnvelopeRejected)
     );
     assert!(!format!("{failure:?} {failure}").contains("HOSTILE"));
-    std::fs::write(&helper, "#!/bin/sh\nprintf 'HOSTILE_SECRET' >&2\nprintf '%s' '{\"failure\":{\"code\":\"possums_v3_acquisition_http_status\",\"stage\":\"acquisition\",\"constraint\":\"http_status\",\"status\":503}}'\n").unwrap();
+    write_helper("printf 'HOSTILE_SECRET' >&2\nprintf '%s' '{\"failure\":{\"code\":\"possums_v3_acquisition_http_status\",\"stage\":\"acquisition\",\"constraint\":\"http_status\",\"status\":503}}'");
     assert_eq!(
         verifier.verify_tor("unused", &[0; 32]).await.err(),
         Some(TorEvidenceError::AcquisitionStatus(503))
     );
-    std::fs::write(&helper, "#!/bin/sh\nprintf '%s' 'HOSTILE_SECRET'\n").unwrap();
+    write_helper("printf '%s' 'HOSTILE_SECRET'");
     assert_eq!(
         verifier.verify_tor("unused", &[0; 32]).await.err(),
         Some(TorEvidenceError::Invalid)
     );
-    std::fs::write(&helper, "#!/bin/sh\nhead -c 1048577 /dev/zero\n").unwrap();
+    write_helper("head -c 1048577 /dev/zero");
     assert_eq!(
         verifier.verify_tor("unused", &[0; 32]).await.err(),
         Some(TorEvidenceError::Invalid)
     );
-    std::fs::write(&helper, "#!/bin/sh\nprintf 'HOSTILE_SECRET' >&2\nexit 1\n").unwrap();
+    write_helper("printf 'HOSTILE_SECRET' >&2\nexit 1");
     assert_eq!(
         verifier.verify_tor("unused", &[0; 32]).await.err(),
         Some(TorEvidenceError::Unavailable)

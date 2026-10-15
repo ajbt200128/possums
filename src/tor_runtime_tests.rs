@@ -24,17 +24,21 @@ fn scratch() -> tempfile::TempDir {
         .tempdir_in("/tmp")
         .unwrap()
 }
+fn fixture_mistrust(path: &Path) -> fs_mistrust::Mistrust {
+    // Assume only the synthetic filesystem ancestors, never the key directory or files.
+    fs_mistrust::Mistrust::builder()
+        .ignore_environment()
+        .ignore_prefix(path.parent().expect("fixture parent"))
+        .build()
+        .unwrap()
+}
+fn load_fixture_identity(path: &Path, approved: &HsId) -> Result<HsIdKeypair, TorStartupFailure> {
+    load_identity_with_mistrust(path, approved, &fixture_mistrust(path))
+}
 fn source(path: &Path) -> KeyMgr {
     KeyMgrBuilder::default()
         .primary_store(Box::new(
-            ArtiNativeKeystore::from_path_and_mistrust(
-                path,
-                &fs_mistrust::Mistrust::builder()
-                    .ignore_environment()
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap(),
+            ArtiNativeKeystore::from_path_and_mistrust(path, &fixture_mistrust(path)).unwrap(),
         ))
         .build()
         .unwrap()
@@ -130,13 +134,13 @@ fn native_sdk_existing_pair_survives_source_removal_without_generation() {
             false,
         )
         .unwrap();
-    let held = load_identity(scratch.path(), &approved).unwrap();
+    let held = load_fixture_identity(scratch.path(), &approved).unwrap();
     let manager = memory();
     hold_identity(&manager, held, &approved).unwrap();
     fs::remove_dir_all(scratch.path()).unwrap();
     assert_eq!(require_identity(&manager, &nickname(), &approved), Ok(()));
     assert_eq!(
-        load_identity(scratch.path(), &approved).err(),
+        load_fixture_identity(scratch.path(), &approved).err(),
         Some(TorStartupFailure::Identity(Failure::IdentityMissing))
     );
     assert!(hold_identity(&manager, synthetic_pair(8), &approved).is_err()); // No overwrite fallback.
@@ -148,7 +152,7 @@ fn native_sdk_missing_wrong_and_oversized_identity_fail_closed() {
     let pair = synthetic_pair(7);
     let approved = HsIdKey::from(&pair).id();
     assert_eq!(
-        load_identity(scratch.path(), &approved).err(),
+        load_fixture_identity(scratch.path(), &approved).err(),
         Some(TorStartupFailure::Identity(Failure::IdentityMissing))
     );
     let manager = source(scratch.path());
@@ -162,7 +166,7 @@ fn native_sdk_missing_wrong_and_oversized_identity_fail_closed() {
         .unwrap();
     let wrong = HsIdKey::from(&synthetic_pair(8)).id();
     assert_eq!(
-        load_identity(scratch.path(), &wrong).err(),
+        load_fixture_identity(scratch.path(), &wrong).err(),
         Some(TorStartupFailure::Identity(Failure::IdentityMismatch))
     );
     let file = scratch
@@ -176,13 +180,88 @@ fn native_sdk_missing_wrong_and_oversized_identity_fail_closed() {
         .with_extension(KeyType::Ed25519ExpandedKeypair.arti_extension());
     fs::write(&file, vec![0; MAX_KEY_FILE as usize + 1]).unwrap();
     assert_eq!(
-        load_identity(scratch.path(), &approved).err(),
+        load_fixture_identity(scratch.path(), &approved).err(),
         Some(TorStartupFailure::IdentityFileInvalid)
     );
     fs::write(&file, "HOSTILE_KEY_TEXT").unwrap();
-    let failure = load_identity(scratch.path(), &approved).err().unwrap();
+    let failure = load_fixture_identity(scratch.path(), &approved)
+        .err()
+        .unwrap();
     assert_eq!(failure, TorStartupFailure::Identity(Failure::IdentityRead));
     assert!(!failure.to_string().contains("HOSTILE"));
+}
+
+#[test]
+fn fixture_policy_retains_sdk_directory_and_content_permission_checks() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = scratch();
+    let pair = synthetic_pair(7);
+    let approved = HsIdKey::from(&pair).id();
+    let spec = HsIdKeypairSpecifier::new(nickname());
+    source(scratch.path())
+        .insert(pair, &spec, KeystoreSelector::Primary, false)
+        .unwrap();
+    assert!(load_fixture_identity(scratch.path(), &approved).is_ok());
+    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        load_fixture_identity(scratch.path(), &approved).err(),
+        Some(TorStartupFailure::Identity(Failure::IdentityRead))
+    );
+    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let file = scratch
+        .path()
+        .join(spec.arti_path().unwrap().as_ref())
+        .with_extension(KeyType::Ed25519ExpandedKeypair.arti_extension());
+    // The SDK permits readable content beneath a protected directory; do not
+    // claim a per-file unreadability guarantee that its policy does not provide.
+    for mode in [0o604, 0o644] {
+        fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(load_fixture_identity(scratch.path(), &approved).is_ok());
+    }
+    let failures = [0o602, 0o622].map(|mode| {
+        fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+        load_fixture_identity(scratch.path(), &approved).err()
+    });
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(load_fixture_identity(scratch.path(), &approved).is_ok());
+    assert_eq!(
+        failures,
+        [Some(TorStartupFailure::Identity(Failure::IdentityRead)); 2]
+    );
+    for failure in failures.into_iter().flatten() {
+        for rendered in [failure.to_string(), format!("{failure:?}")] {
+            assert!(!rendered.contains("PRIVATE KEY"));
+            assert!(!rendered.contains(file.to_str().unwrap()));
+        }
+    }
+}
+
+#[test]
+fn production_identity_wrapper_preserves_real_platform_strict_ancestor_checks() {
+    let scratch = scratch();
+    let pair = synthetic_pair(7);
+    let approved = HsIdKey::from(&pair).id();
+    source(scratch.path())
+        .insert(
+            pair,
+            &HsIdKeypairSpecifier::new(nickname()),
+            KeystoreSelector::Primary,
+            false,
+        )
+        .unwrap();
+    let strict = fs_mistrust::Mistrust::builder()
+        .ignore_environment()
+        .build()
+        .unwrap();
+    // Real filesystem ancestors may be untrusted in a Nix sandbox. Compare
+    // against the unmodified SDK policy, not the fixture's ignored ancestors.
+    let expected = ArtiNativeKeystore::from_path_and_mistrust(scratch.path(), &strict)
+        .map(|_| approved)
+        .map_err(|_| TorStartupFailure::Identity(Failure::IdentityRead));
+    assert_eq!(
+        load_identity(scratch.path(), &approved).map(|pair| HsIdKey::from(&pair).id()),
+        expected
+    );
 }
 
 #[tokio::test]

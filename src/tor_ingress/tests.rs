@@ -821,8 +821,16 @@ fn scratch() -> tempfile::TempDir {
 fn open(path: &Path) -> KeyMgr {
     KeyMgrBuilder::default()
         .primary_store(Box::new(
-            ArtiNativeKeystore::from_path_and_mistrust(path, &fs_mistrust::Mistrust::default())
-                .unwrap(),
+            ArtiNativeKeystore::from_path_and_mistrust(
+                path,
+                &fs_mistrust::Mistrust::builder()
+                    .ignore_environment()
+                    // Assume only synthetic ancestors; the key directory/files stay checked.
+                    .ignore_prefix(path.parent().expect("fixture parent"))
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap(),
         ))
         .build()
         .unwrap()
