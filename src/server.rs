@@ -19,7 +19,7 @@ use axum::{
     routing::get,
     Router,
 };
-use futures_util::FutureExt;
+use futures_util::{FutureExt, Stream, StreamExt};
 use hyper::server::conn::http1;
 use hyper_util::{
     rt::{TokioIo, TokioTimer},
@@ -45,7 +45,21 @@ mod admission_tests;
 #[cfg(test)]
 mod cause_tests;
 #[cfg(test)]
-mod lifecycle_tests;
+mod lifecycle_tests {
+    include!("server/lifecycle_tests.rs");
+    // Keep transport assertions beside the existing private lifecycle fixtures.
+    mod transport_tests {
+        include!("server/transport_tests.rs");
+    }
+    #[cfg(feature = "tor")]
+    mod tor_tests {
+        include!("server/tor_tests.rs");
+    }
+    #[cfg(feature = "tor")]
+    mod tor_bridge_tests {
+        include!("server/tor_bridge_tests.rs");
+    }
+}
 #[cfg(test)]
 mod observer_tests;
 #[cfg(test)]
@@ -84,6 +98,10 @@ pub struct AppState {
     ingress_activity: Arc<AtomicUsize>,
     generation_activity: Arc<AtomicUsize>,
     telemetry: Option<Arc<crate::telemetry::AggregateMetrics>>,
+    #[cfg(feature = "tor")]
+    tor_signer: Option<Arc<crate::tor_endorsement::TorEndorsementSigner>>,
+    #[cfg(feature = "tor")]
+    pub(crate) tor_ready: Option<Arc<std::sync::atomic::AtomicBool>>,
     #[cfg(test)]
     preflight_hooks: Arc<resource_streaming_tests::PreflightHooks>,
     #[cfg(test)]
@@ -91,6 +109,16 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[cfg(feature = "tor")]
+    pub(crate) fn with_tor_endorsement(
+        mut self,
+        signer: Arc<crate::tor_endorsement::TorEndorsementSigner>,
+    ) -> Self {
+        self.tor_signer = Some(signer);
+        self.tor_ready = Some(Arc::default());
+        self
+    }
+
     pub fn with_telemetry(
         mut self,
         metrics: Option<Arc<crate::telemetry::AggregateMetrics>>,
@@ -142,6 +170,10 @@ impl AppState {
             ingress_activity: Arc::default(),
             generation_activity: Arc::default(),
             telemetry: None,
+            #[cfg(feature = "tor")]
+            tor_signer: None,
+            #[cfg(feature = "tor")]
+            tor_ready: None,
             #[cfg(test)]
             preflight_hooks: Arc::default(),
             #[cfg(test)]
@@ -157,9 +189,18 @@ pub fn router(state: AppState) -> Router {
 #[doc(hidden)]
 pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Router {
     let health = state.lifecycle.clone();
+    #[cfg(feature = "tor")]
+    let tor_ready = state.tor_ready.clone();
     let app = Router::new()
         .merge(crate::api::routes())
-        .route("/attestation", get(attestation))
+        .route("/attestation", get(attestation));
+    #[cfg(feature = "tor")]
+    let app = if state.tor_signer.is_some() {
+        app.route("/attestation/tor", get(tor_attestation))
+    } else {
+        app
+    };
+    let app = app
         .fallback(not_found)
         .method_not_allowed_fallback(wrong_method)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
@@ -181,7 +222,14 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
         "/healthz",
         get(move || {
             let health = health.clone();
+            #[cfg(feature = "tor")]
+            let tor_ready = tor_ready.clone();
             async move {
+                #[cfg(feature = "tor")]
+                if tor_ready.is_some_and(|ready| !ready.load(std::sync::atomic::Ordering::Acquire))
+                {
+                    return StatusCode::SERVICE_UNAVAILABLE;
+                }
                 if health.is_serving() {
                     StatusCode::NO_CONTENT
                 } else {
@@ -275,6 +323,53 @@ async fn serve_until_with_header_deadline(
     header_deadline: Duration,
     shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
+    let incoming = futures_util::stream::unfold(listener, |listener| async {
+        let accepted = listener.accept().await.map(|(stream, _)| stream);
+        Some((accepted, listener))
+    });
+    serve_incoming_until(incoming, state, header_deadline, shutdown).await
+}
+
+/// HTTP-only compatibility seam: callers cannot implicitly select a bridge.
+pub(crate) async fn serve_incoming_until<IO>(
+    incoming: impl Stream<Item = std::io::Result<IO>>,
+    state: AppState,
+    header_deadline: Duration,
+    shutdown: impl Future<Output = ()>,
+) -> std::io::Result<()>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    serve_connections_until(
+        incoming.map(|io| io.map(Incoming::Http)),
+        state,
+        header_deadline,
+        shutdown,
+    )
+    .await
+}
+
+/// Explicit physical transport ownership, not trust or request authorization.
+pub(crate) enum Incoming<IO> {
+    Http(IO),
+    #[cfg(feature = "tor")]
+    OpaqueTorBridge(IO, crate::tor_ingress::BridgeMetadata),
+}
+
+/// One admission and drain owner for HTTP and blind Tor bridges. A Tor operation
+/// also returns through the public shim as HTTP, consuming a second permit in
+/// this same pool: at most 32 fully paired Tor operations without other traffic.
+/// Both admissions fail fast: no nested permit wait or second quota.
+pub(crate) async fn serve_connections_until<IO>(
+    incoming: impl Stream<Item = std::io::Result<Incoming<IO>>>,
+    state: AppState,
+    header_deadline: Duration,
+    shutdown: impl Future<Output = ()>,
+) -> std::io::Result<()>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut incoming = Box::pin(incoming);
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let telemetry = state.telemetry.clone();
     let lifecycle = state.lifecycle.clone();
@@ -303,18 +398,19 @@ async fn serve_until_with_header_deadline(
                 if let Some(failure) = &mut injected_accept_failure {
                     tokio::select! {
                         biased;
-                        _ = failure => Err(std::io::Error::other("injected listener failure")),
-                        result = listener.accept() => result,
+                        _ = failure => Some(Err(std::io::Error::other("injected listener failure"))),
+                        result = incoming.next() => result,
                     }
                 } else {
-                    listener.accept().await
+                    incoming.next().await
                 }
                 #[cfg(not(test))]
-                listener.accept().await
+                incoming.next().await
             } => {
-                let (stream, _) = match result {
-                    Ok(accepted) => accepted,
-                    Err(_) => {
+                let stream = match result {
+                    None => break Ok(()),
+                    Some(Ok(accepted)) => accepted,
+                    Some(Err(_)) => {
                         if let Some(metrics) = &telemetry {
                             metrics.interface_error(InterfaceError::LifecycleServeUnknown);
                         }
@@ -330,6 +426,27 @@ async fn serve_until_with_header_deadline(
                     continue;
                 };
                 let permit = Lease::observed(permit, telemetry.as_ref(), Lane::Connection);
+                #[cfg(not(feature = "tor"))]
+                let Incoming::Http(stream) = stream;
+                #[cfg(feature = "tor")]
+                let stream = match stream {
+                    Incoming::Http(stream) => stream,
+                    Incoming::OpaqueTorBridge(stream, metadata) => {
+                        let metrics = telemetry.clone();
+                        tasks.spawn(async move {
+                            // Quiesce fences admission, not accepted opaque delivery.
+                            // The same JoinSet retains this lease until full socket drop.
+                            if let Err(failure) = tor_bridge(stream, &metadata).await {
+                                if let Some(metrics) = &metrics {
+                                    metrics.interface_error(InterfaceError::ConnectionUnknown);
+                                }
+                                metadata.report(failure);
+                            }
+                            drop(permit);
+                        });
+                        continue;
+                    }
+                };
                 let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let seen = entered.clone();
                 let service = TowerToHyperService::new(app.clone());
@@ -405,7 +522,7 @@ async fn serve_until_with_header_deadline(
         }
     };
     lifecycle.quiesce();
-    drop(listener);
+    drop(incoming);
     stop.send_replace(true);
     #[cfg(test)]
     if let Some(done) = hooks.shutdown_published.lock().unwrap().take() {
@@ -432,17 +549,80 @@ async fn serve_until_with_header_deadline(
     Ok(())
 }
 
+/// Blind transport only. The public shim still owns TLS/EHBP and its ten-second
+/// handshake/header deadline; this owner never parses or terminates either.
+#[cfg(feature = "tor")]
+async fn tor_bridge<IO>(
+    stream: IO,
+    metadata: &crate::tor_ingress::BridgeMetadata,
+) -> Result<(), crate::tor_ingress::Failure>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::tor_ingress::Failure;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let disconnect = crate::stream_owner::Disconnect::default();
+    let io_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut downstream = DisconnectIo {
+        stream,
+        disconnect: disconnect.clone(),
+        io_failed: io_failed.clone(),
+    };
+    // One stopwatch covers the first byte, fixed-target dial and initial write.
+    // There is no generation-age, delivery-backpressure or drain timeout.
+    let upstream = tokio::time::timeout(HEADER_DEADLINE, async {
+        let mut first = [0; 1];
+        match downstream.read(&mut first).await {
+            Ok(0) => return Ok(None),
+            Ok(_) => {}
+            Err(_) if !io_failed.load(std::sync::atomic::Ordering::Acquire) => return Ok(None),
+            Err(_) => return Err(Failure::BridgeIo),
+        }
+        let mut upstream = metadata
+            .connect()
+            .await
+            .map_err(|_| Failure::BridgeConnect)?;
+        upstream
+            .write_all(&first)
+            .await
+            .map_err(|_| Failure::BridgeIo)?;
+        Ok(Some(upstream))
+    })
+    .await
+    .map_err(|_| Failure::BridgeDeadline)??;
+    let Some(mut upstream) = upstream else {
+        return Ok(());
+    };
+    let result = tokio::select! {
+        biased;
+        _ = disconnect.cancelled() => Ok(()),
+        result = tokio::io::copy_bidirectional(&mut downstream, &mut upstream) => result.map(|_| ()),
+    };
+    // copy_bidirectional half-shuts the opposite writer on EOF. Cancelling the
+    // copy and dropping the entire owned socket also closes its reader, rather
+    // than leaving upstream generation alive waiting for the other half.
+    drop(upstream);
+    let downstream_ended = disconnect.cancelled().now_or_never().is_some();
+    if io_failed.load(std::sync::atomic::Ordering::Acquire) || result.is_err() && !downstream_ended
+    {
+        Err(Failure::BridgeIo)
+    } else {
+        Ok(())
+    }
+}
+
 /// Non-authorizing propagation marker for the connection's sole I/O owner.
 #[derive(Clone)]
 struct ConnectionIoFailure(Arc<std::sync::atomic::AtomicBool>);
 
-/// Notify request ownership on actual socket EOF/error as well as body drop.
-struct DisconnectIo {
-    stream: tokio::net::TcpStream,
+/// Notify request ownership on actual transport EOF/error as well as body drop.
+struct DisconnectIo<IO> {
+    stream: IO,
     disconnect: crate::stream_owner::Disconnect,
     io_failed: Arc<std::sync::atomic::AtomicBool>,
 }
-impl DisconnectIo {
+impl<IO> DisconnectIo<IO> {
     fn failed(&self, error: &std::io::Error) {
         // Supported connection-end kinds do not establish a separate fault.
         // Other I/O failures are observed once by the connection owner; raw
@@ -460,7 +640,7 @@ impl DisconnectIo {
         }
     }
 }
-impl tokio::io::AsyncRead for DisconnectIo {
+impl<IO: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for DisconnectIo<IO> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -481,7 +661,7 @@ impl tokio::io::AsyncRead for DisconnectIo {
         result
     }
 }
-impl tokio::io::AsyncWrite for DisconnectIo {
+impl<IO: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for DisconnectIo<IO> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -570,6 +750,16 @@ async fn admitted_request(state: AppState, mut request: Request<Body>, next: Nex
     // affect routing. Wrong methods, trailing slashes and encoded aliases stay
     // outside heavy tracking and cannot reach a heavy handler.
     let endpoint = Endpoint::route(request.method().as_str(), request.uri().path());
+    // Reuse the reviewed attestation class, never a transport/identity dimension.
+    #[cfg(feature = "tor")]
+    let endpoint = if state.tor_signer.is_some()
+        && matches!(request.method(), &Method::GET | &Method::HEAD)
+        && request.uri().path() == "/attestation/tor"
+    {
+        Endpoint::Attestation
+    } else {
+        endpoint
+    };
     let (observation, context) = HttpObservation::new(state.telemetry.as_ref(), endpoint);
     request.extensions_mut().insert(context.clone());
     let api = crate::api::is_api(request.uri().path());
@@ -963,6 +1153,179 @@ async fn attestation(
         HeaderValue::from_static("application/json"),
     );
     response
+}
+
+#[cfg(feature = "tor")]
+async fn tor_attestation(
+    State(state): State<AppState>,
+    method: Method,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    use crate::attestation::{decode_raw32, tor_now};
+    let challenge = uri
+        .query()
+        .and_then(|query| query.strip_prefix("nonce="))
+        .and_then(decode_raw32);
+    let Some(challenge) = challenge.filter(|_| method == Method::GET && body.is_empty()) else {
+        return tor_closed_failure(
+            StatusCode::BAD_REQUEST,
+            InterfaceError::InputRefused,
+            TorRouteFailure::Nonce,
+        );
+    };
+    let Some(signer) = &state.tor_signer else {
+        return route_refused(StatusCode::NOT_FOUND);
+    };
+    let evidence = match state
+        .gateway_evidence_verifier
+        .verify_tor(&state.gateway_evidence_path, &challenge)
+        .await
+    {
+        Ok(evidence) => evidence,
+        Err(error) => return tor_evidence_failure(error),
+    };
+    // Recheck after acquisition, and again immediately before producing bytes.
+    match tor_now().and_then(|now| evidence.current_key(now)) {
+        Ok(key) if key == signer.public_key() => {}
+        Ok(_) => {
+            return tor_closed_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                InterfaceError::EvidenceInvalid,
+                TorRouteFailure::GrantMismatch,
+            )
+        }
+        Err(error) => return tor_evidence_failure(error),
+    }
+    let endorsement = signer.endorse(&challenge);
+    let bytes = match crate::bounded_json::to_vec(
+        &serde_json::json!({
+            "evidence": &evidence.quote,
+            "payload": tor_hex(&endorsement.payload),
+            "signature": tor_hex(&endorsement.signature),
+        }),
+        MAX_ATTESTATION_RESPONSE_BYTES,
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return tor_closed_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                encoding_cause(error),
+                TorRouteFailure::Encoding(error),
+            )
+        }
+    };
+    if let Err(error) = tor_now().and_then(|now| evidence.current_key(now)) {
+        return tor_evidence_failure(error);
+    }
+    let mut response = Body::from(bytes).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+#[cfg(feature = "tor")]
+fn tor_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(output, "{byte:02x}").expect("String write");
+    }
+    output
+}
+
+#[cfg(feature = "tor")]
+fn tor_evidence_failure(error: crate::attestation::TorEvidenceError) -> Response {
+    use crate::attestation::{TorEvidenceError, TorVerificationFailure};
+    let cause = match error {
+        TorEvidenceError::Unavailable
+        | TorEvidenceError::Unsupported
+        | TorEvidenceError::AcquisitionStatus(_)
+        | TorEvidenceError::Verification(
+            TorVerificationFailure::AcquisitionUnknown
+            | TorVerificationFailure::AcquisitionTransport
+            | TorVerificationFailure::AcquisitionStatus
+            | TorVerificationFailure::AcquisitionRead
+            | TorVerificationFailure::AcquisitionSize,
+        ) => InterfaceError::EvidenceUnavailable,
+        _ => InterfaceError::EvidenceInvalid,
+    };
+    tor_closed_failure(
+        StatusCode::SERVICE_UNAVAILABLE,
+        cause,
+        TorRouteFailure::Evidence(error),
+    )
+}
+
+// Only the new opt-in route has this diagnostic projection. It is public,
+// unverified metadata, not transport, accounting or service-liveness evidence.
+#[cfg(feature = "tor")]
+enum TorRouteFailure {
+    Evidence(crate::attestation::TorEvidenceError),
+    GrantMismatch,
+    Nonce,
+    Encoding(crate::bounded_json::EncodingFailure),
+}
+
+#[cfg(feature = "tor")]
+fn tor_closed_failure(
+    status: StatusCode,
+    cause: InterfaceError,
+    failure: TorRouteFailure,
+) -> Response {
+    use crate::attestation::{TorEvidenceError, TorVerificationFailure};
+    let mut observed_status = None;
+    let (code, stage, constraint, message, action) = match failure {
+        TorRouteFailure::Evidence(error) => {
+            let parts = match error {
+                TorEvidenceError::Unsupported => ("tor_appraisal_unsupported", "appraisal", "verifier_support"),
+                TorEvidenceError::Unavailable => ("tor_helper_unknown", "helper", "bounded_helper_completion"),
+                TorEvidenceError::Invalid => ("tor_helper_invalid", "helper", "bounded_closed_response"),
+                TorEvidenceError::Expired => ("tor_appraisal_expired", "freshness", "current_evidence"),
+                TorEvidenceError::Verification(category) => category.parts(),
+                TorEvidenceError::AcquisitionStatus(status) => {
+                    observed_status = Some(status);
+                    TorVerificationFailure::AcquisitionStatus.parts()
+                }
+            };
+            (parts.0, parts.1, parts.2, error.to_string(), "Check approved evidence and helper offline; obtain fresh evidence before a deliberate new public setup attempt.")
+        }
+        TorRouteFailure::GrantMismatch => (
+            "tor_grant_mismatch", "grant", "derived_mounted_appraised_A_equality",
+            "Current appraised endorsement key does not match the local signer; no endorsement or inference.".into(),
+            "Check the current boot grant offline; do not bypass key equality.",
+        ),
+        TorRouteFailure::Nonce => (
+            "tor_nonce_refused", "input", "challenge_get_empty_body",
+            "Tor public setup requires GET, one lowercase-hex 32-byte nonce and an empty body; no endorsement or inference.".into(),
+            "Use the approved public challenge request; do not include a target or additional fields.",
+        ),
+        TorRouteFailure::Encoding(error) => match error {
+            crate::bounded_json::EncodingFailure::LimitExceeded => (
+                "tor_response_encoding_limit", "response", "bounded_json",
+                "Tor public setup response exceeded the encoding bound; no endorsement delivered or inference.".into(),
+                "Check approved evidence size offline.",
+            ),
+            crate::bounded_json::EncodingFailure::CauseUnknown => (
+                "tor_response_encoding_unknown", "response", "cause_unknown",
+                "Tor public setup response encoding failed; underlying cause unknown; no endorsement delivered or inference.".into(),
+                "Check the approved backend offline.",
+            ),
+        },
+    };
+    let mut error = serde_json::json!({"code": code, "stage": stage, "constraint": constraint, "message": message, "action": action});
+    if let Some(status) = observed_status {
+        error["status"] = status.into();
+    }
+    // Retain only the already reviewed coarse InterfaceError for observation.
+    let response = crate::api::failure(status, cause);
+    let (parts, _) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::from(serde_json::json!({"error": error}).to_string()),
+    )
 }
 
 async fn verified_gateway_evidence(
