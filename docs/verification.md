@@ -6,6 +6,10 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
+## Tokenizer send diagnostics and aggregate readback — 2026-10-15
+
+[Scoped verification](tokenizer-failure-verification.md) records read-only production error-family ingestion, a two-category tokenizer send refinement with unchanged shipped wire detail, pinned offline regression/SDK-allocation qualification and exact shipped-decoder compatibility. No tokenizer series was returned in the inspected aggregate window; this is not zero errors or request attribution. The source-only refinement is not deployed; Pi's native warning remains coarse. The enclosing preflight deadline and live transport/processor limits remain explicit. No inference probe, client installation, board change or deployment occurred.
+
 ## Typed interface failures and token metrics — policy/plan only
 
 The operator requested intake-style mandatory typed interface failures, a minimal sufficient expected-error set, complete five-minute error counts and input/output/cached-input token aggregates including across models. The [overhaul plan](interface-error-token-metrics-plan.md) and [privacy extension](../PRIVACY.md#typed-interface-failures-and-token-aggregate-extension) record that scope. Applicable controls: [forbidden data](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [aggregation](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [processors/retention/shutdown](../PRIVACY.md#processors-retention-access-and-shutdown), and [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).

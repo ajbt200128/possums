@@ -19,6 +19,8 @@ use tools::{CompletionDelta, InvocationRequest, ToolInvocation, ToolProfile};
 #[cfg(test)]
 #[path = "../tests/support/stream.rs"]
 pub(crate) mod stream_support;
+#[cfg(test)]
+mod tokenizer_send_tests;
 mod upload;
 #[cfg(test)]
 mod upload_tests;
@@ -385,8 +387,13 @@ impl TinfoilInference {
             .body(body);
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendFailed))?
-            .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendFailed))?;
+            .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendDeadline))?
+            .map_err(|error| {
+                InferenceError::Detailed(tokenizer_send_failure(
+                    error.is_timeout(),
+                    error.is_connect(),
+                ))
+            })?;
         if response.url().as_str() != url {
             return Err(InferenceFailure::EndpointBindingFailed.into());
         }
@@ -1028,6 +1035,17 @@ fn invocation_tokenizer_body(
     )
     .map_err(|_| InferenceError::Detailed(InferenceFailure::RequestEncodingFailed))?;
     Ok(upload::body(bytes, Some(heavy)))
+}
+
+// Supported transport predicates only: never inspect or retain error text/URLs.
+fn tokenizer_send_failure(timed_out: bool, connect_failed: bool) -> InferenceFailure {
+    if timed_out {
+        InferenceFailure::TokenizerSendDeadline
+    } else if connect_failed {
+        InferenceFailure::TokenizerConnectFailed
+    } else {
+        InferenceFailure::TokenizerSendFailed
+    }
 }
 
 async fn finish_tokenizer(

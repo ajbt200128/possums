@@ -10,6 +10,10 @@ Carry over intake's reviewed principles: classification remains mandatory with t
 
 Scope: every project-controlled external-facing boundary, inbound and outbound, plus background/startup/cleanup paths supporting those interfaces. Includes client→gateway API/listener, gateway→attestation helper/provider/catalog/tokenizer/inference, response/stream delivery and accounting terminals. Gateway→intake remains an inventory/design seam until an adapter is separately authorized; do not build it here. Existing Possums Pi diagnostics are in the classification inventory, but **no client telemetry upload, Pi/T3 host change or new persistence** is authorized. Failures observable only inside external SDKs, shim/platform or hosts must be recorded as coverage limits.
 
+## Subsequent tokenizer refinement and ingestion check
+
+The operator's 2026-10-15 follow-up separately checked production error-family ingestion and requested more specific tokenizer failures. [Scoped evidence](tokenizer-failure-verification.md) supersedes the earlier ingestion-unknown statement only for the observed error-family aggregates, not release identity or token-family coverage. The source candidate refines tokenizer send into deadline, connection failure and cause-unknown fallback without new wire details/fields; its closed aggregate enum has 56 values (65 extension points including tokens). No rollout or client installation occurred. Native Pi continues to ignore the finer gateway message. Existing deadlines, accounting and no-replay behavior remain unchanged.
+
 ## Source grounding and gaps
 
 - `src/inference/errors.rs::InferenceFailure` already provides 35 closed content-free codes. Preserve known distinctions and reuse them; `src/telemetry/labels.rs` currently projects them into coarser generation stages.

@@ -51,7 +51,7 @@ async fn full_closed_extension_wire_and_runtime_conversion() {
     if !clean_child("telemetry::export::materialize::tests::extensions::full_closed_extension_wire_and_runtime_conversion") { return; }
     let t = populated();
     let expected = exact_extensions();
-    assert_eq!(expected.len(), 63);
+    assert_eq!(expected.len(), 65);
     assert_eq!(points(&wire(request(&t, W).unwrap()).await), expected);
     // Exercise the production encoder as well as the supported exporter above.
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -129,7 +129,7 @@ async fn independent_withholding_and_population_wire() {
                 exact.retain(|(n, _), _| !n.starts_with("possums.tokens."));
             }
             6 => {
-                t.errors = ErrorTotals::with_counts([i64::MAX as u64; 54]);
+                t.errors = ErrorTotals::with_counts([i64::MAX as u64; InterfaceError::ALL.len()]);
                 t.errors.observe(InterfaceError::BodyLimit);
                 exact.retain(|(n, _), _| n != "possums.interface.errors");
             }
@@ -163,7 +163,10 @@ async fn independent_withholding_and_population_wire() {
             "variant {variant}"
         );
     }
-    for (gates, count) in [([true, false], 54), ([false, true], 9)] {
+    for (gates, count) in [
+        ([true, false], InterfaceError::ALL.len()),
+        ([false, true], 9),
+    ] {
         let mut t = populated();
         t.extension_qualification = Some(gates);
         assert_eq!(points(&wire(request(&t, W).unwrap()).await).len(), count);
@@ -177,7 +180,7 @@ async fn independent_withholding_and_population_wire() {
     assert_eq!(p.keys().next().unwrap().0, "possums.http.requests");
     let mut t = cohort(10, false, 0);
     t.extension_qualification = Some([true; 2]);
-    t.errors = ErrorTotals::with_counts([i64::MAX as u64; 54]);
+    t.errors = ErrorTotals::with_counts([i64::MAX as u64; InterfaceError::ALL.len()]);
     t.errors.observe(InterfaceError::BodyLimit);
     t.tokens.observe(QualifiedModel(0), 1, 1, 3, Some(0));
     assert_eq!(
@@ -251,7 +254,7 @@ async fn signed_integer_limits_and_across_partition_overflow_wire() {
             ..Default::default()
         };
         let max = i64::MAX as u64;
-        let mut counts = [0; 54];
+        let mut counts = [0; InterfaceError::ALL.len()];
         counts[InterfaceError::BodyLimit as usize] = max;
         t.errors = ErrorTotals::with_counts(counts);
         let (input, out) = if output { (0, max) } else { (max, 0) };
@@ -298,7 +301,7 @@ async fn signed_integer_limits_and_across_partition_overflow_wire() {
         let mut t = populated();
         t.tokens.observe(QualifiedModel(0), value, 0, value, None);
         let p = points(&wire(request(&t, W).unwrap()).await);
-        assert_eq!(p.len(), 54);
+        assert_eq!(p.len(), InterfaceError::ALL.len());
         assert!(p.keys().all(|(n, _)| n == "possums.interface.errors"));
     }
     // Pin the actual supported 0.29 conversion's dangerous fallback, not a duplicate parser.

@@ -881,10 +881,10 @@ async fn maximum_reachable_cardinality_actual_wire_and_allocations() {
         + 124
         + 50
         + crate::telemetry::EXTENSION_POINTS;
-    assert_eq!(crate::telemetry::EXTENSION_POINTS, 63);
+    assert_eq!(crate::telemetry::EXTENSION_POINTS, 65);
     assert_eq!(
         expected_points,
-        crate::telemetry::REQUEST_CELLS - 630 + 124 + 63
+        crate::telemetry::REQUEST_CELLS - 630 + 124 + 65
     );
     assert_eq!(
         metrics.scope_metrics[0]
