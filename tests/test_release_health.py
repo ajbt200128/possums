@@ -16,7 +16,7 @@ HEALTH = b'''    healthcheck:
       interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 60s
+      start_period: 300s
 '''
 
 
@@ -24,7 +24,8 @@ class HealthReleaseTest(unittest.TestCase):
     def test_measured_gateway_has_fixed_credential_free_probe(self):
         source = (ROOT / "tinfoil-config.yml").read_bytes()
         self.assertEqual(source.count(HEALTH), 1)
-        self.assertIn(b"    attestation: true\n" + HEALTH + b"    pids_limit: 256\n", source)
+        self.assertIn(b"    attestation: true\n    keys: [possums-tor-endorsement-v1]\n" + HEALTH
+                      + b"    pids_limit: 256\n", source)
 
     def test_release_image_replacement_preserves_health_and_runtime(self):
         source = (ROOT / "tinfoil-config.yml").read_bytes()

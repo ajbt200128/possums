@@ -1,0 +1,3 @@
+# Unified-diff blank context lines contain a required marker, not source whitespace.
+spikes/tor-arti/patches/*.patch whitespace=-blank-at-eol
+spikes/tor-client/patches/*.patch whitespace=-blank-at-eol

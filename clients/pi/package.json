@@ -6,6 +6,7 @@
   "scripts": { "build": "node build.mjs" },
   "dependencies": {
     "@tinfoilsh/verifier": "1.2.1",
+    "@scure/base": "2.4.0",
     "@freedomofpress/sigstore-browser": "0.1.15",
     "ehbp": "0.3.2"
   },

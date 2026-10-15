@@ -169,7 +169,11 @@ async fn sender<C: Clock + 'static>(
         // A lost observation/window must not silently disable configured
         // telemetry forever. Rewarm with retained attempted-window watermarks;
         // never replay an old batch or change an inference lifecycle.
-        if metrics.epoch.load(std::sync::atomic::Ordering::SeqCst) % 2 == 0 {
+        if metrics
+            .epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .is_multiple_of(2)
+        {
             metrics.enable(Deployment::Production);
         }
         process.sample(&metrics);
