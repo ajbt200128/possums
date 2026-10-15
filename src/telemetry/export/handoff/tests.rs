@@ -974,7 +974,7 @@ async fn composed_tls_allocation_and_owned_cancel() {
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = acceptor.accept(stream).await.unwrap();
         let body = agg::runtime::tests::capture(&mut stream).await;
-        assert_eq!(oracle::points(&body).len(), 2813);
+        assert_eq!(oracle::points(&body).len(), 2815);
         assert!(body.len() <= super::super::transport::MAX_OUTBOUND);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 65536\r\n\r\n")

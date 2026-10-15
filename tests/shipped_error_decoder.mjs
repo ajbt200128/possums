@@ -76,13 +76,13 @@ const reject = (value, status) => {
 // --- Closed vocabulary source of truth (src/failures.rs) ---------------------
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const failuresSource = await readFile(path.join(repoRoot, 'src', 'failures.rs'), 'utf8');
-const allBlock = failuresSource.match(/pub\(crate\) const ALL: \[Self; 54\] = \[([\s\S]*?)\];/);
+const allBlock = failuresSource.match(/pub\(crate\) const ALL: \[Self; 56\] = \[([\s\S]*?)\];/);
 assert(allBlock, 'src/failures.rs ALL array unavailable');
 const variants = [...allBlock[1].matchAll(/Self::(\w+)/g)].map(match => match[1]);
 const labelPairs = Object.fromEntries([...failuresSource.matchAll(/Self::(\w+) => "([a-z_]+)",/g)].map(match => [match[1], match[2]]));
 const interfaceLabels = variants.map(variant => labelPairs[variant]);
-assert.equal(variants.length, 54, 'expected 54 typed interface failures');
-assert.equal(new Set(interfaceLabels).size, 54, 'expected 54 unique labels');
+assert.equal(variants.length, 56, 'expected 56 typed interface failures');
+assert.equal(new Set(interfaceLabels).size, 56, 'expected 56 unique labels');
 
 // --- Capability detection, from the artifact ---------------------------------
 const legacyCodes = ['insufficient_credit', 'unauthorized', 'invalid_request', 'account_limit', 'duplicate_request', 'unavailable', 'generation_failed'];
@@ -131,6 +131,18 @@ if (toleratesExtraFields) {
   assert.ok(!Object.hasOwn(failure, '__probe'), 'unknown field copied onto GatewayError');
 } else {
   reject({ error: { code: 'unavailable', __probe: 1 } });
+}
+
+// --- Tokenizer send refinements retain the exact shipped default envelope ----
+for (const cause of ['tokenizer_transport_failed', 'tokenizer_send_deadline', 'tokenizer_connect_failed']) {
+  const failure = accept({ error: {
+    code: 'unavailable', detail: 'tokenizer_send_failed', billing: 'unknown',
+    message: `[${cause}] Stage: tokenizer_send; constraint: ${cause}. Not replayed. Billing unknown; a new submission may incur another charge.`,
+  } }, 503);
+  assert.equal(failure.detail, 'tokenizer_send_failed');
+  assert.equal(failure.billing, 'unknown');
+  assert.equal(failure.settlement, undefined);
+  assert.ok(!failure.message.includes(cause)); // Shipped Pi ignores gateway messages.
 }
 
 // --- Candidate optional `interface_failure` diagnostic metadata --------------
