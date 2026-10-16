@@ -674,6 +674,77 @@ class FirstTorActivationTest(StopTest):
         self.assertFalse(d.stable_running(view(V), V, d.REQUIRED_REFS | d.TOR_REFS))
         self.assertTrue(d.stable_running(self.after, V, d.REQUIRED_REFS | d.TOR_REFS))
 
+    def test_pending_old_current_references_wait_for_exact_completed_bindings(self):
+        pending = {**self.before, "update_tag": V, "update_status": "deploying"}
+        with patch.object(d, "plan_update"), \
+                patch.object(d, "get", side_effect=[self.before, pending, self.after]) as get, \
+                patch.object(d, "call", return_value=self.cli_result()) as call, \
+                patch.object(d.time, "sleep") as sleep:
+            gate = Mock()
+            result = d.update_once("unused", V, gate, first_tor_activation=True)
+            self.assertTrue(result["approvedTorBindingsConfirmed"])
+            self.assertTrue(result["targetRunningNoPending"])
+            self.assertFalse(result["servingVerified"])
+            self.assertEqual(get.call_count, 3)
+            sleep.assert_called_once_with(10)
+            gate.assert_called_once_with()
+            call.assert_called_once()
+
+    def test_pending_old_references_do_not_extend_deadline_or_hide_config_drift(self):
+        pending = {**self.before, "update_tag": V, "update_status": "deploying"}
+        with patch.object(d, "plan_update"), \
+                patch.object(d, "get", side_effect=[self.before, pending]), \
+                patch.object(d, "call", return_value=self.cli_result()) as call, \
+                patch.object(d.time, "monotonic", side_effect=[0, 1, 301]), \
+                patch.object(d.time, "sleep") as sleep:
+            self.stop("completion_timeout", d.update_once, "unused", V, Mock(), True)
+            call.assert_called_once()
+            sleep.assert_called_once_with(10)
+        pending = {**pending, "cpus": self.before["cpus"] + 1, "update_status": "failed"}
+        with patch.object(d, "plan_update"), \
+                patch.object(d, "get", side_effect=[self.before, pending]), \
+                patch.object(d, "call", return_value=self.cli_result()) as call, \
+                patch.object(d.time, "sleep") as sleep:
+            self.stop("configuration_changed", d.update_once, "unused", V, Mock(), True)
+            call.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_observed_failed_target_candidate_is_not_a_binding_failure(self):
+        for names in (self.before["secrets"], self.selection):
+            pending = {**self.before, "secrets": names, "update_tag": V, "update_status": "failed"}
+            with self.subTest(names=names), patch.object(d, "plan_update"), \
+                    patch.object(d, "get", side_effect=[self.before, pending]) as get, \
+                    patch.object(d, "call", return_value=self.cli_result()) as call, \
+                    patch.object(d.time, "sleep") as sleep:
+                self.stop("candidate_failed", d.update_once, "unused", V, Mock(), True)
+                self.assertEqual(get.call_count, 2)
+                call.assert_called_once()
+                sleep.assert_not_called()
+        diagnostic = r.diagnostic("candidate_failed")
+        self.assertIn("initiating cause", diagnostic["action"])
+        self.assertIn("unknown", diagnostic["action"])
+        self.assertIn("no replay", diagnostic["action"])
+
+    def test_old_current_references_require_exact_pending_target(self):
+        variants = [
+            {**self.before, "update_tag": "v9.9.9", "update_status": "deploying"},
+            {**self.before, "update_tag": "", "update_status": ""},
+            {**self.before, "current_tag": V, "update_tag": V, "update_status": "deploying"},
+            {**self.before, "status": "failed", "update_tag": V, "update_status": "failed"},
+            {**self.before, "secrets": self.before["secrets"] + ["UNAPPROVED_REF"],
+             "update_tag": V, "update_status": "deploying"},
+            {**self.before, "secrets": self.before["secrets"] + [sorted(d.TOR_REFS)[0]],
+             "update_tag": V, "update_status": "deploying"},
+        ]
+        for pending in variants:
+            with self.subTest(pending=pending), patch.object(d, "plan_update"), \
+                    patch.object(d, "get", side_effect=[self.before, pending]), \
+                    patch.object(d, "call", return_value=self.cli_result()) as call, \
+                    patch.object(d.time, "sleep") as sleep:
+                self.stop("tor_binding_completion", d.update_once, "unused", V, Mock(), True)
+                call.assert_called_once()
+                sleep.assert_not_called()
+
     def test_either_existing_tor_reference_blocks_before_planning_even_without_opt_in(self):
         for refs in ([name] for name in sorted(d.TOR_REFS)):
             self.check_existing_references(refs)

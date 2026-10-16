@@ -8,7 +8,7 @@ Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILE
 
 ## Startup-only diagnostics — policy/source work
 
-See [startup diagnostics verification](startup-diagnostics-verification.md) for the normal-dataset log/metric candidate, SDK source findings and external delivery limits. Pinned Rust 1.92.0 local suites passed: 527 default / 582 all-feature tests, four live tests ignored in each; formatting/strict project Clippy and eight-file active LSP probe passed. Local protobuf/TLS/process fixtures and independent review qualify source behavior only, not deployed observability or failed-v0.0.48 recovery; no new live probe/update is authorized.
+See [startup diagnostics verification](startup-diagnostics-verification.md) for the normal-dataset log/metric candidate, SDK source findings and external delivery limits. Pinned Rust 1.92.0 local suites passed: 527 default / 582 all-feature tests, four live tests ignored in each; formatting/strict project Clippy and eight-file active LSP probe passed. Local protobuf/TLS/process fixtures and independent review qualify source behavior only. The subsequent separately authorized [v49 attempt](startup-diagnostics-verification.md#authorized-v49-attempt-and-closed-diagnostic-limits) published successfully but failed protected completion after one approval/update attempt. Readback reported current v43/running and pending v49/failed; startup ingestion, serving, runtime cleanup and exclusivity remain unverified. A source-only completion-classification correction preserves terminal binding/configuration gates and the original bounded observation period. No update replay or new cancellation is authorized by this record.
 
 ## Deployment latest-release setting preservation — source candidate
 
