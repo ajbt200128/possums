@@ -64,6 +64,7 @@ r.CODES.update({
     "tor_binding": ("first-tor-binding", "Require a unique nonempty-string secret-reference list before adding only the two approved Tor references; no update was sent."),
     "tor_exclusive_publication": ("tor-publication", "Exclusive publication is unknown for an already Tor-bound instance. Separately qualify host drain/exclusivity before another update; no update was sent."),
     "tor_binding_completion": ("completion-tor-binding", "The update may have happened; the approved secret-reference selection was not confirmed and completion is unknown. Reconcile privately; no replay or rollback."),
+    "candidate_failed": ("completion-candidate", "The requested update candidate is reported failed; its initiating cause, cleanup and serving are unknown. Inspect supported startup diagnostics privately; no replay or rollback."),
     "domain_source": ("plan-domain", "Production must use the approved old or new hostname; reconcile its configuration before a new deployment."),
     "domain_completion": ("completion-domain", "The release is running but the approved hostname was not confirmed; reconcile privately without replay or rollback."),
     "completion_timeout": ("completion", "Inspect the pending target privately; no replay or rollback."),
@@ -377,11 +378,21 @@ def update_once(cli, tag, final_gate, first_tor_activation=False):
         r.require(type(after.get("mark_latest_release")) is bool
                   and after["mark_latest_release"] == before["mark_latest_release"], "configuration_changed")
         if selection is not None:
-            r.require(unique_names(after.get("secrets")) and set(after["secrets"]) == set(selection),
+            # CLI JSON returns the initial response without following progress.
+            # Until promotion, the current instance may retain its old references.
+            pending_current = (after.get("current_tag") == previous
+                               and after.get("status") == "running"
+                               and after.get("update_tag") == tag
+                               and unique_names(after.get("secrets"))
+                               and set(after["secrets"]) == set(before["secrets"]))
+            r.require(unique_names(after.get("secrets"))
+                      and (set(after["secrets"]) == set(selection) or pending_current),
                       "tor_binding_completion")
         unchanged = [field for field in STABLE if field != "domain" and not (first_tor_activation and field == "secrets")]
         r.require(all(before[field] == after[field] for field in unchanged)
                   and after.get("domain") in (before["domain"], DOMAIN), "configuration_changed")
+        r.require(not (after.get("update_tag") == tag and after.get("update_status") == "failed"),
+                  "candidate_failed")
         if stable_running(after, tag, REQUIRED_REFS | TOR_REFS if first_tor_activation else REQUIRED_REFS):
             r.require(after["domain"] == DOMAIN, "domain_completion")
             result = {"cliSucceeded": True, "postCallPlanReviewed": True, "opaqueConfigurationPreserved": True,
