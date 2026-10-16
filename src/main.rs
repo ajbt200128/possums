@@ -1,9 +1,13 @@
+use futures_util::FutureExt;
 use possums::{
     attestation::TinfoilEvidenceVerifier,
     auth::Auth,
     inference::{InferenceError, InferenceFailure, TinfoilInference},
     server::{serve_until, AppState, ServerFailure},
-    telemetry::runtime::{Config as TelemetryConfig, Runtime as TelemetryRuntime, ShutdownFailure},
+    telemetry::{
+        runtime::{Config as TelemetryConfig, Runtime as TelemetryRuntime, ShutdownFailure},
+        startup::{Failure as DiagnosticFailure, Outcome, Stage, Startup},
+    },
     tor_runtime::{TorRuntimeConfig, TorStartupFailure},
 };
 use std::{env, process::ExitCode, sync::Arc};
@@ -20,11 +24,26 @@ async fn main() -> ExitCode {
             }
         };
     }
-    match run().await {
+    let mut startup = Startup::new(TelemetryConfig::from_env());
+    let result = run(&mut startup).await;
+    finish_pending_startup(&mut startup, result).await;
+    match result {
         Ok(()) => ExitCode::SUCCESS,
-        // Closed stage-specific exit codes remain nonzero and add no automatic
-        // startup logging, telemetry or support artifacts.
         Err(failure) => ExitCode::from(failure.exit_code()),
+    }
+}
+
+async fn finish_pending_startup(startup: &mut Startup, result: Result<(), StartupFailure>) {
+    if !startup.active() {
+        return;
+    }
+    match result {
+        Ok(()) => startup.finish(Outcome::Interrupted).await,
+        Err(failure) => {
+            if let Some(diagnostic) = failure.initialization_diagnostic() {
+                startup.finish(Outcome::Failed(diagnostic)).await;
+            }
+        }
     }
 }
 
@@ -64,6 +83,23 @@ impl StartupFailure {
             #[cfg(feature = "tor")]
             Self::TorServe(_) => 11,
         }
+    }
+
+    fn initialization_diagnostic(self) -> Option<DiagnosticFailure> {
+        Some(match self {
+            Self::ConfigurationMissing => DiagnosticFailure::ConfigurationMissing,
+            Self::ConfigurationEncodingInvalid => DiagnosticFailure::ConfigurationEncodingInvalid,
+            Self::AccountsInvalid => DiagnosticFailure::AccountsInvalid,
+            Self::Connect(failure) => DiagnosticFailure::Connect(failure),
+            Self::BindUnknown => DiagnosticFailure::BindUnknown,
+            Self::SignalUnknown => DiagnosticFailure::SignalUnknown,
+            Self::TorStartup(failure) => DiagnosticFailure::Tor(failure),
+            #[cfg(feature = "tor")]
+            Self::TorServe(failure) => DiagnosticFailure::TorLaunch(failure),
+            // Runtime failures are not startup telemetry. The startup owner is
+            // already terminal before connection sources can be polled.
+            Self::Serve(_) | Self::ServeUnknown | Self::Cleanup(_) => return None,
+        })
     }
 
     fn code(self) -> &'static str {
@@ -128,10 +164,10 @@ impl From<InferenceError> for StartupFailure {
     }
 }
 
-async fn run() -> Result<(), StartupFailure> {
+async fn run(startup: &mut Startup) -> Result<(), StartupFailure> {
+    startup.enter(Stage::Configuration);
     let tor_config = TorRuntimeConfig::from_env().map_err(StartupFailure::TorStartup)?;
     let accounts = env::var("POSSUMS_ACCOUNTS_JSON")?;
-    let auth = Auth::from_json(&accounts).map_err(|_| StartupFailure::AccountsInvalid)?;
     let host = env::var("POSSUMS_TINFOIL_HOST")?;
     let repository = env::var("POSSUMS_TINFOIL_REPOSITORY")?;
     let api_key = env::var("TINFOIL_API_KEY")?;
@@ -143,6 +179,10 @@ async fn run() -> Result<(), StartupFailure> {
         Err(error) => return Err(error.into()),
     };
 
+    startup.enter(Stage::Accounts);
+    let auth = Auth::from_json(&accounts).map_err(|_| StartupFailure::AccountsInvalid)?;
+
+    startup.enter(Stage::Signal);
     // Signals precede any optional Tor construction/bootstrap/publication.
     #[cfg(unix)]
     let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -163,6 +203,7 @@ async fn run() -> Result<(), StartupFailure> {
     ));
     #[cfg(feature = "tor")]
     let prepared = if let Some(config) = tor_config {
+        startup.enter(Stage::TorPreparation);
         let Some(prepared) = possums::tor_runtime::until_shutdown(shutdown.as_mut(), async {
             possums::tor_runtime::PreparedTor::prepare(
                 config,
@@ -182,6 +223,7 @@ async fn run() -> Result<(), StartupFailure> {
     #[cfg(not(feature = "tor"))]
     let _ = tor_config;
 
+    startup.enter(Stage::Connect);
     let inference = TinfoilInference::connect(&host, &repository, api_key)
         .await
         .map_err(StartupFailure::from)?;
@@ -191,11 +233,13 @@ async fn run() -> Result<(), StartupFailure> {
         Arc::<str>::from(attestation_socket),
         verifier,
     );
+    startup.enter(Stage::Bind);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| StartupFailure::BindUnknown)?;
     #[cfg(feature = "tor")]
     let tor_client = if let Some(prepared) = &prepared {
+        startup.enter(Stage::TorBootstrap);
         let Some(client) = possums::tor_runtime::until_shutdown(shutdown.as_mut(), async {
             prepared.bootstrap().await
         })
@@ -219,31 +263,43 @@ async fn run() -> Result<(), StartupFailure> {
     let state = state.with_telemetry(telemetry.metrics());
     #[cfg(feature = "tor")]
     let result = if let (Some(prepared), Some(client)) = (&prepared, tor_client) {
-        // No automatic diagnostic logs/metrics: the adapter retains closed fatal
-        // source/shared/reporting evidence; peer callbacks remain transient.
+        startup.enter(Stage::TorLaunch);
         match prepared.check_current() {
             Err(failure) => Err(StartupFailure::TorStartup(failure)),
-            Ok(()) => possums::tor_ingress::serve_tcp_and_onion_until(
+            Ok(()) => possums::tor_ingress::serve_tcp_and_onion_until_initialized(
                 listener,
                 state,
                 client,
                 prepared.service(),
                 prepared.approved(),
                 shutdown.as_mut(),
-                Arc::new(|_| {}),
+                (Arc::new(|_| {}), || {
+                    startup.finish(Outcome::InitializationComplete)
+                }),
             )
             .await
             .map_err(StartupFailure::TorServe),
         }
+    } else if shutdown.as_mut().now_or_never().is_some() {
+        Ok(())
     } else {
+        startup.finish(Outcome::InitializationComplete).await;
         serve_until(listener, state, shutdown.as_mut())
             .await
             .map_err(StartupFailure::from)
     };
     #[cfg(not(feature = "tor"))]
-    let result = serve_until(listener, state, shutdown.as_mut())
-        .await
-        .map_err(StartupFailure::from);
+    let result = if shutdown.as_mut().now_or_never().is_some() {
+        Ok(())
+    } else {
+        startup.finish(Outcome::InitializationComplete).await;
+        serve_until(listener, state, shutdown.as_mut())
+            .await
+            .map_err(StartupFailure::from)
+    };
+    // Commit any launch failure/interruption before independent cleanup can
+    // fail. Successful initialization already consumed the startup owner.
+    finish_pending_startup(startup, result).await;
     // Classify independent disposal failure, without replacing the serving
     // primary or recursively feeding telemetry's own metric.
     let cleanup = telemetry
@@ -267,6 +323,49 @@ async fn shutdown_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pending_initialization_is_terminal_before_independent_cleanup() {
+        for primary in [Ok(()), Err(StartupFailure::BindUnknown)] {
+            let mut startup = Startup::new(TelemetryConfig::from_lookup(|_| None));
+            startup.enter(Stage::Bind);
+            finish_pending_startup(&mut startup, primary).await;
+            assert!(!startup.active());
+            let result = primary.and(Err(StartupFailure::Cleanup(
+                ShutdownFailure::DisposalUnconfirmed,
+            )));
+            finish_pending_startup(&mut startup, result).await;
+            assert!(!startup.active());
+            if primary.is_err() {
+                assert_eq!(result, primary);
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_faults_are_not_projected_into_startup_telemetry() {
+        for failure in [
+            StartupFailure::Serve(ServerFailure::Accept),
+            StartupFailure::ServeUnknown,
+            StartupFailure::Cleanup(ShutdownFailure::DisposalUnconfirmed),
+        ] {
+            assert!(failure.initialization_diagnostic().is_none());
+        }
+        assert!(matches!(
+            StartupFailure::Connect(InferenceFailure::VerificationFailed)
+                .initialization_diagnostic(),
+            Some(DiagnosticFailure::Connect(
+                InferenceFailure::VerificationFailed
+            ))
+        ));
+        assert!(matches!(
+            StartupFailure::TorStartup(TorStartupFailure::IdentitySecretInvalid)
+                .initialization_diagnostic(),
+            Some(DiagnosticFailure::Tor(
+                TorStartupFailure::IdentitySecretInvalid
+            ))
+        ));
+    }
 
     #[test]
     fn startup_codes_and_stages_are_closed_and_unique() {

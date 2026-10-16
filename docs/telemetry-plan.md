@@ -17,9 +17,13 @@ The API-only telemetry target retains existing metric names, units, buckets, fix
 - Deployment permission does not enable the synthetic-only schema on real or mixed traffic. Keep those exports off until the reviewed real-traffic release mode is ready; do not flip `IsolatedSynthetic` or retain a misleading `test` workload label on production. Continue isolated local fixture tests without requiring a new live instance.
 - These decisions supersede earlier separate-instance, no-production-deployment and seven-day-retention prerequisites in historical packet records, not their measured evidence or remaining content/identifier protections.
 
+## Startup diagnostics extension
+
+The operator subsequently requested platform + Honeycomb startup logs and aggregate startup metrics, using the **normal Honeycomb dataset**, not a special startup destination. Follow the narrow [policy exception](../PRIVACY.md#startup-diagnostics-exception) and [scoped implementation/verification record](startup-diagnostics-verification.md). This selects ordinary startup logs and metrics, not a new tracing framework. Keep request telemetry metrics-only and all current complete-window gates intact. Normal provider-default MVP retention applies; actual log ingestion, access/retention and platform capture remain unverified. Source implementation is not authorization to activate export, retry the failed rollout or initiate live probes.
+
 ## Recommendation and scope
 
-Use **explicit Rust application metrics → bounded local release/allowlist → direct Honeycomb US OTLP HTTPS**, plus Tinfoil's existing resource metrics if they meet our needs. Use the confirmed Honeycomb **`prod`** destination for the MVP; local synthetic qualification preceded the authorized production deployment. No traces, logs, per-request records, GenAI content instrumentation, profiling, billing analytics or OBI in the first pass.
+Use **explicit Rust application metrics → bounded local release/allowlist → direct Honeycomb US OTLP HTTPS**, plus Tinfoil's existing resource metrics if they meet our needs. Use the confirmed Honeycomb **`prod`** destination for the MVP; local synthetic qualification preceded the authorized production deployment. No traces, logs, per-request records, GenAI content instrumentation, profiling, billing analytics or OBI in the first pass. The later startup-only log exception above does not expand request telemetry.
 
 Organize the dashboard around Google's **latency, traffic, errors and saturation** [1]. Prioritize model reliability and speed, endpoint errors, and CPU/memory headroom for each gateway. Use the same safe metric schema in testing that we intend to review for production later; do not prototype with request traces and promise to sanitize them afterward.
 
