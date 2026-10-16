@@ -6,6 +6,10 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
+## Startup-only diagnostics — policy/source work
+
+See [startup diagnostics verification](startup-diagnostics-verification.md) for the normal-dataset log/metric scope, SDK source findings, pending offline checks and external delivery limits. Policy/design is not deployed observability or failed-v0.0.48 recovery evidence; no new live probe/update is authorized.
+
 ## Deployment latest-release setting preservation — source candidate
 
 The [scoped planning record](deployment-latest-flag-verification.md) reproduces the current v0.0.47 read-only rejection: the omitted latest-marking flag would change the existing setting. Explicit snapshot preservation passed the original inspector without relaxing any gate. The candidate adds strict boolean preservation across current state, request, every pre/post-call plan and completion; 60 synthetic release/deployment tests passed with the documented test-process ZIP epoch workaround. Historical payload attribution and serving remain unqualified. No update, replay, tag replacement or deployment occurred.
