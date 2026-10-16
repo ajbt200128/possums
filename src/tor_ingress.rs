@@ -503,11 +503,12 @@ where
     }
 }
 
-async fn launch_checked<T>(
+async fn launch_checked<T, F: Future<Output = ()>>(
     identity: impl FnOnce() -> Result<(), Failure>,
     launch: impl FnOnce() -> Result<T, Failure>,
     mut shutdown: std::pin::Pin<&mut impl Future<Output = ()>>,
     report: &ReportOwner,
+    initialized: impl FnOnce() -> F,
 ) -> Result<Option<T>, ServeFailure> {
     if shutdown.as_mut().now_or_never().is_some() {
         return Ok(None);
@@ -523,11 +524,15 @@ async fn launch_checked<T>(
     identity().map_err(failure)?;
     // Identity reads are synchronous: observe shutdown again immediately before
     // the launch side effect. A later signal is not a process-exit guarantee.
-    tokio::select! {
+    let launched = tokio::select! {
         biased;
         _ = shutdown => Ok(None),
         result = async { launch() } => result.map(Some).map_err(failure),
+    }?;
+    if launched.is_some() {
+        initialized().await;
     }
+    Ok(launched)
 }
 
 /// Runtime opt-in only. Invoking this explicitly launches a service and may
@@ -543,6 +548,31 @@ pub async fn serve_tcp_and_onion_until(
     shutdown: impl Future<Output = ()>,
     report: Reporter,
 ) -> Result<(), ServeFailure> {
+    serve_tcp_and_onion_until_initialized(
+        listener,
+        state,
+        client,
+        config,
+        approved,
+        shutdown,
+        (report, || std::future::ready(())),
+    )
+    .await
+}
+
+/// Runs the startup-only handoff after local service launch, before accepting
+/// connections. This is not evidence of onion publication or remote serving.
+/// The handoff is separate from the reporter used by later peer callbacks.
+pub async fn serve_tcp_and_onion_until_initialized<F: Future<Output = ()>>(
+    listener: TcpListener,
+    state: AppState,
+    client: Arc<TorClient<PreferredRuntime>>,
+    config: OnionServiceConfig,
+    approved: HsId,
+    shutdown: impl Future<Output = ()>,
+    hooks: (Reporter, impl FnOnce() -> F),
+) -> Result<(), ServeFailure> {
+    let (report, initialized) = hooks;
     tokio::pin!(shutdown);
     let readiness = state.tor_ready.clone();
     let report = ReportOwner::new(report);
@@ -562,6 +592,7 @@ pub async fn serve_tcp_and_onion_until(
         },
         shutdown.as_mut(),
         &report,
+        initialized,
     )
     .await?
     else {

@@ -8,7 +8,7 @@ Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILE
 
 ## Startup-only diagnostics — policy/source work
 
-See [startup diagnostics verification](startup-diagnostics-verification.md) for the normal-dataset log/metric scope, SDK source findings, pending offline checks and external delivery limits. Policy/design is not deployed observability or failed-v0.0.48 recovery evidence; no new live probe/update is authorized.
+See [startup diagnostics verification](startup-diagnostics-verification.md) for the normal-dataset log/metric candidate, SDK source findings and external delivery limits. Pinned Rust 1.92.0 local suites passed: 527 default / 582 all-feature tests, four live tests ignored in each; formatting/strict project Clippy and eight-file active LSP probe passed. Local protobuf/TLS/process fixtures and independent review qualify source behavior only, not deployed observability or failed-v0.0.48 recovery; no new live probe/update is authorized.
 
 ## Deployment latest-release setting preservation — source candidate
 

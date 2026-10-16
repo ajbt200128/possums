@@ -670,6 +670,7 @@ async fn identity_reporter_panic_never_launches_and_launch_fault_stays_separate(
         },
         shutdown.as_mut(),
         &report,
+        || async { panic!("startup handoff must not run after identity failure") },
     )
     .await;
     assert!(!launched);
@@ -684,11 +685,12 @@ async fn identity_reporter_panic_never_launches_and_launch_fault_stays_separate(
         })
     );
     assert_eq!(
-        launch_checked::<()>(
+        launch_checked::<(), _>(
             || Ok(()),
             || Err(Failure::Launch),
             shutdown.as_mut(),
-            &panicking_reporter()
+            &panicking_reporter(),
+            || async { panic!("startup handoff must not run after launch failure") },
         )
         .await,
         Err(ServeFailure {
@@ -720,6 +722,7 @@ async fn shutdown_ready_during_identity_read_never_runs_launch() {
             },
             shutdown.as_mut(),
             &report,
+            || async { panic!("startup handoff must not run after interruption") },
         )
         .await,
         Ok(None)
@@ -732,7 +735,7 @@ async fn shutdown_ready_during_identity_read_never_runs_launch() {
     let shutdown = async { stopped.await.unwrap() };
     tokio::pin!(shutdown);
     assert_eq!(
-        launch_checked::<()>(
+        launch_checked::<(), _>(
             || {
                 stop.send(()).unwrap();
                 Err(Failure::IdentityMismatch)
@@ -740,6 +743,7 @@ async fn shutdown_ready_during_identity_read_never_runs_launch() {
             || panic!("launch must not run"),
             shutdown.as_mut(),
             &panicking_reporter(),
+            || async { panic!("startup handoff must not erase identity failure") },
         )
         .await,
         Err(ServeFailure {
@@ -753,15 +757,47 @@ async fn shutdown_ready_during_identity_read_never_runs_launch() {
     let shutdown = std::future::ready(());
     tokio::pin!(shutdown);
     assert_eq!(
-        launch_checked::<()>(
+        launch_checked::<(), _>(
             || panic!("identity must not run after ready shutdown"),
             || panic!("launch must not run"),
             shutdown.as_mut(),
             &report,
+            || async { panic!("startup handoff must not run after ready shutdown") },
         )
         .await,
         Ok(None)
     );
+}
+
+#[tokio::test]
+async fn initialization_handoff_runs_once_after_successful_local_launch() {
+    let events = std::sync::Mutex::new(Vec::new());
+    let shutdown = std::future::pending();
+    tokio::pin!(shutdown);
+    let (report, seen) = reporter();
+    let result = launch_checked(
+        || {
+            events.lock().unwrap().push("identity");
+            Ok(())
+        },
+        || {
+            events.lock().unwrap().push("launch");
+            Ok(42)
+        },
+        shutdown.as_mut(),
+        &report,
+        || async {
+            tokio::task::yield_now().await;
+            events.lock().unwrap().push("initialization_complete");
+        },
+    )
+    .await;
+    assert_eq!(result, Ok(Some(42)));
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["identity", "launch", "initialization_complete"]
+    );
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
