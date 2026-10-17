@@ -127,15 +127,18 @@
           contents = [ pkgs.cacert ];
           config = { };
         };
+        # Inspect fakeNss's declared recipe inputs without changing its image output.
+        # Wrapping the join itself would prewarm the configured passwd/group files.
+        gatewayAccountFiles = (gatewayAccounts.override { symlinkJoin = args: args; }).paths;
         releaseBuildDeps = (pkgs.linkFarm "release-build-deps"
           (pkgs.lib.imap0 (n: drv: {
             name = toString n;
             # Nix 2.34 rejects 25.05's null structured checks on input-only wrappers.
             # Remove those checks only here; real image output constraints stay intact.
             path = builtins.derivation (builtins.removeAttrs drv.inputDerivation.drvAttrs [ "outputChecks" ]);
-          }) ([ gateway attestationHelper ] ++ imageStages dependencyImage))).overrideAttrs (_: {
+          }) ([ gateway attestationHelper ] ++ gatewayAccountFiles ++ imageStages dependencyImage))).overrideAttrs (_: {
             passthru.rebuildDerivations = map (drv: drv.drvPath)
-              ([ gateway attestationHelper gatewayEntrypoint ] ++ imageStages gatewayImage);
+              ([ gateway attestationHelper gatewayEntrypoint gatewayAccounts ] ++ gatewayAccountFiles ++ imageStages gatewayImage);
           });
         smokeImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway-smoke";
