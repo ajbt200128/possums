@@ -38,18 +38,27 @@ closed test output; this is not a claim of whole-host transience.
 - Both runs use the same immutable image ID, UID/GID 65532, `--network none`,
   read-only root, all capabilities dropped, no-new-privileges, zero core limit,
   and a private owner-only 64 MiB `/tmp` tmpfs. Only the probe ELF is mounted in
-  the positive case. The negative case additionally mounts an empty **public**
-  file read-only over `/etc/passwd` and `/etc/group`; `nsswitch.conf` stays the
-  image's own. Neither run permanently modifies the image or host NSS.
+  the positive case. The negative case additionally mounts a mode-000 **public**
+  file read-only over `/etc/passwd` and `/etc/group`; UID 65532 has no DAC-override
+  capability. `nsswitch.conf` stays the image's own. Neither run permanently
+  modifies the image or host NSS. Validated public image ID/architecture print
+  before either probe, and both runs use that exact ID even if the tag changes.
 - Positive output must prove all stages in order: real NSS, actual
   `TorClient::builder()` default constructor, explicit strict configuration,
   Manual `create_unbootstrapped()`, and empty ephemeral key-manager access.
   This is not the full preparation factory; its existing direct regression and
   r41 composed tests remain separate, complementary coverage. No identity key
   is needed or inserted by this probe.
-- Negative output must show absent records and a caught failure at the **SDK
-  default builder**, before `.config()`. It exits 2, never success. It does not
-  use the unconditional missing-NSS injector, which cannot pass a positive run.
+- Negative output must show the existing `fs-mistrust` dependency's typed
+  `PasswdGroupIoError` with `io::ErrorKind::PermissionDenied`, then a caught
+  failure at the **actual SDK default builder**, before `.config()`. Only that
+  ordered transcript, empty stderr and exit 2 qualify. The preliminary typed
+  lookup does not cache failures; the SDK still performs its own default lookup.
+  No new dependency, POSIX ABI, interposer, permission-disable environment or
+  panic-payload inspection is added. An empty **readable** account database is
+  not this fixture: a successful no-match is valid no-group-trust behavior, not
+  a security failure. Closed diagnostics distinguish that wrong fixture, an
+  unexpectedly returning SDK builder, and unknown output; none qualify.
 - The SDK is never bootstrapped; no onion launch, publication, attestation,
   endorsement, authentication or inference is attempted. Runtime shutdown is
   bounded to one second; container wait to twenty seconds with owned cleanup.
@@ -68,8 +77,13 @@ Pinned offline Nix development shell: Rust/Cargo 1.92.0, aarch64-darwin.
 - Root all-target/all-feature strict Clippy and formatting: pass. Standalone
   ordinary-bin probe build/strict Clippy: pass (Darwin compilation only, **not**
   Linux NSS execution). Existing vendored tinfoil dead-code warning is unchanged.
-- Four offline Tor-image projection tests and nine existing image-health tests:
-  pass. No Docker/inference is initiated by these unit tests.
+- Seven offline Tor-image projection tests and nine existing image-health tests:
+  pass after the NSS I/O-fixture correction. Coverage includes every required
+  stage/exit, wrong-fixture transcripts, hostile stdout/stderr, mode-000 fixture,
+  identical image IDs across runs and public identity output before failure.
+  Root and ordinary-bin strict Clippy plus Rust formatting pass in the pinned
+  Darwin shell; this does not execute Linux NSS. No Docker/inference is initiated
+  by these unit tests.
 - Pinned `checks.aarch64-darwin.gateway-accounts`: pass. Exact x86_64-linux
   candidate image and probe derivations evaluate. Local Linux image build is
   not substituted for cached original-repository PR CI.
@@ -94,6 +108,28 @@ include a leaf permission refusal. No ignored prefix, permission bypass or
 production code change is introduced. The independent existing strict-ancestor
 test and actual-image positive check remain required. No image result is inferred
 from the first run.
+
+Head `0ca0bb059d079438cfa618906e9e228a1a1aa964`, check run `39055238199`,
+attempt 1: `flake` and `image` passed. The actual linux/amd64 rootfs positive
+passed all NSS/default-builder/config/Manual-client/empty-keymgr stages.
+`image-startup` failed the negative's exact projection after exit 2; packaged
+health and startup smoke were skipped. The mismatching transcript was not
+projected, so neither an actual SDK panic nor its absence was observed there.
+The Docker ID was not printed before failure; prior Nix paths are not substituted
+for it.
+
+The separately authorized one-commit follow-up corrects that fixture, not
+production. Pinned `fs-mistrust` 0.16.0 `src/user.rs`
+`get_own_username`/`get_self_named_gid_impl` accept `Ok(None)` and
+`TrustedGroup::SelfNamed` propagates only lookup I/O failures through
+`PasswdGroupIoError`; failed results are not inserted into `TrustedUsersCache`.
+Pinned `pwd-grp` 1.0.2 uses libc's reentrant lookups and preserves nonzero return
+codes as I/O errors. Thus a readable empty database did not faithfully test the
+intended I/O-error constraint. The corrected mode-000 hypothesis requires its own
+new-head Linux attempt-1 CI observation; Darwin compilation is not EACCES evidence.
+No source NSS, permission policy, SDK features, production binary/configuration,
+workflow or publication change is made by this follow-up. Post-CI observations
+belong in the PR record without creating another unqualified documentation head.
 
 The operator additionally requires a **fresh independent Linux E2E after the
 final candidate fixes and these image/SDK checks pass**, then final review.

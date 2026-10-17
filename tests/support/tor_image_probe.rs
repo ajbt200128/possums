@@ -7,7 +7,7 @@ static STAGE: AtomicU8 = AtomicU8::new(0);
 
 // Linux libc's POSIX account API. No host command, host NSS or extra Cargo features.
 #[cfg(target_os = "linux")]
-fn account_records() -> bool {
+fn account_records() -> Result<bool, &'static str> {
     use std::ffi::{c_char, c_int, CStr};
     #[repr(C)]
     struct Passwd {
@@ -42,7 +42,7 @@ fn account_records() -> bool {
     unsafe {
         // Linux RLIMIT_CORE: never retain a panic/core payload.
         if setrlimit(4, &[0, 0]) != 0 || [getuid(), geteuid(), getgid(), getegid()] != [65532; 4] {
-            return false;
+            return Err("identity_or_core_limit_unknown");
         }
         for by_name in [false, true] {
             let entry = if by_name {
@@ -55,7 +55,7 @@ fn account_records() -> bool {
                 || (*entry).gid != 65532
                 || CStr::from_ptr((*entry).name).to_bytes() != b"possums"
             {
-                return false;
+                return Ok(false);
             }
             let entry = if by_name {
                 getgrnam(c"possums".as_ptr())
@@ -66,22 +66,40 @@ fn account_records() -> bool {
                 || (*entry).gid != 65532
                 || CStr::from_ptr((*entry).name).to_bytes() != b"possums"
             {
-                return false;
+                return Ok(false);
             }
         }
     }
-    true
+    Ok(true)
+}
+
+// Use the existing dependency's typed NSS error, not errno guesses or panic text.
+// Failed lookups are not cached by fs-mistrust, so the SDK must still do its own.
+fn missing_records_code() -> &'static str {
+    match fs_mistrust::Mistrust::builder().build() {
+        Err(fs_mistrust::Error::PasswdGroupIoError(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            "io_permission_denied"
+        }
+        Ok(_) => "records_unmatched",
+        _ => "cause_unknown",
+    }
 }
 
 fn exercise() -> Result<(), &'static str> {
     STAGE.store(1, Ordering::Relaxed);
     #[cfg(target_os = "linux")]
-    let records = account_records();
+    let records = account_records()?;
     #[cfg(not(target_os = "linux"))]
     let records = false;
     println!(
         "stage=nss code={}",
-        if records { "present" } else { "absent" }
+        if records {
+            "present"
+        } else {
+            missing_records_code()
+        }
     );
 
     STAGE.store(2, Ordering::Relaxed);

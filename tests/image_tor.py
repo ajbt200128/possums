@@ -1,7 +1,7 @@
 """Public, key-free Arti constructor acceptance in the actual production rootfs.
 
 No daemon, bootstrap, service launch, attestation, inference or telemetry export.
-Only the probe binary and (negative case) empty public account files are mounted.
+Only the probe binary and (negative case) unreadable public account files are mounted.
 Docker's local image/metadata persistence is not whole-host transience.
 """
 import contextlib
@@ -24,7 +24,16 @@ POSITIVE = (
     b"stage=ephemeral_keymgr code=ok\n"
     b"stage=terminal code=ok\n"
 )
-NEGATIVE = b"stage=nss code=absent\nstage=terminal code=sdk_builder_panic\n"
+NEGATIVE = b"stage=nss code=io_permission_denied\nstage=terminal code=sdk_builder_panic\n"
+# Exact locally authored transcripts only: never project arbitrary probe output.
+NEGATIVE_FAILURES = {
+    b"stage=nss code=records_unmatched\nstage=sdk_builder code=ok\nstage=terminal code=nss_not_rejected\n":
+        "tor_negative_fixture_no_match",
+    b"stage=nss code=records_unmatched\nstage=terminal code=sdk_builder_panic\n":
+        "tor_negative_fixture_no_match_sdk_builder_panic",
+    b"stage=nss code=io_permission_denied\nstage=sdk_builder code=ok\nstage=terminal code=nss_not_rejected\n":
+        "tor_negative_sdk_builder_not_rejected",
+}
 
 
 def result_matches(exit_code, stdout, stderr, negative):
@@ -32,7 +41,13 @@ def result_matches(exit_code, stdout, stderr, negative):
             and stdout == (NEGATIVE if negative else POSITIVE))
 
 
-def probe(image, binary, empty, negative):
+def projection_failure(exit_code, stdout, stderr, negative):
+    if negative and exit_code == 2 and not stderr:
+        return NEGATIVE_FAILURES.get(stdout, "tor_negative_output_cause_unknown")
+    return "tor_negative_output_cause_unknown" if negative else "tor_positive_output_cause_unknown"
+
+
+def probe(image, binary, unreadable, negative):
     name = "possums-tor-image-probe-" + uuid.uuid4().hex
     created = False
     try:
@@ -44,7 +59,7 @@ def probe(image, binary, empty, negative):
                    "--entrypoint", "/tor-image-probe"]
         if negative:
             for target in ("passwd", "group"):
-                command += ["--mount", f"type=bind,src={empty},dst=/etc/{target},readonly"]
+                command += ["--mount", f"type=bind,src={unreadable},dst=/etc/{target},readonly"]
         command += [image]
         require(bool(re.fullmatch(rb"[0-9a-f]{64}\n", checked(command, "tor_container_create"))),
                 "tor_container_create")
@@ -59,9 +74,11 @@ def probe(image, binary, empty, negative):
         require(checked(["wait", name], "tor_container_wait", timeout=20)
                 == (b"2\n" if negative else b"0\n"), "tor_container_exit")
         code, out, err = docker(["logs", name], "tor_container_output")
-        require(code == 0 and result_matches(2 if negative else 0, out, err, negative),
-                "tor_negative_projection" if negative else "tor_positive_projection")
-        print("stage=image_negative code=nss_default_builder_rejected" if negative
+        require(code == 0, "tor_container_output")
+        exit_code = 2 if negative else 0
+        require(result_matches(exit_code, out, err, negative),
+                projection_failure(exit_code, out, err, negative))
+        print("stage=image_negative code=nss_io_permission_denied_sdk_builder_panic" if negative
               else "stage=image_positive code=nss_builder_configure_create_keymgr_ok")
     finally:
         if created:
@@ -82,15 +99,17 @@ def qualify(archive, binary):
     architecture = checked(["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", IMAGE],
                            "tor_image_architecture").strip()
     require(architecture == b"linux/amd64", "tor_image_architecture")
+    # Public identity remains available even if a subsequent probe fails.
+    print("stage=image_identity code=" + identity.decode("ascii"), flush=True)
+    print("stage=image_architecture code=linux_amd64", flush=True)
     # Only a single ELF is mounted; no host libraries or host NSS are available.
     with tempfile.TemporaryDirectory(prefix="possums-tor-public-") as directory:
-        empty = Path(directory) / "empty"
-        empty.write_bytes(b"")
-        empty.chmod(0o644)
-        probe(identity.decode("ascii"), binary, empty, False)
-        probe(identity.decode("ascii"), binary, empty, True)
-    print("stage=image_identity code=" + identity.decode("ascii"))
-    print("stage=image_architecture code=linux_amd64")
+        unreadable = Path(directory) / "unreadable"
+        unreadable.write_bytes(b"")
+        # UID 65532 with CAP_DROP ALL cannot read this, unlike an empty 0644 DB.
+        unreadable.chmod(0o000)
+        probe(identity.decode("ascii"), binary, unreadable, False)
+        probe(identity.decode("ascii"), binary, unreadable, True)
 
 
 def main(argv):
