@@ -59,6 +59,10 @@ mod lifecycle_tests {
     mod tor_bridge_tests {
         include!("server/tor_bridge_tests.rs");
     }
+    #[cfg(feature = "tor")]
+    mod tor_offline_e2e_tests {
+        include!("server/tor_offline_e2e_tests.rs");
+    }
 }
 #[cfg(test)]
 mod observer_tests;
