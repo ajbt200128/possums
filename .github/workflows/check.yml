@@ -16,6 +16,52 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  independent-tor-linux:
+    # One independent controller, never a source-PR push or manual dispatch.
+    if: github.event_name == 'pull_request' && github.head_ref == 'test/tor-linux-independent-r46'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+      - name: Check closed-output controller with public canned outputs
+        run: python3 tests/tor_linux_independent.py --self-test
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: 74b7223c210ba361b0a76962805f5ab764d5395a
+          path: subject
+          persist-credentials: false
+      - name: Record distinct public controller and exact subject identities
+        env:
+          CONTROLLER_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git -C subject rev-parse HEAD)" = 74b7223c210ba361b0a76962805f5ab764d5395a
+          test "$CONTROLLER_HEAD" != 74b7223c210ba361b0a76962805f5ab764d5395a
+          test -z "$(git -C subject status --porcelain)"
+          printf 'controller_head=%s\ncontroller_checkout=%s\n' "$CONTROLLER_HEAD" "$(git rev-parse HEAD)"
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+        with:
+          diagnostic-endpoint: ""
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          diagnostic-endpoint: ""
+          use-flakehub: false
+          use-gha-cache: true
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - name: Build exact subject production image and normal-dependency probe
+        working-directory: subject
+        run: |
+          nix --version
+          nix build .#gateway-image --out-link "$RUNNER_TEMP/independent-production-image" --print-build-logs
+          nix build .#tor-image-probe --out-link "$RUNNER_TEMP/independent-normal-probe" --print-build-logs
+          nix develop -c bash -c 'rustc --version; cargo --version'
+      - name: Run exact subject public fixture pair in independently built pinned rootfs
+        run: |
+          python3 tests/tor_linux_independent.py subject \
+            "$RUNNER_TEMP/independent-production-image" \
+            "$RUNNER_TEMP/independent-normal-probe/bin/tor-image-probe"
+
   flake:
     runs-on: ubuntu-latest
     steps:
