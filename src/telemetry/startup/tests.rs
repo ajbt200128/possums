@@ -550,6 +550,25 @@ async fn malformed_config_and_off_do_no_transport_work_or_content_encoding() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn expired_shared_deadline_never_opens_another_connection() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let client = Client::new(listener.local_addr().unwrap()).unwrap();
+    let failure = send(
+        &client,
+        Signal::Metrics,
+        &records(Outcome::Interrupted),
+        tokio::time::Instant::now(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(failure.constraint, "shared_delivery_deadline");
+    assert_eq!(client.evidence().connecting.load(SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn shared_deadline_and_cancelled_finish_drop_owned_work_and_never_reopen() {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
@@ -563,8 +582,8 @@ async fn shared_deadline_and_cancelled_finish_drop_owned_work_and_never_reopen()
         .err()
         .unwrap();
     assert_eq!(tokio::time::Instant::now() - start, BUDGET);
-    assert_eq!(failure.constraint, "shared_delivery_deadline");
-    assert_eq!(evidence.connecting.load(SeqCst), 1);
+    assert_eq!(failure.constraint, "signal_delivery_deadline");
+    assert_eq!(evidence.connecting.load(SeqCst), 2);
     assert_eq!(evidence.live_io.load(SeqCst), 0);
 
     for (index, outcome) in [
@@ -584,13 +603,13 @@ async fn shared_deadline_and_cancelled_finish_drop_owned_work_and_never_reopen()
         assert!(!startup.active());
         startup.enter(Stage::Connect);
         startup.finish(Outcome::Interrupted).await;
-        assert_eq!(evidence.connecting.load(SeqCst), index + 2);
+        assert_eq!(evidence.connecting.load(SeqCst), index + 3);
         assert_eq!(evidence.live_io.load(SeqCst), 0);
     }
 }
 
 #[tokio::test]
-async fn second_signal_uses_remaining_budget_and_preserves_first_failure() {
+async fn second_signal_gets_its_own_budget_and_preserves_first_failure() {
     for rejected in [false, true] {
         let (listener, client, acceptor) =
             super::super::runtime::tests::fixture(true, "api.honeycomb.io").await;
@@ -609,7 +628,7 @@ async fn second_signal_uses_remaining_budget_and_preserves_first_failure() {
             let mut io = acceptor.accept(io).await.unwrap();
             let payload = capture(&mut io, "/v1/metrics").await;
             assert!(!String::from_utf8_lossy(&payload).contains(HOSTILE));
-            // No response: the shared deadline must dispose the real TLS stream.
+            // No response: the signal deadline must dispose the real TLS stream.
             assert!(io.read_u8().await.is_err());
         };
         let observations = records(Outcome::Failed(Failure::BindUnknown));
@@ -622,13 +641,86 @@ async fn second_signal_uses_remaining_budget_and_preserves_first_failure() {
             assert_eq!(failure.constraint, "http_response_rejected");
         } else {
             assert!(matches!(failure.signal, Signal::Metrics));
-            assert_eq!(failure.constraint, "shared_delivery_deadline");
+            assert_eq!(failure.constraint, "signal_delivery_deadline");
         }
         assert!(!failure.to_string().contains(HOSTILE));
         assert_eq!(evidence.connecting.load(SeqCst), 2);
         assert_eq!(evidence.live_io.load(SeqCst), 0);
         assert!(observations[1].to_string().contains("startup_bind_unknown"));
     }
+}
+
+#[tokio::test]
+async fn logs_timeout_does_not_starve_metrics_of_its_only_attempt() {
+    let (listener, client, acceptor) =
+        super::super::runtime::tests::fixture(true, "api.honeycomb.io").await;
+    let evidence = client.evidence();
+    let peer = async {
+        let (io, _) = listener.accept().await.unwrap();
+        let mut io = acceptor.accept(io).await.unwrap();
+        capture(&mut io, "/v1/logs").await;
+        // Withhold the log response through its deadline. The owned TLS stream
+        // must close before the independent metrics attempt is allowed to start.
+        assert!(io.read_u8().await.is_err());
+        drop(io);
+        let next = tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
+        let Ok(Ok((io, _))) = next else {
+            return false;
+        };
+        let mut io = acceptor.accept(io).await.unwrap();
+        let body = capture(&mut io, "/v1/metrics").await;
+        ExportMetricsServiceRequest::decode(body.as_slice()).unwrap();
+        io.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        true
+    };
+    let observations = records(Outcome::Failed(Failure::BindUnknown));
+    let (result, metrics_attempted) = tokio::time::timeout(Duration::from_secs(4), async {
+        tokio::join!(deliver(client, &observations), peer)
+    })
+    .await
+    .unwrap();
+    assert!(
+        metrics_attempted,
+        "logs exhausted the only metrics delivery opportunity"
+    );
+    let failure = result.err().unwrap();
+    assert!(matches!(failure.signal, Signal::Logs));
+    assert_eq!(failure.constraint, "signal_delivery_deadline");
+    assert_eq!(evidence.connecting.load(SeqCst), 2);
+    assert_eq!(evidence.live_io.load(SeqCst), 0);
+    assert!(observations[1].to_string().contains("startup_bind_unknown"));
+}
+
+#[tokio::test]
+async fn two_individually_timely_tls_signals_both_complete() {
+    let (listener, client, acceptor) =
+        super::super::runtime::tests::fixture(true, "api.honeycomb.io").await;
+    let evidence = client.evidence();
+    let peer = async {
+        for path in ["/v1/logs", "/v1/metrics"] {
+            let (io, _) = listener.accept().await.unwrap();
+            let mut io = acceptor.accept(io).await.unwrap();
+            capture(&mut io, path).await;
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            let _ = io
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+    };
+    let observations = records(Outcome::Interrupted);
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(4), async {
+        tokio::join!(deliver(client, &observations), peer)
+    })
+    .await
+    .unwrap();
+    assert!(
+        result.is_ok(),
+        "individually timely signals lost their delivery opportunity"
+    );
+    assert_eq!(evidence.connections.load(SeqCst), 2);
+    assert_eq!(evidence.live_io.load(SeqCst), 0);
 }
 
 #[tokio::test]

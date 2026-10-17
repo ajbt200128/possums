@@ -27,7 +27,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const BUDGET: Duration = Duration::from_secs(1);
+// The transport already caps each signal attempt at one second. Reserve both
+// sequential attempts so stalled logs cannot consume metrics' only opportunity.
+const BUDGET: Duration = Duration::from_secs(2);
 const MAX_RECORDS: usize = 9; // eight distinct stages and one terminal
 const EVENT: &str = "possums.startup";
 
@@ -451,7 +453,7 @@ async fn send(
         .map_err(|error| {
             let constraint = match error.downcast_ref::<transport::Failure>() {
                 Some(transport::Failure::Response) => "http_response_rejected",
-                Some(transport::Failure::Expired) => "shared_delivery_deadline",
+                Some(transport::Failure::Expired) => "signal_delivery_deadline",
                 Some(transport::Failure::Configuration) => "transport_configuration",
                 _ => "transport_cause_unknown",
             };
