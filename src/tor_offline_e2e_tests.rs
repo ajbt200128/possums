@@ -208,10 +208,39 @@ fn exercise() -> Result<&'static str, &'static str> {
     STAGE.store(5, Ordering::Relaxed);
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     drop(prepared);
-    if scratch_path.exists() {
-        return Err("CLEANUP");
+    finish_after_cleanup(result, scratch_path.exists())
+}
+
+fn finish_after_cleanup(
+    result: Result<&'static str, &'static str>,
+    scratch_remains: bool,
+) -> Result<&'static str, &'static str> {
+    result.and_then(|outcome| {
+        if scratch_remains {
+            Err("CLEANUP")
+        } else {
+            Ok(outcome)
+        }
+    })
+}
+
+#[test]
+fn cleanup_failure_preserves_primary_sdk_failure() {
+    for failure in ["SDK_CLIENT", "SDK_KEYSTORE", "SDK_IDENTITY"] {
+        assert_eq!(finish_after_cleanup(Err(failure), true), Err(failure));
     }
-    result
+}
+
+#[test]
+fn cleanup_failure_rejects_only_otherwise_successful_probe() {
+    assert_eq!(
+        finish_after_cleanup(Ok("PREPARE_AND_SDK_OK"), true),
+        Err("CLEANUP")
+    );
+    assert_eq!(
+        finish_after_cleanup(Ok("PREPARE_AND_SDK_OK"), false),
+        Ok("PREPARE_AND_SDK_OK")
+    );
 }
 
 #[test]
