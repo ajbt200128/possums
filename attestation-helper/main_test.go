@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ajbt200128/possums/attestation-helper/verifier"
 	"github.com/tinfoilsh/tinfoil-go/document"
@@ -155,7 +157,9 @@ func TestFetchEvidenceResponseBounds(t *testing.T) {
 				if !errors.As(err, &observed) || observed.status != test.status {
 					t.Fatal("acquisition boundary discarded observed HTTP status")
 				}
-				response := torEvidence(bytes.NewReader(make([]byte, nonceBytes)), socket, verifier.Repository)
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+				response := torEvidenceContext(ctx, bytes.NewReader(make([]byte, nonceBytes)), socket, verifier.Repository)
 				if response.Failure == nil || response.Failure.Code != "possums_v3_acquisition_http_status" || response.Failure.Status == nil || *response.Failure.Status != test.status || response.Evidence != nil {
 					t.Fatal("actual Tor native acquisition did not retain observed HTTP status")
 				}
