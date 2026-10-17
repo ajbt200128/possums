@@ -74,6 +74,17 @@
             mv $out/bin/attestation-helper $out/bin/possums-attestation
           '';
         };
+        # Build the public probe as a regular bin (not an example/test): Cargo
+        # must not unify dev-dependency features into the shipping SDK closure.
+        # filterCargoSources includes this .rs helper; gatewayImage never does.
+        torImageProbe = craneLib.buildPackage (torCommon // {
+          cargoArtifacts = torCargoArtifacts;
+          cargoExtraArgs = torCommon.cargoExtraArgs + " --bin tor-image-probe";
+          doCheck = false;
+          postPatch = ''
+            printf '\n[[bin]]\nname = "tor-image-probe"\npath = "tests/support/tor_image_probe.rs"\n' >> Cargo.toml
+          '';
+        });
         apiSmokeFixture = craneLib.buildPackage (common // {
           inherit cargoArtifacts;
           cargoExtraArgs = "--example api_smoke_fixture";
@@ -143,6 +154,7 @@
           attestation-helper = attestationHelper;
           attestation-go = attestationGo;
           api-smoke-fixture = apiSmokeFixture;
+          tor-image-probe = torImageProbe;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;
           gateway-smoke-image = smokeImage;
