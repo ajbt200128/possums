@@ -1,6 +1,6 @@
 # Tor v0: endorsed signing-key and onion signature primitives
 
-**Current continuation:** [backend source integration](#backend-source-integration--default-off) now implements the earlier runtime seams. Prior packet descriptions and acceptance remain historical; no deployed or positive live trust-chain claim follows.
+**Current continuation:** [backend source integration](#backend-source-integration--default-off) implements the earlier runtime seams. The operator subsequently **removed startup self-appraisal completely**, including cached freshness checks through bootstrap/launch; see [the new publication boundary](tor-startup-removal-verification.md). Local grant consistency is not appraisal. Fresh per-request and independent client verification remain required. Prior packet descriptions and acceptance remain historical; no deployed or positive live trust-chain claim follows.
 
 ## Scope and status
 
@@ -163,9 +163,12 @@ does not implement provisioning, storage, approval or these custody gates.
 V3's endorsed SPKI mechanism supports A's projection, and the pinned generator's
 encoding is source-qualified below. An actual mounted application signing key,
 its per-boot rotation and signing capability remain **runtime-unqualified**.
-Future startup must compare the private grant's derived raw Ed25519 public key
-against the approved public SPKI and the same-ID freshly authenticated endorsed
-SPKI, rejecting any mismatch before serving endorsements. This is especially
+The historical startup requirement was to compare the private grant's derived
+raw Ed25519 public key against the approved public SPKI and the same-ID freshly
+authenticated endorsed SPKI before serving endorsements. The later operator
+startup change supersedes that self-appraisal requirement: startup checks only
+the mounted private/public pair; each endorsement request still requires fresh
+appraised-A equality before returning endorsement bytes. This is especially
 necessary for v1, which contains no public component to check. Such equality
 alone does not authenticate the mount, approved measured configuration, container
 grant ownership or local B custody; those integration gates remain unimplemented.
@@ -409,13 +412,17 @@ valid envelope remains a helper-stage unknown, not invented SDK specificity.
 Quote transport size remains subject to these existing bounded-output limits,
 not a complete hardware-evidence acquisition guarantee.
 
-`PreparedTor` first obtains fresh official native Tor appraisal using a random
-public nonce. It then reads only the fixed grant paths
+`PreparedTor` reads only the fixed grant paths
 `/run/tinfoil/keys/possums-tor-endorsement-v1/{private_key.pem,public_key.pem}`,
 with bounded file reads. Maintained Rustls PEM and Spki DER decoders plus the
-existing Ring v1/v2 parser require Ed25519 and derived/mounted/appraised A equality.
-No private-key Debug/export, custom ASN.1/PEM/crypto, new key generation or secret
-arguments are introduced. A rotation away from the held signer fails closed.
+existing Ring v1/v2 parser require Ed25519 and derived/mounted public A equality.
+It does not acquire evidence, generate a nonce or retain/check an appraisal at
+preparation, bootstrap or launch. This is local consistency, not authentication
+of the mounted grant. No private-key Debug/export, custom ASN.1/PEM/crypto, new
+key generation or secret arguments are introduced. Per-request appraisal still
+rejects a rotation away from the held signer before returning endorsement bytes.
+Publication can precede any successful self-appraisal; it does not make an
+unavailable attestation endpoint work or qualify the live client trust chain.
 The [runtime continuation](tor-dual-endpoint-plan.md#backend-runtime-continuation--offline-source-only)
 records the native SDK B-custody choice, ephemeral primary and source-removal
 fixture, protected/exclusive host assumptions, signal ordering and readiness.

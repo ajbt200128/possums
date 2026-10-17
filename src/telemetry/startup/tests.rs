@@ -228,7 +228,6 @@ fn known_failures_and_stage_specific_unknowns_keep_safe_evidence() {
         Failure::Tor(TorStartupFailure::State),
         Failure::Tor(TorStartupFailure::Client),
         Failure::Tor(TorStartupFailure::Bootstrap),
-        Failure::Tor(TorStartupFailure::Nonce),
     ];
     for failure in failures {
         let record = Observation::new(Stage::Connect, Some(Outcome::Failed(failure)));
@@ -276,25 +275,9 @@ fn known_failures_and_stage_specific_unknowns_keep_safe_evidence() {
 
 #[cfg(feature = "tor")]
 #[test]
-fn nested_tor_codes_and_only_observed_status_are_preserved() {
-    use crate::{
-        attestation::{TorEvidenceError, TorVerificationFailure},
-        server::ServerFailure,
-        tor_ingress,
-    };
+fn nested_tor_codes_are_preserved_without_appraisal_status() {
+    use crate::{server::ServerFailure, tor_ingress};
     let cases = [
-        (
-            Failure::Tor(TorStartupFailure::Appraisal(
-                TorEvidenceError::AcquisitionStatus(418),
-            )),
-            "status=418",
-        ),
-        (
-            Failure::Tor(TorStartupFailure::Appraisal(
-                TorEvidenceError::Verification(TorVerificationFailure::PublisherCertificate),
-            )),
-            "code=possums_v3_publisher_certificate",
-        ),
         (
             Failure::Tor(TorStartupFailure::Identity(
                 tor_ingress::Failure::IdentityMismatch,

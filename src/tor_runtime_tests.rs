@@ -43,15 +43,10 @@ fn source(path: &Path) -> KeyMgr {
         .build()
         .unwrap()
 }
-fn pem_fixture(
-    private: &str,
-    public: &str,
-    a: [u8; 32],
-) -> Result<TorEndorsementSigner, TorStartupFailure> {
+fn pem_fixture(private: &str, public: &str) -> Result<TorEndorsementSigner, TorStartupFailure> {
     decode_grant(
         private.as_bytes(),
         public.as_bytes(),
-        a,
         &HsIdKey::from(&synthetic_pair(7)).id(),
     )
 }
@@ -61,19 +56,26 @@ fn actual_go_pkcs8_v1_pem_spki_and_derived_key_equality() {
     let private = fixture["private_key_pem"].as_str().unwrap();
     let public = fixture["public_key_pem"].as_str().unwrap();
     let a = crate::attestation::decode_raw32(fixture["application_key"].as_str().unwrap()).unwrap();
-    assert_eq!(pem_fixture(private, public, a).unwrap().public_key(), a);
-    assert_eq!(
-        pem_fixture(private, public, [8; 32]).err(),
-        Some(TorStartupFailure::GrantMismatch)
-    );
+    // The mounted pair is locally consistent, not independently appraised A.
+    assert_eq!(pem_fixture(private, public).unwrap().public_key(), a);
     for malformed in [
         "",
         "HOSTILE_SECRET_EXCEPTION",
         "-----BEGIN PUBLIC KEY-----\nAQ==\n-----END PUBLIC KEY-----",
     ] {
-        let failure = pem_fixture(private, malformed, a).err().unwrap();
+        let failure = pem_fixture(private, malformed).err().unwrap();
         assert_eq!(failure, TorStartupFailure::GrantInvalid);
         assert!(!failure.to_string().contains("HOSTILE"));
+    }
+    for trailing in [public.to_owned(), "HOSTILE_TRAILING_PEM".into()] {
+        assert_eq!(
+            pem_fixture(&format!("{private}{trailing}"), public).err(),
+            Some(TorStartupFailure::GrantInvalid)
+        );
+        assert_eq!(
+            pem_fixture(private, &format!("{public}{trailing}")).err(),
+            Some(TorStartupFailure::GrantInvalid)
+        );
     }
     // Standard SPKI decoder rejects a non-Ed25519 OID and trailing DER.
     use base64::{engine::general_purpose::STANDARD, Engine};
@@ -93,10 +95,10 @@ fn actual_go_pkcs8_v1_pem_spki_and_derived_key_equality() {
             "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
             STANDARD.encode(der)
         );
-        assert_eq!(pem_fixture(private, &pem, a).err(), Some(expected));
+        assert_eq!(pem_fixture(private, &pem).err(), Some(expected));
     }
     assert_eq!(
-        pem_fixture(public, public, a).err(),
+        pem_fixture(public, public).err(),
         Some(TorStartupFailure::GrantInvalid)
     );
 }
@@ -277,29 +279,113 @@ async fn ready_shutdown_never_polls_construction_bootstrap_or_publication() {
     );
 }
 
+struct NoStartupCalls;
+
+#[async_trait::async_trait]
+impl crate::attestation::EvidenceVerifier for NoStartupCalls {
+    async fn verify(
+        &self,
+        _: &str,
+        _: u64,
+    ) -> Result<crate::attestation::GatewayEvidence, crate::attestation::EvidenceError> {
+        panic!("startup must not appraise evidence");
+    }
+    async fn verify_tor(
+        &self,
+        _: &str,
+        _: &[u8; 32],
+    ) -> Result<crate::attestation::TorGatewayEvidence, crate::attestation::TorEvidenceError> {
+        panic!("startup must not appraise Tor evidence");
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::inference::Inference for NoStartupCalls {
+    async fn catalog(&self) -> Result<Vec<u8>, crate::inference::InferenceError> {
+        panic!("fixture must not acquire a catalog");
+    }
+    async fn count_tokens(
+        &self,
+        _: &str,
+        _: &[crate::inference::Message],
+        _: Arc<crate::telemetry::hooks::Lease>,
+    ) -> Result<u64, crate::inference::InferenceError> {
+        panic!("fixture must not tokenize");
+    }
+    fn verification_document(&self) -> Result<serde_json::Value, crate::inference::InferenceError> {
+        panic!("fixture must not acquire inference evidence");
+    }
+}
+
 #[tokio::test]
-async fn preflight_appraisal_failure_precedes_all_mount_state_client_work() {
-    for identity in [
-        IdentitySource::Directory("/nonexistent/synthetic".into()),
-        IdentitySource::Native(zeroize::Zeroizing::new("HOSTILE_KEY_TEXT".into())),
+async fn local_preparation_and_bootstrap_inputs_do_not_need_an_appraisal() {
+    use crate::attestation::{EvidenceVerifier, UnavailableEvidenceVerifier};
+    let fixture = fixture();
+    let approved = HsIdKey::from(&synthetic_pair(7)).id();
+    for verifier in [
+        Arc::new(UnavailableEvidenceVerifier) as Arc<dyn EvidenceVerifier>,
+        Arc::new(NoStartupCalls),
     ] {
-        let config = TorRuntimeConfig {
-            identity,
-            approved: HsIdKey::from(&synthetic_pair(7)).id(),
-        };
-        let failure = PreparedTor::prepare(
-            config,
-            &crate::attestation::UnavailableEvidenceVerifier,
-            "unused",
+        let state = crate::server::AppState::new(
+            crate::auth::Auth::from_json(
+                r#"[{"id":"synthetic","credential_sha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","demo_microunits":1}]"#,
+            )
+            .unwrap(),
+            Arc::new(NoStartupCalls),
+            Arc::<str>::from("unused"),
+            verifier,
+        );
+        // Same production preparation after fixed-path bounded reads; only
+        // public synthetic grant bytes and B replace the mounted inputs.
+        let prepared = PreparedTor::prepare_with_grants(
+            TorRuntimeConfig {
+                identity: IdentitySource::Native(native_fixture(7)),
+                approved,
+            },
+            fixture["private_key_pem"].as_str().unwrap().as_bytes(),
+            fixture["public_key_pem"].as_str().unwrap().as_bytes(),
         )
-        .await
-        .err()
         .unwrap();
+        let _state = prepared.configure(state);
+        assert_eq!(prepared.approved(), approved);
         assert_eq!(
-            failure,
-            TorStartupFailure::Appraisal(crate::attestation::TorEvidenceError::Unsupported)
+            require_identity(&prepared.identity, &nickname(), &approved),
+            Ok(())
+        );
+        assert!(prepared._scratch.path().is_dir());
+        // No TorClient/network is constructed. Ready cancellation still owns
+        // bootstrap and wins without polling any SDK construction/work.
+        let shutdown = std::future::ready(());
+        tokio::pin!(shutdown);
+        assert!(
+            crate::tor_runtime::until_shutdown(shutdown.as_mut(), prepared.bootstrap())
+                .await
+                .is_none()
         );
     }
+    assert_eq!(
+        PreparedTor::prepare_with_grants(
+            TorRuntimeConfig {
+                identity: IdentitySource::Native(native_fixture(8)),
+                approved,
+            },
+            fixture["private_key_pem"].as_str().unwrap().as_bytes(),
+            fixture["public_key_pem"].as_str().unwrap().as_bytes(),
+        )
+        .err(),
+        Some(TorStartupFailure::Identity(Failure::IdentityMismatch))
+    );
+    let shutdown = std::future::ready(());
+    tokio::pin!(shutdown);
+    assert!(crate::tor_runtime::until_shutdown(
+        shutdown.as_mut(),
+        PreparedTor::prepare(TorRuntimeConfig {
+            identity: IdentitySource::Native(native_fixture(7)),
+            approved,
+        }),
+    )
+    .await
+    .is_none()); // Even the fixed mounted paths must not be read after shutdown.
 }
 
 // The official SSH SDK encodes deterministic public test material, entirely in memory.

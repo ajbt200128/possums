@@ -205,12 +205,7 @@ async fn run(startup: &mut Startup) -> Result<(), StartupFailure> {
     let prepared = if let Some(config) = tor_config {
         startup.enter(Stage::TorPreparation);
         let Some(prepared) = possums::tor_runtime::until_shutdown(shutdown.as_mut(), async {
-            possums::tor_runtime::PreparedTor::prepare(
-                config,
-                verifier.as_ref(),
-                &attestation_socket,
-            )
-            .await
+            possums::tor_runtime::PreparedTor::prepare(config).await
         })
         .await
         else {
@@ -264,22 +259,19 @@ async fn run(startup: &mut Startup) -> Result<(), StartupFailure> {
     #[cfg(feature = "tor")]
     let result = if let (Some(prepared), Some(client)) = (&prepared, tor_client) {
         startup.enter(Stage::TorLaunch);
-        match prepared.check_current() {
-            Err(failure) => Err(StartupFailure::TorStartup(failure)),
-            Ok(()) => possums::tor_ingress::serve_tcp_and_onion_until_initialized(
-                listener,
-                state,
-                client,
-                prepared.service(),
-                prepared.approved(),
-                shutdown.as_mut(),
-                (Arc::new(|_| {}), || {
-                    startup.finish(Outcome::InitializationComplete)
-                }),
-            )
-            .await
-            .map_err(StartupFailure::TorServe),
-        }
+        possums::tor_ingress::serve_tcp_and_onion_until_initialized(
+            listener,
+            state,
+            client,
+            prepared.service(),
+            prepared.approved(),
+            shutdown.as_mut(),
+            (Arc::new(|_| {}), || {
+                startup.finish(Outcome::InitializationComplete)
+            }),
+        )
+        .await
+        .map_err(StartupFailure::TorServe)
     } else if shutdown.as_mut().now_or_never().is_some() {
         Ok(())
     } else {
