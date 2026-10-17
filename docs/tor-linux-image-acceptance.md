@@ -83,6 +83,26 @@ from `image-startup`. Do not infer success from a queued job, image evaluation,
 Darwin compilation, injected test, or an older workflow run. A corrective head
 requires its own normal attempt-1 checks; no dispatch/rerun/release is authorized.
 
+First candidate `aa2142d3b4f56d96c38596a0c75adae6fa00d12f`, original-repository
+check run `39053432234`, attempt 1: `flake` failed after 21 minutes at the new
+permission test's unconditional whole-path 0700 acceptance assertion (408 other
+library tests passed); image jobs were skipped. That assertion assumed trusted
+Nix sandbox ancestors. The sole corrective commit changes only this test to
+inspect the production verifier's complete typed error set: 0700 may have only
+ancestor ownership/permission refusals, while 0750/0770/0777 must specifically
+include a leaf permission refusal. No ignored prefix, permission bypass or
+production code change is introduced. The independent existing strict-ancestor
+test and actual-image positive check remain required. No image result is inferred
+from the first run.
+
+The operator additionally requires a **fresh independent Linux E2E after the
+final candidate fixes and these image/SDK checks pass**, then final review.
+The parent owns that delegation; this branch does not spawn it. Passing this CI
+alone does not establish shipping acceptance. Repeat only public fixtures at the
+exact final head/rootfs; keep full preparation, real SDK/keymgr construction and
+composed ingress/TLS/API stream/accounting/drain/cleanup coverage distinguished
+from a full daemon or live Tor test.
+
 The earlier [NSS investigation](tor-config-builder-verification.md) and r41
 record preserve historical pre-image-acceptance gaps. A passing new CI record
 qualifies only this public, key-free Linux image path. Attribution of the

@@ -72,14 +72,41 @@ fn offline_production_client_config_keeps_ephemeral_keys_and_strict_permissions(
         config.keystore().primary_kind(),
         Some(tor_keymgr::config::ArtiKeystoreKind::Ephemeral)
     );
-    assert!(config.fs_mistrust().check_directory(scratch.path()).is_ok());
+    let leaf = scratch.path().canonicalize().unwrap();
+    let check_leaf = |private: bool| {
+        // Nix's synthetic /tmp ancestors can themselves be untrusted. Inspect
+        // all typed errors so an ancestor refusal cannot mask the leaf policy;
+        // neither ignore ancestors nor weaken the actual production verifier.
+        let mut leaf_rejected = false;
+        if let Err(error) = config
+            .fs_mistrust()
+            .verifier()
+            .require_directory()
+            .all_errors()
+            .check(&leaf)
+        {
+            for error in error.errors() {
+                match error {
+                    fs_mistrust::Error::BadPermission(path, ..) if path == &leaf => {
+                        leaf_rejected = true;
+                    }
+                    fs_mistrust::Error::BadPermission(path, ..)
+                    | fs_mistrust::Error::BadOwner(path, _)
+                        if path != &leaf && leaf.starts_with(path) => {}
+                    _ => panic!("code=offline_permission_check_unexpected"),
+                }
+            }
+        }
+        assert_eq!(leaf_rejected, !private);
+    };
+    check_leaf(true);
     // Even the process's own group must not authorize group access.
     for mode in [0o750, 0o770, 0o777] {
         fs::set_permissions(scratch.path(), fs::Permissions::from_mode(mode)).unwrap();
-        assert!(config.fs_mistrust().check_directory(scratch.path()).is_err());
+        check_leaf(false);
     }
     fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(config.fs_mistrust().check_directory(scratch.path()).is_ok());
+    check_leaf(true);
     assert!(fs::read_dir(scratch.path()).unwrap().next().is_none());
 }
 

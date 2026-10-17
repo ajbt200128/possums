@@ -6,11 +6,12 @@ Docker's local image/metadata persistence is not whole-host transience.
 """
 import contextlib
 import json
-from pathlib import Path
+import os
 import re
 import sys
 import tempfile
 import uuid
+from pathlib import Path
 
 from image_health import QualificationError, checked, docker, load, require
 
@@ -38,7 +39,7 @@ def probe(image, binary, empty, negative):
         command = ["create", "--name", name, "--network", "none", "--read-only",
                    "--user", "65532:65532", "--cap-drop", "ALL",
                    "--security-opt", "no-new-privileges", "--ulimit", "core=0:0",
-                   "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=0700,uid=65532,gid=65532",
+                   "--tmpfs", os.path.join(os.sep, "tmp") + ":rw,nosuid,nodev,size=64m,mode=0700,uid=65532,gid=65532",
                    "--mount", f"type=bind,src={binary},dst=/tor-image-probe,readonly",
                    "--entrypoint", "/tor-image-probe"]
         if negative:
