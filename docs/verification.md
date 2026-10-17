@@ -1911,3 +1911,17 @@ Policy read before diagnostic/reporting changes: [data handling](../PRIVACY.md#d
 No live cache hit, paid/cache pair, dashboard/invoice agreement, provider cache eviction/retention/erasure, whole-process memory/privacy, deployment identity or installed client activation is claimed. Native-v3 CLI platform-signer mismatch, legacy-v2 freshness limits and historical live billing/privacy unknowns remain unchanged. Future intake ledger authoritative settlement/lost-response/expiry qualification is still separate; its money-only contract was not edited. At the integration checkpoint, independent review, small commits and protected release remained parent-owned next steps. Remote main still resolved to the original base during integration; it was not fetched/reset/overwritten.
 
 Parent acceptance subsequently inspected the integrated diff and reran package formatting plus the full offline/all-target/all-feature test suite using the same existing pinned Nix Rust 1.88 compiler: **369 passed, four funded/live tests ignored**. Independent Luna read-only review found no concrete integration, security, billing or tested shipped-client compatibility blocker. This resolves the old patch's pinned-toolchain qualification gap for the current integration, not live cache behavior or release/deployment acceptance.
+
+## Tor readiness fix — nonproduction guarded debug iteration
+
+[Scoped source, tests, exact diagnostic image and runtime evidence](tor-readiness-debug-verification.md)
+record the bounded local-503 acquisition fix and one compile-time-guarded Tor-on
+experiment on the existing debug instance. The new artifact is explicitly not
+production-qualified. The current debug gate is HTTP 503 with the shim's closed
+`attestation_unavailable` category, mapped by pinned CVM source to collateral
+acquisition before appraisal; its underlying cause and production relevance are
+unknown. The final Tor-off control is healthy/HTTP 204 with telemetry disabled and
+all five bindings unchanged. No B private-key read, endorsement, onion publication,
+inference or production operation occurred. Policy references and synthetic privacy
+negative tests are included in the linked record; no telemetry activation or whole-
+process persistence/erasure guarantee is claimed.
