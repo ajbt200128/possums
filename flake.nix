@@ -62,6 +62,8 @@
         # The shipping binary supports Tor; runtime activation remains explicit.
         # Tests have their own checks, not an image-build side effect.
         gateway = craneLib.buildPackage (torCommon // {
+          # NONPRODUCTION artifact: cannot read B or construct/publish Tor.
+          cargoExtraArgs = "--locked --features tor-appraisal-diagnostic";
           cargoArtifacts = torCargoArtifacts;
           doCheck = false;
         });
@@ -96,6 +98,10 @@
             Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
             User = "65532:65532";
             WorkingDir = "/tmp";
+            Labels = {
+              "org.opencontainers.image.revision" = self.rev or "uncommitted";
+              "possums.diagnostic" = "tor-appraisal-only-no-private-keys";
+            };
           };
         };
         # Cache external inputs, never the application-specific image assembly.

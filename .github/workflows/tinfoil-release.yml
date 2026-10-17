@@ -1,18 +1,84 @@
-# Legacy entry point now uses the same exact-main reproducible release path.
-name: Tinfoil Release
+# Isolated debug image only. No measurement/release, production dispatch or
+# production provenance qualification. PRIVACY.md#startup-diagnostics-exception.
+name: NONPRODUCTION guarded Tor appraisal image
+run-name: NONPRODUCTION guarded Tor appraisal ${{ github.sha }}
 on:
   workflow_dispatch:
+concurrency:
+  group: diagnostic-readiness-v0.0.49-debug-readiness.1
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
-  prepare-release:
-    if: github.repository == 'ajbt200128/possums' && github.ref == 'refs/heads/main' && vars.RELEASE_AUTOMATION_ENABLED == 'true'
+  diagnostic-image:
+    if: github.repository == 'ajbt200128/possums' && github.ref == 'refs/tags/v0.0.49-debug-readiness.1' && github.run_attempt == 1
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
-      actions: write
+      contents: read
+      packages: write
     steps:
-      - name: Dispatch the gated reproducible release path
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require clean exact source and diagnostic-only build
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          grep -F 'cargoExtraArgs = "--locked --features tor-appraisal-diagnostic";' flake.nix
+          grep -F 'return Err(TorStartupFailure::DiagnosticStop);' src/tor_runtime.rs
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+        with:
+          diagnostic-endpoint: ""
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          diagnostic-endpoint: ""
+          use-flakehub: false
+          use-gha-cache: true
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - name: Build pinned guarded image (not independent production qualification)
+        run: nix build .#gateway-image --option builders "" --print-build-logs
+      - name: Inspect source-bound archive and publish unique diagnostic image
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: gh workflow run publish-image.yml --ref main
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -L result gateway-image.tar.gz
+          nix shell --inputs-from . nixpkgs#skopeo --command skopeo inspect docker-archive:gateway-image.tar.gz > image-public.json
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          image = json.loads(Path('image-public.json').read_text())
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', image['Digest'])
+          assert image['Labels']['org.opencontainers.image.revision'] == os.environ['GITHUB_SHA']
+          assert image['Labels']['possums.diagnostic'] == 'tor-appraisal-only-no-private-keys'
+          assert image['Architecture'] == 'amd64' and image['Os'] == 'linux'
+          Path('digest').write_text(image['Digest'] + '\n')
+          Path('diagnostic-identity.json').write_text(json.dumps({
+              'source': os.environ['GITHUB_SHA'], 'digest': image['Digest'],
+              'diagnostic_only': True, 'guard': 'before_private_keys_and_TorClient',
+              'run': os.environ['GITHUB_RUN_ID'], 'attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'production_qualified': False,
+          }, sort_keys=True) + '\n')
+          PY
+          printf '%s' "$GHCR_TOKEN" | nix shell --inputs-from . nixpkgs#skopeo --command skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          nix shell --inputs-from . nixpkgs#skopeo --command skopeo copy --preserve-digests docker-archive:gateway-image.tar.gz "docker://ghcr.io/ajbt200128/possums-gateway:debug-readiness-${GITHUB_SHA}"
+          nix shell --inputs-from . nixpkgs#skopeo --command skopeo inspect "docker://ghcr.io/ajbt200128/possums-gateway:debug-readiness-${GITHUB_SHA}" > registry-public.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          assert json.loads(Path('registry-public.json').read_text())['Digest'] == Path('digest').read_text().strip()
+          print('DIAGNOSTIC_REGISTRY_DIGEST_MATCH')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: debug-readiness-${{ github.sha }}-${{ github.run_id }}-1
+          path: |
+            gateway-image.tar.gz
+            diagnostic-identity.json
+            digest
+          compression-level: 0
+          retention-days: 1
