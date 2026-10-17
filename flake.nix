@@ -74,6 +74,17 @@
             mv $out/bin/attestation-helper $out/bin/possums-attestation
           '';
         };
+        # Build the public probe as a regular bin (not an example/test): Cargo
+        # must not unify dev-dependency features into the shipping SDK closure.
+        # filterCargoSources includes this .rs helper; gatewayImage never does.
+        torImageProbe = craneLib.buildPackage (torCommon // {
+          cargoArtifacts = torCargoArtifacts;
+          cargoExtraArgs = torCommon.cargoExtraArgs + " --bin tor-image-probe";
+          doCheck = false;
+          postPatch = ''
+            printf '\n[[bin]]\nname = "tor-image-probe"\npath = "tests/support/tor_image_probe.rs"\n' >> Cargo.toml
+          '';
+        });
         apiSmokeFixture = craneLib.buildPackage (common // {
           inherit cargoArtifacts;
           cargoExtraArgs = "--example api_smoke_fixture";
@@ -87,10 +98,16 @@
           ulimit -c 0
           exec ${gateway}/bin/possums
         '';
+        # Arti constructs a default config before accepting our explicit one;
+        # its strict filesystem policy resolves the running account via NSS.
+        gatewayAccounts = pkgs.dockerTools.fakeNss.override {
+          extraPasswdLines = [ "possums:!:65532:65532:Possums gateway:/tmp:/noshell" ];
+          extraGroupLines = [ "possums:!:65532:" ];
+        };
         gatewayImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway";
           tag = "phase0";
-          contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert ];
+          contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert gatewayAccounts ];
           config = {
             Entrypoint = [ "${gatewayEntrypoint}/bin/possums-entrypoint" ];
             Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
@@ -137,6 +154,7 @@
           attestation-helper = attestationHelper;
           attestation-go = attestationGo;
           api-smoke-fixture = apiSmokeFixture;
+          tor-image-probe = torImageProbe;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;
           gateway-smoke-image = smokeImage;
@@ -144,6 +162,11 @@
         };
         checks = {
           inherit gateway;
+          gateway-accounts = pkgs.runCommand "gateway-account-records-check" { } ''
+            grep -Fxq 'possums:!:65532:65532:Possums gateway:/tmp:/noshell' ${gatewayAccounts}/etc/passwd
+            grep -Fxq 'possums:!:65532:' ${gatewayAccounts}/etc/group
+            touch "$out"
+          '';
           fmt = craneLib.cargoFmt { inherit src; };
           clippy = craneLib.cargoClippy (common // {
             inherit cargoArtifacts;

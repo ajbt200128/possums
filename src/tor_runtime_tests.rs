@@ -1,6 +1,10 @@
 // Public synthetic fixtures only. No TorClient, bootstrap or publication.
 use super::*;
 
+mod offline_e2e {
+    include!("tor_offline_e2e_tests.rs");
+}
+
 // Public deterministic seed [7; 32], encoded as a standard v3 address.
 const SYNTHETIC_B: &str = "5jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwfmxqd.onion";
 
@@ -50,6 +54,62 @@ fn pem_fixture(private: &str, public: &str) -> Result<TorEndorsementSigner, TorS
         &HsIdKey::from(&synthetic_pair(7)).id(),
     )
 }
+#[test]
+fn offline_service_builder() {
+    assert!(OnionServiceConfig::builder()
+        .nickname(nickname())
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn offline_production_client_config_keeps_ephemeral_keys_and_strict_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = scratch();
+    let config = client_config(scratch.path())
+        .unwrap_or_else(|_| panic!("code=offline_client_configuration_invalid"));
+    assert_eq!(
+        config.keystore().primary_kind(),
+        Some(tor_keymgr::config::ArtiKeystoreKind::Ephemeral)
+    );
+    let leaf = scratch.path().canonicalize().unwrap();
+    let check_leaf = |private: bool| {
+        // Nix's synthetic /tmp ancestors can themselves be untrusted. Inspect
+        // all typed errors so an ancestor refusal cannot mask the leaf policy;
+        // neither ignore ancestors nor weaken the actual production verifier.
+        let mut leaf_rejected = false;
+        if let Err(error) = config
+            .fs_mistrust()
+            .verifier()
+            .require_directory()
+            .all_errors()
+            .check(&leaf)
+        {
+            for error in error.errors() {
+                match error {
+                    fs_mistrust::Error::BadPermission(path, ..) if path == &leaf => {
+                        leaf_rejected = true;
+                    }
+                    fs_mistrust::Error::BadPermission(path, ..)
+                    | fs_mistrust::Error::BadOwner(path, _)
+                        if path != &leaf && leaf.starts_with(path) => {}
+                    _ => panic!("code=offline_permission_check_unexpected"),
+                }
+            }
+        }
+        assert_eq!(leaf_rejected, !private);
+    };
+    check_leaf(true);
+    // Even the process's own group must not authorize group access.
+    for mode in [0o750, 0o770, 0o777] {
+        fs::set_permissions(scratch.path(), fs::Permissions::from_mode(mode)).unwrap();
+        check_leaf(false);
+    }
+    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    check_leaf(true);
+    assert!(fs::read_dir(scratch.path()).unwrap().next().is_none());
+}
+
 #[test]
 fn actual_go_pkcs8_v1_pem_spki_and_derived_key_equality() {
     let fixture = fixture();
