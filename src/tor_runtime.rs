@@ -312,6 +312,29 @@ mod enabled {
         require_identity(manager, &nickname(), approved).map_err(TorStartupFailure::Identity)
     }
 
+    fn client_config(
+        scratch: &Path,
+    ) -> Result<TorClientConfig, tor_keymgr::config::ConfigBuildError> {
+        let mut builder = TorClientConfig::builder();
+        builder
+            .storage()
+            .cache_dir(CfgPath::new_literal(scratch.join("cache")));
+        builder
+            .storage()
+            .state_dir(CfgPath::new_literal(scratch.join("state")));
+        builder
+            .storage()
+            .keystore()
+            .primary()
+            .kind(tor_keymgr::config::ArtiKeystoreKind::Ephemeral.into());
+        builder.storage().permissions().ignore_environment();
+        // Minimal images have no passwd/group database. Trust no group rather
+        // than resolving the SDK's default same-name group or weakening checks.
+        #[cfg(unix)]
+        builder.storage().permissions().trust_no_group_id();
+        builder.build()
+    }
+
     impl PreparedTor {
         /// Local grant consistency and approved B custody only, not appraisal.
         /// Fresh attestation remains owned by each client-requested endorsement.
@@ -347,22 +370,8 @@ mod enabled {
             let scratch = scratch_builder
                 .tempdir_in("/tmp")
                 .map_err(|_| TorStartupFailure::State)?;
-            let mut builder = TorClientConfig::builder();
-            builder
-                .storage()
-                .cache_dir(CfgPath::new_literal(scratch.path().join("cache")));
-            builder
-                .storage()
-                .state_dir(CfgPath::new_literal(scratch.path().join("state")));
-            builder
-                .storage()
-                .keystore()
-                .primary()
-                .kind(tor_keymgr::config::ArtiKeystoreKind::Ephemeral.into());
-            builder.storage().permissions().ignore_environment();
-            let client_config = builder
-                .build()
-                .map_err(|_| TorStartupFailure::Configuration)?;
+            let client_config =
+                client_config(scratch.path()).map_err(|_| TorStartupFailure::Configuration)?;
             // Exercise the very same supported ephemeral insertion before any client.
             let manager = KeyMgrBuilder::default()
                 .primary_store(Box::new(ArtiEphemeralKeystore::new("preflight".into())))

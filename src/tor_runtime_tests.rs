@@ -51,6 +51,35 @@ fn pem_fixture(private: &str, public: &str) -> Result<TorEndorsementSigner, TorS
     )
 }
 #[test]
+fn offline_service_builder() {
+    assert!(OnionServiceConfig::builder()
+        .nickname(nickname())
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn offline_production_client_config_keeps_ephemeral_keys_and_strict_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = scratch();
+    let config = client_config(scratch.path())
+        .unwrap_or_else(|_| panic!("code=offline_client_configuration_invalid"));
+    assert_eq!(
+        config.keystore().primary_kind(),
+        Some(tor_keymgr::config::ArtiKeystoreKind::Ephemeral)
+    );
+    assert!(config.fs_mistrust().check_directory(scratch.path()).is_ok());
+    // Even the process's own group must not authorize group access.
+    for mode in [0o750, 0o770, 0o777] {
+        fs::set_permissions(scratch.path(), fs::Permissions::from_mode(mode)).unwrap();
+        assert!(config.fs_mistrust().check_directory(scratch.path()).is_err());
+    }
+    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(config.fs_mistrust().check_directory(scratch.path()).is_ok());
+    assert!(fs::read_dir(scratch.path()).unwrap().next().is_none());
+}
+
+#[test]
 fn actual_go_pkcs8_v1_pem_spki_and_derived_key_equality() {
     let fixture = fixture();
     let private = fixture["private_key_pem"].as_str().unwrap();
