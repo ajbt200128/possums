@@ -87,10 +87,16 @@
           ulimit -c 0
           exec ${gateway}/bin/possums
         '';
+        # Arti constructs a default config before accepting our explicit one;
+        # its strict filesystem policy resolves the running account via NSS.
+        gatewayAccounts = pkgs.dockerTools.fakeNss.override {
+          extraPasswdLines = [ "possums:!:65532:65532:Possums gateway:/tmp:/noshell" ];
+          extraGroupLines = [ "possums:!:65532:" ];
+        };
         gatewayImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway";
           tag = "phase0";
-          contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert ];
+          contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert gatewayAccounts ];
           config = {
             Entrypoint = [ "${gatewayEntrypoint}/bin/possums-entrypoint" ];
             Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
@@ -144,6 +150,11 @@
         };
         checks = {
           inherit gateway;
+          gateway-accounts = pkgs.runCommand "gateway-account-records-check" { } ''
+            grep -Fxq 'possums:!:65532:65532:Possums gateway:/tmp:/noshell' ${gatewayAccounts}/etc/passwd
+            grep -Fxq 'possums:!:65532:' ${gatewayAccounts}/etc/group
+            touch "$out"
+          '';
           fmt = craneLib.cargoFmt { inherit src; };
           clippy = craneLib.cargoClippy (common // {
             inherit cargoArtifacts;
