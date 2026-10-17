@@ -4,7 +4,12 @@
 below supersede the historical unwired/raw-HTTP plan. The operator now permits
 Monero-style optional SOCKS credentials/no-auth, backend deployment and live E2E;
 historical strict-auth and first-packet authorization restrictions below are
-superseded. This is authorization, not deployment or transport evidence.
+superseded. The subsequent operator decision **removes Tor startup self-appraisal**
+and all cached-appraisal freshness checks through bootstrap/launch. It explicitly
+supersedes the historical fresh-A-before-B startup invariant below, not fresh
+per-request or independent client verification. See [publication boundary and
+source-only evidence](tor-startup-removal-verification.md). This is authorization,
+not deployment or transport evidence.
 
 ## Current opaque shim bridge — offline acceptance only
 
@@ -178,9 +183,11 @@ remain outside this accepted-stream seam.
   guard selection across restarts increases exposure to new guards and is an
   explicit planning tradeoff, **not an anonymity or unlinkability claim**. Guard/vanguard/replay-state loss and rollback/resource behavior require
   later qualification; this packet changes no storage policy or volume.
-- Future startup must compare the private grant's derived public A against the
-  approved public-key file and the freshly authenticated same-ID v3 endorsed
-  SPKI before serving endorsements. Mounted-grant authenticity, measured
+- Historical requirement (superseded by the operator's startup-self-appraisal
+  removal): compare the private grant's derived public A against the approved
+  public-key file and freshly authenticated same-ID v3 endorsed SPKI at startup.
+  Current startup requires local derived/mounted public A equality only; fresh
+  per-request appraised-A equality is still required before endorsement bytes. Mounted-grant authenticity, measured
   selection of B, local private B custody, live qualification of read-only
   key-manager identity checks and exclusive publication/restore remain future gates. Do not concurrently
   publish copied B in blue and green; a local state lock is not distributed
@@ -462,9 +469,18 @@ write to the operator source is called. Protected source ownership between
 metadata checks and SDK decoding, authentic secret mounts, exclusive publication
 and rollback-safe restoration remain host constraints, not locks implemented here.
 
-After fresh official native Tor appraisal, fixed-path A's PKCS8 v1 PEM and SPKI
-PEM are decoded with maintained Rustls/Spki and the existing Ring signer.
-Derived A, mounted public A and appraised A must agree before client construction.
+Fixed-path A's PKCS8 v1 PEM and SPKI PEM are decoded with maintained Rustls/Spki
+and the existing Ring signer. Derived A and mounted public A must agree before
+TorClient construction. No startup verifier/socket/nonce, stored appraisal or
+freshness check remains in preparation, bootstrap or launch. This explicitly
+replaces the former fresh-appraised-A-before-B startup ordering: Tor can publish
+while the attestation endpoint is unavailable. Local consistency does not prove
+grant authenticity; each `/attestation/tor` request still freshly appraises the
+same client challenge, requires current appraised A to equal the held signer and
+checks expiry before returning bytes. Independent client publisher/release,
+nonce/A/B/TLS/HPKE/freshness checks are unchanged. Removing the startup dependency
+may help initialization but does not resolve an underlying acquisition 503 or
+establish Tor-client E2E acceptance.
 The existing B pair is inserted once, overwrite false, into supported
 `ArtiEphemeralKeystore`; missing/mismatched B fails closed. The prepared owner
 retains this memory-only pair, so source removal cannot make B disappear before
@@ -641,8 +657,10 @@ above remain open.
 ### Final source integration and first-rollout admission
 
 The completed final gateway review found no blocking source-code issue in the
-shared 64-permit admission/drain owner, opaque public-shim bridge, fresh A-before-B
-startup ordering or measured shipping configuration. This supersedes an
+shared 64-permit admission/drain owner, opaque public-shim bridge, then-required
+fresh A-before-B startup ordering or measured shipping configuration. That
+startup ordering was subsequently removed by explicit operator decision; this
+review remains historical evidence for the earlier source. This supersedes an
 interrupted review, not its missing acceptance. Source changes are now organized
 into logical commits; no deployment or installed-host qualification is implied.
 

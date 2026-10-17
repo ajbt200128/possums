@@ -4,6 +4,13 @@ Development convenience only: not installed-client, deployed-backend or transpor
 qualification. The pinned Nix/devenv environments include Tor; neither starts it
 automatically. No flake input or lock update is required.
 
+The gateway's separately opted-in Tor startup now checks local A-grant consistency
+and approved B custody without self-appraisal or cached freshness gates. It may
+publish before `/attestation/tor` can return verified evidence; clients must still
+refuse an unverified connection. This does not fix an attestation acquisition 503
+or qualify live E2E; see [the operator-approved boundary](tor-startup-removal-verification.md).
+The foreground client helper below is unchanged.
+
 ## Existing user configuration first
 
 Keep using your existing Tor/Browser SOCKS listener when available. Select its
