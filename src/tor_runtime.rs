@@ -12,15 +12,12 @@ pub enum TorStartupFailure {
     GrantRead,
     #[error("code=tor_grant_invalid stage=grant constraint=bounded_ed25519_pkcs8_spki action=check_approved_grant_offline; no service launched")]
     GrantInvalid,
-    #[error("code=tor_grant_mismatch stage=grant constraint=derived_mounted_appraised_A_equality action=check_current_boot_grant_offline; no service launched or endorsement")]
+    #[error("code=tor_grant_mismatch stage=grant constraint=derived_mounted_A_equality action=check_current_boot_grant_offline; no service launched or endorsement")]
     GrantMismatch,
     #[error("code=tor_identity_file_invalid stage=identity constraint=bounded_regular_native_key_file action=restore_approved_native_key_files_offline; no replacement generated or service launched")]
     IdentityFileInvalid,
     #[error("code=tor_identity_secret_invalid stage=identity constraint=bounded_unencrypted_native_expanded_ed25519 action=restore_approved_native_key_secret_offline; no replacement generated or service launched")]
     IdentitySecretInvalid,
-    #[cfg(feature = "tor")]
-    #[error("{0}")]
-    Appraisal(crate::attestation::TorEvidenceError),
     #[cfg(feature = "tor")]
     #[error("{0}")]
     Identity(crate::tor_ingress::Failure),
@@ -30,8 +27,6 @@ pub enum TorStartupFailure {
     Client,
     #[error("code=tor_bootstrap_unknown stage=bootstrap constraint=sdk_bootstrap cause=unknown action=check_Tor_reachability; no service launched; not replayed")]
     Bootstrap,
-    #[error("code=tor_nonce_unknown stage=appraisal constraint=random_nonce cause=unknown action=check_runtime_offline; no service launched")]
-    Nonce,
 }
 
 // Intentionally no Debug/serialization: config may contain a secret and identifying paths/B.
@@ -105,7 +100,6 @@ impl TorRuntimeConfig {
 mod enabled {
     use super::*;
     use crate::{
-        attestation::{tor_now, EvidenceVerifier, TorGatewayEvidence},
         tor_endorsement::TorEndorsementSigner,
         tor_ingress::{require_identity, Failure},
     };
@@ -133,7 +127,6 @@ mod enabled {
         identity: KeyMgr,
         service: OnionServiceConfig,
         approved: HsId,
-        evidence: TorGatewayEvidence,
         // Kept through bootstrap, publication, shared serving and original drain.
         _scratch: tempfile::TempDir,
     }
@@ -158,16 +151,25 @@ mod enabled {
         Ok(bytes)
     }
 
+    fn grant_pem<T: PemObject>(bytes: &[u8]) -> Result<T, TorStartupFailure> {
+        let mut sections = T::pem_slice_iter(bytes);
+        let key = sections
+            .next()
+            .ok_or(TorStartupFailure::GrantInvalid)?
+            .map_err(|_| TorStartupFailure::GrantInvalid)?;
+        if !sections.remainder().iter().all(u8::is_ascii_whitespace) {
+            return Err(TorStartupFailure::GrantInvalid);
+        }
+        Ok(key)
+    }
+
     fn decode_grant(
         private: &[u8],
         public: &[u8],
-        approved_a: [u8; 32],
         b: &HsId,
     ) -> Result<TorEndorsementSigner, TorStartupFailure> {
-        let private = PrivatePkcs8KeyDer::from_pem_slice(private)
-            .map_err(|_| TorStartupFailure::GrantInvalid)?;
-        let public = SubjectPublicKeyInfoDer::from_pem_slice(public)
-            .map_err(|_| TorStartupFailure::GrantInvalid)?;
+        let private: PrivatePkcs8KeyDer<'_> = grant_pem(private)?;
+        let public: SubjectPublicKeyInfoDer<'_> = grant_pem(public)?;
         let spki = SubjectPublicKeyInfoRef::from_der(public.as_ref())
             .map_err(|_| TorStartupFailure::GrantInvalid)?;
         if spki.algorithm.oid != ObjectIdentifier::new_unwrap("1.3.101.112")
@@ -182,7 +184,7 @@ mod enabled {
             .ok_or(TorStartupFailure::GrantInvalid)?;
         let signer = TorEndorsementSigner::from_pkcs8(private.secret_pkcs8_der(), *b.as_ref())
             .map_err(|_| TorStartupFailure::GrantInvalid)?;
-        if signer.public_key() != public || public != approved_a {
+        if signer.public_key() != public {
             return Err(TorStartupFailure::GrantMismatch);
         }
         Ok(signer)
@@ -311,30 +313,22 @@ mod enabled {
     }
 
     impl PreparedTor {
-        /// Fresh official native appraisal precedes all grant/state/client work.
-        pub async fn prepare(
-            config: TorRuntimeConfig,
-            verifier: &dyn EvidenceVerifier,
-            socket: &str,
-        ) -> Result<Self, TorStartupFailure> {
-            use ring::rand::{SecureRandom, SystemRandom};
-            let mut nonce = [0; 32];
-            SystemRandom::new()
-                .fill(&mut nonce)
-                .map_err(|_| TorStartupFailure::Nonce)?;
-            let evidence = verifier
-                .verify_tor(socket, &nonce)
-                .await
-                .map_err(TorStartupFailure::Appraisal)?;
-            let a = evidence
-                .current_key(tor_now().map_err(TorStartupFailure::Appraisal)?)
-                .map_err(TorStartupFailure::Appraisal)?;
-            let signer = decode_grant(
+        /// Local grant consistency and approved B custody only, not appraisal.
+        /// Fresh attestation remains owned by each client-requested endorsement.
+        pub async fn prepare(config: TorRuntimeConfig) -> Result<Self, TorStartupFailure> {
+            Self::prepare_with_grants(
+                config,
                 &read_grant(Path::new(PRIVATE_GRANT))?,
                 &read_grant(Path::new(PUBLIC_GRANT))?,
-                a,
-                &config.approved,
-            )?;
+            )
+        }
+
+        fn prepare_with_grants(
+            config: TorRuntimeConfig,
+            private: &[u8],
+            public: &[u8],
+        ) -> Result<Self, TorStartupFailure> {
+            let signer = decode_grant(private, public, &config.approved)?;
             let pair = match config.identity {
                 IdentitySource::Directory(path) => load_identity(&path, &config.approved)?,
                 IdentitySource::Native(native) => decode_native_identity(native, &config.approved)?,
@@ -375,16 +369,12 @@ mod enabled {
                 .build()
                 .map_err(|_| TorStartupFailure::State)?;
             hold_identity(&manager, pair, &config.approved)?;
-            evidence
-                .current_key(tor_now().map_err(TorStartupFailure::Appraisal)?)
-                .map_err(TorStartupFailure::Appraisal)?;
             Ok(Self {
                 signer: Arc::new(signer),
                 config: client_config,
                 identity: manager,
                 service,
                 approved: config.approved,
-                evidence,
                 _scratch: scratch,
             })
         }
@@ -394,9 +384,6 @@ mod enabled {
         pub async fn bootstrap(
             &self,
         ) -> Result<Arc<TorClient<PreferredRuntime>>, TorStartupFailure> {
-            self.evidence
-                .current_key(tor_now().map_err(TorStartupFailure::Appraisal)?)
-                .map_err(TorStartupFailure::Appraisal)?;
             let client = TorClient::builder()
                 .config(self.config.clone())
                 .bootstrap_behavior(BootstrapBehavior::Manual)
@@ -416,9 +403,6 @@ mod enabled {
                 .bootstrap()
                 .await
                 .map_err(|_| TorStartupFailure::Bootstrap)?;
-            self.evidence
-                .current_key(tor_now().map_err(TorStartupFailure::Appraisal)?)
-                .map_err(TorStartupFailure::Appraisal)?;
             Ok(client)
         }
 
@@ -430,12 +414,6 @@ mod enabled {
         }
         pub fn configure(&self, state: crate::server::AppState) -> crate::server::AppState {
             state.with_tor_endorsement(self.signer.clone())
-        }
-        pub fn check_current(&self) -> Result<(), TorStartupFailure> {
-            self.evidence
-                .current_key(tor_now().map_err(TorStartupFailure::Appraisal)?)
-                .map_err(TorStartupFailure::Appraisal)
-                .map(|_| ())
         }
     }
 

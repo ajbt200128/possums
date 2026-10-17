@@ -60,8 +60,8 @@ impl Stage {
 }
 
 /// All nested fields were reviewed: InferenceFailure is unit variants;
-/// TorStartupFailure contains only closed enums and TorEvidenceError's typed
-/// acquisition status (u16); ServeFailure contains only closed optional causes.
+/// TorStartupFailure contains only closed enums;
+/// ServeFailure contains only closed optional causes.
 /// Never replace these with SDK/io errors or a string-bearing wrapper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
