@@ -1,18 +1,50 @@
-# Legacy entry point now uses the same exact-main reproducible release path.
-name: Tinfoil Release
+# Isolated diagnostic publication only; never dispatches image or production workflows.
+# Privacy: PRIVACY.md#startup-diagnostics-exception and #processors-retention-access-and-shutdown.
+name: Tinfoil Release - NONPRODUCTION key diagnostic
+run-name: NONPRODUCTION v0.0.49-debug-keys.1
 on:
   workflow_dispatch:
+concurrency:
+  group: diagnostic-v0.0.49-debug-keys.1
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
-  prepare-release:
-    if: github.repository == 'ajbt200128/possums' && github.ref == 'refs/heads/main' && vars.RELEASE_AUTOMATION_ENABLED == 'true'
+  diagnostic-measure-and-release:
+    if: github.repository == 'ajbt200128/possums' && github.ref == 'refs/tags/v0.0.49-debug-keys.1' && github.run_attempt == 1
     runs-on: ubuntu-latest
     permissions:
-      actions: write
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
     steps:
-      - name: Dispatch the gated reproducible release path
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: gh workflow run publish-image.yml --ref main
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Enforce diagnostic-only v49 delta
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib, subprocess
+          base = 'f0e6af2f8b135a5bbf95b922b39606478a4437d4'
+          def git(*args):
+              return subprocess.check_output(['git', *args])
+          assert git('rev-parse', 'HEAD^').decode().strip() == base
+          assert set(git('diff', '--name-only', base, 'HEAD').decode().splitlines()) == {
+              'tinfoil-config.yml', '.github/workflows/tinfoil-release.yml'}
+          original = git('show', base + ':tinfoil-config.yml')
+          expected = original.replace(b'POSSUMS_TOR_ENABLED: "true"', b'POSSUMS_TOR_ENABLED: "false"').replace(
+              b'      - OTEL_SERVICE_NAME: "possums-gateway"\n',
+              b'      - OTEL_SERVICE_NAME: "possums-gateway"\n      - OTEL_SDK_DISABLED: "true"\n')
+          assert pathlib.Path('tinfoil-config.yml').read_bytes() == expected
+          print('DIAGNOSTIC_CONFIG_EXACT_V49_DELTA_PASS')
+          PY
+      - name: Measure unchanged image and publish diagnostic identity
+        uses: tinfoilsh/measure-image-action@f2ec2fdf4510459730f0a5158c5817f5361e9461 # v0.13.2
+        with:
+          config-file: ${{ github.workspace }}/tinfoil-config.yml
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mark-as-latest: "false"

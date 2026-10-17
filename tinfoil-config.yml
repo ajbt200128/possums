@@ -15,13 +15,14 @@ containers:
     env:
       - HOME: "/tmp"
       - POSSUMS_BIND: "0.0.0.0:8080"
-      - POSSUMS_TOR_ENABLED: "true"
+      - POSSUMS_TOR_ENABLED: "false"
       - POSSUMS_GATEWAY_ATTESTATION_SOCKET: "/tinfoil/attestation.sock"
       - POSSUMS_GATEWAY_REPOSITORY: "ajbt200128/possums"
       - POSSUMS_TINFOIL_HOST: "inference.tinfoil.sh"
       - POSSUMS_TINFOIL_REPOSITORY: "tinfoilsh/confidential-model-router"
       - OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io"
       - OTEL_SERVICE_NAME: "possums-gateway"
+      - OTEL_SDK_DISABLED: "true"
     networks: [inference]
     attestation: true
     keys: [possums-tor-endorsement-v1]
