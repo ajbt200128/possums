@@ -21,6 +21,7 @@ const (
 	nonceBytes       = 32
 	maxEvidenceBytes = 16 << 20
 	requestTimeout   = 30 * time.Second
+	readinessPoll    = 250 * time.Millisecond
 )
 
 type verifiedEvidence struct {
@@ -80,7 +81,11 @@ type verifiedTorEvidence struct {
 	TorEndorsementKey string `json:"tor_endorsement_key"`
 }
 
-func torEvidence(input io.Reader, socket, repo string) (response torResponse) {
+func torEvidence(input io.Reader, socket, repo string) torResponse {
+	return torEvidenceContext(context.Background(), input, socket, repo)
+}
+
+func torEvidenceContext(ctx context.Context, input io.Reader, socket, repo string) (response torResponse) {
 	stage := "input"
 	defer func() {
 		if recover() != nil {
@@ -95,7 +100,7 @@ func torEvidence(input io.Reader, socket, repo string) (response torResponse) {
 		return torResponse{Failure: torFailure(stage, "nonce")}
 	}
 	stage = "acquisition"
-	document, err := fetchEvidence(socket, nonce)
+	document, err := fetchTorEvidence(ctx, socket, nonce)
 	if err != nil {
 		return torResponse{Failure: torAcquisitionFailure(err)}
 	}
@@ -168,7 +173,34 @@ type acquisitionHTTPStatus struct{ status int }
 
 func (acquisitionHTTPStatus) Error() string { return string(acquisitionStatus) }
 
+// The local shim can listen before its attestation handler is ready. Only its
+// observed 503 permits reacquisition, never a failed appraisal or transport.
+// One deadline covers all attempts; keep the same fresh challenge throughout.
+func fetchTorEvidence(ctx context.Context, socket string, nonce []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	for {
+		body, err := fetchEvidenceContext(ctx, socket, nonce)
+		var status acquisitionHTTPStatus
+		if !errors.As(err, &status) || status.status != http.StatusServiceUnavailable {
+			return body, err
+		}
+		timer := time.NewTimer(readinessPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			// Preserve the observed status, not an invented transport/root cause.
+			return nil, status
+		case <-timer.C:
+		}
+	}
+}
+
 func fetchEvidence(socket string, nonce []byte) ([]byte, error) {
+	return fetchEvidenceContext(context.Background(), socket, nonce)
+}
+
+func fetchEvidenceContext(ctx context.Context, socket string, nonce []byte) ([]byte, error) {
 	if len(nonce) != nonceBytes {
 		return nil, errors.New("invalid nonce length")
 	}
@@ -183,7 +215,7 @@ func fetchEvidence(socket string, nonce []byte) ([]byte, error) {
 		"http://localhost/.well-known/tinfoil-attestation?nonce=%s",
 		hex.EncodeToString(nonce),
 	)
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}

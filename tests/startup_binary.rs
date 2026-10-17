@@ -44,6 +44,22 @@ async fn missing_config_remains_exit_two_and_is_visible_with_export_disabled() {
 }
 
 #[tokio::test]
+async fn export_off_overrides_valid_ingestion_configuration_without_hiding_failure() {
+    let mut command = startup();
+    command
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "https://api.honeycomb.io")
+        .env(
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            format!("x-honeycomb-team={CANARY}"),
+        );
+    let output = run(command).await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("startup_delivery_unconfirmed"));
+    assert_eq!(stderr.lines().count(), 2); // entered configuration + primary failure
+    assert_closed(output, 2, "configuration_missing");
+}
+
+#[tokio::test]
 async fn hostile_accounts_and_private_configuration_never_enter_platform_diagnostics() {
     let mut command = startup();
     command
