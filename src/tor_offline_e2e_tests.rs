@@ -1,6 +1,12 @@
 // Operator-only offline integration. Public A fixture; B is never signed/exported.
 use super::*;
-use std::{io::Write, os::unix::fs::PermissionsExt};
+use std::{
+    io::Write,
+    os::unix::fs::PermissionsExt,
+    sync::atomic::{AtomicU8, Ordering},
+};
+
+static STAGE: AtomicU8 = AtomicU8::new(0);
 
 impl PreparedTor {
     pub(crate) fn offline_public_fixture() -> Self {
@@ -145,6 +151,7 @@ fn exercise() -> Result<&'static str, &'static str> {
         _ => return Err("ARGUMENTS"),
     };
     let public_a = fixture();
+    STAGE.store(1, Ordering::Relaxed);
     let prepared = PreparedTor::prepare_with_grants(
         TorRuntimeConfig {
             identity: IdentitySource::Native(native),
@@ -170,6 +177,7 @@ fn exercise() -> Result<&'static str, &'static str> {
         return Err("PREPARE_STATE");
     }
     let scratch_path = prepared._scratch.path().to_owned();
+    STAGE.store(2, Ordering::Relaxed);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -177,11 +185,15 @@ fn exercise() -> Result<&'static str, &'static str> {
     let result = runtime.block_on(async {
         // Exact supported construction and B insertion used before bootstrap in production.
         // Never call bootstrap, launch_onion_service, endorse or any network method.
-        let client = TorClient::builder()
+        STAGE.store(3, Ordering::Relaxed);
+        let builder = TorClient::builder();
+        STAGE.store(6, Ordering::Relaxed);
+        let builder = builder
             .config(prepared.config.clone())
-            .bootstrap_behavior(BootstrapBehavior::Manual)
-            .create_unbootstrapped()
-            .map_err(|_| "SDK_CLIENT")?;
+            .bootstrap_behavior(BootstrapBehavior::Manual);
+        STAGE.store(7, Ordering::Relaxed);
+        let client = builder.create_unbootstrapped().map_err(|_| "SDK_CLIENT")?;
+        STAGE.store(4, Ordering::Relaxed);
         let pair = prepared
             .identity
             .get::<HsIdKeypair>(&HsIdKeypairSpecifier::new(nickname()))
@@ -193,6 +205,7 @@ fn exercise() -> Result<&'static str, &'static str> {
         drop(client);
         Ok("PREPARE_AND_SDK_OK")
     });
+    STAGE.store(5, Ordering::Relaxed);
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     drop(prepared);
     if scratch_path.exists() {
@@ -209,7 +222,16 @@ fn operator_full_path() {
         Ok(Ok(code) | Err(code)) => code,
         Err(payload) => {
             std::mem::forget(payload);
-            "CAUSE_UNKNOWN"
+            match STAGE.load(Ordering::Relaxed) {
+                1 => "PREPARE_PANIC",
+                2 => "RUNTIME_PANIC",
+                3 => "SDK_BUILDER_PANIC",
+                4 => "SDK_KEYSTORE_PANIC",
+                5 => "CLEANUP_PANIC",
+                6 => "SDK_CONFIG_PANIC",
+                7 => "SDK_CLIENT_PANIC",
+                _ => "CAUSE_UNKNOWN",
+            }
         }
     };
     let _ = writeln!(std::io::stdout().lock(), "POSSUMS_OFFLINE_E2E={code}");

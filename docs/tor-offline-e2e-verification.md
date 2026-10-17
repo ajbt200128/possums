@@ -97,6 +97,59 @@ this is not a measured Linux release-artifact execution.
   explicit formatting of included test files are checked separately. Existing
   vendored Tinfoil dead-code warning is unchanged.
 
+## Candidate result: constructor blocker, shipping HOLD
+
+Completed production fix `b123869dc8a058a63ddc57e34919d8d96470c4f6` was inspected and
+cherry-picked **only** into this isolated test branch (local `f4170aa`). The tester
+made no production fix and did not merge/push/deploy. The fix's completed owner
+supplied a tiny public C injector interposing only `getpwuid_r`/`getpwnam_r` to
+return `ENOENT` and a null result. Its inspected source is retained in
+`tests/fixtures/tor-missing-nss.c`; an independently built local dylib is pinned
+separately from the Rust helper. Injection is rejected for private-input mode.
+
+Independent public before/after execution:
+
+1. Baseline helper with actual qualified network/write denial, `HOME=/tmp` and
+   injected missing NSS: full preparation returned `PREPARE_CONFIGURATION`;
+   wrapper output `code=tor_offline_e2e_baseline_confirmed`. An additional public
+   probe requires the default strict Mistrust build to fail, proving the injector
+   actually took effect instead of being stripped by Darwin SIP.
+2. Baseline combined integration under the same public NSS injector: failed
+   immediately at public full preparation, typed `Configuration`; ingress was
+   not started. This is a synthetic platform-fault reproduction, not proof of the
+   deployed failure's cause.
+3. Candidate combined preparation/ingress/TLS/stream/drain test: **passed** under
+   injection. It does not itself construct `TorClient`.
+4. Candidate full preparation **plus actual SDK constructor** under the qualified
+   deny-network/write wrapper: **FAILED**. Stage projection initially enclosed
+   the whole constructor chain; splitting the expressions proved the panic is
+   in standalone **`TorClient::builder()`**, before `.config(...)`, Manual policy,
+   `create_unbootstrapped`, key-store access, bootstrap or publication. Final closed
+   output is `code=tor_offline_e2e_sdk_builder_panic`, exit 2. The panic payload was
+   neither inspected nor formatted; stage markers are locally authored constants.
+5. Candidate ordinary (no NSS injection) full-prepare/SDK helper: **passed**.
+   That success must not erase the injected constructor failure. No private B
+   was reread for this candidate or injected reproduction; retained real-B
+   evidence applies only to the earlier ordinary baseline path.
+
+Final ordinary candidate checks: **409 library tests passed, 1 operator helper
+ignored**; selected-feature strict library/test Clippy, actual shipping-feature
+binary compilation, package/included-file formatting, whitespace checks and
+active changed-file LSP diagnostics passed. The default-feature-off test also
+passed with its lookup closure refusing every identity/config lookup beyond the
+switch. These successful checks do **not** override the injected constructor
+failure. Final build/test executables use this worktree's private `target/build`
+namespace; only compiled dependency artifacts were seeded by filesystem clone
+from the existing cache. The copied/hash-pinned helper is never rebuilt in place
+by another worktree.
+
+The parent and production-fix owner received the new boundary immediately.
+**No successful post-builder startup acceptance or shipping approval is claimed.**
+The production-fix owner retains investigation and implementation ownership.
+Future tests must exercise its actual resulting construction path, not merely
+our combined transport fixture. The Linux NSS equivalent reported by that owner
+is separate evidence; this tester did not execute a shipping Linux SDK/image.
+
 ## Reproduction
 
 Run from this test worktree. The shared target directory is an optional compilation
@@ -123,6 +176,22 @@ After any rebuild, review/re-pin that **public artifact** and rerun qualificatio
 before authorizing private input. A changed or absent artifact fails closed.
 
 `/usr/bin/python3 scripts/tor-offline-e2e.py qualify`
+
+Build/review and pin the separate **public-only** injector before using this
+optional synthetic mode; never put `DYLD_INSERT_LIBRARIES` on Cargo/Nix or a
+private-input execution. The wrapper sets it immediately before the Rust child
+inside the sandbox and checks an independent public NSS-effect probe.
+
+`clang -dynamiclib tests/fixtures/tor-missing-nss.c -o target/missing_nss.dylib`
+
+`/usr/bin/python3 scripts/tor-offline-e2e.py qualify --synthetic-missing-nss`
+
+On the tested candidate the latter command intentionally exits 2 with
+`code=tor_offline_e2e_sdk_builder_panic`. Do not reinterpret libtest's inner
+one-test pass (the containment entry) as success; the wrapper's closed code and
+exit status are authoritative. The successful combined local-network fixture is
+a **separate public-only** direct test-executable invocation with the injector,
+not a private sandbox invocation or proof of SDK constructor success.
 
 Native connector reproduction uses the locked supported SDK, not a replacement
 SOCKS parser. Build with the pinned compiler and pass the resulting helper path
