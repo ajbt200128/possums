@@ -6,6 +6,8 @@ use std::env;
 pub enum TorStartupFailure {
     #[error("code=tor_configuration_invalid stage=configuration constraint=explicit_opt_in_and_approved_identity action=check_approved_configuration_offline; no service launched")]
     Configuration,
+    #[error("code=tor_diagnostic_appraisal_complete stage=appraisal constraint=diagnostic_stop_before_private_keys action=review_guarded_appraisal_evidence; no private identity read, endorsement, client or service launched")]
+    DiagnosticStop,
     #[error("code=tor_feature_unavailable stage=configuration constraint=compiled_tor_feature action=use_an_approved_Tor_build; no service launched")]
     FeatureUnavailable,
     #[error("code=tor_grant_read_unknown stage=grant constraint=mounted_read cause=unknown action=check_approved_grant_mount_offline; no service launched")]
@@ -44,6 +46,8 @@ pub struct TorRuntimeConfig {
 
 #[cfg(feature = "tor")]
 enum IdentitySource {
+    #[cfg(feature = "tor-appraisal-diagnostic")]
+    AppraisalOnly,
     Directory(std::path::PathBuf),
     // Zeroizes this owned copy only; OS/runtime environment retention is separate.
     Native(zeroize::Zeroizing<String>),
@@ -70,6 +74,23 @@ impl TorRuntimeConfig {
         return Err(TorStartupFailure::FeatureUnavailable);
         #[cfg(feature = "tor")]
         {
+            // Compile-time diagnostic mode never even requests the native B
+            // secret. It cannot be disabled by runtime configuration.
+            #[cfg(feature = "tor-appraisal-diagnostic")]
+            if cfg!(feature = "tor-appraisal-diagnostic") {
+                let address = read("POSSUMS_TOR_EXPECTED_ONION")
+                    .map_err(|_| TorStartupFailure::Configuration)?;
+                if address.len() != 62 {
+                    return Err(TorStartupFailure::Configuration);
+                }
+                let approved = address
+                    .parse()
+                    .map_err(|_| TorStartupFailure::Configuration)?;
+                return Ok(Some(Self {
+                    identity: IdentitySource::AppraisalOnly,
+                    approved,
+                }));
+            }
             let directory = read("POSSUMS_TOR_IDENTITY_DIRECTORY");
             let native = read("POSSUMS_TOR_IDENTITY_NATIVE_KEY").map(zeroize::Zeroizing::new);
             let identity = match (directory, native) {
@@ -329,6 +350,11 @@ mod enabled {
             let a = evidence
                 .current_key(tor_now().map_err(TorStartupFailure::Appraisal)?)
                 .map_err(TorStartupFailure::Appraisal)?;
+            // Hard stop even if a debug appraisal unexpectedly succeeds.
+            // This precedes grant reads, B import, signing, state and TorClient.
+            if cfg!(feature = "tor-appraisal-diagnostic") {
+                return Err(TorStartupFailure::DiagnosticStop);
+            }
             let signer = decode_grant(
                 &read_grant(Path::new(PRIVATE_GRANT))?,
                 &read_grant(Path::new(PUBLIC_GRANT))?,
@@ -336,6 +362,8 @@ mod enabled {
                 &config.approved,
             )?;
             let pair = match config.identity {
+                #[cfg(feature = "tor-appraisal-diagnostic")]
+                IdentitySource::AppraisalOnly => return Err(TorStartupFailure::DiagnosticStop),
                 IdentitySource::Directory(path) => load_identity(&path, &config.approved)?,
                 IdentitySource::Native(native) => decode_native_identity(native, &config.approved)?,
             };
@@ -442,6 +470,10 @@ mod enabled {
     #[cfg(test)]
     mod tests {
         include!("tor_runtime_tests.rs");
+    }
+    #[cfg(all(test, feature = "tor-appraisal-diagnostic"))]
+    mod diagnostic_tests {
+        include!("tor_diagnostic_tests.rs");
     }
 }
 #[cfg(feature = "tor")]

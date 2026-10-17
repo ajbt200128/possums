@@ -2,6 +2,7 @@
 use super::*;
 
 // Public deterministic seed [7; 32], encoded as a standard v3 address.
+#[cfg(not(feature = "tor-appraisal-diagnostic"))]
 const SYNTHETIC_B: &str = "5jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwfmxqd.onion";
 
 fn fixture() -> serde_json::Value {
@@ -471,6 +472,7 @@ fn native_secret_malformed_hostile_and_oversize_errors_are_content_free() {
     );
 }
 
+#[cfg(not(feature = "tor-appraisal-diagnostic"))]
 fn lookup_config(
     directory: Result<String, env::VarError>,
     native: Result<String, env::VarError>,
@@ -485,6 +487,7 @@ fn lookup_config(
     })
 }
 
+#[cfg(not(feature = "tor-appraisal-diagnostic"))]
 #[test]
 fn enabled_configuration_requires_exactly_one_source_and_expected_b() {
     let approved = HsIdKey::from(&synthetic_pair(7)).id();
@@ -559,7 +562,7 @@ fn enabled_configuration_requires_exactly_one_source_and_expected_b() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(feature = "tor-appraisal-diagnostic")))]
 #[test]
 fn nonunicode_configuration_never_selects_an_alternative_source() {
     use std::os::unix::ffi::OsStringExt;
