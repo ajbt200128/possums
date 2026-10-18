@@ -36,7 +36,7 @@ async fn terminal_before_waiting_poll_never_emits_a_late_waiting_record() {
     assert!(!local[0].contains("outcome=waiting"));
 }
 
-#[cfg(not(feature = "debug-tor-no-health"))]
+#[cfg(not(feature = "debug-tor-readiness"))]
 #[tokio::test(start_paused = true)]
 async fn late_waiting_upload_cannot_extend_the_180_second_observation_budget() {
     let (mut observer, receiver) = tests::fixture();

@@ -67,7 +67,7 @@
         });
         debugGateway = craneLib.buildPackage (torCommon // {
           cargoArtifacts = torCargoArtifacts;
-          cargoExtraArgs = "--locked --features debug-tor-no-health";
+          cargoExtraArgs = "--locked --features debug-tor-readiness";
           doCheck = false;
         });
         debugEntrypoint = pkgs.writeShellScriptBin "possums-debug-entrypoint" ''

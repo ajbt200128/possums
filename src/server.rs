@@ -106,7 +106,7 @@ pub struct AppState {
     tor_signer: Option<Arc<crate::tor_endorsement::TorEndorsementSigner>>,
     #[cfg(feature = "tor")]
     pub(crate) tor_ready: Option<Arc<std::sync::atomic::AtomicBool>>,
-    #[cfg(feature = "debug-tor-no-health")]
+    #[cfg(feature = "debug-tor-readiness")]
     pub(crate) debug_tor_readiness: Option<crate::tor_ingress::DebugReadiness>,
     #[cfg(test)]
     preflight_hooks: Arc<resource_streaming_tests::PreflightHooks>,
@@ -125,7 +125,7 @@ impl AppState {
         self
     }
 
-    #[cfg(feature = "debug-tor-no-health")]
+    #[cfg(feature = "debug-tor-readiness")]
     pub fn with_debug_tor_readiness(
         mut self,
         observer: Option<crate::tor_ingress::DebugReadiness>,
@@ -189,7 +189,7 @@ impl AppState {
             tor_signer: None,
             #[cfg(feature = "tor")]
             tor_ready: None,
-            #[cfg(feature = "debug-tor-no-health")]
+            #[cfg(feature = "debug-tor-readiness")]
             debug_tor_readiness: None,
             #[cfg(test)]
             preflight_hooks: Arc::default(),
@@ -206,7 +206,7 @@ pub fn router(state: AppState) -> Router {
 #[doc(hidden)]
 pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Router {
     let health = state.lifecycle.clone();
-    #[cfg(all(feature = "tor", not(feature = "debug-tor-no-health")))]
+    #[cfg(all(feature = "tor", not(feature = "debug-tor-readiness")))]
     let tor_ready = state.tor_ready.clone();
     let app = Router::new()
         .merge(crate::api::routes())
@@ -239,12 +239,12 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
         "/healthz",
         get(move || {
             let health = health.clone();
-            #[cfg(all(feature = "tor", not(feature = "debug-tor-no-health")))]
+            #[cfg(all(feature = "tor", not(feature = "debug-tor-readiness")))]
             let tor_ready = tor_ready.clone();
             async move {
                 // Debug-only health independence does not change SDK state,
                 // endorsement verification, engine ownership or shared drain.
-                #[cfg(all(feature = "tor", not(feature = "debug-tor-no-health")))]
+                #[cfg(all(feature = "tor", not(feature = "debug-tor-readiness")))]
                 if tor_ready.is_some_and(|ready| !ready.load(std::sync::atomic::Ordering::Acquire))
                 {
                     return StatusCode::SERVICE_UNAVAILABLE;

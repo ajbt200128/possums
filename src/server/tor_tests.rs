@@ -402,7 +402,7 @@ async fn tor_health_policy_preserves_non_tor_quiescence() {
             .await
             .unwrap()
             .status(),
-        if cfg!(feature = "debug-tor-no-health") {
+        if cfg!(feature = "debug-tor-readiness") {
             StatusCode::NO_CONTENT
         } else {
             StatusCode::SERVICE_UNAVAILABLE
@@ -428,7 +428,7 @@ async fn tor_health_policy_preserves_non_tor_quiescence() {
         .store(false, Ordering::Release);
     assert_eq!(
         router(state.clone()).oneshot(check()).await.unwrap().status(),
-        if cfg!(feature = "debug-tor-no-health") {
+        if cfg!(feature = "debug-tor-readiness") {
             StatusCode::NO_CONTENT
         } else {
             StatusCode::SERVICE_UNAVAILABLE

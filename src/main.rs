@@ -25,9 +25,9 @@ async fn main() -> ExitCode {
         };
     }
     let mut startup = Startup::new(TelemetryConfig::from_env());
-    #[cfg(not(feature = "debug-tor-no-health"))]
+    #[cfg(not(feature = "debug-tor-readiness"))]
     let result = run(&mut startup).await;
-    #[cfg(feature = "debug-tor-no-health")]
+    #[cfg(feature = "debug-tor-readiness")]
     let result = if env::var("POSSUMS_TOR_ENABLED").as_deref() == Ok("true") {
         let (observer, diagnostics) = possums::tor_ingress::debug_readiness();
         let serving = run(&mut startup, Some(observer));
@@ -180,7 +180,7 @@ impl From<InferenceError> for StartupFailure {
 
 async fn run(
     startup: &mut Startup,
-    #[cfg(feature = "debug-tor-no-health")] readiness: Option<possums::tor_ingress::DebugReadiness>,
+    #[cfg(feature = "debug-tor-readiness")] readiness: Option<possums::tor_ingress::DebugReadiness>,
 ) -> Result<(), StartupFailure> {
     startup.enter(Stage::Configuration);
     let tor_config = TorRuntimeConfig::from_env().map_err(StartupFailure::TorStartup)?;
@@ -245,7 +245,7 @@ async fn run(
         Arc::<str>::from(attestation_socket),
         verifier,
     );
-    #[cfg(feature = "debug-tor-no-health")]
+    #[cfg(feature = "debug-tor-readiness")]
     let state = state.with_debug_tor_readiness(readiness);
     startup.enter(Stage::Bind);
     let listener = tokio::net::TcpListener::bind(bind)

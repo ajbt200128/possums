@@ -8,7 +8,7 @@ publish = false
 [features]
 default = []
 # Experimental debug image only; never enable in production releases.
-debug-tor-no-health = ["tor"]
+debug-tor-readiness = ["tor"]
 tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-hscrypto", "dep:tor-keymgr", "dep:tor-cell", "dep:tor-proto", "dep:tor-rtcompat", "dep:tokio-util", "dep:fs-mistrust", "dep:tor-llcrypto", "dep:tempfile", "dep:spki", "dep:ssh-key", "dep:zeroize"]
 
 [dependencies]

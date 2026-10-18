@@ -120,7 +120,7 @@ async fn waiting_export_stall_cannot_erase_first_ready_or_failure() {
     }
 }
 
-#[cfg(not(feature = "debug-tor-no-health"))]
+#[cfg(not(feature = "debug-tor-readiness"))]
 #[tokio::test(start_paused = true)]
 async fn never_ready_deadline_only_ends_observer_and_future_status_is_inert() {
     let (observer, receiver) = fixture();
@@ -171,7 +171,7 @@ async fn monotonic_bucket_boundaries_and_off_path() {
         (119, "60s_to_under_180s"),
         (
             1,
-            if cfg!(feature = "debug-tor-no-health") {
+            if cfg!(feature = "debug-tor-readiness") {
                 "180s_to_under_590s"
             } else {
                 "180s_or_more"
@@ -196,7 +196,7 @@ async fn monotonic_bucket_boundaries_and_off_path() {
     assert!(worker.now_or_never().is_some());
 }
 
-#[cfg(feature = "debug-tor-no-health")]
+#[cfg(feature = "debug-tor-readiness")]
 #[tokio::test(start_paused = true)]
 async fn debug_observes_ready_after_old_cutoff_without_resetting_start_clock() {
     let (observer, receiver) = fixture();
@@ -218,7 +218,7 @@ async fn debug_observes_ready_after_old_cutoff_without_resetting_start_clock() {
     assert!(local[1].contains("elapsed_bucket=180s_to_under_590s"));
 }
 
-#[cfg(feature = "debug-tor-no-health")]
+#[cfg(feature = "debug-tor-readiness")]
 #[tokio::test(start_paused = true)]
 async fn debug_deadline_prints_before_grace_even_with_stalled_export_and_keeps_observing() {
     for terminal in [Terminal::FirstLocalReady, Terminal::EngineFailure] {
@@ -270,7 +270,7 @@ async fn debug_deadline_prints_before_grace_even_with_stalled_export_and_keeps_o
     }
 }
 
-#[cfg(feature = "debug-tor-no-health")]
+#[cfg(feature = "debug-tor-readiness")]
 #[tokio::test(start_paused = true)]
 async fn debug_terminal_at_deadline_wins_without_timeout_or_late_waiting() {
     for terminal in [Terminal::FirstLocalReady, Terminal::StatusEnded] {
@@ -286,7 +286,7 @@ async fn debug_terminal_at_deadline_wins_without_timeout_or_late_waiting() {
     }
 }
 
-#[cfg(feature = "debug-tor-no-health")]
+#[cfg(feature = "debug-tor-readiness")]
 #[test]
 fn debug_timeout_wire_is_closed_and_does_not_claim_engine_failure() {
     let record = Record {
