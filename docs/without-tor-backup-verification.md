@@ -73,12 +73,6 @@ Pi **1.0.4**, TypeScript **5.9.3**, esbuild **0.25.10**. Rust used isolated
   connector, readiness or libc call; documentation and negative canaries remain.
   `git diff --check` passed.
 
-The shell's inherited Python **3.15.0a7** initially failed one existing ZIP-fixture
-construction with a DOS-date field-range error (79 tests, one error). No fixture
-or gate was relaxed. Offline evaluation identified the flake's Python 3.12.12;
-all 89 tests above then passed using its explicit executable. The earlier run is
-not pinned-project failure evidence and is not hidden by the successful rerun.
-
 Final scratch package: `/tmp/possums-pi-build-daiP5D/package`, extension SHA-256
 `b9fd453ebf5cc7028397fd9ee145e7d34efc066383b3f8fd8404470cc8924174`.
 Reused the prior locked scratch dependency install without another npm fetch;
