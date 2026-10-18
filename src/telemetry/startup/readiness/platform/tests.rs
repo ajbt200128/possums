@@ -49,7 +49,7 @@ fn wrapper_with_pipe(full: bool) -> Vec<u8> {
             "--nocapture",
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::from(writer.try_clone().unwrap()))
         .spawn()
         .unwrap();
@@ -66,6 +66,17 @@ fn wrapper_with_pipe(full: bool) -> Vec<u8> {
         std::thread::sleep(Duration::from_millis(10));
     };
     assert!(status.success());
+    let mut harness = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut harness)
+        .unwrap();
+    assert!(
+        harness.contains("1 passed;"),
+        "the exact wrapper fixture must actually run"
+    );
     assert_eq!(
         unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) },
         before_spawn,
@@ -97,5 +108,12 @@ fn linux_nonroot_writable_fifo_captures_real_readiness_record() {
     );
     let bytes = wrapper_with_pipe(false);
     let text = String::from_utf8(bytes).unwrap();
-    assert!(text.contains("event=possums.startup_readiness outcome=waiting"));
+    let records: Vec<_> = text.lines().collect();
+    assert_eq!(records.len(), 2);
+    assert!(records[0].contains("event=possums.startup_readiness outcome=waiting"));
+    assert!(records[1].contains("event=possums.startup_readiness outcome=first_local_ready"));
+    assert!(
+        !text.contains("outcome=engine_failure"),
+        "first Running is historical evidence, not current health"
+    );
 }

@@ -7,13 +7,13 @@ use tokio::io::AsyncWriteExt;
 fn off() -> Config {
     Config::from_lookup(|_| None)
 }
-fn fixture() -> (Observer, watch::Receiver<Snapshot>) {
+pub(super) fn fixture() -> (Observer, watch::Receiver<Snapshot>) {
     let (observer, unused) = new(off());
     drop(unused);
     let receiver = observer.snapshot.subscribe();
     (observer, receiver)
 }
-fn stalled() -> Client {
+pub(super) fn stalled() -> Client {
     let mut client = Client::new("127.0.0.1:1".parse().unwrap()).unwrap();
     client.stall_connect = true;
     client
@@ -23,8 +23,17 @@ fn stalled() -> Client {
 // No network or production configuration, and no alternate production dialer.
 pub(crate) fn stalled_observer() -> (Observer, impl Future<Output = ()>) {
     let (observer, receiver) = fixture();
-    let worker = run(observer.start, receiver, Ok(Some(stalled())));
+    let worker = run(observer.clone(), receiver, Ok(Some(stalled())));
     (observer, worker)
+}
+
+pub(crate) fn captured_observer() -> (Observer, impl Future<Output = ()>, impl Fn() -> Vec<String>)
+{
+    let (observer, worker) = new(off());
+    let local = observer.local.clone();
+    (observer, worker, move || {
+        local.records.lock().unwrap().clone()
+    })
 }
 
 #[tokio::test(start_paused = true)]
@@ -46,9 +55,11 @@ async fn ready_before_waiting_is_terminal_once_and_duplicates_are_inert() {
         observer.failure(Terminal::StatusEnded);
     }
     assert_eq!(receiver.borrow().first, Some(first));
+    assert_eq!(observer.local.records.lock().unwrap().len(), 1);
+    assert!(observer.local.records.lock().unwrap()[0].contains("outcome=first_local_ready"));
     let client = stalled();
     let evidence = client.evidence();
-    let worker = run(observer.start, receiver, Ok(Some(client)));
+    let worker = run(observer.clone(), receiver, Ok(Some(client)));
     tokio::pin!(worker);
     assert!(worker.as_mut().now_or_never().is_none());
     assert_eq!(evidence.connecting.load(SeqCst), 1);
@@ -68,7 +79,7 @@ async fn waiting_export_stall_cannot_erase_first_ready_or_failure() {
         let (observer, receiver) = fixture();
         let client = stalled();
         let evidence = client.evidence();
-        let worker = run(observer.start, receiver.clone(), Ok(Some(client)));
+        let worker = run(observer.clone(), receiver.clone(), Ok(Some(client)));
         tokio::pin!(worker);
         assert!(worker.as_mut().now_or_never().is_none());
         tokio::time::advance(WAIT).await;
@@ -85,12 +96,27 @@ async fn waiting_export_stall_cannot_erase_first_ready_or_failure() {
         assert_eq!(receiver.borrow().first, first);
         assert_eq!(receiver.borrow().first.unwrap().terminal, Some(terminal));
         assert_eq!(receiver.borrow().first.unwrap().elapsed, "30s_to_under_60s");
+        // Both local attempts precede completion of the waiting upload. The
+        // terminal cannot be ownership-dropped or duplicated by that worker.
+        let local = observer.local.records.lock().unwrap().clone();
+        assert_eq!(local.len(), 2);
+        assert!(local[0].contains("outcome=waiting"));
+        assert!(!local[1].contains("outcome=waiting"));
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(worker.as_mut().now_or_never().is_none());
         assert_eq!(evidence.connecting.load(SeqCst), 2);
         tokio::time::advance(Duration::from_secs(1)).await;
         worker.await;
         assert_eq!(evidence.connecting.load(SeqCst), 2);
+        let local = observer.local.records.lock().unwrap();
+        assert_eq!(local.len(), 3); // two readiness + one local-only warning
+        assert_eq!(
+            local
+                .iter()
+                .filter(|r| r.contains("stage=tor_startup_readiness_delivery"))
+                .count(),
+            1
+        );
     }
 }
 
@@ -99,7 +125,7 @@ async fn never_ready_deadline_only_ends_observer_and_future_status_is_inert() {
     let (observer, receiver) = fixture();
     let client = stalled();
     let evidence = client.evidence();
-    let worker = run(observer.start, receiver.clone(), Ok(Some(client)));
+    let worker = run(observer.clone(), receiver.clone(), Ok(Some(client)));
     tokio::pin!(worker);
     assert!(worker.as_mut().now_or_never().is_none());
     observer.observe(OnionState::Bootstrapping, ProblemKind::Ipt, None);
@@ -114,13 +140,19 @@ async fn never_ready_deadline_only_ends_observer_and_future_status_is_inert() {
     tokio::time::advance(Duration::from_secs(1)).await;
     worker.await;
     // Deadline has no readiness reference and never fabricates an engine fault.
-    assert!(receiver.borrow().first.is_none());
+    assert_eq!(
+        receiver.borrow().first.unwrap().terminal,
+        Some(Terminal::Unconfirmed)
+    );
     observer.observe(
         OnionState::Running,
         ProblemKind::None,
         Some(Terminal::FirstLocalReady),
     );
-    assert!(receiver.borrow().first.is_none());
+    assert_eq!(
+        receiver.borrow().first.unwrap().terminal,
+        Some(Terminal::Unconfirmed)
+    );
     assert_eq!(receiver.borrow().latest.state, State::Bootstrapping);
     tokio::time::advance(Duration::from_secs(1000)).await;
     assert_eq!(evidence.connecting.load(SeqCst), 2);
@@ -290,7 +322,7 @@ async fn actual_tls_otlp_wire_waiting_then_latched_ready_has_only_sealed_logs() 
         }
         bodies
     };
-    let (_, bodies) = tokio::join!(run(observer.start, receiver, Ok(Some(client))), peer);
+    let (_, bodies) = tokio::join!(run(observer.clone(), receiver, Ok(Some(client))), peer);
     assert_eq!(evidence.connections.load(SeqCst), 2);
     assert_eq!(evidence.live_io.load(SeqCst), 0);
     for (bytes, outcome) in bodies.iter().zip(["waiting", "first_local_ready"]) {
@@ -314,7 +346,7 @@ async fn dropping_worker_closes_actual_io_without_late_upload_or_retry() {
         ProblemKind::None,
         Some(Terminal::FirstLocalReady),
     );
-    let mut worker = Box::pin(run(observer.start, receiver, Ok(Some(client))));
+    let mut worker = Box::pin(run(observer.clone(), receiver, Ok(Some(client))));
     let peer = async {
         let (io, _) = listener.accept().await.unwrap();
         let mut io = acceptor.accept(io).await.unwrap();

@@ -360,6 +360,61 @@ async fn observed_fatal_eof_and_panic_retain_original_engine_policy() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn quiet_engine_failure_eof_and_panic_commit_local_terminal_before_immediate_drain() {
+    let cases = [
+        (
+            stream::iter([(State::Running, true, ProblemKind::Runtime)]).boxed(),
+            "tor_startup_engine_failure",
+        ),
+        (
+            stream::iter([(State::Broken, false, ProblemKind::Ipt)]).boxed(),
+            "tor_startup_engine_failure",
+        ),
+        (stream::empty().boxed(), "tor_startup_status_ended"),
+        (
+            stream::poll_fn(|_| panic!("HOSTILE_STATUS_PANIC_SECRET")).boxed(),
+            "tor_startup_status_panicked",
+        ),
+    ];
+    for (statuses, code) in cases {
+        let start = tokio::time::Instant::now();
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (observer, diagnostics, captured) = readiness::tests::captured_observer();
+        let engine = stream::once(async {
+            Err(engine_status(statuses, Some(ready.clone()), Some(observer)).await)
+        });
+        let (report, seen) = reporter();
+        let serving_state = state();
+        let result = with_readiness_diagnostics(
+            serve_sources_until(
+                stream::pending(),
+                engine,
+                serving_state.clone(),
+                Duration::from_secs(10),
+                std::future::pending(),
+                report,
+            ),
+            diagnostics,
+        )
+        .await;
+        assert_eq!(result.unwrap_err().source, Some(Failure::Engine));
+        assert_eq!(*seen.lock().unwrap(), vec![Failure::Engine]);
+        assert!(!serving_state.lifecycle.is_serving());
+        assert!(!ready.load(Ordering::Acquire));
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start,
+            "no yield/upload wait added to drain"
+        );
+        let local = captured();
+        assert_eq!(local.len(), 1);
+        assert!(local[0].contains(code));
+        assert!(local[0].contains("outcome=engine_failure"));
+        assert!(!local[0].contains("HOSTILE"));
+    }
+}
+
 #[tokio::test]
 async fn stalled_diagnostics_are_owned_and_cannot_delay_source_failure_or_drain() {
     struct Dropped(Arc<AtomicUsize>);

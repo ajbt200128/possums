@@ -151,9 +151,23 @@ struct Snapshot {
 }
 /// Only closed values enter this single bounded cell. Latch before coalescing:
 /// Running followed by Broken during a stalled waiting export stays first-ready.
+#[derive(Clone)]
 pub(crate) struct Observer {
     start: Instant,
     snapshot: watch::Sender<Snapshot>,
+    local: std::sync::Arc<Local>,
+}
+#[derive(Default)]
+struct Local {
+    #[cfg(test)]
+    records: std::sync::Mutex<Vec<String>>,
+}
+impl Local {
+    fn emit(&self, record: fmt::Arguments<'_>) {
+        platform::emit(record);
+        #[cfg(test)]
+        self.records.lock().unwrap().push(record.to_string());
+    }
 }
 impl Observer {
     pub(crate) fn observe(
@@ -183,6 +197,9 @@ impl Observer {
             snapshot.latest.terminal = terminal;
             if terminal.is_some() {
                 snapshot.first = Some(snapshot.latest);
+                // Commit the local attempt at observation, before serving can
+                // complete in this same poll and drop the owned upload future.
+                self.local.emit(format_args!("{}", snapshot.latest));
             }
             true
         });
@@ -200,40 +217,77 @@ pub(crate) fn new(config: Config) -> (Observer, impl Future<Output = ()>) {
         },
         first: None,
     });
-    (Observer { start, snapshot }, async move {
+    let observer = Observer {
+        start,
+        snapshot,
+        local: Default::default(),
+    };
+    let worker = observer.clone();
+    (observer, async move {
         // Disabled config never constructs transport/TLS or performs HTTP.
-        let client = config.into_client();
-        run(start, receiver, client).await;
+        run(worker, receiver, config.into_client()).await;
     })
 }
 
 async fn run(
-    start: Instant,
+    observer: Observer,
     mut snapshot: watch::Receiver<Snapshot>,
     client: Result<Option<Client>, transport::Failure>,
 ) {
+    let start = observer.start;
+    let mut warned = false;
+    if client.is_err() {
+        warn(
+            &observer.local,
+            &mut warned,
+            Delivery {
+                signal: Signal::Logs,
+                constraint: "transport_configuration",
+            },
+        );
+    }
     let mut waiting_sent = false;
     loop {
-        let current = *snapshot.borrow_and_update();
-        let record = if let Some(first) = current.first {
-            Some(first)
-        } else if Instant::now() >= start + END {
-            Some(Record {
-                terminal: Some(Terminal::Unconfirmed),
-                elapsed: elapsed(start),
-                ..current.latest
-            })
-        } else if !waiting_sent && Instant::now() >= start + WAIT {
-            waiting_sent = true;
-            Some(Record {
-                elapsed: elapsed(start),
-                ..current.latest
-            })
-        } else {
-            None
-        };
+        snapshot.borrow_and_update();
+        let mut record = None;
+        // Serialize the waiting/deadline local attempt with observation. Waiting
+        // can never follow a committed terminal, even across threads.
+        observer.snapshot.send_if_modified(|current| {
+            if let Some(first) = current.first {
+                record = Some(first); // Local attempt already committed.
+            } else if Instant::now() >= start + END {
+                let terminal = Record {
+                    terminal: Some(Terminal::Unconfirmed),
+                    elapsed: elapsed(start),
+                    ..current.latest
+                };
+                current.first = Some(terminal);
+                observer.local.emit(format_args!("{terminal}"));
+                record = Some(terminal);
+                return true;
+            } else if !waiting_sent && Instant::now() >= start + WAIT {
+                waiting_sent = true;
+                let waiting = Record {
+                    elapsed: elapsed(start),
+                    ..current.latest
+                };
+                observer.local.emit(format_args!("{waiting}"));
+                record = Some(waiting);
+            }
+            false
+        });
         if let Some(record) = record {
-            deliver_record(&client, record).await;
+            let stop = start
+                + END
+                + if record.terminal.is_some() {
+                    Duration::from_secs(1)
+                } else {
+                    Duration::ZERO
+                };
+            let deadline = (Instant::now() + Duration::from_secs(1)).min(stop);
+            if let Err(failure) = deliver_record(&client, record, deadline).await {
+                warn(&observer.local, &mut warned, failure);
+            }
             if record.terminal.is_some() {
                 break;
             }
@@ -281,23 +335,35 @@ fn logs(record: Record) -> ExportLogsServiceRequest {
         }],
     }
 }
-async fn deliver_record(client: &Result<Option<Client>, transport::Failure>, record: Record) {
-    platform::emit(format_args!("{record}"));
-    let Ok(Some(client)) = client else {
+fn warn(local: &Local, warned: &mut bool, failure: Delivery) {
+    if *warned {
         return;
+    }
+    *warned = true;
+    // Reuse the sender's closed classification, never format its raw cause or
+    // recursively export this warning. No HTTP status survives that boundary.
+    local.emit(format_args!("code=tor_startup_readiness_delivery_unconfirmed stage=tor_startup_readiness_delivery constraint={} action=check_telemetry_ingestion_configuration_and_connectivity_offline; delivery unknown; not retried; original readiness and service outcome unchanged", failure.constraint));
+}
+
+async fn deliver_record(
+    client: &Result<Option<Client>, transport::Failure>,
+    record: Record,
+    deadline: Instant,
+) -> Result<(), Delivery> {
+    let Ok(Some(client)) = client else {
+        return Ok(());
     };
     let client = client.clone().for_signal(Signal::Logs);
-    // The shared sender classifies delivery faults, but this observer emits no
-    // extra delivery-warning records: its entire stderr/OTLP budget is two.
-    // Missing ingestion is unavailable, never evidence of success or health.
-    let _ = send_payload(
+    send_payload(
         &client,
         Signal::Logs,
         logs(record).encode_to_vec(),
-        Instant::now() + Duration::from_secs(1),
+        deadline,
     )
-    .await;
+    .await
 }
 
+#[cfg(test)]
+mod delivery_tests;
 #[cfg(test)]
 pub(crate) mod tests;
