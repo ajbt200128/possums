@@ -5,7 +5,7 @@ use super::{
     export::transport::{self, Client, Signal},
     runtime::Config,
 };
-use crate::inference::InferenceFailure;
+use crate::{inference::InferenceFailure, tor_runtime::TorStartupFailure};
 use opentelemetry_http::HttpClient;
 use opentelemetry_proto::tonic::{
     collector::{
@@ -30,7 +30,7 @@ use std::{
 // The transport already caps each signal attempt at one second. Reserve both
 // sequential attempts so stalled logs cannot consume metrics' only opportunity.
 const BUDGET: Duration = Duration::from_secs(2);
-const MAX_RECORDS: usize = 6; // five distinct stages and one terminal
+const MAX_RECORDS: usize = 9; // eight distinct stages and one terminal
 const EVENT: &str = "possums.startup";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,8 +38,11 @@ pub enum Stage {
     Configuration,
     Accounts,
     Signal,
+    TorPreparation,
     Connect,
     Bind,
+    TorBootstrap,
+    TorLaunch,
 }
 impl Stage {
     fn label(self) -> &'static str {
@@ -47,13 +50,18 @@ impl Stage {
             Self::Configuration => "configuration",
             Self::Accounts => "accounts",
             Self::Signal => "signal",
+            Self::TorPreparation => "tor_preparation",
             Self::Connect => "connect",
             Self::Bind => "bind",
+            Self::TorBootstrap => "tor_bootstrap",
+            Self::TorLaunch => "tor_launch",
         }
     }
 }
 
-/// All nested fields were reviewed: InferenceFailure is unit variants.
+/// All nested fields were reviewed: InferenceFailure is unit variants;
+/// TorStartupFailure contains only closed enums;
+/// ServeFailure contains only closed optional causes.
 /// Never replace these with SDK/io errors or a string-bearing wrapper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
@@ -63,6 +71,9 @@ pub enum Failure {
     SignalUnknown,
     Connect(InferenceFailure),
     BindUnknown,
+    Tor(TorStartupFailure),
+    #[cfg(feature = "tor")]
+    TorLaunch(crate::tor_ingress::ServeFailure),
 }
 impl Failure {
     fn diagnostic(self) -> Diagnostic {
@@ -97,6 +108,17 @@ impl Failure {
                 "tcp_listener_bind_cause_unknown",
                 "check_approved_listener_configuration_offline",
             ),
+            Self::Tor(_) => (
+                "startup_tor_failed",
+                "approved_tor_initialization",
+                "check_approved_tor_configuration_and_evidence_offline",
+            ),
+            #[cfg(feature = "tor")]
+            Self::TorLaunch(_) => (
+                "startup_tor_launch_failed",
+                "approved_tor_launch",
+                "check_approved_tor_host_state_offline",
+            ),
         };
         Diagnostic {
             code,
@@ -116,6 +138,9 @@ impl fmt::Display for Failure {
         match self {
             // Debug retains distinctions hidden by the shipped serde aliases.
             Self::Connect(cause) => write!(f, " cause={cause:?}; {cause}"),
+            Self::Tor(cause) => write!(f, "; {cause}"),
+            #[cfg(feature = "tor")]
+            Self::TorLaunch(cause) => write!(f, "; {cause}"),
             Self::SignalUnknown | Self::BindUnknown => f.write_str(" cause=unknown"),
             _ => Ok(()),
         }

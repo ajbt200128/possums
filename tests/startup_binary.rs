@@ -1,4 +1,4 @@
-//! Actual process startup failures, before provider construction. Offline only.
+//! Actual process startup failures, before provider/Tor construction. Offline only.
 use std::{
     process::{Output, Stdio},
     time::Duration,
@@ -12,6 +12,7 @@ fn startup() -> Command {
     command
         .env_clear()
         .env("OTEL_SDK_DISABLED", "true")
+        .env("POSSUMS_TOR_ENABLED", "false")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -71,12 +72,22 @@ async fn hostile_accounts_and_private_configuration_never_enter_platform_diagnos
         .env("TINFOIL_API_KEY", CANARY)
         .env("POSSUMS_GATEWAY_ATTESTATION_SOCKET", CANARY)
         .env("POSSUMS_GATEWAY_REPOSITORY", CANARY)
+        .env("POSSUMS_TOR_IDENTITY_NATIVE_KEY", CANARY)
         // Invalid telemetry must fail closed without external work. Its error
         // must not replace the primary account failure or echo its value.
         .env("OTEL_SDK_DISABLED", "false")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", CANARY)
         .env("OTEL_EXPORTER_OTLP_HEADERS", CANARY);
     assert_closed(run(command).await, 3, "accounts_invalid");
+}
+
+#[tokio::test]
+async fn malformed_tor_opt_in_is_diagnosed_without_reading_identity_values() {
+    let mut command = startup();
+    command
+        .env("POSSUMS_TOR_ENABLED", CANARY)
+        .env("POSSUMS_TOR_IDENTITY_NATIVE_KEY", CANARY);
+    assert_closed(run(command).await, 10, "tor_configuration_invalid");
 }
 
 #[cfg(unix)]
