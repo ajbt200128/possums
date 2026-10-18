@@ -59,6 +59,16 @@ unchanged. These source checks include paused-time deadlines, readiness after
 severity/schema and untouched engine readiness/failure behavior. Existing actual
 TLS/OTLP hostile-response/drop and Linux FIFO tests remain part of the suite.
 
-Hosted build, signed release and actual debug deployment remain pending. Their
-results will be recorded separately; existing startup logs are not
-retrospectively relabeled.
+[Hosted build39150178658](https://github.com/ajbt200128/possums/actions/runs/39150178658),
+attempt1, succeeded from exact source `0aebc70c33dc0a66c8799b32df7b0229124bf9fa`.
+Normal/debug lifecycle checks, formatting, Clippy, pinned Nix image build and
+archive/registry digest equality passed. Actual downloaded Linux/amd64 image was
+loaded and inspected: UID/GID65532, matching source and diagnostic labels. Digest:
+`sha256:a660c5c4461c00c76bfeac224eebd04287b5812890f4e5d0ba0f8bdb9ecea33a`.
+An actual-image offline/read-only/no-capabilities run with Tor enabled but absent
+approved identity configuration failed promptly with closed
+`tor_configuration_invalid`, startup failure, exit10; no network or service
+launch occurred. This verifies the early failure diagnostic, not Tor readiness.
+
+Signed release and actual debug deployment remain pending. Their results will be
+recorded separately; existing startup logs are not retrospectively relabeled.
