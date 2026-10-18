@@ -4,6 +4,8 @@ use std::future::Future;
 use tokio::{sync::watch, time::Instant};
 use tor_hsservice::status::{Problem, State as OnionState};
 
+mod platform;
+
 const WAIT: Duration = Duration::from_secs(30);
 const END: Duration = Duration::from_secs(180);
 const EVENT: &str = "possums.startup_readiness";
@@ -280,7 +282,7 @@ fn logs(record: Record) -> ExportLogsServiceRequest {
     }
 }
 async fn deliver_record(client: &Result<Option<Client>, transport::Failure>, record: Record) {
-    let _ = writeln!(std::io::stderr().lock(), "{record}");
+    platform::emit(format_args!("{record}"));
     let Ok(Some(client)) = client else {
         return;
     };
