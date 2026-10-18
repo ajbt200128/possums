@@ -144,6 +144,22 @@ try {
     assert.equal(response.status, 302); await response.body.cancel(); assert.equal(requests, beforeRedirect + 1); passed++;
   } finally { redirectOp.close(); }
   assert.deepEqual(await send('/'), { ok: true }); passed++;
+  // Same address, new endpoint key: an old live trust context fails before
+  // HTTP, while an independently supplied new pin can reach the same server.
+  // The new pin here is synthetic, not evidence of public attestation success.
+  execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(out, 'rotated-key.pem'),
+    '-out', path.join(out, 'rotated-cert.pem'), '-days', '1', '-subj', '/CN=localhost',
+    '-addext', 'subjectAltName=DNS:localhost'], { stdio: 'ignore' });
+  const rotatedCert = await readFile(path.join(out, 'rotated-cert.pem'), 'utf8');
+  const rotatedPin = sha(new X509Certificate(rotatedCert).publicKey.export({ type: 'spki', format: 'der' }));
+  assert.notEqual(rotatedPin, tls);
+  server.setSecureContext({ key: await readFile(path.join(out, 'rotated-key.pem')), cert: rotatedCert });
+  const beforeRotation = requests;
+  await rejects(() => send('/'), 'certificate');
+  assert.equal(requests, beforeRotation); passed++;
+  assert.deepEqual(await send('/', rotatedPin), { ok: true });
+  assert.equal(requests, beforeRotation + 1); passed++;
+  server.setSecureContext({ key: await readFile(path.join(out, 'key.pem')), cert: certPEM });
   assert.deepEqual(await send('/'), { ok: true }); passed++;
   const cancelled = new test.Operation(5000);
   const response = await test.pinnedRequest(new Request(url + '/stream'), cancelled, tls, () => {});

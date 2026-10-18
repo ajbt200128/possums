@@ -689,6 +689,69 @@ await check('coalesced recovery survives one caller abort; external logout suppr
  provider.logout();held.resolve();const cancelled=await obsolete;
  warningText(cancelled);assert.equal(provider.client,undefined);assert.equal(source.sends(),1);
 });
+await check('transport interruption then certificate failure latches old session; only a new trust session selects replacement',async()=>{
+ const templates={A:await catalogFixture(),B:await catalogFixture()};
+ let active='A',transportFailure=true,verifies=0,probes=0,catalogs=0,controls=0,chats=0;
+ const prepared=[];
+ for(const [identity,template] of Object.entries(templates)) {
+  template.channel.models=async()=>{
+   catalogs++;
+   if(identity!==active)throw new m.DiagnosticFailure('trust','certificate');
+   return {object:'list',data:[entry(false)]};
+  };
+  template.channel.control=async route=>route==='/v1/sessions'
+   ? {token:'b'.repeat(43),token_type:'Bearer',expires_in:43200}
+   : (controls++,{submission:'s'.repeat(43)});
+  template.channel.chat=async(_payload,_bearer,options)=>{
+   chats++;await options.onResponse?.({status:200,contentType:'text/event-stream'});
+   if(transportFailure)throw new m.DiagnosticFailure('transport','fetch','uncertain',200);
+   const frame=value=>'data: '+JSON.stringify(value)+'\n\n';
+   const text=frame(event({role:'assistant',content:'Synthetic replacement answer'}))+
+    frame({object:'chat.completion.chunk',model:'synthetic',choices:[{index:0,delta:{},finish_reason:'stop'}]})+
+    frame({object:'chat.completion.chunk',model:'synthetic',choices:[],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2},possums:{outcome:'settled',charged_microunits:'2',refunded_microunits:'50'}})+'data: [DONE]\n\n';
+   return new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(text));controller.close();}});
+  };
+  const freshSession=template.freshSession.bind(template);
+  template.freshSession=()=>{
+   const client=freshSession(),prepare=client.prepareChat.bind(client);
+   client.prepareChat=async(...args)=>{const value=await prepare(...args);prepared.push(value);return value;};
+   return client;
+  };
+ }
+ const provider=new m.PossumsProvider(async()=>{verifies++;return templates[active];},()=>{},async()=>{probes++;throw Error('must not recover certificate');});
+ await provider.auth.apiKey.login(interaction());const selected=provider.getModels()[0];
+ const interrupted=await provider.streamSimple(selected,context(false)).result();
+ warningText(interrupted,/possums_transport_fetch.*200/);
+ assert.equal(prepared[0].dispatched,true);assert.equal(provider.recoveryBlocked,undefined);
+ assert(interrupted.diagnostics.some(value=>value.type==='possums_billing_unknown'));
+ assert.deepEqual([verifies,probes,controls,chats],[1,0,1,1]);
+ provider.settleRun();active='B';transportFailure=false;
+ const rejected=await provider.streamSimple(selected,context(false)).result();
+ assert.equal(rejected.stopReason,'error');assert.match(rejected.errorMessage,/possums_trust_certificate/);
+ assert.equal(prepared[1].dispatched,false);assert(provider.recoveryBlocked);
+ assert(rejected.diagnostics.some(value=>value.type==='possums_billing_unknown'));
+ assert.deepEqual([verifies,probes,controls,chats],[1,0,1,1]);
+ const before=catalogs;provider.settleRun();
+ const blocked=await provider.streamSimple(selected,context(false)).result();
+ assert.equal(blocked.stopReason,'error');assert.match(blocked.errorMessage,/possums_trust_certificate/);
+ await assert.rejects(provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey})),error=>error.diagnostic?.constraint==='certificate');
+ assert.equal(catalogs,before);assert.equal(prepared.length,2);
+ provider.newSession();await provider.auth.apiKey.login(interaction());
+ const replacement=await provider.streamSimple(provider.getModels()[0],context(false)).result();
+ assert.equal(replacement.stopReason,'stop');assert(!replacement.diagnostics.some(value=>value.type==='possums_turn_warning'));
+ assert.equal(prepared[2].dispatched,true);assert.equal(provider.recoveryBlocked,undefined);
+ assert.deepEqual([verifies,probes,controls,chats],[2,0,2,2]);
+ // A rotation observed only after the conservative dispatch latch cannot
+ // qualify setup recovery, even if the TLS transport sent no HTTP bytes.
+ provider.settleRun();
+ templates.B.channel.chat=async()=>{chats++;throw new m.DiagnosticFailure('trust','certificate');};
+ const afterDispatch=await provider.streamSimple(provider.getModels()[0],context(false)).result();
+ assert.equal(afterDispatch.stopReason,'error');assert.match(afterDispatch.errorMessage,/possums_trust_certificate/);
+ assert.equal(prepared[3].dispatched,true);assert(provider.recoveryBlocked);
+ assert.deepEqual([verifies,probes,controls,chats],[2,0,3,3]);
+ assert(!JSON.stringify([interrupted,rejected,blocked,replacement,afterDispatch]).includes(recoveryKey));
+ provider.shutdown();
+});
 await check('unchanged evidence latches failed scope; no credential/catalog refresh or inference on retry',async()=>{
  const source=await setup([]);const first=freshFixture(source.client);
  let catalogs=0,probes=0;
