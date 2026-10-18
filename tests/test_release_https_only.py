@@ -115,11 +115,26 @@ class HTTPSOnlyReleaseTest(StopTest):
         for name in ("src/telemetry/startup/readiness.rs", "src/telemetry/startup/readiness",
                      "src/tor_ingress/readiness_tests.rs", "src/tor_ingress/readiness_tests"):
             self.assertFalse((ROOT / name).exists(), name)
-        for name in ("src/main.rs", "src/telemetry/startup.rs"):
-            source = (ROOT / name).read_text()
-            for removed in ("startup_readiness", "readiness::", "mod readiness", "libc::"):
-                self.assertNotIn(removed, source)
+        source = (ROOT / "src/main.rs").read_text()
+        for removed in ("startup_readiness", "readiness::", "mod readiness", "libc::"):
+            self.assertNotIn(removed, source)
         self.assertNotRegex((ROOT / "Cargo.toml").read_text(), r"(?m)^libc\s*=")
+
+    def test_startup_diagnostics_are_removed_not_disabled(self):
+        for name in ("src/telemetry/startup.rs", "src/telemetry/startup"):
+            self.assertFalse((ROOT / name).exists(), name)
+        self.assertNotIn("pub mod startup;", (ROOT / "src/telemetry.rs").read_text())
+        main = (ROOT / "src/main.rs").read_text()
+        self.assertNotIn("Startup::", main)
+        self.assertNotIn("startup.finish", main)
+        self.assertIn("TelemetryRuntime::start(", main)
+        transport = (ROOT / "src/telemetry/export/transport.rs").read_text()
+        self.assertNotIn('"/v1/logs"', transport)
+        self.assertNotIn("for_signal", transport)
+        self.assertIn('.uri("/v1/metrics")', transport)
+        cargo = (ROOT / "Cargo.toml").read_text()
+        self.assertIn('features = ["gen-tonic-messages", "metrics"]', cargo)
+        self.assertNotIn('"logs"', cargo)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,6 @@ mod infrastructure;
 mod labels;
 mod process;
 pub mod runtime;
-pub mod startup;
 mod tables;
 mod tokens;
 pub use infrastructure::*;
