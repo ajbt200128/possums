@@ -118,5 +118,39 @@ configuration can enable the existing switch without editing opaque overrides.
 This is a preparation snapshot, not authority to skip fresh selection before the
 one permitted later lifecycle attempt. Both previous consumed markers remain.
 
-**Build/signing, deployment, actual SDK health and Honeycomb ingestion are pending.**
-The current running instance has not been changed by the source work above.
+## Qualified debug image build, signing candidate
+
+Implementation commit `609c26eccbb49f2df5d247a1ba2b53a99819d3be` was followed
+by the workflow-only build source `aba880c786ac4b3cf7939b2167f706cd52ddf8fa`.
+Build tag `v0.0.53-debug-tor-health.4-build`, hosted run39168974498/attempt1,
+completed successfully. Parent independently checked exact repository, workflow,
+source, event, tag, attempt and successful job plus the sole unexpired source-bound
+artifact. Downloaded public archive inspection verified Linux/amd64, UID/GID65532,
+source/diagnostic labels and the expected debug entrypoint.
+
+Qualified image:
+`sha256:e51654c571fffd9a43aa480185d2b40f148777d0147ce9025f8584f405381df5`.
+This is artifact/configuration evidence, not initialized runtime or attestation.
+
+The signing candidate is release-only: measured config changes exactly the image
+digest and `OTEL_SDK_DISABLED` from true to false. All other bytes, including600s
+grace, probe/interval/timeout/retries, resources, five secret bindings, read-only
+root/tmpfs and attested-key controls, remain unchanged. The exact-build and
+release-only-delta guard requires the pinned successful build and artifact before
+measurement, with promotion/latest false and attempt1 only.
+
+Additional offline release preparation used explicit locked nixpkgs Python3.12:
+automation64 passed, cache12 passed/one skipped, rollout8 passed. The Rust dev shell
+does not pin Python: an initial ambient3.15 alpha ZIP-fixture failure did not
+qualify that tool. The two existing normal measured-health fixtures still expect
+300s, so do not pass against this deliberately approved600s debug configuration;
+they were not weakened. No claim that all Python tests pass. The debug path checks
+the exact600s source/config separately.
+
+Fresh read-only pre-signing selection again confirmed health.2 running/health.3
+failed pending, existing resources/bindings/SSH/promotion and absent export-disable
+override, with no instance mutation. Original attempt markers remain consumed;
+the new build-dispatch marker was consumed once and no dispatch was replayed.
+
+**Signing, deployment, actual SDK health and Honeycomb ingestion remain pending.**
+The running instance has not been changed by this build/signing preparation.
