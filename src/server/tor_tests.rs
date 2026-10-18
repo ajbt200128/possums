@@ -393,50 +393,24 @@ async fn closed_appraisal_and_acquisition_facts_survive_route_to_node() {
 }
 
 #[tokio::test]
-async fn tor_health_policy_preserves_non_tor_quiescence() {
+async fn tor_health_requires_current_readiness_and_preserves_quiescence() {
     let (state, _, _) = tor_fixture();
+    let app = router(state.clone());
     let check = || Request::get("/healthz").body(Body::empty()).unwrap();
-    assert_eq!(
-        router(state.clone())
-            .oneshot(check())
-            .await
-            .unwrap()
-            .status(),
-        if cfg!(feature = "debug-tor-readiness") {
-            StatusCode::NO_CONTENT
-        } else {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-    );
-    state
-        .tor_ready
-        .as_ref()
-        .unwrap()
-        .store(true, Ordering::Release);
-    assert_eq!(
-        router(state.clone())
-            .oneshot(check())
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NO_CONTENT
-    );
-    state
-        .tor_ready
-        .as_ref()
-        .unwrap()
-        .store(false, Ordering::Release);
-    assert_eq!(
-        router(state.clone()).oneshot(check()).await.unwrap().status(),
-        if cfg!(feature = "debug-tor-readiness") {
-            StatusCode::NO_CONTENT
-        } else {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-    );
+    let ready = state.tor_ready.as_ref().unwrap();
+    for (is_ready, expected) in [
+        (false, StatusCode::SERVICE_UNAVAILABLE),
+        (true, StatusCode::NO_CONTENT),
+        (false, StatusCode::SERVICE_UNAVAILABLE),
+        (true, StatusCode::NO_CONTENT),
+    ] {
+        ready.store(is_ready, Ordering::Release);
+        assert_eq!(app.clone().oneshot(check()).await.unwrap().status(), expected);
+    }
+    // Quiescence must fail health even while the Tor readiness gate passes.
     state.lifecycle.quiesce();
     assert_eq!(
-        router(state).oneshot(check()).await.unwrap().status(),
+        app.oneshot(check()).await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
 }

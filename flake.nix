@@ -179,7 +179,7 @@
               WorkingDir = "/tmp";
               Labels = {
                 "org.opencontainers.image.revision" = self.rev or self.dirtyRev or "unknown";
-                "possums.diagnostic" = "tor-no-health-v53";
+                "possums.diagnostic" = "tor-health-gated-v53";
               };
             };
           };

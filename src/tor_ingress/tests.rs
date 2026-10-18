@@ -236,7 +236,21 @@ async fn engine_terminal_state_is_visible_but_initial_shutdown_is_not_fabricated
 
 #[tokio::test]
 async fn readiness_tracks_only_supported_running_and_clears_on_recovery_and_terminal_eof() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
     let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut state = state();
+    state.tor_ready = Some(ready.clone());
+    let app = crate::server::router(state);
+    let check = || Request::get("/healthz").body(Body::empty()).unwrap();
+    assert_eq!(
+        app.clone().oneshot(check()).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
     let (send, mut recv) = tokio::sync::mpsc::channel(1);
     let statuses = stream::poll_fn(move |cx| recv.poll_recv(cx));
     let monitor = engine_status(
@@ -248,6 +262,8 @@ async fn readiness_tracks_only_supported_running_and_clears_on_recovery_and_term
     for (state, expected) in [
         (State::Shutdown, false),
         (State::Bootstrapping, false),
+        (State::DegradedReachable, false),
+        (State::DegradedUnreachable, false),
         (State::Running, true),
         (State::Recovering, false),
         (State::Running, true),
@@ -263,10 +279,22 @@ async fn readiness_tracks_only_supported_running_and_clears_on_recovery_and_term
             }
         })
         .await;
+        assert_eq!(
+            app.clone().oneshot(check()).await.unwrap().status(),
+            if expected {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        );
     }
     drop(send);
     assert_eq!(bounded(monitor).await, Failure::Engine);
     assert!(!ready.load(Ordering::Acquire));
+    assert_eq!(
+        app.oneshot(check()).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
 }
 
 #[tokio::test(start_paused = true)]
