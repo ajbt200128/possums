@@ -10,7 +10,7 @@ permissions:
   contents: read
 jobs:
   diagnostic-image:
-    if: github.repository == 'ajbt200128/possums' && github.ref == 'refs/tags/v0.0.53-debug-tor-health.1-build' && github.run_attempt == 1
+    if: github.repository == 'ajbt200128/possums' && github.ref == 'refs/tags/v0.0.53-debug-tor-health.1-build.2' && github.run_attempt == 1
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -36,7 +36,7 @@ jobs:
           diagnostic-endpoint: ""
           use-flakehub: false
           use-gha-cache: true
-          source-revision: baeb334664df3e5406cad9b27f7db66dcb273b02
+          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
       - name: Focused debug and retained normal health gates
         run: |
           nix develop --command bash -c 'set -e; cargo fmt --check; cargo test --locked --features tor tor_health_policy; cargo test --locked --features debug-tor-no-health tor_health_policy; cargo test --locked --features debug-tor-no-health health::tests; cargo clippy --locked --all-targets --all-features -- -D warnings'
