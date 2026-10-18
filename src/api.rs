@@ -145,6 +145,46 @@ fn reject(observation: &RequestContext, status: StatusCode, reason: MetricReject
 
 #[cfg(test)]
 #[tokio::test]
+async fn tokenizer_send_causes_keep_shipped_wire_and_unknown_billing() {
+    use http_body_util::BodyExt as _;
+    for (source, cause) in [
+        (
+            InferenceFailure::TokenizerSendFailed,
+            InterfaceError::TokenizerTransportFailed,
+        ),
+        (
+            InferenceFailure::TokenizerSendDeadline,
+            InterfaceError::TokenizerSendDeadline,
+        ),
+        (
+            InferenceFailure::TokenizerConnectFailed,
+            InterfaceError::TokenizerConnectFailed,
+        ),
+    ] {
+        let response = rejection_response(Rejection::Failure {
+            failure: cause,
+            projection: FailureProjection::Upstream(source),
+            owned: true,
+        });
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.extensions().get::<InterfaceError>(), Some(&cause));
+        assert!(response.extensions().get::<FailureOwned>().is_some());
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let error = value["error"].as_object().unwrap();
+        assert_eq!(error.len(), 4); // No new fields for strict shipped decoders.
+        assert_eq!(error["code"], "unavailable");
+        assert_eq!(error["detail"], "tokenizer_send_failed");
+        assert_eq!(error["billing"], "unknown");
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains(cause.label()));
+        assert!(message.contains("Not replayed"));
+        assert!(message.contains("new submission may incur another charge"));
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
 async fn unsupported_reasoning_keeps_main_wire_and_unowned_typed_refusal() {
     use http_body_util::BodyExt as _;
     let response = rejection_response(Rejection::Failure {

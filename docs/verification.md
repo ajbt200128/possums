@@ -1,9 +1,10 @@
 # Phase 0 verification record
 
-> **Exact v43 image/new release control:** [scope, intentional diagnostic
-> regressions and local evidence](exact-v43-image-control.md). Earlier tokenizer
-> refinements and newer compiled test fixtures are historical for this candidate.
-> Hosted publication/deployment and fresh serving acceptance remain separate gates.
+> **Current exact-v54/v59 re-release:** [operator-reported recreation recovery,
+> release scope and local checks](v54-rerelease-v59.md). The v56–v58 removal
+> controls are historical, including the [exact-v43 control](exact-v43-image-control.md).
+> No earlier failed check is retrospectively upgraded; publication and serving
+> acceptance remain distinct.
 
 > **Inactive HTTPS-only backup:** [current scope and checks](without-tor-backup-verification.md).
 > Tor is removed, including PR90 readiness. All earlier Tor instructions/results

@@ -1,6 +1,18 @@
 # Repository guidance
 
-## Local HTTPS-only backup authority
+## Current exact-v54 re-release authority
+
+The operator reports recovery after instance recreation (v58, then v54 working)
+and explicitly requests v59 as an **exact v54 re-release**, not v55 settings.
+Follow [the recovery/re-release record](docs/v54-rerelease-v59.md): restore v54's
+runtime, including verified renewal and bounded startup diagnostics, open egress,
+300-second startup grace and 512 MiB memory-only `/tmp`. The v56–v58 removal
+controls are historical, not required fixes. Tor stays unsupported and removed.
+Preserve normal release/provenance/protected-approval gates; do not infer a new
+production update authorization from the publication request. Older "inactive
+backup" and deployment-status paragraphs below are dated context.
+
+## Historical HTTPS-only backup authority
 
 This branch is an inactive backup composed on exact main
 `ca7243b88a6b5b11a930ff743206589633a497d6` (PR90). Tor is **unsupported and
@@ -11,15 +23,6 @@ records are historical evidence only; their commands and authorizations do not
 apply to this backup. Older release-status statements below are dated context,
 not current production inventory. See [backup verification](docs/without-tor-backup-verification.md).
 No installation, activation, release or deployment follows from local checks.
-
-## Exact-v43 image control
-
-The subsequent operator-approved [exact-image control](docs/exact-v43-image-control.md)
-restores v43 image inputs on current main, with normal release/deployment gates.
-Its tokenizer diagnostics are intentionally coarser and its helper acquisition
-wrapper is historical; no raw error export or weaker trust/accounting gate is
-permitted. Do not restore later image inputs during this control or treat local
-identity/tests as deployment or serving acceptance.
 
 ## Minimum implementation per phase
 
@@ -101,11 +104,11 @@ Preserve these trust boundaries:
 
 **Always read and reference [`PRIVACY.md`](PRIVACY.md) before touching telemetry**, including instrumentation, logs/traces, metrics, SDK defaults, collectors, resource discovery, dashboards, alerts, deployment, or diagnostic/support tooling. Link the applicable policy sections and privacy-test evidence in the change description and verification record. The policy applies to real data in testing as well as production; an environment label does not relax it. The rollout plan is [`docs/telemetry-plan.md`](docs/telemetry-plan.md). The operator's 2026-10-08 MVP decision permits deployment to the existing production gateway and Honeycomb's default retention. Direct authenticated Honeycomb US OTLP HTTPS (no Collector) and enablement with valid allowlisted credentials are now selected; `OTEL_SDK_DISABLED=true` is the off switch. Other privacy/runtime gates still apply. A development telemetry destination does not make production traffic synthetic.
 
-Production request observability uses aggregate Honeycomb metrics only. The operator's subsequent [NSS/startup isolation candidate](docs/nss-startup-removal-verification.md) removes all application startup diagnostics, not merely their export. The [startup-only exception](PRIVACY.md#startup-diagnostics-exception) is historical for this candidate; do not restore it. Retain typed startup failures/nonzero exit codes and ordinary health/request diagnostics. This scoped startup-silence decision does not relax request diagnostic or aggregate-metric requirements:
+Production request observability uses aggregate Honeycomb metrics only. The [startup-only exception](PRIVACY.md#startup-diagnostics-exception) additionally permits finite closed platform/Honeycomb startup logs and lifecycle counts in the normal destination, not a separate dataset:
 
 - Sanitize and aggregate locally before direct authenticated TLS export; enforce the final allowlist in-process, without a Collector.
 - Send sanitized aggregates to Honeycomb US with provider-default retention for the MVP, per the explicit operator decision in `PRIVACY.md`. Record effective retention when verified; request shorter retention (target: seven days) after the MVP. Do not claim that the default is seven days.
-- Do not export production request logs or request-level traces. Startup logs and lifecycle snapshots are removed in the isolation candidate. No raw exceptions, private config, credentials, identifiers or request data; do not add a logging bridge or tracing framework.
+- Do not export production request logs or request-level traces. Startup-only logs must follow the closed schema/lifecycle in the exception above; no raw exceptions, private config, credentials, identifiers or request data. Do not add a logging bridge or tracing framework.
 - Never export prompts, responses, conversation history, request bodies, URLs/query strings, headers, client IPs, user agents, credentials, account/payment identifiers, onion identifiers, stable pseudonyms, exact request timestamps, or per-request token/cost events.
 - Allowed signals are low-cardinality aggregates such as coarse request counts, status classes, latency buckets, queue depth, and process health, subject to the privacy-release gates in `PRIVACY.md`. The subsequent operator-requested [error/token extension](PRIVACY.md#typed-interface-failures-and-token-aggregate-extension) permits complete five-minute typed failure counts and observed input/output/cached-input token sums through the existing reviewed model partitions, including validated `other`; query-sum partitions for across-model totals rather than export overlapping marginals. Count validated final or last trustworthy cumulative usage once, never snapshots/estimates; cached input is a subset and unknown cache evidence is not zero. Cost metrics remain excluded. This is policy/planning approval, not implementation or activation evidence. Never export user- or session-keyed aggregates. Apply the operator-approved 2026-10-09 complete five-minute aggregate policy, without minimum-count or linked-sparsity suppression. Preserve complete-window and lifecycle/arithmetic integrity gates. Sparse aggregates may reveal individual activity; neither bucketing nor observation counts establish anonymity or prevent external timing correlation.
 - Sampling is not sanitization. Do not rely on vendor-side deletion as the primary control.

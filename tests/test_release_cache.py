@@ -17,6 +17,9 @@ DEP = "/nix/store/dependency.drv"
 APP_OUT = "/nix/store/app"
 HELPER_OUT = "/nix/store/helper"
 DEP_OUT = "/nix/store/dependency-dev"
+ACCOUNTS = "/nix/store/fake-nss.drv"
+USER_RECORD = "/nix/store/passwd.drv"
+GROUP_RECORD = "/nix/store/group.drv"
 
 
 def graph():
@@ -28,10 +31,11 @@ def graph():
 
 
 class ReleaseCacheTests(unittest.TestCase):
-    def validate(self, image=None, dependencies=None, valid=None):
+    def validate(self, image=None, dependencies=None, valid=None, expected=None):
         return release_cache.validate_boundary(
             image or graph(), dependencies if dependencies is not None else {DEP: graph()[DEP]},
-            [APP, HELPER], (valid if valid is not None else {DEP_OUT}).__contains__,
+            [APP, HELPER] if expected is None else expected,
+            (valid if valid is not None else {DEP_OUT}).__contains__,
         )
 
     def test_prewarmed_dependencies_and_fresh_application(self):
@@ -56,6 +60,27 @@ class ReleaseCacheTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "boundary changed"):
             self.validate(image=image)
 
+    def test_configured_accounts_and_record_files_must_remain_fresh(self):
+        image = graph()
+        image[APP]["inputDrvs"][ACCOUNTS] = ["out"]
+        image[ACCOUNTS] = {"outputs": {"out": {"path": "/nix/store/fake-nss"}},
+                           "inputDrvs": {USER_RECORD: ["out"], GROUP_RECORD: ["out"], DEP: ["dev"]}}
+        for record in [USER_RECORD, GROUP_RECORD]:
+            image[record] = {"outputs": {"out": {"path": record.removesuffix(".drv")}},
+                             "inputDrvs": {DEP: ["dev"]}}
+        expected = [APP, HELPER, ACCOUNTS, USER_RECORD, GROUP_RECORD]
+        self.assertEqual(self.validate(image=image, expected=expected), 5)
+        for account_node in [ACCOUNTS, USER_RECORD, GROUP_RECORD]:
+            with self.subTest(node=account_node):
+                with self.assertRaisesRegex(ValueError, "boundary changed"):
+                    self.validate(image=image, expected=[node for node in expected if node != account_node])
+                with self.assertRaisesRegex(ValueError, "boundary changed"):
+                    self.validate(image=image, expected=expected,
+                                  dependencies={DEP: image[DEP], account_node: image[account_node]})
+                with self.assertRaisesRegex(ValueError, "already realized"):
+                    self.validate(image=image, expected=expected,
+                                  valid={DEP_OUT, release_cache.output_path(image[account_node], "out")})
+
     @unittest.skipUnless(os.environ.get("RELEASE_CACHE_GRAPH_CHECK") == "1", "opt-in pinned Linux graph evaluation")
     def test_pinned_linux_graph_partition_without_realizing_outputs(self):
         image = release_cache.derivations(release_cache.nix_json(
@@ -70,7 +95,13 @@ class ReleaseCacheTests(unittest.TestCase):
         fresh = set(image) - set(dependencies)
         self.assertTrue(fresh)
         self.assertEqual(fresh, expected)
-        self.assertFalse(any(path.endswith("-fake-nss.drv") for path in fresh))
+        accounts = [path for path in fresh if path.endswith("-fake-nss.drv")]
+        self.assertEqual(len(accounts), 1)
+        account_inputs = release_cache.inputs(image[accounts[0]])
+        for name in ["passwd", "group", "nsswitch.conf", "var-empty"]:
+            records = {path for path in account_inputs if path.endswith(f"-{name}.drv")}
+            self.assertTrue(records)
+            self.assertTrue(records <= fresh)
         # Selected external outputs must be reachable from the prewarm recipe.
         required = {(dep, output) for path in fresh for dep, outputs in release_cache.inputs(image[path]).items()
                     if dep not in fresh for output in outputs}

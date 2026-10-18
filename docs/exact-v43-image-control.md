@@ -1,5 +1,10 @@
 # Exact v43 image under a new release identity
 
+> **Historical v58 control:** promotion succeeded but fresh serving failed.
+> The operator then reported v58 working after instance recreation, followed by
+> v54 working. The [recovery/v59 record](v54-rerelease-v59.md) distinguishes those
+> reports from the original failed verification and restores exact v54 inputs.
+
 ## Operator decision and binding
 
 The operator approved a new measured release containing the exact v43 image,

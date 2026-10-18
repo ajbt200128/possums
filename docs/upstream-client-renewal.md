@@ -1,12 +1,9 @@
 # Verified upstream-client renewal — historical source candidate
 
-**Intentionally removed in the current operator-authorized
-[runtime-path regression control](runtime-path-regression-control.md).** The
-candidate again uses one startup-verified direct SDK client, without later
-renewal or request replay. Upstream rotation can leave that client unavailable;
-TLS still fails closed. This loss of availability recovery is deliberate and
-is not a proven native-503 fix. The mechanism and offline evidence below describe
-the prior renewal implementation, not the current runtime.
+**Restored in the operator-requested [exact-v54/v59 re-release](v54-rerelease-v59.md).**
+The v57/v58 [runtime removal control](runtime-path-regression-control.md) is
+historical, not a proven fix. The mechanism below is restored unchanged; its dated
+verification remains scoped and does not establish new live rotation acceptance.
 
 ## Authorization and scope
 

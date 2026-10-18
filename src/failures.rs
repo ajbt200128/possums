@@ -61,11 +61,13 @@ pub(crate) enum InterfaceError {
     UpstreamErrorReported,
     CatalogAcquisitionUnknown,
     ResponseEncodingLimit,
+    TokenizerSendDeadline,
+    TokenizerConnectFailed,
 }
 
 #[allow(dead_code)]
 impl InterfaceError {
-    pub(crate) const ALL: [Self; 54] = [
+    pub(crate) const ALL: [Self; 56] = [
         Self::InputRefused,
         Self::RouteRefused,
         Self::AuthenticationRefused,
@@ -120,6 +122,8 @@ impl InterfaceError {
         Self::UpstreamErrorReported,
         Self::CatalogAcquisitionUnknown,
         Self::ResponseEncodingLimit,
+        Self::TokenizerSendDeadline,
+        Self::TokenizerConnectFailed,
     ];
 
     pub(crate) fn stage(self) -> &'static str {
@@ -143,7 +147,9 @@ impl InterfaceError {
             Self::CatalogFailed | Self::CatalogAcquisitionUnknown => "catalog",
             Self::RequestEncodingFailed => "request_encoding",
             Self::TokenizerTransportFailed
-            | Self::TokenizerHttpRefused
+            | Self::TokenizerSendDeadline
+            | Self::TokenizerConnectFailed => "tokenizer_send",
+            Self::TokenizerHttpRefused
             | Self::TokenizerResponseInvalid
             | Self::TokenizerUploadIncomplete => "tokenizer",
             Self::GenerationTransportFailed
@@ -182,6 +188,8 @@ impl InterfaceError {
             Self::ContextRefused | Self::ModelUnavailable => "Check the authenticated model catalog and selected model's context window.",
             Self::EvidenceUnavailable | Self::EvidenceInvalid | Self::VerificationFailed => "Do not send further prompts until backend identity and authenticity are confirmed.",
             Self::SettlementFailed | Self::AccountingStateUnknown => "Check account reconciliation through the verified channel; do not assume settlement or refund.",
+            Self::TokenizerSendDeadline => "The tokenizer send deadline elapsed. Check upstream service availability; this does not establish whether the upstream received the token-count request.",
+            Self::TokenizerConnectFailed => "The tokenizer transport reported a connection failure. Check upstream connectivity; this does not identify DNS, TLS or another specific connection cause.",
             _ => "Check service availability and share only this content-free code/stage/constraint for support.",
         };
         let unknown = matches!(
@@ -200,6 +208,8 @@ impl InterfaceError {
                 | Self::LifecycleCleanupUnknown
                 | Self::CatalogAcquisitionUnknown
                 | Self::UpstreamErrorReported
+                | Self::TokenizerTransportFailed
+                | Self::TokenizerConnectFailed
         );
         let cause = if unknown {
             "The underlying cause is unknown. "
@@ -229,6 +239,8 @@ impl InterfaceError {
             Self::CatalogFailed => "catalog_failed",
             Self::RequestEncodingFailed => "request_encoding_failed",
             Self::TokenizerTransportFailed => "tokenizer_transport_failed",
+            Self::TokenizerSendDeadline => "tokenizer_send_deadline",
+            Self::TokenizerConnectFailed => "tokenizer_connect_failed",
             Self::TokenizerHttpRefused => "tokenizer_http_refused",
             Self::TokenizerResponseInvalid => "tokenizer_response_invalid",
             Self::TokenizerUploadIncomplete => "tokenizer_upload_incomplete",
@@ -296,6 +308,8 @@ impl From<InferenceFailure> for InterfaceError {
             CatalogFailed => Self::CatalogFailed,
             RequestEncodingFailed => Self::RequestEncodingFailed,
             TokenizerSendFailed => Self::TokenizerTransportFailed,
+            TokenizerSendDeadline => Self::TokenizerSendDeadline,
+            TokenizerConnectFailed => Self::TokenizerConnectFailed,
             TokenizerHttpFailed => Self::TokenizerHttpRefused,
             TokenizerResponseInvalid => Self::TokenizerResponseInvalid,
             TokenizerUploadIncomplete => Self::TokenizerUploadIncomplete,

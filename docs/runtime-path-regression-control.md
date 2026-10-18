@@ -1,8 +1,9 @@
 # Bounded runtime-path regression control
 
-> **Historical v57 packet:** the subsequent [exact-v43 image control](exact-v43-image-control.md)
-> also restores the remaining image/test inputs, removing the retained tokenizer
-> refinements and newer fixtures described below. This record remains scoped to v57.
+> **Historical v57 packet:** followed by the v58 [exact-v43 control](exact-v43-image-control.md).
+> The operator-requested [exact-v54/v59 re-release](v54-rerelease-v59.md) restores
+> renewal, Rust 1.92 and general transport support. This removal record remains
+> scoped to v57; it is not a proven fix or current-source instruction.
 
 ## Operator decision and intentional regression
 

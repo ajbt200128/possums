@@ -1,10 +1,10 @@
 # Startup diagnostics — source candidate
 
-> Historical evidence for the dated packets below. The subsequent operator-requested
-> [NSS/startup isolation candidate](nss-startup-removal-verification.md) removes
-> **all** application startup diagnostics, including the general six-record owner,
-> Honeycomb log/lifecycle delivery and OTLP logs feature. Earlier backup/Tor
-> counts and release outcomes remain historical, not requalified.
+> Historical evidence for the dated packets below. The operator-requested
+> [exact-v54/v59 re-release](v54-rerelease-v59.md) restores the general six-record
+> owner and bounded Honeycomb delivery. The intervening v56–v58
+> [removal controls](nss-startup-removal-verification.md) are historical.
+> Tor readiness remains absent; earlier Tor counts/results are not requalified.
 
 ## Scope and status
 

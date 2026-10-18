@@ -1,9 +1,9 @@
 # Tokenizer send failures — 2026-10-15
 
-> **Historical refinement:** the subsequent operator-approved
-> [exact-v43 image control](exact-v43-image-control.md) removes the deadline/connect
-> refinements and restores the coarse send category. The finer diagnostics/tests
-> below are not current-source coverage; no new live acceptance is implied.
+> **Restored in the [exact-v54/v59 re-release](v54-rerelease-v59.md):** the
+> deadline/connect refinements and tests below return unchanged after the
+> historical exact-v43 control. Dated test and live evidence remains scoped;
+> no new live acceptance is implied.
 
 ## Scope and privacy
 
