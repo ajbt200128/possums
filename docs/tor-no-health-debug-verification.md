@@ -198,3 +198,75 @@ No production operation, configuration edit, boot/restart, new container, key
 provisioning, paid/live inference or new attestation probe was performed in this
 SSH follow-up. Publication exclusivity, successful onion reachability, native-v3
 signer compatibility and platform retention/erasure remain unproved.
+
+## Direct onion reachability: confirmed on a later probe
+
+The operator requested continued investigation until onion connectivity was
+answered. This follow-up deliberately tested the configured onion identity,
+without inference, credentials in requests, gateway mutation or production access.
+It supersedes the absence of a direct connectivity check in the earlier section.
+
+A standalone local client used pinned-flake C Tor0.4.8.21, Python3.12.12,
+Stem's supported authenticated control client/events, and PycURL7.45.3 with
+libcurl8.14.1. Tor's raw output went to `/dev/null`, not a log artifact. Only a
+closed code/status/event-count projection was returned. Each isolated client was
+owned and reaped; its temporary state directory was removed afterward. This is
+not proof of physical erasure or whole-process transience. No gateway Arti logger,
+SDK fork, new gateway release or telemetry export was introduced.
+
+Before target acquisition, fresh native/Admin selection confirmed the exact
+running debug release, no pending operation and five bindings. The expected public
+onion routing value was read through one bounded SSH command from its exact
+named environment entry, never a full Env/config dump. It remained in local
+memory for routing and never appeared in tool output, arguments, repository
+artifacts or diagnostics. No native B private key or private original was read.
+The selected debug hostname likewise stayed in memory. Opaque settings/references
+were compared before/after without exporting their contents.
+
+Offline synthetic checks verified numeric libcurl failure classification and
+that a local failed-proxy diagnostic contains no raw exception, host, URL or
+routing value. The final public helper source SHA256 was
+`473195e21795172e6477bb848495664f1feb4e91148be56b3c67eb4b352e152a`.
+The helper uses supported C Tor/Stem/libcurl protocol handling; it does not
+implement SOCKS, TLS, onion descriptors or Tor wire protocols itself.
+
+Two deliberate read-only reachability experiments:
+
+1. An independent Tor client bootstrapped and a public HTTPS HEAD control returned
+   HTTP200 with TLS verification enabled. The debug onion HEAD then hit the120s
+   connection deadline: libcurl28, no completed TLS or HTTP response. Closed
+   events showed one descriptor request and no received descriptor by that
+   deadline. This was an actual unsuccessful probe, not evidence of permanent
+   unreachability or a specific network/publisher cause.
+2. A separately owned independent Tor client bootstrapped; the same public HTTPS
+   control again returned200. One explicit official `HSFETCH` command was accepted
+   by C Tor for the configured v3 onion. The typed `HS_DESC` listener observed
+   **descriptor received**. A subsequent HEAD to `/healthz`, with libcurl's
+   supported SOCKS5-hostname routing and `CONNECT_TO` from the selected debug
+   hostname:443 to the onion:80, returned **HTTP204**, libcurl0, completed TLS and
+   one typed successful Tor stream event. TLS peer and hostname verification
+   stayed enabled; there was no insecure fallback, redirect following, retry or
+   request-body capture. The descriptor acquisition bound was300s and the HEAD
+   connection/total bounds were300s/310s; these client-probe bounds did not alter
+   gateway startup or health timings. The public control did not advertise an
+   Onion-Location header, so no separate public-onion control was claimed.
+
+**Answer:** the configured onion was published/fetchable and connectable over Tor
+at the successful later probe, including a TLS-verified HTTP204 health response.
+The earlier180s startup log is a historical unconfirmed snapshot, not a current
+outage indicator. The precise reason for the first timeout, or when service
+publication became reachable, remains unknown; no network-blocking or lifecycle
+root cause is invented. No additional startup-failure relaxation was necessary.
+
+This proves transport reachability for that configured identity at that time,
+not a complete attestation/HPKE/accounting or inference qualification. Shared-key
+publication exclusivity and physical cleanup of earlier publishers remain
+unproved; no claim is made that a successful identity lookup independently
+attributes the publisher to this particular debug VM. No client trust gate may be
+replaced by this health result.
+
+Final fresh exact-target/SSH checks: same debug tag/image, running, Docker healthy,
+no observed OOM, loopback HTTP204, no pending update, opaque settings/references
+unchanged during the operations. No deployment, boot, gateway config edit,
+private-key operation, inference or production action was performed in this
+follow-up.
