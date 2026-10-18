@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-from test_release_automation import ROOT, S, R, D, V, StopTest, d, plan, r, view
+from test_release_automation import D, R, ROOT, S, V, StopTest, d, plan, r, view
 
 
 class HTTPSOnlyReleaseTest(StopTest):
@@ -80,8 +80,15 @@ class HTTPSOnlyReleaseTest(StopTest):
         self.assertNotIn("POSSUMS_TOR_", config)
         self.assertNotIn("attested-keys:", config)
         self.assertNotIn("    keys:", config)
-        for required in ("attestation: true", "read_only: true", 'size=512m,mode=1777'):
+        for required in ("attestation: true", "read_only: true", 'size=64m,mode=1777',
+                         "start_period: 60s"):
             self.assertIn(required, config)
+        self.assertIn("    egress: allowlist\n    allow:\n"
+                      "      - inference.tinfoil.sh\n"
+                      "      - github-proxy.tinfoil.sh\n"
+                      "      - kds-proxy.tinfoil.sh\n"
+                      "      - api.honeycomb.io\n", config)
+        self.assertNotIn("egress: open", config)
         for name in ("Cargo.toml", "flake.nix", "devenv.nix", ".github/workflows/check.yml",
                      "scripts/deploy.py", "clients/pi/build.sh", "clients/pi/build.mjs"):
             source = (ROOT / name).read_text()
