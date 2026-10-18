@@ -65,6 +65,15 @@
           cargoArtifacts = torCargoArtifacts;
           doCheck = false;
         });
+        debugGateway = craneLib.buildPackage (torCommon // {
+          cargoArtifacts = torCargoArtifacts;
+          cargoExtraArgs = "--locked --features debug-tor-no-health";
+          doCheck = false;
+        });
+        debugEntrypoint = pkgs.writeShellScriptBin "possums-debug-entrypoint" ''
+          ulimit -c 0
+          exec ${debugGateway}/bin/possums
+        '';
         attestationHelper = buildGoModule {
           pname = "possums-attestation";
           version = "0.1.0";
@@ -160,6 +169,20 @@
           tor-image-probe = torImageProbe;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;
+          debug-tor-image = gatewayImage.override {
+            name = "possums-gateway-debug-tor";
+            contents = [ debugGateway debugEntrypoint attestationHelper pkgs.cacert gatewayAccounts ];
+            config = {
+              Entrypoint = [ "${debugEntrypoint}/bin/possums-debug-entrypoint" ];
+              Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
+              User = "65532:65532";
+              WorkingDir = "/tmp";
+              Labels = {
+                "org.opencontainers.image.revision" = self.rev or self.dirtyRev or "unknown";
+                "possums.diagnostic" = "tor-no-health-v53";
+              };
+            };
+          };
           gateway-smoke-image = smokeImage;
           release-build-deps = releaseBuildDeps;
         };

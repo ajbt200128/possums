@@ -393,7 +393,7 @@ async fn closed_appraisal_and_acquisition_facts_survive_route_to_node() {
 }
 
 #[tokio::test]
-async fn enabled_health_requires_sdk_running_not_just_tcp_or_bootstrap() {
+async fn tor_health_policy_preserves_non_tor_quiescence() {
     let (state, _, _) = tor_fixture();
     let check = || Request::get("/healthz").body(Body::empty()).unwrap();
     assert_eq!(
@@ -402,7 +402,11 @@ async fn enabled_health_requires_sdk_running_not_just_tcp_or_bootstrap() {
             .await
             .unwrap()
             .status(),
-        StatusCode::SERVICE_UNAVAILABLE
+        if cfg!(feature = "debug-tor-no-health") {
+            StatusCode::NO_CONTENT
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
     );
     state
         .tor_ready
@@ -416,6 +420,19 @@ async fn enabled_health_requires_sdk_running_not_just_tcp_or_bootstrap() {
             .unwrap()
             .status(),
         StatusCode::NO_CONTENT
+    );
+    state
+        .tor_ready
+        .as_ref()
+        .unwrap()
+        .store(false, Ordering::Release);
+    assert_eq!(
+        router(state.clone()).oneshot(check()).await.unwrap().status(),
+        if cfg!(feature = "debug-tor-no-health") {
+            StatusCode::NO_CONTENT
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
     );
     state.lifecycle.quiesce();
     assert_eq!(

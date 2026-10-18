@@ -193,7 +193,7 @@ pub fn router(state: AppState) -> Router {
 #[doc(hidden)]
 pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Router {
     let health = state.lifecycle.clone();
-    #[cfg(feature = "tor")]
+    #[cfg(all(feature = "tor", not(feature = "debug-tor-no-health")))]
     let tor_ready = state.tor_ready.clone();
     let app = Router::new()
         .merge(crate::api::routes())
@@ -226,10 +226,12 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
         "/healthz",
         get(move || {
             let health = health.clone();
-            #[cfg(feature = "tor")]
+            #[cfg(all(feature = "tor", not(feature = "debug-tor-no-health")))]
             let tor_ready = tor_ready.clone();
             async move {
-                #[cfg(feature = "tor")]
+                // Debug-only health independence does not change SDK state,
+                // endorsement verification, engine ownership or shared drain.
+                #[cfg(all(feature = "tor", not(feature = "debug-tor-no-health")))]
                 if tor_ready.is_some_and(|ready| !ready.load(std::sync::atomic::Ordering::Acquire))
                 {
                     return StatusCode::SERVICE_UNAVAILABLE;
