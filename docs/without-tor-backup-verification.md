@@ -1,5 +1,11 @@
 # Inactive HTTPS-only backup — local verification
 
+> Historical checkpoint for the exact source below. Its statements that general
+> startup diagnostics and NSS records/checks are retained are superseded by the
+> operator-requested [NSS/startup isolation candidate](nss-startup-removal-verification.md).
+> All historical test counts, deployment limits and unresolved failures remain
+> scoped to this checkpoint, not current production inventory.
+
 **BACKUP ONLY: not merged, installed, activated, released or deployed.**
 Worktree: `/Users/mb5/projects/possums-backup-without-tor`, branch
 `backup/remove-tor`. The removal was safely rebased onto exact PR90 main

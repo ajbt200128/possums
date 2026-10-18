@@ -1,11 +1,10 @@
 # Startup diagnostics — source candidate
 
-> Historical evidence for the dated packets below, not the inactive HTTPS-only
-> backup's result. This backup retains general startup diagnostics with five
-> stages plus one terminal record (six maximum), but removes all Tor stages,
-> readiness handoff/FIFO delivery and related policy. Old nine-record/Tor test
-> counts and release outcomes remain historical, not requalified. See
-> [current backup checks](without-tor-backup-verification.md).
+> Historical evidence for the dated packets below. The subsequent operator-requested
+> [NSS/startup isolation candidate](nss-startup-removal-verification.md) removes
+> **all** application startup diagnostics, including the general six-record owner,
+> Honeycomb log/lifecycle delivery and OTLP logs feature. Earlier backup/Tor
+> counts and release outcomes remain historical, not requalified.
 
 ## Scope and status
 

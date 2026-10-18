@@ -1,13 +1,9 @@
-use futures_util::FutureExt;
 use possums::{
     attestation::TinfoilEvidenceVerifier,
     auth::Auth,
     inference::{InferenceError, InferenceFailure, TinfoilInference},
     server::{serve_until, AppState, ServerFailure},
-    telemetry::{
-        runtime::{Config as TelemetryConfig, Runtime as TelemetryRuntime, ShutdownFailure},
-        startup::{Failure as DiagnosticFailure, Outcome, Stage, Startup},
-    },
+    telemetry::runtime::{Config as TelemetryConfig, Runtime as TelemetryRuntime, ShutdownFailure},
 };
 use std::{env, process::ExitCode, sync::Arc};
 
@@ -23,26 +19,11 @@ async fn main() -> ExitCode {
             }
         };
     }
-    let mut startup = Startup::new(TelemetryConfig::from_env());
-    let result = run(&mut startup).await;
-    finish_pending_startup(&mut startup, result).await;
-    match result {
+    match run().await {
         Ok(()) => ExitCode::SUCCESS,
+        // Closed stage-specific exit codes remain nonzero and add no automatic
+        // startup logging, telemetry or support artifacts.
         Err(failure) => ExitCode::from(failure.exit_code()),
-    }
-}
-
-async fn finish_pending_startup(startup: &mut Startup, result: Result<(), StartupFailure>) {
-    if !startup.active() {
-        return;
-    }
-    match result {
-        Ok(()) => startup.finish(Outcome::Interrupted).await,
-        Err(failure) => {
-            if let Some(diagnostic) = failure.initialization_diagnostic() {
-                startup.finish(Outcome::Failed(diagnostic)).await;
-            }
-        }
     }
 }
 
@@ -76,20 +57,6 @@ impl StartupFailure {
             Self::Cleanup(_) => 9,
             Self::ConfigurationEncodingInvalid => 8,
         }
-    }
-
-    fn initialization_diagnostic(self) -> Option<DiagnosticFailure> {
-        Some(match self {
-            Self::ConfigurationMissing => DiagnosticFailure::ConfigurationMissing,
-            Self::ConfigurationEncodingInvalid => DiagnosticFailure::ConfigurationEncodingInvalid,
-            Self::AccountsInvalid => DiagnosticFailure::AccountsInvalid,
-            Self::Connect(failure) => DiagnosticFailure::Connect(failure),
-            Self::BindUnknown => DiagnosticFailure::BindUnknown,
-            Self::SignalUnknown => DiagnosticFailure::SignalUnknown,
-            // Runtime failures are not startup telemetry. The startup owner is
-            // already terminal before connection sources can be polled.
-            Self::Serve(_) | Self::ServeUnknown | Self::Cleanup(_) => return None,
-        })
     }
 
     fn code(self) -> &'static str {
@@ -148,9 +115,9 @@ impl From<InferenceError> for StartupFailure {
     }
 }
 
-async fn run(startup: &mut Startup) -> Result<(), StartupFailure> {
-    startup.enter(Stage::Configuration);
+async fn run() -> Result<(), StartupFailure> {
     let accounts = env::var("POSSUMS_ACCOUNTS_JSON")?;
+    let auth = Auth::from_json(&accounts).map_err(|_| StartupFailure::AccountsInvalid)?;
     let host = env::var("POSSUMS_TINFOIL_HOST")?;
     let repository = env::var("POSSUMS_TINFOIL_REPOSITORY")?;
     let api_key = env::var("TINFOIL_API_KEY")?;
@@ -162,28 +129,6 @@ async fn run(startup: &mut Startup) -> Result<(), StartupFailure> {
         Err(error) => return Err(error.into()),
     };
 
-    startup.enter(Stage::Accounts);
-    let auth = Auth::from_json(&accounts).map_err(|_| StartupFailure::AccountsInvalid)?;
-
-    startup.enter(Stage::Signal);
-    #[cfg(unix)]
-    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|_| StartupFailure::SignalUnknown)?;
-    #[cfg(unix)]
-    let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .map_err(|_| StartupFailure::SignalUnknown)?;
-    #[cfg(unix)]
-    let shutdown = shutdown_signal(terminate, interrupt);
-    #[cfg(not(unix))]
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    tokio::pin!(shutdown);
-    let verifier = Arc::new(TinfoilEvidenceVerifier::new(
-        "/bin/possums-attestation",
-        gateway_repository,
-    ));
-    startup.enter(Stage::Connect);
     let inference = TinfoilInference::connect(&host, &repository, api_key)
         .await
         .map_err(StartupFailure::from)?;
@@ -191,28 +136,35 @@ async fn run(startup: &mut Startup) -> Result<(), StartupFailure> {
         auth,
         Arc::new(inference),
         Arc::<str>::from(attestation_socket),
-        verifier,
+        Arc::new(TinfoilEvidenceVerifier::new(
+            "/bin/possums-attestation",
+            gateway_repository,
+        )),
     );
-    startup.enter(Stage::Bind);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| StartupFailure::BindUnknown)?;
+    // Register both handlers before the first accept. Never serve without a
+    // working termination signal subscription.
+    #[cfg(unix)]
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|_| StartupFailure::SignalUnknown)?;
+    #[cfg(unix)]
+    let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|_| StartupFailure::SignalUnknown)?;
     let telemetry = TelemetryRuntime::start(
         TelemetryConfig::from_env(),
         possums::server::admission_capacities(),
     );
     let state = state.with_telemetry(telemetry.metrics());
-    let result = if shutdown.as_mut().now_or_never().is_some() {
-        Ok(())
-    } else {
-        startup.finish(Outcome::InitializationComplete).await;
-        serve_until(listener, state, shutdown.as_mut())
-            .await
-            .map_err(StartupFailure::from)
-    };
-    // Commit any initialization failure/interruption before independent cleanup can
-    // fail. Successful initialization already consumed the startup owner.
-    finish_pending_startup(startup, result).await;
+    #[cfg(unix)]
+    let result = serve_until(listener, state, shutdown_signal(terminate, interrupt))
+        .await
+        .map_err(StartupFailure::from);
+    #[cfg(not(unix))]
+    let result = serve_until(listener, state, tokio::signal::ctrl_c())
+        .await
+        .map_err(StartupFailure::from);
     // Classify independent disposal failure, without replacing the serving
     // primary or recursively feeding telemetry's own metric.
     let cleanup = telemetry
@@ -236,42 +188,6 @@ async fn shutdown_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn pending_initialization_is_terminal_before_independent_cleanup() {
-        for primary in [Ok(()), Err(StartupFailure::BindUnknown)] {
-            let mut startup = Startup::new(TelemetryConfig::from_lookup(|_| None));
-            startup.enter(Stage::Bind);
-            finish_pending_startup(&mut startup, primary).await;
-            assert!(!startup.active());
-            let result = primary.and(Err(StartupFailure::Cleanup(
-                ShutdownFailure::DisposalUnconfirmed,
-            )));
-            finish_pending_startup(&mut startup, result).await;
-            assert!(!startup.active());
-            if primary.is_err() {
-                assert_eq!(result, primary);
-            }
-        }
-    }
-
-    #[test]
-    fn runtime_faults_are_not_projected_into_startup_telemetry() {
-        for failure in [
-            StartupFailure::Serve(ServerFailure::Accept),
-            StartupFailure::ServeUnknown,
-            StartupFailure::Cleanup(ShutdownFailure::DisposalUnconfirmed),
-        ] {
-            assert!(failure.initialization_diagnostic().is_none());
-        }
-        assert!(matches!(
-            StartupFailure::Connect(InferenceFailure::VerificationFailed)
-                .initialization_diagnostic(),
-            Some(DiagnosticFailure::Connect(
-                InferenceFailure::VerificationFailed
-            ))
-        ));
-    }
 
     #[test]
     fn startup_codes_and_stages_are_closed_and_unique() {

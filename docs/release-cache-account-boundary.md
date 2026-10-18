@@ -1,10 +1,10 @@
 # Configured NSS release-cache boundary followup
 
-> Historical graph/image evidence for the exact sources below. This inactive
-> HTTPS-only backup removes Tor graph members without changing the strict
-> checker or NSS account recipe. Its fresh partition check passed, but it has
-> no new Linux image identity or A/B evidence. See
-> [backup verification](without-tor-backup-verification.md).
+> Historical graph/image evidence for the exact sources below. The subsequent
+> [NSS/startup isolation candidate](nss-startup-removal-verification.md) removes
+> the NSS recipe and its freshness members entirely while retaining the strict
+> checker and numerical UID/GID. Old NSS/image checks below do not qualify that
+> new image; its release must pass fresh A/B and normal provenance gates.
 
 ## Scope and cause
 

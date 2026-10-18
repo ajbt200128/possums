@@ -11,6 +11,10 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
+## NSS and all startup diagnostics removal — isolation candidate
+
+The operator requested a combined reversion of NSS image contents and all application startup diagnostics, retaining Rust 1.92, the egress allowlist, 60-second startup grace and 64 MiB memory-only `/tmp`. [Scoped evidence](nss-startup-removal-verification.md) records the exact v43 startup-path restoration, retained typed exits/ordinary metrics, offline checks and remaining image/deployment limits. This is an isolation experiment, not an established collateral-503 fix. Earlier NSS/startup records below remain historical.
+
 ## Tor startup self-appraisal removal — source candidate
 
 The operator explicitly removed startup self-appraisal and cached freshness gates through Tor bootstrap/launch, superseding the former fresh-A-before-B startup requirement only. [Scoped boundary and offline evidence](tor-startup-removal-verification.md) records local grant consistency versus independent client trust, unchanged per-request fail-closed verification, 531 default / 586 all-feature Rust passes, client/helper/privacy checks and remaining limits. Publication may precede available attestation; removal does not fix the acquisition 503 or qualify live Tor-client E2E. No production action or release was performed; parent security review remains required.

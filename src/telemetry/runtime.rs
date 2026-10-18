@@ -77,10 +77,6 @@ impl Config {
     pub fn enabled(&self) -> bool {
         self.credential.is_some()
     }
-
-    pub(super) fn into_client(self) -> Result<Option<Client>, super::export::transport::Failure> {
-        self.credential.map(Client::honeycomb).transpose()
-    }
 }
 
 /// Owns the sender, not inference or accounting. Explicit shutdown joins actual

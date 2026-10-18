@@ -77,15 +77,10 @@
           ulimit -c 0
           exec ${gateway}/bin/possums
         '';
-        # Preserve the normal unprivileged runtime's passwd/group records.
-        gatewayAccounts = pkgs.dockerTools.fakeNss.override {
-          extraPasswdLines = [ "possums:!:65532:65532:Possums gateway:/tmp:/noshell" ];
-          extraGroupLines = [ "possums:!:65532:" ];
-        };
         gatewayImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway";
           tag = "phase0";
-          contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert gatewayAccounts ];
+          contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert ];
           config = {
             Entrypoint = [ "${gatewayEntrypoint}/bin/possums-entrypoint" ];
             Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
@@ -105,18 +100,15 @@
           contents = [ pkgs.cacert ];
           config = { };
         };
-        # Inspect fakeNss's declared recipe inputs without changing its image output.
-        # Wrapping the join itself would prewarm the configured passwd/group files.
-        gatewayAccountFiles = (gatewayAccounts.override { symlinkJoin = args: args; }).paths;
         releaseBuildDeps = (pkgs.linkFarm "release-build-deps"
           (pkgs.lib.imap0 (n: drv: {
             name = toString n;
             # Nix 2.34 rejects 25.05's null structured checks on input-only wrappers.
             # Remove those checks only here; real image output constraints stay intact.
             path = builtins.derivation (builtins.removeAttrs drv.inputDerivation.drvAttrs [ "outputChecks" ]);
-          }) ([ gateway attestationHelper ] ++ gatewayAccountFiles ++ imageStages dependencyImage))).overrideAttrs (_: {
+          }) ([ gateway attestationHelper ] ++ imageStages dependencyImage))).overrideAttrs (_: {
             passthru.rebuildDerivations = map (drv: drv.drvPath)
-              ([ gateway attestationHelper gatewayEntrypoint gatewayAccounts ] ++ gatewayAccountFiles ++ imageStages gatewayImage);
+              ([ gateway attestationHelper gatewayEntrypoint ] ++ imageStages gatewayImage);
           });
         smokeImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway-smoke";
@@ -142,11 +134,6 @@
         };
         checks = {
           inherit gateway;
-          gateway-accounts = pkgs.runCommand "gateway-account-records-check" { } ''
-            grep -Fxq 'possums:!:65532:65532:Possums gateway:/tmp:/noshell' ${gatewayAccounts}/etc/passwd
-            grep -Fxq 'possums:!:65532:' ${gatewayAccounts}/etc/group
-            touch "$out"
-          '';
           fmt = craneLib.cargoFmt { inherit src; };
           clippy = craneLib.cargoClippy (common // {
             inherit cargoArtifacts;

@@ -25,25 +25,19 @@ async fn run(mut command: Command) -> Output {
         .expect("start fixture binary")
 }
 
-fn assert_closed(output: Output, exit: i32, code: &str) {
+fn assert_silent(output: Output, exit: i32) {
     assert_eq!(output.status.code(), Some(exit));
     assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains(code), "expected closed diagnostic code");
-    assert!(stderr.contains("constraint="));
-    assert!(stderr.contains("action="));
-    assert!(!stderr.contains(CANARY));
-    assert!(!stderr.contains("initialization_complete"));
-    assert!(stderr.len() < 16 * 1024);
+    assert!(output.stderr.is_empty());
 }
 
 #[tokio::test]
-async fn missing_config_remains_exit_two_and_is_visible_with_export_disabled() {
-    assert_closed(run(startup()).await, 2, "configuration_missing");
+async fn missing_config_remains_exit_two_without_startup_diagnostics() {
+    assert_silent(run(startup()).await, 2);
 }
 
 #[tokio::test]
-async fn export_off_overrides_valid_ingestion_configuration_without_hiding_failure() {
+async fn export_off_with_valid_ingestion_configuration_keeps_startup_silent() {
     let mut command = startup();
     command
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", "https://api.honeycomb.io")
@@ -51,15 +45,11 @@ async fn export_off_overrides_valid_ingestion_configuration_without_hiding_failu
             "OTEL_EXPORTER_OTLP_HEADERS",
             format!("x-honeycomb-team={CANARY}"),
         );
-    let output = run(command).await;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("startup_delivery_unconfirmed"));
-    assert_eq!(stderr.lines().count(), 2); // entered configuration + primary failure
-    assert_closed(output, 2, "configuration_missing");
+    assert_silent(run(command).await, 2);
 }
 
 #[tokio::test]
-async fn hostile_accounts_and_private_configuration_never_enter_platform_diagnostics() {
+async fn hostile_accounts_and_private_configuration_remain_silent() {
     let mut command = startup();
     command
         .env(
@@ -76,7 +66,7 @@ async fn hostile_accounts_and_private_configuration_never_enter_platform_diagnos
         .env("OTEL_SDK_DISABLED", "false")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", CANARY)
         .env("OTEL_EXPORTER_OTLP_HEADERS", CANARY);
-    assert_closed(run(command).await, 3, "accounts_invalid");
+    assert_silent(run(command).await, 3);
 }
 
 #[cfg(unix)]
@@ -87,5 +77,5 @@ async fn non_unicode_configuration_preserves_exit_eight_without_echoing_bytes() 
     value.push(0xff);
     let mut command = startup();
     command.env("POSSUMS_ACCOUNTS_JSON", OsString::from_vec(value));
-    assert_closed(run(command).await, 8, "configuration_encoding_invalid");
+    assert_silent(run(command).await, 8);
 }

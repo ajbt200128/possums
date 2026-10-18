@@ -19,6 +19,12 @@ The API-only telemetry target retains existing metric names, units, buckets, fix
 
 ## Startup diagnostics extension
 
+**Superseded for the current candidate:** the operator requested removing all
+application startup diagnostics, including platform stderr, Honeycomb logs and
+lifecycle counts. Keep ordinary aggregate metrics and typed startup exit codes;
+see [removal evidence](nss-startup-removal-verification.md). The original choice
+below is historical, not authority to restore the removed implementation.
+
 The operator subsequently requested platform + Honeycomb startup logs and aggregate startup metrics, using the **normal Honeycomb dataset**, not a special startup destination. Follow the narrow [policy exception](../PRIVACY.md#startup-diagnostics-exception) and [scoped implementation/verification record](startup-diagnostics-verification.md). This selects ordinary startup logs and metrics, not a new tracing framework. Keep request telemetry metrics-only and all current complete-window gates intact. Normal provider-default MVP retention applies; actual log ingestion, access/retention and platform capture remain unverified. Source implementation is not authorization to activate export, retry the failed rollout or initiate live probes.
 
 ## Recommendation and scope

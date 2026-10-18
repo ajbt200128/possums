@@ -60,21 +60,6 @@ struct State {
     evidence: Arc<Evidence>,
 }
 
-// Only reviewed OTLP signals, never a caller-supplied endpoint or dataset.
-#[derive(Clone, Copy)]
-pub(in crate::telemetry) enum Signal {
-    Logs,
-    Metrics,
-}
-impl Signal {
-    fn path(self) -> &'static str {
-        match self {
-            Self::Logs => "/v1/logs",
-            Self::Metrics => "/v1/metrics",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(in crate::telemetry) struct Client {
     address: Option<SocketAddr>,
@@ -195,13 +180,6 @@ impl Client {
         self.authority = Some((epoch, expected, deadline));
     }
 
-    pub(in crate::telemetry) fn for_signal(mut self, signal: Signal) -> Self {
-        let mut parts = self.uri.into_parts();
-        parts.path_and_query = Some(http::uri::PathAndQuery::from_static(signal.path()));
-        self.uri = Uri::from_parts(parts).expect("fixed OTLP path preserves URI authority");
-        self
-    }
-
     pub(in crate::telemetry) fn endpoint(&self) -> String {
         self.uri.to_string()
     }
@@ -234,7 +212,7 @@ impl Client {
         // Full takes ownership of Bytes without cloning/copying its data.
         let mut builder = Request::builder()
             .method(http::Method::POST)
-            .uri(self.uri.path()) // fixed origin-form signal path, never proxy-form
+            .uri("/v1/metrics") // origin-form on the one direct connection, never proxy-form
             .header(http::header::HOST, self.uri.authority().unwrap().as_str())
             .header(http::header::CONTENT_TYPE, "application/x-protobuf")
             .header(http::header::CONNECTION, "close");
