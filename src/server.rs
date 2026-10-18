@@ -19,7 +19,7 @@ use axum::{
     routing::get,
     Router,
 };
-use futures_util::{FutureExt, Stream, StreamExt};
+use futures_util::FutureExt;
 use hyper::server::conn::http1;
 use hyper_util::{
     rt::{TokioIo, TokioTimer},
@@ -45,13 +45,7 @@ mod admission_tests;
 #[cfg(test)]
 mod cause_tests;
 #[cfg(test)]
-mod lifecycle_tests {
-    include!("server/lifecycle_tests.rs");
-    // Keep transport assertions beside the existing private lifecycle fixtures.
-    mod transport_tests {
-        include!("server/transport_tests.rs");
-    }
-}
+mod lifecycle_tests;
 #[cfg(test)]
 mod observer_tests;
 #[cfg(test)]
@@ -165,8 +159,7 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
     let health = state.lifecycle.clone();
     let app = Router::new()
         .merge(crate::api::routes())
-        .route("/attestation", get(attestation));
-    let app = app
+        .route("/attestation", get(attestation))
         .fallback(not_found)
         .method_not_allowed_fallback(wrong_method)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
@@ -282,24 +275,6 @@ async fn serve_until_with_header_deadline(
     header_deadline: Duration,
     shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
-    let incoming = futures_util::stream::unfold(listener, |listener| async {
-        let accepted = listener.accept().await.map(|(stream, _)| stream);
-        Some((accepted, listener))
-    });
-    serve_incoming_until(incoming, state, header_deadline, shutdown).await
-}
-
-/// One admission and drain owner for accepted HTTP connections.
-pub(crate) async fn serve_incoming_until<IO>(
-    incoming: impl Stream<Item = std::io::Result<IO>>,
-    state: AppState,
-    header_deadline: Duration,
-    shutdown: impl Future<Output = ()>,
-) -> std::io::Result<()>
-where
-    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    let mut incoming = Box::pin(incoming);
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let telemetry = state.telemetry.clone();
     let lifecycle = state.lifecycle.clone();
@@ -328,19 +303,18 @@ where
                 if let Some(failure) = &mut injected_accept_failure {
                     tokio::select! {
                         biased;
-                        _ = failure => Some(Err(std::io::Error::other("injected listener failure"))),
-                        result = incoming.next() => result,
+                        _ = failure => Err(std::io::Error::other("injected listener failure")),
+                        result = listener.accept() => result,
                     }
                 } else {
-                    incoming.next().await
+                    listener.accept().await
                 }
                 #[cfg(not(test))]
-                incoming.next().await
+                listener.accept().await
             } => {
-                let stream = match result {
-                    None => break Ok(()),
-                    Some(Ok(accepted)) => accepted,
-                    Some(Err(_)) => {
+                let (stream, _) = match result {
+                    Ok(accepted) => accepted,
+                    Err(_) => {
                         if let Some(metrics) = &telemetry {
                             metrics.interface_error(InterfaceError::LifecycleServeUnknown);
                         }
@@ -431,7 +405,7 @@ where
         }
     };
     lifecycle.quiesce();
-    drop(incoming);
+    drop(listener);
     stop.send_replace(true);
     #[cfg(test)]
     if let Some(done) = hooks.shutdown_published.lock().unwrap().take() {
@@ -462,13 +436,13 @@ where
 #[derive(Clone)]
 struct ConnectionIoFailure(Arc<std::sync::atomic::AtomicBool>);
 
-/// Notify request ownership on actual transport EOF/error as well as body drop.
-struct DisconnectIo<IO> {
-    stream: IO,
+/// Notify request ownership on actual socket EOF/error as well as body drop.
+struct DisconnectIo {
+    stream: tokio::net::TcpStream,
     disconnect: crate::stream_owner::Disconnect,
     io_failed: Arc<std::sync::atomic::AtomicBool>,
 }
-impl<IO> DisconnectIo<IO> {
+impl DisconnectIo {
     fn failed(&self, error: &std::io::Error) {
         // Supported connection-end kinds do not establish a separate fault.
         // Other I/O failures are observed once by the connection owner; raw
@@ -486,7 +460,7 @@ impl<IO> DisconnectIo<IO> {
         }
     }
 }
-impl<IO: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for DisconnectIo<IO> {
+impl tokio::io::AsyncRead for DisconnectIo {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -507,7 +481,7 @@ impl<IO: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for DisconnectIo<IO>
         result
     }
 }
-impl<IO: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for DisconnectIo<IO> {
+impl tokio::io::AsyncWrite for DisconnectIo {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
