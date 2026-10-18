@@ -186,8 +186,6 @@ impl From<crate::inference::InferenceFailure> for GenerationTerminal {
             CatalogFailed => Self::Catalog,
             RequestEncodingFailed => Self::Encoding,
             TokenizerSendFailed
-            | TokenizerSendDeadline
-            | TokenizerConnectFailed
             | TokenizerHttpFailed
             | TokenizerUploadIncomplete
             | GenerationSendFailed

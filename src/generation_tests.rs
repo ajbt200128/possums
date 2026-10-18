@@ -266,14 +266,6 @@ async fn owned_tokenizer_and_context_failures_are_observed_before_rejection_not_
             InterfaceError::TokenizerTransportFailed,
         ),
         (
-            Tokens::Failure(InferenceFailure::TokenizerSendDeadline),
-            InterfaceError::TokenizerSendDeadline,
-        ),
-        (
-            Tokens::Failure(InferenceFailure::TokenizerConnectFailed),
-            InterfaceError::TokenizerConnectFailed,
-        ),
-        (
             Tokens::Failure(InferenceFailure::TokenizerHttpFailed),
             InterfaceError::TokenizerHttpRefused,
         ),

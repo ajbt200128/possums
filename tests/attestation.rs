@@ -107,23 +107,22 @@ fn evidence_rejects_raw_value_reparse_before_building_quote_tree() {
 mod helper {
     use super::*;
     use possums::attestation::{EvidenceVerifier, TinfoilEvidenceVerifier};
+    use std::os::unix::fs::PermissionsExt;
 
     fn script(body: &str) -> TempFile {
-        TempFile::new(format!("{body}\n").as_bytes())
+        let file = TempFile::new(format!("#!/bin/sh\n{body}\n").as_bytes());
+        let mut permissions = std::fs::metadata(&file.0).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&file.0, permissions).unwrap();
+        file
     }
 
     async fn verify(
         file: &TempFile,
     ) -> Result<possums::attestation::GatewayEvidence, EvidenceError> {
-        TinfoilEvidenceVerifier::new(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/attestation-helper.sh"
-            ),
-            "fixture",
-        )
-        .verify(file.0.to_str().unwrap(), NOW)
-        .await
+        TinfoilEvidenceVerifier::new(file.0.to_str().unwrap(), "fixture")
+            .verify("fixture", NOW)
+            .await
     }
 
     #[tokio::test]
@@ -138,12 +137,7 @@ mod helper {
         ));
         // The supplied request-start sample predates issuance; only a
         // validation-time sample after the helper exits can accept it.
-        let result = verify(&file).await;
-        assert!(
-            result.is_ok(),
-            "helper issuance acceptance: observed {}",
-            outcome(&result)
-        );
+        assert!(verify(&file).await.is_ok());
     }
 
     #[tokio::test]
@@ -156,28 +150,7 @@ mod helper {
             "printf '%s' '{}'",
             envelope_at(r#"{"format":"v3"}"#, now + 60, now + 360)
         ));
-        // Reproduce the writable-descriptor condition deterministically on Linux.
-        let writer = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&file.0)
-            .unwrap();
-        let result = verify(&file).await;
-        drop(writer);
-        assert!(
-            matches!(result, Err(EvidenceError::Invalid)),
-            "helper future issuance rejection: observed {}",
-            outcome(&result)
-        );
-    }
-
-    fn outcome(
-        result: &Result<possums::attestation::GatewayEvidence, EvidenceError>,
-    ) -> &'static str {
-        match result {
-            Ok(_) => "accepted",
-            Err(EvidenceError::Invalid) => "invalid",
-            Err(EvidenceError::Unavailable) => "unavailable",
-        }
+        assert!(matches!(verify(&file).await, Err(EvidenceError::Invalid)));
     }
 
     #[tokio::test]

@@ -39,9 +39,8 @@
                 ./vendor/tinfoil/assets/trusted_root.json
                 ./vendor/tinfoil/assets/rekor_test_bundle.json
               ];
-              helperTestAssets = map toString [ ./tests/fixtures/attestation-helper.sh ];
             in
-            (craneLib.filterCargoSources path type || builtins.elem (toString path) (sdkAssets ++ helperTestAssets)) &&
+            (craneLib.filterCargoSources path type || builtins.elem (toString path) sdkAssets) &&
             base != ".pi" && base != ".env";
         };
         common = {
@@ -50,7 +49,7 @@
           SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         };
         cargoArtifacts = craneLib.buildDepsOnly common;
-        # Tests have their own checks, not an image-build side effect.
+        # Tests have their own check; image builds should not compile/run them again.
         gateway = craneLib.buildPackage (common // {
           inherit cargoArtifacts;
           doCheck = false;
@@ -142,8 +141,6 @@
           tests = craneLib.cargoTest (common // { inherit cargoArtifacts; });
           attestation-helper = attestationHelper;
         };
-        devShells.default = craneLib.devShell {
-          checks = self.checks.${system};
-        };
+        devShells.default = craneLib.devShell { checks = self.checks.${system}; };
       });
 }

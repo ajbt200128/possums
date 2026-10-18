@@ -175,7 +175,7 @@ fn startup_125_with_zero_monotonic_anchor_and_two_independent_grids() {
         let mono = half * SECOND / 2;
         let wall = 125 * SECOND + mono;
         metrics.clock.pair(mono, wall);
-        if (190 * SECOND..=240 * SECOND).contains(&wall) && wall.is_multiple_of(10 * SECOND) {
+        if (190 * SECOND..=240 * SECOND).contains(&wall) && wall % (10 * SECOND) == 0 {
             metrics.resource(
                 wall,
                 ResourceScope::TinfoilEnclave,
