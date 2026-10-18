@@ -413,7 +413,7 @@ async fn engine_status(
         };
         if let Some(ready) = &ready {
             ready.store(
-                state == State::Running && !fatal,
+                state.is_fully_reachable() && !fatal,
                 std::sync::atomic::Ordering::Release,
             );
         }

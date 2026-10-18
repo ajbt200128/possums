@@ -235,7 +235,7 @@ async fn engine_terminal_state_is_visible_but_initial_shutdown_is_not_fabricated
 }
 
 #[tokio::test]
-async fn readiness_tracks_only_supported_running_and_clears_on_recovery_and_terminal_eof() {
+async fn readiness_tracks_reachability_and_clears_on_recovery_and_terminal_eof() {
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -262,9 +262,10 @@ async fn readiness_tracks_only_supported_running_and_clears_on_recovery_and_term
     for (state, expected) in [
         (State::Shutdown, false),
         (State::Bootstrapping, false),
-        (State::DegradedReachable, false),
-        (State::DegradedUnreachable, false),
         (State::Running, true),
+        (State::DegradedReachable, true),
+        (State::DegradedUnreachable, false),
+        (State::DegradedReachable, true),
         (State::Recovering, false),
         (State::Running, true),
     ] {
@@ -380,6 +381,9 @@ async fn actual_export_stall_does_not_delay_running_or_engine_failure() {
 async fn observed_fatal_eof_and_panic_retain_original_engine_policy() {
     let cases = [
         stream::iter([(State::Running, true, ProblemKind::Runtime)])
+            .chain(stream::pending())
+            .boxed(),
+        stream::iter([(State::DegradedReachable, true, ProblemKind::Runtime)])
             .chain(stream::pending())
             .boxed(),
         stream::empty().boxed(),
