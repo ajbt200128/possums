@@ -17,6 +17,13 @@ class HTTPSOnlyReleaseTest(StopTest):
     def result(self, data=None):
         return subprocess.CompletedProcess([], 0, b"opaque", json.dumps(plan() if data is None else data).encode())
 
+    def test_deployment_lookup_targets_recreated_gateway(self):
+        self.assertEqual(d.NAME, "gateway")
+        response = subprocess.CompletedProcess([], 0, json.dumps(view()).encode(), b"")
+        with patch.object(d, "call", return_value=response) as call:
+            self.assertEqual(d.get("unused")["name"], "gateway")
+        call.assert_called_once_with("unused", ["container", "get", "gateway", "--output", "json"])
+
     def test_opaque_secret_references_are_preserved_never_selected_or_deleted(self):
         before, after = view(), view(V)
         before["secrets"].append("EXISTING_OPAQUE_REF")
