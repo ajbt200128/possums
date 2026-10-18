@@ -37,6 +37,7 @@ export function diagnosticDescription(failure: DiagnosticFailure): string {
   const description = requestDescription ?? (failure.constraint === 'expired' ? 'Session-pinned trust validity has elapsed.' :
     failure.constraint === 'unexpected' ? 'The component did not complete; the underlying cause is unknown.' :
     failure.constraint === 'precision' ? 'A numeric value exceeds the supported safe-integer range for Pi metadata/display.' :
+    failure.constraint === 'peer_key_mismatch' ? 'The TLS peer key differs from the last verified identity; the underlying cause is unknown.' :
     `The ${failure.constraint.replaceAll('_', ' ')} constraint was not satisfied.`);
   return `[${failure.message}] Stage: ${failure.stage}; constraint: ${failure.constraint}. ${description}` +
     (failure.status === undefined ? '' : ` Observed HTTP status: ${failure.status}.`) + ` ${actions[failure.stage]}`;
