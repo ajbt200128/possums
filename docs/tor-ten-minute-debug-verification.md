@@ -70,5 +70,71 @@ approved identity configuration failed promptly with closed
 `tor_configuration_invalid`, startup failure, exit10; no network or service
 launch occurred. This verifies the early failure diagnostic, not Tor readiness.
 
-Signed release and actual debug deployment remain pending. Their results will be
-recorded separately; existing startup logs are not retrospectively relabeled.
+## Signed release and actual deployment
+
+[Publication39151322202](https://github.com/ajbt200128/possums/actions/runs/39151322202),
+attempt1, succeeded for `v0.0.53-debug-tor-health.2`, release commit
+`3b2abdb818d92e1e77079d6b8c24512e8dd14235`. The existing repository manifest
+validator checked the downloaded manifest/hash against exact committed config
+and image. Supported `gh attestation verify` checked the exact tagged diagnostic
+workflow, source/signer commit, predicate and hosted runner; checked statement
+predicate/subject and invocation match that run/attempt. Manifest SHA256:
+`7fdd7286656b5471508bd1bd9176577427b1603f1c8341bdb724bc3c6b35a3d4`.
+No independently reproduced production release or main promotion is claimed.
+
+Fresh exact existing debug selection: current `.1`, running, no pending update,
+five managed bindings. Two read-only plans (one standalone, one immediately
+before submission) approved `.2`, blue-green/no downtime/no hold, unchanged
+resources/opaque variables/references/SSH settings and the exact existing five
+secret refresh names. Promotion was explicitly disabled for this experiment.
+One update POST was acknowledged, then observed `.1/pending`, `.1/started` and
+finally `.2/running` with no pending update. Opaque settings/references remained
+unchanged; `mark_latest_release=false` was confirmed. No replay, cancellation,
+rollback, direct toolbox boot or production action occurred. Metadata completion
+is not proof of physical cleanup or shared-key publication exclusivity.
+
+## Actual readiness and Tor checks
+
+Fresh SSH metadata was used with accept-new/never-replace-changed host-key policy,
+no forwarding, bounded noninteractive commands. Installed toolbox README and
+AGENTS were reread before inspection. No raw logs, environment/config dumps,
+credentials, keys, reports, URLs or onion/peer identifiers left the safe projection.
+
+Actual runtime matched the exact new digest and source/debug image labels.
+Tor was enabled and export disabled. Docker health grace was **600s**, with the
+existing10s interval/5s timeout/three retries, read-only root and /tmp512MiB.
+Gateway was running/healthy, exit0, no observed OOM and direct loopback HTTP204.
+Nine closed startup records included local initialization completion.
+
+Bounded read-only observation captured these actual records:
+
+| Elapsed bucket from pre-preparation origin | Outcome | SDK state | Problem |
+| --- | --- | --- | --- |
+| 30s to under60s | waiting | bootstrapping | none |
+| 180s to under590s | first_local_ready | running | none |
+
+The actual ready record was therefore captured **after the old180s cutoff and
+before the600s grace ended**. Its code is `tor_startup_first_local_ready`; this
+was not a deadline-generated/fake Running state. The590s timeout was unnecessary
+in this live run; its emission/continued-observation behavior is qualified by the
+paused-time/actual-sender tests, not invented live failure evidence. Exact ready
+time is deliberately not retained. First-ready is not a perpetual current-health
+or full attestation guarantee.
+
+One deliberate post-update direct Tor check used the same isolated supported
+C Tor/Stem/PyCURL helper as the prior iteration, with only exact tag/image constants
+updated (public helper SHA256
+`153248d41a8073c4ab14ed1ad1a8dafc5d27376a2a9fca2a324609f50339a329`).
+Independent client bootstrapped; public HTTPS HEAD control returned200; explicit
+v3 HSFETCH was accepted and a descriptor was received (two request events).
+Configured-onion stream succeeded, TLS peer/hostname verification remained enabled,
+and HEAD `/healthz` returned **HTTP204**, libcurl0. No insecure fallback,
+inference, redirect following, raw header/body capture or automated HTTP retry.
+The owned client was reaped and temporary client state removed, not claimed
+securely erased. Routing values remained in memory, never diagnostic output.
+
+Final fresh selection: `.2/running`, no pending update, five bindings. This
+establishes observed debug SDK first-readiness and configured-onion transport
+reachability, not attestation/HPKE/accounting qualification, exact invoice parity,
+independent attribution of a shared onion publisher to one VM, exclusive
+publication or cleanup of earlier publishers. Production and main were untouched.
