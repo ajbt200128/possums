@@ -1,5 +1,11 @@
 # NSS and startup-diagnostics isolation candidate
 
+**Subsequent scoped control:** the [runtime-path regression control](runtime-path-regression-control.md)
+retains this NSS/startup removal and all three restored measured settings, but
+returns Rust to 1.88.0 and removes later upstream-client renewal/generalized
+ingress. The Rust 1.92.0 statements and test counts below remain evidence for
+this earlier checkpoint, not the later control.
+
 ## Decision and scope
 
 The operator requested removing two possible contributors together for the next

@@ -1930,3 +1930,22 @@ Policy read before diagnostic/reporting changes: [data handling](../PRIVACY.md#d
 No live cache hit, paid/cache pair, dashboard/invoice agreement, provider cache eviction/retention/erasure, whole-process memory/privacy, deployment identity or installed client activation is claimed. Native-v3 CLI platform-signer mismatch, legacy-v2 freshness limits and historical live billing/privacy unknowns remain unchanged. Future intake ledger authoritative settlement/lost-response/expiry qualification is still separate; its money-only contract was not edited. At the integration checkpoint, independent review, small commits and protected release remained parent-owned next steps. Remote main still resolved to the original base during integration; it was not fetched/reset/overwritten.
 
 Parent acceptance subsequently inspected the integrated diff and reran package formatting plus the full offline/all-target/all-feature test suite using the same existing pinned Nix Rust 1.88 compiler: **369 passed, four funded/live tests ignored**. Independent Luna read-only review found no concrete integration, security, billing or tested shipped-client compatibility blocker. This resolves the old patch's pinned-toolchain qualification gap for the current integration, not live cache behavior or release/deployment acceptance.
+
+## Bounded runtime-path regression control — local source only
+
+On exact v56 source `7b1a1d1c6329431058aff1fd3b5c0629a9c8a75f`, the operator
+explicitly authorized returning to Rust 1.88 and v0.0.43's direct upstream client
+and TCP serving path. **Later upstream-client renewal is intentionally removed;
+this is not a proven native-503 fix.** TLS still fails closed, no request is
+replayed, and upstream key rotation can leave the resident client unavailable.
+The [scoped record](runtime-path-regression-control.md) details the exact changes,
+retained tokenizer diagnostics, privacy policy references, preserved NSS/startup
+removal/measured settings, and remaining compatibility/runtime limits.
+
+Pinned `devenv shell` Rust/Cargo **1.88.0**, offline all-target/all-feature tests:
+**496 passed, zero failed, four funded/live tests ignored**. Package formatting,
+strict all-target/all-feature Clippy, three-file active LSP and whitespace checks
+passed. No compatibility patch or dependency/SDK-pin/lockfile change was necessary.
+The existing vendored unused-method warning remains. No credential access, live
+endpoint call, workflow mutation, historical image rebuild, installation,
+publication or deployment occurred in this implementation packet.
