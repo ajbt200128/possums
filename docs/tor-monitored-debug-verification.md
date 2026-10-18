@@ -110,11 +110,16 @@ stage. It neither proves that the candidate ran nor explains the platform's
 rollout failure. The read-only reference check did not mutate/probe the gateway,
 initiate inference, or count `.2` as candidate evidence.
 
-Astra is correcting only the scratch sampler/parser/tests offline, using typed
+Astra corrected only the scratch sampler/parser/tests offline, using typed
 comparisons without relaxing any actual health constraint and retaining explicit
-closed guard stages. That correction is not deployed and cannot retrospectively
-recover this attempt's missing runtime observations. No additional attempt is
-started under the consumed authorization.
+closed guard stages. The parent reviewed actual diffs and reran **34 pinned offline
+tests** successfully, plus shell syntax checks. Fixtures reproduce duration
+Stringer rendering, reject wrong typed durations, cover each closed guard stage,
+hostile/partial output, absent records, exact candidate identity and no replay.
+The original attempt's scripts and consumed marker were preserved. This correction
+cannot retrospectively recover missing runtime observations; no additional attempt
+was started under the consumed authorization. A subsequent operator authorization
+is required for any newly monitored deployment.
 
 ## Remaining decision
 
