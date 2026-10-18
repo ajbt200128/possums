@@ -239,7 +239,11 @@ async fn readiness_tracks_only_supported_running_and_clears_on_recovery_and_term
     let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (send, mut recv) = tokio::sync::mpsc::channel(1);
     let statuses = stream::poll_fn(move |cx| recv.poll_recv(cx));
-    let monitor = engine_status(statuses, Some(ready.clone()));
+    let monitor = engine_status(
+        statuses.map(|(state, fatal)| (state, fatal, ProblemKind::None)),
+        Some(ready.clone()),
+        None,
+    );
     tokio::pin!(monitor);
     for (state, expected) in [
         (State::Shutdown, false),
@@ -263,6 +267,186 @@ async fn readiness_tracks_only_supported_running_and_clears_on_recovery_and_term
     drop(send);
     assert_eq!(bounded(monitor).await, Failure::Engine);
     assert!(!ready.load(Ordering::Acquire));
+}
+
+#[tokio::test(start_paused = true)]
+async fn observer_deadline_does_not_change_engine_readiness_or_later_failure() {
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (observer, diagnostics) =
+        readiness::new(crate::telemetry::runtime::Config::from_lookup(|_| None));
+    let (send, mut recv) = tokio::sync::mpsc::channel(1);
+    let statuses = stream::poll_fn(move |cx| recv.poll_recv(cx));
+    let engine = engine_status(statuses, Some(ready.clone()), Some(observer));
+    tokio::pin!(engine, diagnostics);
+    assert!(poll!(&mut diagnostics).is_pending());
+    send.send((State::Bootstrapping, false, ProblemKind::Ipt))
+        .await
+        .unwrap();
+    assert!(poll!(&mut engine).is_pending());
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(poll!(&mut diagnostics).is_pending());
+    tokio::time::advance(Duration::from_secs(150)).await;
+    diagnostics.await;
+    assert!(!ready.load(Ordering::Acquire));
+    send.send((State::Running, false, ProblemKind::None))
+        .await
+        .unwrap();
+    bounded(async {
+        while !ready.load(Ordering::Acquire) {
+            assert!(poll!(&mut engine).is_pending());
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    send.send((State::Broken, false, ProblemKind::Unknown))
+        .await
+        .unwrap();
+    assert_eq!(engine.await, Failure::Engine);
+    assert!(!ready.load(Ordering::Acquire));
+}
+
+#[tokio::test(start_paused = true)]
+async fn actual_export_stall_does_not_delay_running_or_engine_failure() {
+    let start = tokio::time::Instant::now();
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (observer, diagnostics) = readiness::tests::stalled_observer();
+    let (send, mut recv) = tokio::sync::mpsc::channel(1);
+    let statuses = stream::poll_fn(move |cx| recv.poll_recv(cx));
+    let serving = with_readiness_diagnostics(
+        engine_status(statuses, Some(ready.clone()), Some(observer)),
+        diagnostics,
+    );
+    tokio::pin!(serving);
+    assert!(poll!(&mut serving).is_pending());
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(poll!(&mut serving).is_pending()); // waiting export is now stalled
+    send.send((State::Running, false, ProblemKind::None))
+        .await
+        .unwrap();
+    bounded(async {
+        while !ready.load(Ordering::Acquire) {
+            assert!(poll!(&mut serving).is_pending());
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    send.send((State::Broken, false, ProblemKind::Runtime))
+        .await
+        .unwrap();
+    assert_eq!(serving.await, Failure::Engine);
+    assert!(!ready.load(Ordering::Acquire));
+    // Neither readiness nor first-fault completion waited for the 1s attempt.
+    assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(30));
+}
+
+#[tokio::test]
+async fn observed_fatal_eof_and_panic_retain_original_engine_policy() {
+    let cases = [
+        stream::iter([(State::Running, true, ProblemKind::Runtime)])
+            .chain(stream::pending())
+            .boxed(),
+        stream::empty().boxed(),
+        stream::poll_fn(|_| panic!("HOSTILE_STATUS_PANIC_SECRET")).boxed(),
+    ];
+    for statuses in cases {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (observer, diagnostics) =
+            readiness::new(crate::telemetry::runtime::Config::from_lookup(|_| None));
+        let result = engine_status(statuses, Some(ready.clone()), Some(observer)).await;
+        assert_eq!(result, Failure::Engine);
+        assert!(!ready.load(Ordering::Acquire));
+        assert!(diagnostics.now_or_never().is_some());
+        assert!(!result.to_string().contains("HOSTILE"));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiet_engine_failure_eof_and_panic_commit_local_terminal_before_immediate_drain() {
+    let cases = [
+        (
+            stream::iter([(State::Running, true, ProblemKind::Runtime)]).boxed(),
+            "tor_startup_engine_failure",
+        ),
+        (
+            stream::iter([(State::Broken, false, ProblemKind::Ipt)]).boxed(),
+            "tor_startup_engine_failure",
+        ),
+        (stream::empty().boxed(), "tor_startup_status_ended"),
+        (
+            stream::poll_fn(|_| panic!("HOSTILE_STATUS_PANIC_SECRET")).boxed(),
+            "tor_startup_status_panicked",
+        ),
+    ];
+    for (statuses, code) in cases {
+        let start = tokio::time::Instant::now();
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (observer, diagnostics, captured) = readiness::tests::captured_observer();
+        let engine = stream::once(async {
+            Err(engine_status(statuses, Some(ready.clone()), Some(observer)).await)
+        });
+        let (report, seen) = reporter();
+        let serving_state = state();
+        let result = with_readiness_diagnostics(
+            serve_sources_until(
+                stream::pending(),
+                engine,
+                serving_state.clone(),
+                Duration::from_secs(10),
+                std::future::pending(),
+                report,
+            ),
+            diagnostics,
+        )
+        .await;
+        assert_eq!(result.unwrap_err().source, Some(Failure::Engine));
+        assert_eq!(*seen.lock().unwrap(), vec![Failure::Engine]);
+        assert!(!serving_state.lifecycle.is_serving());
+        assert!(!ready.load(Ordering::Acquire));
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start,
+            "no yield/upload wait added to drain"
+        );
+        let local = captured();
+        assert_eq!(local.len(), 1);
+        assert!(local[0].contains(code));
+        assert!(local[0].contains("outcome=engine_failure"));
+        assert!(!local[0].contains("HOSTILE"));
+    }
+}
+
+#[tokio::test]
+async fn stalled_diagnostics_are_owned_and_cannot_delay_source_failure_or_drain() {
+    struct Dropped(Arc<AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let guard = Dropped(drops.clone());
+    let diagnostics = async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    };
+    let (report, seen) = reporter();
+    let serving_state = state();
+    let result = bounded(with_readiness_diagnostics(
+        serve_sources_until(
+            stream::pending(),
+            stream::iter([Err(Failure::Engine)]),
+            serving_state.clone(),
+            Duration::from_secs(10),
+            std::future::pending(),
+            report,
+        ),
+        diagnostics,
+    ))
+    .await;
+    assert_eq!(result.unwrap_err().source, Some(Failure::Engine));
+    assert!(!serving_state.lifecycle.is_serving());
+    assert_eq!(*seen.lock().unwrap(), vec![Failure::Engine]);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

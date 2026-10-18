@@ -33,6 +33,9 @@ const BUDGET: Duration = Duration::from_secs(2);
 const MAX_RECORDS: usize = 9; // eight distinct stages and one terminal
 const EVENT: &str = "possums.startup";
 
+#[cfg(feature = "tor")]
+pub(crate) mod readiness;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     Configuration,
@@ -434,16 +437,25 @@ async fn send(
     records: &[Observation],
     deadline: tokio::time::Instant,
 ) -> Result<(), Delivery> {
+    let payload = match signal {
+        Signal::Logs => logs(records).encode_to_vec(),
+        Signal::Metrics => metrics(records).encode_to_vec(),
+    };
+    send_payload(client, signal, payload, deadline).await
+}
+
+async fn send_payload(
+    client: &Client,
+    signal: Signal,
+    payload: Vec<u8>,
+    deadline: tokio::time::Instant,
+) -> Result<(), Delivery> {
     let failure = |constraint| Delivery { signal, constraint };
     // The transport's own deadline can resolve at the same instant as ours.
     // Never begin the next connection after the shared budget is spent.
     if tokio::time::Instant::now() >= deadline {
         return Err(failure("shared_delivery_deadline"));
     }
-    let payload = match signal {
-        Signal::Logs => logs(records).encode_to_vec(),
-        Signal::Metrics => metrics(records).encode_to_vec(),
-    };
     let request = http::Request::post(client.endpoint())
         .body(hyper::body::Bytes::from(payload))
         .map_err(|_| failure("request_encoding"))?;

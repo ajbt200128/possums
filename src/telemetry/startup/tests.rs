@@ -34,13 +34,13 @@ fn records(outcome: Outcome) -> Vec<Observation> {
         },
     ]
 }
-fn text(value: &AnyValue) -> &str {
+pub(super) fn text(value: &AnyValue) -> &str {
     let Some(Value::StringValue(value)) = &value.value else {
         panic!("not text");
     };
     value
 }
-fn expected_resource() -> Resource {
+pub(super) fn expected_resource() -> Resource {
     Resource {
         attributes: [
             ("service.name", "possums-gateway"),
@@ -313,7 +313,7 @@ fn nested_tor_codes_are_preserved_without_appraisal_status() {
         .contains("status="));
 }
 
-async fn capture<S: AsyncRead + Unpin>(stream: &mut S, path: &str) -> Vec<u8> {
+pub(super) async fn capture<S: AsyncRead + Unpin>(stream: &mut S, path: &str) -> Vec<u8> {
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
         assert!(header.len() < 4096);
