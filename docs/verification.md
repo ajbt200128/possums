@@ -10,6 +10,17 @@ Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILE
 
 The operator explicitly removed startup self-appraisal and cached freshness gates through Tor bootstrap/launch, superseding the former fresh-A-before-B startup requirement only. [Scoped boundary and offline evidence](tor-startup-removal-verification.md) records local grant consistency versus independent client trust, unchanged per-request fail-closed verification, 531 default / 586 all-feature Rust passes, client/helper/privacy checks and remaining limits. Publication may precede available attestation; removal does not fix the acquisition 503 or qualify live Tor-client E2E. No production action or release was performed; parent security review remains required.
 
+## Nonproduction Tor ten-minute readiness iteration
+
+The operator-authorized [debug-only iteration](tor-ten-minute-debug-verification.md)
+changes the experimental debug health grace to600s, observes across preparation/
+bootstrap and beyond180s, attempts a closed timeout at590s if pending, and keeps
+watching for the actual first ready/failure. It retains finite record counts,
+nonblocking presentation, disabled debug export and all trust/accounting/drain
+boundaries. It is not a production/main release or an unconditional platform-log
+capture guarantee. Tests, signed artifact and debug runtime evidence are scoped
+in that record.
+
 ## Startup-only diagnostics — policy/source work
 
 The finite [Tor startup-readiness handoff](tor-startup-readiness-diagnostics-verification.md) adds at most two closed readiness logs after local initialization, ending at first observed SDK Running/failure or a diagnostic-only 180-second deadline, plus at most one closed local-only delivery warning. It preserves the original nine-record owner/metrics and readiness/engine/accounting policies. The [r57 response](tor-startup-readiness-diagnostics-verification.md#r57-independent-review-responses--source-only) fixes full-pipe blocking by dropping unavailable platform output, commits local terminals at observation before immediate empty drain, and preserves typed delivery failures without recursive export. Final pinned offline Rust 1.92.0 Darwin checks passed: **531 default / 610 all-feature**, four live fixtures ignored in both plus one operator-only Tor sandbox fixture in all-feature; package fmt, strict Clippy, Linux-target locked metadata and all 13 release-cache tests including offline pinned Linux graph partition passed. OS-timeout/full-pipe, real TLS/OTLP hostile-response, paused-time/latching, off/outage/drop and immediate-drain tests qualify source only. Positive nonroot Linux FIFO capture is a separate Linux-only regression **not yet run here**; Darwin's explicit drop-only path is not positive Linux evidence. Policy/privacy links, synthetic closed examples and missing-record limits are in that record; Linux CI/images, actual Tor/Honeycomb/platform behavior and deployment remain unqualified. Parent retains round-two review and release/reconciliation ownership.

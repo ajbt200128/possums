@@ -106,6 +106,8 @@ pub struct AppState {
     tor_signer: Option<Arc<crate::tor_endorsement::TorEndorsementSigner>>,
     #[cfg(feature = "tor")]
     pub(crate) tor_ready: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(feature = "debug-tor-no-health")]
+    pub(crate) debug_tor_readiness: Option<crate::tor_ingress::DebugReadiness>,
     #[cfg(test)]
     preflight_hooks: Arc<resource_streaming_tests::PreflightHooks>,
     #[cfg(test)]
@@ -120,6 +122,15 @@ impl AppState {
     ) -> Self {
         self.tor_signer = Some(signer);
         self.tor_ready = Some(Arc::default());
+        self
+    }
+
+    #[cfg(feature = "debug-tor-no-health")]
+    pub fn with_debug_tor_readiness(
+        mut self,
+        observer: Option<crate::tor_ingress::DebugReadiness>,
+    ) -> Self {
+        self.debug_tor_readiness = observer;
         self
     }
 
@@ -178,6 +189,8 @@ impl AppState {
             tor_signer: None,
             #[cfg(feature = "tor")]
             tor_ready: None,
+            #[cfg(feature = "debug-tor-no-health")]
+            debug_tor_readiness: None,
             #[cfg(test)]
             preflight_hooks: Arc::default(),
             #[cfg(test)]

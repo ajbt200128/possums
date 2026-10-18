@@ -1,4 +1,4 @@
-//! Finite post-launch observation, not a readiness gate or runtime logger.
+//! Bounded startup records, not a readiness gate or request/runtime logger.
 use super::*;
 use std::future::Future;
 use tokio::{sync::watch, time::Instant};
@@ -7,7 +7,12 @@ use tor_hsservice::status::{Problem, State as OnionState};
 mod platform;
 
 const WAIT: Duration = Duration::from_secs(30);
-const END: Duration = Duration::from_secs(180);
+// Debug grace is 600s from process startup; leave 10s for local presentation.
+const END: Duration = Duration::from_secs(if cfg!(feature = "debug-tor-no-health") {
+    590
+} else {
+    180
+});
 const EVENT: &str = "possums.startup_readiness";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +108,9 @@ impl Record {
         match self.terminal {
             None => "waiting",
             Some(Terminal::FirstLocalReady) => "first_local_ready",
+            Some(Terminal::Unconfirmed) if cfg!(feature = "debug-tor-no-health") => {
+                "readiness_timeout"
+            }
             Some(Terminal::Unconfirmed) => "unconfirmed",
             Some(_) => "engine_failure",
         }
@@ -114,6 +122,9 @@ impl Record {
             Some(Terminal::EngineFailure) => "tor_startup_engine_failure",
             Some(Terminal::StatusEnded) => "tor_startup_status_ended",
             Some(Terminal::StatusPanicked) => "tor_startup_status_panicked",
+            Some(Terminal::Unconfirmed) if cfg!(feature = "debug-tor-no-health") => {
+                "tor_startup_readiness_deadline"
+            }
             Some(Terminal::Unconfirmed) => "tor_startup_readiness_unconfirmed",
         }
     }
@@ -124,6 +135,9 @@ impl Record {
             }
             Some(Terminal::EngineFailure | Terminal::StatusEnded | Terminal::StatusPanicked) => {
                 "observed_engine_failure_cause_unknown"
+            }
+            Some(Terminal::Unconfirmed) if cfg!(feature = "debug-tor-no-health") => {
+                "sdk_running_not_observed_before_600s_grace_end_observation_continues"
             }
             _ => "first_sdk_running_not_observed_within_diagnostic_window",
         }
@@ -140,6 +154,9 @@ fn elapsed(start: Instant) -> &'static str {
         0..30 => "under_30s",
         30..60 => "30s_to_under_60s",
         60..180 => "60s_to_under_180s",
+        180..590 if cfg!(feature = "debug-tor-no-health") => "180s_to_under_590s",
+        590..600 if cfg!(feature = "debug-tor-no-health") => "590s_to_under_600s",
+        600.. if cfg!(feature = "debug-tor-no-health") => "600s_or_more",
         _ => "180s_or_more",
     }
 }
@@ -152,7 +169,7 @@ struct Snapshot {
 /// Only closed values enter this single bounded cell. Latch before coalescing:
 /// Running followed by Broken during a stalled waiting export stays first-ready.
 #[derive(Clone)]
-pub(crate) struct Observer {
+pub struct Observer {
     start: Instant,
     snapshot: watch::Sender<Snapshot>,
     local: std::sync::Arc<Local>,
@@ -182,7 +199,7 @@ impl Observer {
         self.update(None, Some(terminal));
     }
     fn update(&self, status: Option<(State, ProblemKind)>, terminal: Option<Terminal>) {
-        if Instant::now() >= self.start + END {
+        if !cfg!(feature = "debug-tor-no-health") && Instant::now() >= self.start + END {
             return;
         }
         self.snapshot.send_if_modified(|snapshot| {
@@ -247,6 +264,7 @@ async fn run(
         );
     }
     let mut waiting_sent = false;
+    let mut deadline_sent = false;
     loop {
         snapshot.borrow_and_update();
         let mut record = None;
@@ -255,16 +273,20 @@ async fn run(
         observer.snapshot.send_if_modified(|current| {
             if let Some(first) = current.first {
                 record = Some(first); // Local attempt already committed.
-            } else if Instant::now() >= start + END {
+            } else if !deadline_sent && Instant::now() >= start + END {
                 let terminal = Record {
                     terminal: Some(Terminal::Unconfirmed),
                     elapsed: elapsed(start),
                     ..current.latest
                 };
-                current.first = Some(terminal);
+                deadline_sent = true;
+                waiting_sent = true;
+                if !cfg!(feature = "debug-tor-no-health") {
+                    current.first = Some(terminal);
+                }
                 observer.local.emit(format_args!("{terminal}"));
                 record = Some(terminal);
-                return true;
+                return !cfg!(feature = "debug-tor-no-health");
             } else if !waiting_sent && Instant::now() >= start + WAIT {
                 waiting_sent = true;
                 let waiting = Record {
@@ -277,20 +299,34 @@ async fn run(
             false
         });
         if let Some(record) = record {
-            let stop = start
-                + END
-                + if record.terminal.is_some() {
-                    Duration::from_secs(1)
-                } else {
-                    Duration::ZERO
-                };
-            let deadline = (Instant::now() + Duration::from_secs(1)).min(stop);
+            let deadline = Instant::now() + Duration::from_secs(1);
+            #[cfg(not(feature = "debug-tor-no-health"))]
+            let deadline = deadline.min(
+                start
+                    + END
+                    + if record.terminal.is_some() {
+                        Duration::from_secs(1)
+                    } else {
+                        Duration::ZERO
+                    },
+            );
             if let Err(failure) = deliver_record(&client, record, deadline).await {
                 warn(&observer.local, &mut warned, failure);
             }
-            if record.terminal.is_some() {
+            if record.terminal.is_some()
+                && !(cfg!(feature = "debug-tor-no-health")
+                    && record.terminal == Some(Terminal::Unconfirmed))
+            {
                 break;
             }
+        }
+        if cfg!(feature = "debug-tor-no-health") && deadline_sent {
+            // Timeout is not an engine failure or a terminal latch. Keep the
+            // owned bounded cell until actual first-ready/failure or host drain.
+            if snapshot.changed().await.is_err() {
+                break;
+            }
+            continue;
         }
         let deadline = start + if waiting_sent { END } else { WAIT };
         tokio::select! {
@@ -306,6 +342,8 @@ async fn run(
 }
 
 fn logs(record: Record) -> ExportLogsServiceRequest {
+    let timeout =
+        cfg!(feature = "debug-tor-no-health") && record.terminal == Some(Terminal::Unconfirmed);
     ExportLogsServiceRequest {
         resource_logs: vec![ResourceLogs {
             resource: Some(resource()),
@@ -313,8 +351,12 @@ fn logs(record: Record) -> ExportLogsServiceRequest {
                 scope: Some(scope()),
                 log_records: vec![LogRecord {
                     event_name: EVENT.into(),
-                    severity_number: SeverityNumber::Info as i32,
-                    severity_text: "INFO".into(),
+                    severity_number: if timeout {
+                        SeverityNumber::Error as i32
+                    } else {
+                        SeverityNumber::Info as i32
+                    },
+                    severity_text: if timeout { "ERROR" } else { "INFO" }.into(),
                     body: Some(AnyValue {
                         value: Some(Value::StringValue(record.to_string())),
                     }),

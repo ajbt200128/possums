@@ -601,6 +601,15 @@ pub async fn serve_tcp_and_onion_until(
     .await
 }
 
+#[cfg(feature = "debug-tor-no-health")]
+pub use readiness::Observer as DebugReadiness;
+
+/// Begin the debug grace clock before Tor preparation/bootstrap, not at launch.
+#[cfg(feature = "debug-tor-no-health")]
+pub fn debug_readiness() -> (DebugReadiness, impl Future<Output = ()>) {
+    readiness::new(crate::telemetry::runtime::Config::from_env())
+}
+
 /// Runs the startup-only handoff after local service launch, before accepting
 /// connections. This is not evidence of onion publication or remote serving.
 /// The handoff is separate from the reporter used by later peer callbacks.
@@ -647,7 +656,18 @@ pub async fn serve_tcp_and_onion_until_initialized<F: Future<Output = ()>>(
             .map_err(|_| Failure::TcpSource);
         Some((accepted, listener))
     });
+    #[cfg(not(feature = "debug-tor-no-health"))]
     let (observer, diagnostics) = readiness::new(crate::telemetry::runtime::Config::from_env());
+    #[cfg(feature = "debug-tor-no-health")]
+    let (observer, diagnostics): (_, std::pin::Pin<Box<dyn Future<Output = ()> + Send>>) =
+        if let Some(observer) = state.debug_tor_readiness.clone() {
+            // Main owns and polls diagnostics across preparation, bootstrap,
+            // serving and drain. No second observer or detached task.
+            (observer, Box::pin(std::future::pending()))
+        } else {
+            let (observer, worker) = debug_readiness();
+            (observer, Box::pin(worker))
+        };
     let engine = stream::once(async {
         let statuses = service.status_events().map(|status| {
             (

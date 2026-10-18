@@ -120,6 +120,7 @@ async fn waiting_export_stall_cannot_erase_first_ready_or_failure() {
     }
 }
 
+#[cfg(not(feature = "debug-tor-no-health"))]
 #[tokio::test(start_paused = true)]
 async fn never_ready_deadline_only_ends_observer_and_future_status_is_inert() {
     let (observer, receiver) = fixture();
@@ -168,7 +169,14 @@ async fn monotonic_bucket_boundaries_and_off_path() {
         (29, "30s_to_under_60s"),
         (1, "60s_to_under_180s"),
         (119, "60s_to_under_180s"),
-        (1, "180s_or_more"),
+        (
+            1,
+            if cfg!(feature = "debug-tor-no-health") {
+                "180s_to_under_590s"
+            } else {
+                "180s_or_more"
+            },
+        ),
     ] {
         tokio::time::advance(Duration::from_secs(advance)).await;
         assert_eq!(elapsed(start), expected);
@@ -186,6 +194,118 @@ async fn monotonic_bucket_boundaries_and_off_path() {
     );
     // Off returns without encoding, TLS construction or dialing.
     assert!(worker.now_or_never().is_some());
+}
+
+#[cfg(feature = "debug-tor-no-health")]
+#[tokio::test(start_paused = true)]
+async fn debug_observes_ready_after_old_cutoff_without_resetting_start_clock() {
+    let (observer, receiver) = fixture();
+    let worker = run(observer.clone(), receiver, Ok(None));
+    tokio::pin!(worker);
+    assert!(worker.as_mut().now_or_never().is_none());
+    // This also covers preparation/bootstrap time before any SDK observation.
+    tokio::time::advance(Duration::from_secs(240)).await;
+    assert!(worker.as_mut().now_or_never().is_none());
+    observer.observe(
+        OnionState::Running,
+        ProblemKind::None,
+        Some(Terminal::FirstLocalReady),
+    );
+    worker.await;
+    let local = observer.local.records.lock().unwrap();
+    assert_eq!(local.len(), 2);
+    assert!(local[1].contains("outcome=first_local_ready"));
+    assert!(local[1].contains("elapsed_bucket=180s_to_under_590s"));
+}
+
+#[cfg(feature = "debug-tor-no-health")]
+#[tokio::test(start_paused = true)]
+async fn debug_deadline_prints_before_grace_even_with_stalled_export_and_keeps_observing() {
+    for terminal in [Terminal::FirstLocalReady, Terminal::EngineFailure] {
+        let (observer, receiver) = fixture();
+        let client = stalled();
+        let evidence = client.evidence();
+        let worker = run(observer.clone(), receiver.clone(), Ok(Some(client)));
+        tokio::pin!(worker);
+        assert!(worker.as_mut().now_or_never().is_none());
+        tokio::time::advance(END - Duration::from_millis(100)).await;
+        assert!(worker.as_mut().now_or_never().is_none()); // waiting upload stalls
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert!(worker.as_mut().now_or_never().is_none());
+        // The waiting upload is bounded to one second, not the grace period.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(worker.as_mut().now_or_never().is_none());
+        let local = observer.local.records.lock().unwrap().clone();
+        assert!(local
+            .iter()
+            .any(|r| r.contains("code=tor_startup_readiness_deadline")));
+        assert!(local
+            .iter()
+            .any(|r| r.contains("outcome=readiness_timeout")));
+        assert!(Instant::now() < observer.start + Duration::from_secs(600));
+        assert!(receiver.borrow().first.is_none()); // no fabricated engine fault/latch
+        tokio::time::advance(Duration::from_secs(110)).await;
+        assert!(worker.as_mut().now_or_never().is_none());
+        observer.observe(OnionState::Running, ProblemKind::None, Some(terminal));
+        let first = receiver.borrow().first.unwrap();
+        assert_eq!(first.terminal, Some(terminal));
+        assert_eq!(first.elapsed, "600s_or_more");
+        for _ in 0..100 {
+            observer.failure(Terminal::StatusEnded);
+        }
+        assert_eq!(receiver.borrow().first, Some(first));
+        assert!(worker.as_mut().now_or_never().is_none());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        worker.await;
+        let local = observer.local.records.lock().unwrap();
+        assert_eq!(local.len(), 4); // waiting + deadline + actual terminal + one warning
+        assert_eq!(evidence.connecting.load(SeqCst), 3);
+        assert_eq!(
+            local
+                .iter()
+                .filter(|r| r.contains("outcome=readiness_timeout"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(feature = "debug-tor-no-health")]
+#[tokio::test(start_paused = true)]
+async fn debug_terminal_at_deadline_wins_without_timeout_or_late_waiting() {
+    for terminal in [Terminal::FirstLocalReady, Terminal::StatusEnded] {
+        let (observer, receiver) = fixture();
+        tokio::time::advance(END).await;
+        observer.failure(terminal);
+        run(observer.clone(), receiver, Ok(None)).await;
+        let local = observer.local.records.lock().unwrap();
+        assert_eq!(local.len(), 1);
+        assert!(!local[0].contains("outcome=readiness_timeout"));
+        assert!(!local[0].contains("outcome=waiting"));
+        assert!(local[0].contains("elapsed_bucket=590s_to_under_600s"));
+    }
+}
+
+#[cfg(feature = "debug-tor-no-health")]
+#[test]
+fn debug_timeout_wire_is_closed_and_does_not_claim_engine_failure() {
+    let record = Record {
+        state: State::NotObserved,
+        problem: ProblemKind::None,
+        elapsed: "590s_to_under_600s",
+        terminal: Some(Terminal::Unconfirmed),
+    };
+    let bytes = logs(record).encode_to_vec();
+    let message = ExportLogsServiceRequest::decode(bytes.as_slice()).unwrap();
+    let log = &message.resource_logs[0].scope_logs[0].log_records[0];
+    assert_eq!(log.severity_number, SeverityNumber::Error as i32);
+    assert_eq!(log.severity_text, "ERROR");
+    assert_eq!(log.attributes.len(), 7);
+    assert!(log.trace_id.is_empty() && log.span_id.is_empty());
+    assert_eq!(log.time_unix_nano, 0);
+    assert!(record.to_string().contains("outcome=readiness_timeout"));
+    assert!(record.to_string().contains("observation_continues"));
+    assert!(!record.to_string().contains("engine_failure"));
 }
 
 #[test]

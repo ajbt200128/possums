@@ -286,7 +286,14 @@ async fn observer_deadline_does_not_change_engine_readiness_or_later_failure() {
     tokio::time::advance(Duration::from_secs(30)).await;
     assert!(poll!(&mut diagnostics).is_pending());
     tokio::time::advance(Duration::from_secs(150)).await;
-    diagnostics.await;
+    #[cfg(not(feature = "debug-tor-no-health"))]
+    diagnostics.as_mut().await;
+    #[cfg(feature = "debug-tor-no-health")]
+    {
+        assert!(poll!(&mut diagnostics).is_pending());
+        tokio::time::advance(Duration::from_secs(410)).await;
+        assert!(poll!(&mut diagnostics).is_pending());
+    }
     assert!(!ready.load(Ordering::Acquire));
     send.send((State::Running, false, ProblemKind::None))
         .await
@@ -298,6 +305,8 @@ async fn observer_deadline_does_not_change_engine_readiness_or_later_failure() {
         }
     })
     .await;
+    #[cfg(feature = "debug-tor-no-health")]
+    diagnostics.await;
     send.send((State::Broken, false, ProblemKind::Unknown))
         .await
         .unwrap();
