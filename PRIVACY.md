@@ -43,7 +43,7 @@ Do not retain or export client IPs for abuse controls. Transient account quota/c
 
 ## Telemetry: permitted signals and forbidden data
 
-**Request telemetry is metrics only.** The narrowly authorized [startup diagnostics exception](#startup-diagnostics-exception) permits startup-only logs and lifecycle counts. No production request logs or request-level traces. Apply the same collection policy to real traffic in testing. Do not use access logs, trace-to-metrics processing, log bridges, automatic HTTP/GenAI instrumentation, profiling or session replay as a back door to collecting request data. Aggregate directly from closed, typed observations in application memory. Never put raw requests or raw errors into the telemetry pipeline to redact later.
+**Request telemetry is metrics only.** The narrowly authorized [startup diagnostics exception](#startup-diagnostics-exception) permits startup-only logs and lifecycle counts. The separate [debug-only Tor background exception](#debug-only-tor-background-diagnostics-exception) permits closed SDK background-state/error logs only in the experimental diagnostic image. No production request logs or request-level traces. Apply the same collection policy to real traffic in testing. Do not use access logs, trace-to-metrics processing, log bridges, automatic HTTP/GenAI instrumentation, profiling or session replay as a back door to collecting request data. Aggregate directly from closed, typed observations in application memory. Never put raw requests or raw errors into the telemetry pipeline to redact later.
 
 Permitted after privacy gating:
 
@@ -129,9 +129,75 @@ The operator requested platform and Honeycomb startup logs plus aggregate startu
 
 Implementation and offline evidence are tracked in [startup diagnostics verification](docs/startup-diagnostics-verification.md). The failed v0.0.48 update remains unreconciled; this authorization permits no automatic update/retry/cancel/rollback, live probe or export activation.
 
+## Debug-only Tor background diagnostics exception
+
+The operator explicitly requested Arti's `is_fully_reachable()` Tor health predicate,
+ongoing non-request-specific Arti diagnostics, and Honeycomb enablement on a new
+signed release to the **existing debug instance only**. This exception authorizes
+that scoped implementation and one separately guarded debug deployment, not
+production/main rollout, inference, attestation probes, raw Arti logging or a
+request/peer telemetry path. It supplements rather than reinterprets the finite
+startup evidence above. Implementation, offline privacy evidence and later live
+qualification must be recorded separately; policy approval is not ingestion proof.
+
+- Only the experimental `debug-tor-readiness` build may produce the new
+  `possums.tor_background` log family. Inputs are supported SDK bootstrap status,
+  onion-service status and the existing status-source lifecycle, never
+  request/peer/stream/circuit callbacks. Permitted fields are closed onion state,
+  SDK reachability assessment, observation/source availability, coarse bootstrap
+  quarter-progress/ready/blockage categories, selected problem kind, fixed typed
+  descriptor-upload retry/stage flags, introduction-point error flags, runtime
+  error kind, a fixed debug diagnostic profile, and locally authored
+  code/stage/constraint/action. The problem is the SDK-selected most-severe
+  problem, not a complete subsystem inventory. Unsupported variants and missing
+  evidence remain unknown, not healthy zeroes. No exact error/retry counts,
+  per-directory progress or network/traffic volume fields.
+- Classify supported typed variants before crossing the boundary. Never format or
+  retain SDK errors, messages or their source chains. Do not export raw errors,
+  panic text, stacks, relays/onion/peer/circuit identities, addresses, paths,
+  filenames, configuration, key material, clock-skew values, request/account/
+  session identifiers, content or arbitrary strings. Error flags describe only
+  the selected reported problem; absent flags do not establish global absence of
+  failures. No global logging/tracing bridge, SDK debug formatting or metrics
+  export family is introduced.
+- Use one bounded latest-state cell; deduplicate identical closed projections and
+  coalesce changes to **at most one attempt per60 seconds**, across all categories.
+  The first observed snapshot may be attempted immediately. Healthy initial or
+  recovery information is INFO, degradation without a reported problem is WARN,
+  and reported problems/unexpected status-source loss are ERROR. Normal shutdown
+  is not fabricated into an error. Event observation timestamps, if present, are
+  minute-coarsened; no precise observation durations or transition history queue.
+  State changes may be lost/coalesced, and the last delivered SDK assessment is
+  not proof of current reachability, fresh attestation or exclusive publication.
+- Reuse the existing fixed Honeycomb US destination, allowlisted credentials,
+  reviewed resource fields, normal dataset and provider-default MVP retention.
+  Retention/access and processor limits above remain applicable; source-profile
+  fields distinguish debug diagnostics, not people or requests. Tor lifecycle,
+  ingestion timing and sparse errors can expose availability and permit external
+  correlation; non-request-specific does not mean anonymous or uncorrelatable.
+  No additional destination, support artifact, local spool or dashboard export.
+- Keep one owned best-effort attempt with the existing one-second delivery bound,
+  no retries/detached upload and no effect on SDK bootstrap, health, publication,
+  cancellation, inference/accounting or drain. A rate-bounded closed record may
+  also use the existing nonblocking platform presentation path. At most one
+  closed local-only delivery warning per lifecycle; never recursively export it
+  or replace the primary Tor failure. `OTEL_SDK_DISABLED=true` disables this new
+  background family's local and Honeycomb emission and avoids encoder/TLS/network
+  construction; existing finite startup-local behavior is unchanged. Owner drop,
+  immediate fatal shutdown, transport failure and coalescing may lose even terminal
+  diagnostics; receipt/retention is not guaranteed. Enabling the existing shared
+  switch also enables already-approved aggregate/startup signals, not a new
+  request-log permission.
+- Require actual SDK-type projection/hostile-input tests, decoded OTLP allowlist
+  evidence, off/configuration-error/outage/drop and dedup/rate/coalescing tests,
+  plus unchanged fatal/drain/trust/accounting behavior. Debug deployment must keep
+  exact signed artifact/config/image binding,600s grace and all existing custody
+  and fresh client-attestation gates. Logs themselves must initiate no inference,
+  probe, replay or recovery work.
+
 ## Processors, retention, access and shutdown
 
-- **Honeycomb** is a third-party observability processor, not inside the attested boundary. Send only approved aggregates and the closed startup-only logs authorized above over authenticated TLS directly to the US endpoint (no Collector sidecar). Honeycomb receives gateway network metadata as part of transport; it must not receive client addresses or request identifiers. Verify vendor-side transport/audit retention separately from metric retention.
+- **Honeycomb** is a third-party observability processor, not inside the attested boundary. Send only approved aggregates and the closed startup/debug-Tor logs authorized above over authenticated TLS directly to the US endpoint (no Collector sidecar). Honeycomb receives gateway network metadata as part of transport; it must not receive client addresses or request identifiers. Verify vendor-side transport/audit retention separately from metric retention.
 - **MVP retention exception:** the operator accepts Honeycomb's provider-default metric retention; a custom seven-day setting is no longer required before first export. Public documentation describes 60 days for most customers, but that is not proof of this account's effective period. Record actual retention/deletion/backup information when available, and label unknowns accurately. Shorter retention (target: seven days) remains a post-MVP follow-up; do not silently extend retention beyond the accepted provider default.
 - **Tinfoil** provides the enclave/inference platform and already offers container resource metrics and billing/usage APIs. Its platform collection, access, retention and backup behavior are a separate boundary, not controlled by a seven-day Honeycomb setting. Verify/disclose these properties; do not claim that locally disabling export turns off platform observability. Do not import API-key billing breakdowns or provider resource identifiers into telemetry.
 - Limit Honeycomb access to named operators who need it; no public boards or unrestricted share links. Use environment-scoped ingestion-only keys where supported. Keep vendor/admin keys in runtime secret delivery, never a document or image. Do not place a Tinfoil admin key in the prompt-processing gateway.
