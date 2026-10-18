@@ -186,6 +186,36 @@ try {
       assert.equal(f.provider.recoveryBlocked, undefined, 'obsolete recovery must not latch a replacement session');
     } finally { release.resolve(); await f.close(); }
   });
+  for (const stage of ['catalog', 'dispatched']) await check('delayed old-context ' + stage + ' mismatch cannot probe or poison a verified replacement', async () => {
+    const f = await fixture(), entered = deferred(), release = deferred();
+    try {
+      const channel = f.provider.client.channel, method = stage === 'catalog' ? 'models' : 'chat';
+      const original = channel[method].bind(channel); let first = true;
+      channel[method] = async (...args) => {
+        try { return await original(...args); }
+        catch (error) {
+          if (first) { first = false; entered.resolve(); await release.promise; }
+          throw error;
+        }
+      };
+      if (stage === 'catalog') f.rotate(); else f.rotateChat = true;
+      let probes = 0;
+      f.provider.recover = async () => {
+        if (++probes > 1) throw new m.ConnectionFailure('evidence_unchanged');
+        return f.candidate('B');
+      };
+      const older = f.invoke(); await entered.promise; f.rotateChat = false;
+      const newer = await f.invoke(); assert.equal(newer.stopReason, 'stop');
+      release.resolve(); const late = await older;
+      assert.equal(probes, 1); assert.equal(f.counts.sessions, 2);
+      assert.equal(f.provider.recoveryBlocked, undefined);
+      assert.equal(late.stopReason, stage === 'catalog' ? 'stop' : 'error');
+      assert.equal(f.counts.submissions, 2);
+      assert.equal(f.counts.chats, stage === 'catalog' ? 2 : 1, 'dispatched old attempt is never replayed');
+      assert.equal((await f.invoke()).stopReason, 'stop', 'replacement remains usable');
+      assert.equal(probes, 1); assert.equal(f.counts.sessions, 2);
+    } finally { release.resolve(); await f.close(); }
+  });
   for (const action of ['logout', 'newSession']) await check(action + ' during rejected recovery propagation cannot relatch replacement trust', async () => {
     // Sweep the short rejection chain, including replacement after the verifier
     // rejected but before the request owner's outer catch receives that error.

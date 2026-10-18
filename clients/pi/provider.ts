@@ -852,6 +852,7 @@ export class PossumsProvider implements Provider {
     const epoch = this.epoch;
     const account = this.accountEpoch;
     let scope: RecoveryScope | undefined;
+    let failureTrust = this.verifiedTemplate;
     const ownsRequest = () => epoch === this.epoch && account === this.accountEpoch &&
       !this.sessionClosed && !options.signal?.aborted &&
       (!scope || (scope === this.runScope && !scope.controller.signal.aborted));
@@ -912,6 +913,8 @@ export class PossumsProvider implements Provider {
         });
         failureStage = 'provider';
         const originalClient = this.client;
+        const originalTrust = this.verifiedTemplate;
+        failureTrust = originalTrust;
         const guard = () => {
           if (!ownsRequest() || this.recoveryBlocked || this.renewalRequired) {
             throw new DiagnosticFailure('request', 'interrupted', 'uncertain');
@@ -975,10 +978,11 @@ export class PossumsProvider implements Provider {
         });
         let receipt;
         try {
-          let client = originalClient;
+          let client = originalClient, clientTrust = originalTrust;
           while (true) {
             guard();
             try {
+              failureTrust = clientTrust;
               submitted = true; // Submission control effects may be unknown even before inference dispatch.
               receipt = await client.chatPrepared(prepared, () => { guard(); if (client !== this.client) throw new DiagnosticFailure('request', 'interrupted', 'uncertain'); });
               break;
@@ -986,11 +990,16 @@ export class PossumsProvider implements Provider {
               if (!scope || !this.recover || !eligibleSetup(error) || prepared.dispatched) throw error;
               if ((error instanceof DiagnosticFailure && error.stage === 'submission') ||
                   (error instanceof GatewayError && error.billing === 'unknown')) uncertainControl = true;
-              try { guard(); await this.recoverSetup(scope, options.signal); }
-              catch (recoveryError) {
+              try {
+                guard();
+                // A delayed setup rejection may belong to a context another
+                // caller already replaced. Reuse its fully published client.
+                if (!this.client || client === this.client) await this.recoverSetup(scope, options.signal);
+              } catch (recoveryError) {
                 // Rejected promises may propagate after cancellation/replacement.
                 // They cannot publish a trust failure into the current session.
-                if (!ownsRequest()) throw new DiagnosticFailure('request', 'interrupted', 'uncertain');
+                if (!ownsRequest() || clientTrust !== this.verifiedTemplate)
+                  throw new DiagnosticFailure('request', 'interrupted', 'uncertain');
                 // Failure to replace unconfirmed trust cannot downgrade the
                 // triggering peer mismatch, including a concurrently blocked guard.
                 if (error instanceof DiagnosticFailure && error.stage === 'trust' && error.constraint === 'peer_key_mismatch') {
@@ -1004,7 +1013,7 @@ export class PossumsProvider implements Provider {
               const fresh = this.catalog.find(value => value.id === selected.id);
               if (!fresh) throw new Error('possums_model_unavailable');
               if (payload.tools?.length && fresh.tool_protocol !== 'openai-functions-v1') throw new Error('possums_tools_unsupported');
-              client = this.client;
+              client = this.client; clientTrust = this.verifiedTemplate;
             }
           }
         } finally { prepared.close(); }
@@ -1082,7 +1091,7 @@ export class PossumsProvider implements Provider {
           output.errorMessage += ' Earlier submission control outcome unknown; no inference request was replayed. A new request may incur another charge.';
         }
         if (trustFailure(error)) {
-          if (ownsRequest()) this.recoveryBlocked = connectionFailure(error);
+          if (ownsRequest() && failureTrust === this.verifiedTemplate) this.recoveryBlocked = connectionFailure(error);
           events.push({ type: 'error', reason: output.stopReason, error: output });
         } else {
           // Host stop is NOT successful backend generation. Provisional calls

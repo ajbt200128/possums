@@ -157,8 +157,8 @@ The operator subsequently authorized this client fix, PR publication/merge and
   the existing `!prepared.dispatched` boundary. The existing full verifier,
   advancing freshness, three-attempt shared budget, fresh authentication/catalog,
   coalescing and current account/run/cancellation guards are unchanged.
-- Any unsuccessful replacement (including unchanged evidence and budget
-  exhaustion) preserves the original peer-mismatch diagnostic and sticky trust
+- For a current trust context, unsuccessful replacement (including unchanged
+  evidence and budget exhaustion) preserves the peer-mismatch diagnostic and sticky trust
   block, with a separately closed secondary recovery explanation. Cancellation
   and obsolete account/run/session guards prevent late latching of a replacement
   session. A mismatch during replacement authentication or after dispatch stays
@@ -196,7 +196,12 @@ latch and provider recovery loop (candidate verification alone is synthetic):
   cannot relatch an obsolete verifier failure, and late nonrecoverable
   certificate failures cannot mutate replacement trust state;
 - concurrent waiters: one verifier/login owner; one caller's abort does not kill
-  the surviving request.
+  the surviving request;
+- a delayed old-trust rejection after successful replacement cannot probe again
+  or poison the verified replacement. An undispatched caller reuses the already
+  published client; an already-dispatched caller remains failed without replay.
+  Later deliberate requests still work; failed current-context recovery stays
+  sticky.
 
 The v3 TLS suite additionally exercises wrong-host, expired/not-yet-valid and
 unexpected date-check failures even when SPKI differs: all stay generic fatal
@@ -207,14 +212,14 @@ in the full runner. These fixtures establish no production root cause, live
 hardware acceptance, accounting outcome or installed T3 UI/runtime qualification.
 
 Pinned offline build and the full `check.mjs` runner passed at
-`/tmp/possums-pi-build-session-recovery-bls8bw_i`: 165 Pi groups, 47 v3 checks,
-16 TLS/provider recovery groups, 18 packaged-host and 31 discovery checks, plus
+`/tmp/possums-pi-build-session-recovery-bn0kcua2`: 165 Pi groups, 47 v3 checks,
+18 TLS/provider recovery groups, 18 packaged-host and 31 discovery checks, plus
 the other unchanged reference/cache/stream/diagnostics/admission suites. Strict
 TypeScript compilation passed. The checkout-only LSP lacks installed Pi/Node
 declarations; its missing-module/cascading-any findings were dispositioned as
 environment-only after the pinned compiler passed, not suppressed in source.
 
-The same 16 TLS/provider recovery groups also passed in a separate scratch
+The same 18 TLS/provider recovery groups also passed in a separate scratch
 bundle resolving the current read-only Pi 1.2.0 peer packages. This is bounded
 adapter coverage, not full native Pi 1.2.0 lifecycle/T3 UI qualification or proof
 of the affected process's loaded artifact. No installed files were modified.
@@ -226,7 +231,7 @@ changes; a gateway rollout is unnecessary. Existing source-versus-installed and
 Pi 1.2.0 peer-link qualifications above remain unresolved by this offline packet.
 The installed link/bundle must remain unchanged pending separate authorization.
 
-Independent read-only review found and prompted two failure-path corrections:
+Independent read-only review found and prompted failure-path corrections:
 failed recovery must not downgrade the original peer trust failure, and an
 already-rejected trust error propagating after replacement must not poison the
 replacement session. The final implementation shares one current-request owner
@@ -234,4 +239,9 @@ guard between dispatch and failure handling, converts obsolete recovery exits to
 interruption, and independently guards the final trust-latch mutation. Received
 accounting extraction is unchanged. Pending-cancellation and rejected-result
 propagation are tested separately; a passing pending-cancellation fixture alone
-was insufficient evidence for the latter race.
+was insufficient evidence for the latter race. A subsequent overlap finding
+also requires the failing client's verified-template identity at the final
+latch: run/account ownership alone cannot distinguish a delayed old-key failure
+from distrust of a successfully published replacement. Only an actual fully
+published client can be reused pre-dispatch; absent/failed replacement retains
+the existing recovery failure and current-context fatal latch.
