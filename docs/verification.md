@@ -1955,3 +1955,18 @@ passed. No compatibility patch or dependency/SDK-pin/lockfile change was necessa
 The existing vendored unused-method warning remains. No credential access, live
 endpoint call, workflow mutation, historical image rebuild, installation,
 publication or deployment occurred in this implementation packet.
+
+## Tor source restoration on current main — PR candidate
+
+The operator now authorizes source restoration on PR97 main, superseding the
+historical Tor-removal restriction for this independent source/PR packet only.
+[Restoration scope, offline evidence, review and compatibility/runtime limits](tor-main-restoration.md)
+records the selective historical donors, paired gateway/helper/Pi restoration,
+no startup self-appraisal, retained per-request nonce trust, and exclusion of
+post-launch diagnostic export/debug release overrides. Default measured config,
+deployment target, verified renewal and release/protected-approval gates remain.
+No merge, release dispatch, deployment, client installation/activation, runtime/key
+binding mutation or new live probe follows. Historical HTTPS-only and debug
+observations remain dated; health flapping and exclusive publication are not
+claimed resolved. Applicable privacy sections and synthetic test evidence are
+linked in the restoration record.

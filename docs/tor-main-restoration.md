@@ -75,9 +75,13 @@ Applicable policy: [data handling](../PRIVACY.md#data-handling-boundaries),
 [startup exception](../PRIVACY.md#startup-diagnostics-exception), and
 [synthetic tests](../PRIVACY.md#synthetic-testing-exception).
 Only closed preparation/bootstrap/local-launch initialization stages rejoin the
-bounded startup owner (at most nine records; six without Tor). No post-launch
-observer, SDK logger, peer/request diagnostics, new destination or background
-export is restored. Existing generic startup/off/outage/hostile-data tests remain.
+bounded startup diagnostic owner (at most nine records; six without Tor). No
+post-launch **diagnostic-export** observer, SDK logger, peer/request diagnostics,
+new destination or background export is restored. The existing owned Arti
+status stream remains necessary for engine-failure handling and the separately
+tested health readiness bit; it emits no post-launch diagnostic records. Its
+fully-reachable health assessment can still flap, and does not trigger inference,
+appraisal, retries, export or recovery. Existing generic startup/off/outage/hostile-data tests remain.
 Native Pi/T3 history and platform capture are separate persistence boundaries.
 No private originals, credentials or runtime configuration were read by this work.
 
@@ -87,18 +91,49 @@ Pinned `nix develop --offline`: Rust/Cargo 1.92.0, Go 1.27.2, root Node 24.20.0.
 Client acceptance uses its separate required Node 24.13.0/Pi 1.0.4 pins.
 Python is explicitly locked nixpkgs `python312` 3.12.12, not ambient shell Python.
 
-- Cargo `--offline --locked --all-targets --all-features`: library 412 passed,
+- Cargo `--offline --locked --all-targets --all-features`: **592 total passed**; library 412 passed,
   one existing operator-only test ignored; binary 6 passed; integration/example
   results passed, four existing live/funded probes ignored. No live tests run.
-- Cargo `--offline --locked --all-targets --no-default-features`: library 351
+- Cargo `--offline --locked --all-targets --no-default-features`: **531 total passed**; library 351
   and binary 6 passed; all integration/example results passed, four live ignored.
 - Package formatting and strict all-target/all-feature Clippy passed; existing
   vendored Tinfoil unused-method warning remains. Nine changed Rust paths passed
   active LSP with no errors/inconclusive outcomes. Whitespace check passed.
 - Explicit Python 3.12 offline discovery: 97 tests, zero failures, one existing
   opt-in skip. Includes release/approval/target preservation, no activation,
-  image-health 300-second controls and key-free Tor-image projections.
-- Client/helper/scratch-package verification and independent review: pending.
+  image-health 300-second controls and key-free Tor-image projections. Separate
+  opt-in actual release-cache graph checks passed all 13 tests. Pinned Nix
+  `checks.aarch64-darwin.gateway-accounts` also passed.
+- Parent independently reran the complete pinned scratch client runner after
+  comparing 28 source/dependency-manifest files with the checkout: passed,
+  including 84 actual-native/local-TLS Tor channel checks, real packaged-WASM
+  identity 31/setup 193, direct-v3 36, retained legacy-v2 179, actual Pi SDK/RPC
+  164 and discovery 31. These use synthetic trust, not hardware-positive evidence.
+- Parent reran Go race tests, vet and module verification with `GOPROXY=off`,
+  `GOSUMDB=off`, `GOTOOLCHAIN=local`: passed. Parent reran the actual native-helper
+  local SOCKS/TLS suite: 87 passed. Worker additionally rebuilt verifier/native
+  artifacts offline, verified packaging hashes, passed general WASM 40,
+  Rust-sign/Node-verify endorsement 55 and maintained-Arti onion vectors 19.
+- Scratch dependencies were integrity/byte-checked against cached lock tarballs,
+  not downloaded. The worker reconstructed a scratch Pi 1.0.4 runtime and pinned
+  four internal peers explicitly to cached 1.0.4 tarballs after an older scratch
+  lock resolved newer peers. This qualifies that disclosed synthetic host, not
+  a shipped dependency tree; original installed/runtime directories are unchanged.
+- `nix flake check --offline --no-build` passed. Full offline flake construction
+  was interrupted by the tool's 200-second deadline during dependency compilation;
+  it is **not a passing flake-build claim**, nor evidence the pinned compiler
+  failed. Executed Cargo suites/Clippy above are separate completed evidence.
+- Independent review found two client gaps: non-2xx setup bodies bypassed the
+  closed diagnostic decoder, and the normal scratch runner omitted the real Tor
+  WASM ABI suite. Both were fixed and regression-tested; second review confirmed
+  those fixes. A later health-observer objection arose from ambiguous wording:
+  excluding post-launch diagnostic export does not remove the owned engine/health
+  status stream. Final strong independent review refuted that objection using
+  pre-PR90 source and historical observer documentation, and found no remaining
+  blocker for source/PR scope. It independently reran 67 Tor-focused Rust tests
+  (one operator-only ignored), Go race, native/local-TLS channel 84, packaged-WASM
+  identity 31/setup 193 and image projection 7. Parent then repeated complete
+  final-source Cargo suites/format/Clippy and Python discovery successfully.
 
 New health tests carry actual SDK states into the real health router:
 Running/DegradedReachable are reachable; Bootstrapping/DegradedUnreachable/
