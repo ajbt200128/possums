@@ -17,7 +17,10 @@ use tor_keymgr::KeyMgr;
 use tor_proto::stream::IncomingStreamRequest;
 use tor_rtcompat::PreferredRuntime;
 
-use crate::server::{serve_connections_until, AppState, Incoming, ServerFailure};
+use crate::{
+    server::{serve_connections_until, AppState, Incoming, ServerFailure},
+    telemetry::startup::readiness::{self, Observer, ProblemKind, Terminal},
+};
 
 /// Closed diagnostics only. No SDK error, peer, key, argument or payload is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -383,19 +386,28 @@ async fn accept_stream(request: StreamRequest, report: ReportOwner) -> Option<Bo
 
 #[cfg(test)]
 async fn engine_failure(statuses: impl Stream<Item = (State, bool)>) -> Failure {
-    engine_status(statuses, None).await
+    engine_status(
+        statuses.map(|(state, fatal)| (state, fatal, ProblemKind::None)),
+        None,
+        None,
+    )
+    .await
 }
 
 async fn engine_status(
-    statuses: impl Stream<Item = (State, bool)>,
+    statuses: impl Stream<Item = (State, bool, ProblemKind)>,
     ready: Option<Arc<std::sync::atomic::AtomicBool>>,
+    observer: Option<Observer>,
 ) -> Failure {
     let mut statuses = Box::pin(AssertUnwindSafe(statuses).catch_unwind());
     let mut started = false;
     while let Some(status) = statuses.next().await {
-        let Ok((state, fatal)) = status else {
+        let Ok((state, fatal, problem)) = status else {
             if let Some(ready) = &ready {
                 ready.store(false, std::sync::atomic::Ordering::Release);
+            }
+            if let Some(observer) = &observer {
+                observer.failure(Terminal::StatusPanicked);
             }
             return Failure::Engine;
         };
@@ -405,7 +417,18 @@ async fn engine_status(
                 std::sync::atomic::Ordering::Release,
             );
         }
-        if fatal || state == State::Broken || started && state == State::Shutdown {
+        let failed = fatal || state == State::Broken || started && state == State::Shutdown;
+        if let Some(observer) = &observer {
+            let terminal = if failed {
+                Some(Terminal::EngineFailure)
+            } else if state == State::Running {
+                Some(Terminal::FirstLocalReady)
+            } else {
+                None
+            };
+            observer.observe(state, problem, terminal);
+        }
+        if failed {
             return Failure::Engine;
         }
         // Arti starts in Shutdown before background tasks report progress.
@@ -416,7 +439,25 @@ async fn engine_status(
     if let Some(ready) = &ready {
         ready.store(false, std::sync::atomic::Ordering::Release);
     }
+    if let Some(observer) = &observer {
+        observer.failure(Terminal::StatusEnded);
+    }
     Failure::Engine
+}
+
+// No spawn: the host owns both futures through serving/drain. Diagnostic I/O
+// can yield without delaying source polling, readiness updates or shutdown;
+// returning from serving drops any pending upload immediately.
+async fn with_readiness_diagnostics<T>(
+    serving: impl Future<Output = T>,
+    diagnostics: impl Future<Output = ()>,
+) -> T {
+    tokio::pin!(serving, diagnostics);
+    tokio::select! {
+        biased;
+        _ = &mut diagnostics => serving.await,
+        result = &mut serving => result,
+    }
 }
 
 /// One fair combined incoming stream, one invocation of the existing core.
@@ -606,14 +647,16 @@ pub async fn serve_tcp_and_onion_until_initialized<F: Future<Output = ()>>(
             .map_err(|_| Failure::TcpSource);
         Some((accepted, listener))
     });
+    let (observer, diagnostics) = readiness::new(crate::telemetry::runtime::Config::from_env());
     let engine = stream::once(async {
         let statuses = service.status_events().map(|status| {
             (
                 status.state(),
                 matches!(status.current_problem(), Some(Problem::Runtime(_))),
+                ProblemKind::from_sdk(status.current_problem()),
             )
         });
-        Err(engine_status(statuses, readiness).await)
+        Err(engine_status(statuses, readiness, Some(observer)).await)
     });
     let onion = stream::select(onion_streams(requests, report.clone()), engine);
     let bridge_report = report.clone();
@@ -623,13 +666,16 @@ pub async fn serve_tcp_and_onion_until_initialized<F: Future<Output = ()>>(
     let tcp = tcp.map(|io| io.map(Incoming::Http));
     // The public shim's returning HTTP connection shares this same admission
     // pool; opaque onion traffic can never be parsed directly by Hyper here.
-    let result = serve_connection_sources_until(
-        tcp,
-        onion,
-        state,
-        Duration::from_secs(10),
-        shutdown,
-        report,
+    let result = with_readiness_diagnostics(
+        serve_connection_sources_until(
+            tcp,
+            onion,
+            state,
+            Duration::from_secs(10),
+            shutdown,
+            report,
+        ),
+        diagnostics,
     )
     .await;
     drop(service);

@@ -33,6 +33,9 @@ const BUDGET: Duration = Duration::from_secs(2);
 const MAX_RECORDS: usize = 9; // eight distinct stages and one terminal
 const EVENT: &str = "possums.startup";
 
+#[cfg(feature = "tor")]
+pub(crate) mod readiness;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     Configuration,
