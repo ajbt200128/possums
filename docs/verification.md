@@ -10,6 +10,17 @@ Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILE
 
 The operator explicitly removed startup self-appraisal and cached freshness gates through Tor bootstrap/launch, superseding the former fresh-A-before-B startup requirement only. [Scoped boundary and offline evidence](tor-startup-removal-verification.md) records local grant consistency versus independent client trust, unchanged per-request fail-closed verification, 531 default / 586 all-feature Rust passes, client/helper/privacy checks and remaining limits. Publication may precede available attestation; removal does not fix the acquisition 503 or qualify live Tor-client E2E. No production action or release was performed; parent security review remains required.
 
+## Nonproduction monitored Tor-gated debug attempt
+
+The operator subsequently authorized retained-evidence inspection and one
+[monitored debug attempt](tor-monitored-debug-verification.md). One failed-stage
+cancellation was independently confirmed, then one planned new update failed;
+`.2` remained current and `.3` failed. Candidate documents were briefly reachable,
+but no runtime health sample qualified. A duration-rendering bug in the scratch
+monitor was confirmed on the old reference, not as the rollout cause. No further
+attempt, production action or attestation probe followed; limits and offline
+monitor correction are recorded separately.
+
 ## Nonproduction Tor-gated health with ten-minute grace
 
 The subsequent operator-authorized [debug-only health restoration](tor-health-grace-debug-verification.md)

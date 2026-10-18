@@ -123,3 +123,8 @@ readiness/reachability evidence must not be relabeled as `.3` evidence.
 The failed pending operation remains in place. Another update or lifecycle action
 requires a separately reviewed operator decision and fresh exact state selection;
 this experiment does not authorize automatic cleanup/retry. Production unchanged.
+
+The operator subsequently authorized retained-evidence inspection and one
+monitored attempt. Its separately approved cancellation, new failed rollout and
+monitoring coverage defect are recorded in [the subsequent record](tor-monitored-debug-verification.md),
+not treated as successful recovery of this historical attempt.
