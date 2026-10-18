@@ -22,8 +22,6 @@ pub(crate) mod stream_support;
 #[cfg(test)]
 mod tokenizer_send_tests;
 mod upload;
-mod verified_client;
-use verified_client::VerifiedClient;
 #[cfg(test)]
 mod upload_tests;
 
@@ -264,7 +262,7 @@ pub trait Inference: Send + Sync {
 pub type SharedInference = Arc<dyn Inference>;
 
 pub struct TinfoilInference {
-    client: VerifiedClient<Client>,
+    client: Client,
     origin: String,
 }
 
@@ -274,18 +272,6 @@ impl TinfoilInference {
         repository: &str,
         api_key: String,
     ) -> Result<Self, InferenceError> {
-        let client = Self::verify_client(host, repository, api_key).await?;
-        Ok(Self {
-            origin: format!("https://{host}"),
-            client: VerifiedClient::new(client),
-        })
-    }
-
-    async fn verify_client(
-        host: &str,
-        repository: &str,
-        api_key: String,
-    ) -> Result<Client, InferenceError> {
         let client = tokio::time::timeout(
             Duration::from_secs(30),
             Client::new(host, repository, api_key),
@@ -293,21 +279,12 @@ impl TinfoilInference {
         .await
         .map_err(|_| InferenceError::Detailed(InferenceFailure::VerificationFailed))?
         .map_err(|_| InferenceError::Detailed(InferenceFailure::VerificationFailed))?;
-        Self::client_document(&client)?;
-        Ok(client)
-    }
-
-    async fn acquire_client(&self) -> Result<Arc<Client>, InferenceError> {
-        self.client
-            .acquire(|previous| async move {
-                Self::verify_client(
-                    previous.secure_client().host(),
-                    previous.repo(),
-                    previous.secure_client().api_key().to_owned(),
-                )
-                .await
-            })
-            .await
+        let inference = Self {
+            origin: format!("https://{host}"),
+            client,
+        };
+        inference.verification_document()?;
+        Ok(inference)
     }
 
     /// Verified streaming adapter.
@@ -364,14 +341,14 @@ impl TinfoilInference {
                 content: "Reply with exactly: possums-live-canary".into(),
             }];
             let input_tokens = self.count_tokens_owned(model, &messages, None).await?;
-            let client = self.acquire_client().await?;
-            let request = Self::authenticate(
-                &client,
-                Self::http(&client)?.post(format!("{}/v1/chat/completions", self.origin)),
-            )
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .body(stream::request_body(model, 64, &messages, None)?);
+            let request = self
+                .authenticate(
+                    self.http()?
+                        .post(format!("{}/v1/chat/completions", self.origin)),
+                )
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .body(stream::request_body(model, 64, &messages, None)?);
             let deadline = Instant::now() + Duration::from_secs(90);
             let mut probe = StreamProbe {
                 tokenizer_tokens: input_tokens,
@@ -379,13 +356,7 @@ impl TinfoilInference {
             };
             match tokio::time::timeout_at(deadline, request.send()).await {
                 Ok(Ok(response)) => probe.consume(response, deadline).await,
-                Ok(Err(error)) => {
-                    if error.is_connect() {
-                        self.client.invalidate(&client);
-                    }
-                    probe.failure = Some(ProbeFailure::TransportOrDeadline);
-                }
-                Err(_) => probe.failure = Some(ProbeFailure::TransportOrDeadline),
+                _ => probe.failure = Some(ProbeFailure::TransportOrDeadline),
             }
             Ok(probe)
         })
@@ -410,17 +381,14 @@ impl TinfoilInference {
     ) -> Result<u64, InferenceError> {
         let deadline = Instant::now() + stream::RESPONSE_TIMEOUT;
         let url = format!("{}/v1/chat/completions/input_tokens", self.origin);
-        let client = self.acquire_client().await?;
-        let request = Self::authenticate(&client, Self::http(&client)?.post(&url))
+        let request = self
+            .authenticate(self.http()?.post(&url))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
             .map_err(|_| InferenceError::Detailed(InferenceFailure::TokenizerSendDeadline))?
             .map_err(|error| {
-                if error.is_connect() {
-                    self.client.invalidate(&client);
-                }
                 InferenceError::Detailed(tokenizer_send_failure(
                     error.is_timeout(),
                     error.is_connect(),
@@ -434,7 +402,6 @@ impl TinfoilInference {
 
     async fn bounded_response(
         &self,
-        client: &Arc<Client>,
         request: tinfoil::verifier::tls::OriginBoundRequestBuilder,
         limit: usize,
     ) -> Result<Vec<u8>, CatalogFailure> {
@@ -443,9 +410,6 @@ impl TinfoilInference {
             .await
             .map_err(|_| CatalogFailure::SendDeadline)?
             .map_err(|error| {
-                if error.is_connect() {
-                    self.client.invalidate(client);
-                }
                 if error.is_timeout() {
                     CatalogFailure::SendDeadline
                 } else {
@@ -455,17 +419,17 @@ impl TinfoilInference {
         collect_catalog_response(response, limit, deadline).await
     }
 
-    fn http(client: &Client) -> Result<&tinfoil::verifier::tls::OriginBoundClient, InferenceError> {
-        client
+    fn http(&self) -> Result<&tinfoil::verifier::tls::OriginBoundClient, InferenceError> {
+        self.client
             .http_client()
             .map_err(|_| InferenceError::Detailed(InferenceFailure::VerificationFailed))
     }
 
     fn authenticate(
-        client: &Client,
+        &self,
         request: tinfoil::verifier::tls::OriginBoundRequestBuilder,
     ) -> tinfoil::verifier::tls::OriginBoundRequestBuilder {
-        request.bearer_auth(client.secure_client().api_key())
+        request.bearer_auth(self.client.secure_client().api_key())
     }
 }
 
@@ -1214,8 +1178,8 @@ impl Inference for TinfoilInference {
             heavy.clone(),
         )?;
         let url = format!("{}/v1/chat/completions", self.origin);
-        let client = self.acquire_client().await?;
-        let request = Self::authenticate(&client, Self::http(&client)?.post(&url))
+        let request = self
+            .authenticate(self.http()?.post(&url))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .header("X-Tinfoil-Request-Usage-Metrics", "true")
@@ -1224,12 +1188,7 @@ impl Inference for TinfoilInference {
         let response = tokio::time::timeout(stream::RESPONSE_TIMEOUT, request.send())
             .await
             .map_err(|_| InferenceFailure::GenerationSendFailed)?
-            .map_err(|error| {
-                if error.is_connect() {
-                    self.client.invalidate(&client);
-                }
-                InferenceFailure::GenerationSendFailed
-            })?;
+            .map_err(|_| InferenceFailure::GenerationSendFailed)?;
         if response.url().as_str() != url {
             return Err(InferenceFailure::EndpointBindingFailed.into());
         }
@@ -1242,11 +1201,9 @@ impl Inference for TinfoilInference {
     }
 
     async fn catalog_checked(&self) -> Result<Vec<u8>, CatalogFailure> {
-        let client = self.acquire_client().await.map_err(CatalogFailure::from)?;
-        let http = Self::http(&client).map_err(CatalogFailure::from)?;
-        let request = Self::authenticate(&client, http.get(format!("{}/v1/models", self.origin)));
-        self.bounded_response(&client, request, MAX_CATALOG_BYTES)
-            .await
+        let http = self.http().map_err(CatalogFailure::from)?;
+        let request = self.authenticate(http.get(format!("{}/v1/models", self.origin)));
+        self.bounded_response(request, MAX_CATALOG_BYTES).await
     }
 
     async fn count_tokens(
@@ -1341,15 +1298,7 @@ impl Inference for TinfoilInference {
     }
 
     fn verification_document(&self) -> Result<serde_json::Value, InferenceError> {
-        // Status projects the last completed verification with its original
-        // verified_at. It does not renew or authorize a new upstream dispatch.
-        Self::client_document(&self.client.last_verified())
-    }
-}
-
-impl TinfoilInference {
-    fn client_document(client: &Client) -> Result<serde_json::Value, InferenceError> {
-        let secure = client.secure_client();
+        let secure = self.client.secure_client();
         secure
             .with_verified_ground_truth(|ground_truth| {
                 verification_value(ground_truth, secure.host())
@@ -1432,10 +1381,9 @@ fn verification_value(
             InferenceFailure::VerificationFailed,
         ));
     }
-    // Direct evidence is immutable and retains its original verification time;
-    // dispatch eligibility is separately gated by verified-client acquisition.
-    // A proxy still exports only its active channel state under the SDK read lock,
-    // never a fallback after revocation. Bounds precede any request-owned clone.
+    // The direct SDK borrow is immutable; proxy export keeps the channel read
+    // lock through this callback. No check/export race, unbounded SDK export,
+    // stale cache, or change to attestation/provenance/key authentication.
     let document =
         tinfoil::VerificationDocument::from_ground_truth(ground_truth.clone(), host.to_owned())
             .ok_or(InferenceError::Detailed(
