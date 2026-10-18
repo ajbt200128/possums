@@ -95,7 +95,10 @@ class HTTPSOnlyReleaseTest(StopTest):
             for removed in ("POSSUMS_TOR_", "torCommon", "tor-image-probe", "first_tor_activation", "arti-client"):
                 self.assertNotIn(removed, source)
         self.assertIn('User = "65532:65532"', (ROOT / "flake.nix").read_text())
-        self.assertIn('gatewayAccounts', (ROOT / "flake.nix").read_text())
+        image = (ROOT / "flake.nix").read_text()
+        self.assertIn('contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert ];', image)
+        for removed in ('gatewayAccounts', 'gatewayAccountFiles', 'fakeNss'):
+            self.assertNotIn(removed, image)
 
     def test_pr90_readiness_modules_hooks_and_direct_libc_are_removed(self):
         for name in ("src/telemetry/startup/readiness.rs", "src/telemetry/startup/readiness",
