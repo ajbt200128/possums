@@ -105,7 +105,7 @@ reachability change above; no client upgrade or decoder extension is required by
 these new internal OTLP fields. The full existing offline integration suites pass;
 no separately installed old-client artifact was exercised in this packet.
 
-## Live preparation — read-only, no rollout yet
+## Pre-signing preparation — historical read-only snapshot
 
 Fresh exact debug readback still found health.2 running and health.3 failed pending,
 with existing resources, promotion false, five bindings and opaque settings
@@ -152,5 +152,84 @@ failed pending, existing resources/bindings/SSH/promotion and absent export-disa
 override, with no instance mutation. Original attempt markers remain consumed;
 the new build-dispatch marker was consumed once and no dispatch was replayed.
 
-**Signing, deployment, actual SDK health and Honeycomb ingestion remain pending.**
-The running instance has not been changed by this build/signing preparation.
+## Public signature and one completed debug deployment
+
+Signed tag `v0.0.53-debug-tor-health.4` binds release
+`b2b23eff83e8e4b1b74be05a83b4d5db887fe8f2`, hosted signing run39171162238/1,
+and manifest `7c0ebcb8c8175295789caa531b153d6f171032055a1839ff0a2d6d46b5fd0ac7`.
+Parent verified the public signature's exact workflow/tag/source/signer/hosted-run
+identity, successful build/signing jobs, manifest subject/hash and decoded config.
+This verifies public release provenance, **not device/runtime attestation**.
+
+New scratch monitor controls preserved both earlier attempts and consumed a new
+exclusive-create deployment marker. Parent inspected real diffs and ran39 pinned
+offline tests plus shell syntax. Independent guard reviews caught two stale-evidence
+admission paths: a failed final sample and a control read crossing the deadline
+before its runtime sample. Both were fixed/tested. Final admission requires a valid
+sample paired with the latest control observation, not cached earlier health.
+Round3 found no remaining pairing blocker and independently passed the three
+relevant regressions; its broader unpinned shell lacked timeout, so parent retained
+the complete pinned39-test evidence rather than claiming that host suite passed.
+
+Fresh exact target/settings/override, signature/archive, installed-document and
+monitor-path gates passed before mutation. One minimal failed health.3 cancellation
+was independently confirmed: health.2 still running, no pending update, settings
+preserved. One fresh blue-green/no-hold/no-downtime plan then one health.4 update
+were acknowledged, promotion false, resources/opaque references/five bindings/SSH
+key references preserved. **Health.4 became current/running with no pending operation.** No uncertain
+mutation was replayed and no subsequent cancellation/rollback was performed.
+Physical cleanup and exclusive Tor publication remain unproved.
+
+## Runtime checks — deployment succeeded, health is unstable
+
+The bounded900s monitor verified the actual candidate's exact image/source/debug
+labels, installed documents, typed600s grace/10s interval/5s timeout/three retries,
+health command, read-only root/tmpfs and effective Tor-on/export-enabled switches.
+Process samples remained running, exit0, no OOM. Local initialization completed.
+
+**Healthy-to-unhealthy flapping was observed both before and after600s.** Docker
+failure counts rose and recovered; local probes alternated `ready`/`not_ready`.
+Unlike earlier unqualified attempts, this is direct evidence of a healthy/unhealthy
+sequence for health.4, not a claim that historical health.3 flapped. A first healthy
+check can end Docker's startup exemption;600s is not an unconditional immunity
+period after early health success. The exact historical platform failure remains
+unknown.
+
+The finite590s diagnostic reported `degraded_reachable`/`descriptor_upload`, not
+first SDK Running. It remained diagnostic-only under the new fully-reachable health
+semantics. Final paired control/runtime sample was current health.4/running,
+Docker healthy, local probe ready, exit0/no OOM. A separate fresh read-only postcheck
+again observed those results with no pending operation/settings drift and effective
+export enabled. Neither sample establishes sustained availability.
+
+A bounded, source/identity/document-guarded platform projection (13 offline hostile-
+input cases passed) returned the **last locally retained** closed background record:
+SDK `degraded_reachable`, SDK-reachable true, bootstrap complete/ready, blockage
+none, selected `descriptor_upload`, flags `upload_timeout` and `desc_circuit`,
+selected runtime kind none. This identifies an upload deadline with a circuit error
+among recorded causes, **not** the underlying circuit failure or a full subsystem
+inventory. It is not current connection, fresh attestation or exclusive-publication
+proof; coalescing can miss the states that caused individual health failures.
+
+## Honeycomb evidence and remaining limits
+
+Before rollout, the existing prod events dataset lacked the new background fields.
+After rollout, metadata showed the new typed `diagnostic_profile`, reachability,
+bootstrap/source/runtime and upload/IPT flag columns in the existing
+`prod/possums-gateway` dataset. This is scoped **new-schema ingestion evidence**, not
+an end-to-end query of event values, completeness or every transition. No raw event,
+body or request-level records were downloaded. Available Honeycomb tools exposed
+metadata/query-history/result reads, not new query execution; no matching saved
+Tor query was found. Event-value/count querying therefore remains unqualified.
+No query capability was bypassed and no new credential was requested or exported.
+
+The shared switch also enables the existing approved aggregate/startup signals;
+the shared destination/resource is not per-VM isolation or exclusive attribution.
+Existing Honeycomb US/provider-default retention is accepted; actual retention/
+access/platform capture properties remain unverified. Native host history is a
+separate persistence boundary. No gateway inference, device-attestation probe,
+production/main rollout, private-original key read or further lifecycle mutation
+was performed. Current deployment checks succeeded at their sampled endpoints,
+but **health flapping and the underlying circuit/upload cause remain unresolved**.
+Further rollout/recovery or deeper diagnostic changes require a separate decision;
+the one authorized deployment marker remains consumed.

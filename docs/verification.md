@@ -20,8 +20,17 @@ qualification passed: debug449/one ignored, normal Tor430/one ignored, binary6,
 15 actual-typed/synthetic-TLS privacy tests and2 bootstrap cancellation/no-replay
 regressions; full all-feature suites629 passed/five opt-in ignored. Formatting,
 strict Clippy/no-default and eight-file active LSP passed.
-Independent read-only review found no blocker. Release/runtime/ingestion remain
-pending in that record; no production/main action or attestation probe is implied.
+Independent source review found no blocker. Exact build39168974498/1 and signed
+release39171162238/1 passed public artifact/config/provenance checks. One guarded
+update made health.4 current/running with no pending operation, promotion false
+and settings/bindings preserved;39 pinned monitor tests plus reviewed final-sample
+pairing guards preceded execution. Final and separate postcheck samples were
+healthy/ready, **but actual health flapping occurred before and after600s**.
+Last retained SDK background record selected descriptor-upload timeout with a
+circuit-error cause. New background columns appeared in the existing Honeycomb
+prod events dataset; event-value/count queries and sustained availability remain
+unqualified. No production/main operation, device-attestation or inference probe,
+replay/recovery mutation, exclusive-publication or retention guarantee is implied.
 
 ## Nonproduction corrected-monitor Tor-gated trace
 
