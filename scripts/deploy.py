@@ -18,7 +18,7 @@ from pathlib import Path
 
 import release as r
 
-NAME = "possum-phase0"
+NAME = "gateway"
 OLD_DOMAIN = "possum-phase0.possums.containers.tinfoil.dev"
 DOMAIN = "gateway.possums.dev"
 CLI_SHA256 = "ef014c67a976b4b47941d084fb0a3837ba6eb59c9f4e662424c6826fb7a70f8c"
