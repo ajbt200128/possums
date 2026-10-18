@@ -138,3 +138,23 @@ establishes observed debug SDK first-readiness and configured-onion transport
 reachability, not attestation/HPKE/accounting qualification, exact invoice parity,
 independent attribution of a shared onion publisher to one VM, exclusive
 publication or cleanup of earlier publishers. Production and main were untouched.
+
+## Subsequent debug attestation availability check
+
+Operator requested checking whether attestation works on this debug deployment.
+One fresh nonce-bound public platform acquisition, selected from fresh exact
+`.2/running/debug=true` metadata with no pending update, returned **HTTP503** and
+the allowlisted closed protocol code **`attestation_unavailable`**. No success
+report, quote, certificate payload, hardware identifier, nonce, URL, headers or
+raw exception was returned or retained in this record. No appraisal, retry,
+inference, instance mutation or production probe was performed. Opaque settings
+and references were compared in memory and remained unchanged.
+
+In the pinned CVM source already documented in the preceding investigation,
+this code marks collateral acquisition/cache unavailability before fresh device
+evidence construction/appraisal. The underlying provider/cache cause is unknown;
+this is not evidence that debug policy rejected an otherwise valid report or
+that Tor caused the failure. Debug-mode evidence availability can be checked,
+but a debug-enabled instance must not qualify normal production confidentiality/
+client trust. Tor readiness and successful transport do not establish attestation
+availability or authorization. Current debug fresh attestation remains unavailable.
