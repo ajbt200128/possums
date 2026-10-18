@@ -1,6 +1,9 @@
 # Pi session failure after gateway replacement — offline investigation
 
-## Scope and conclusion
+## Initial investigation checkpoint
+
+This section records the pre-fix checkpoint. The subsequently authorized source
+correction and its qualification are recorded below.
 
 Investigation and synthetic regression tests only. No runtime/client lifecycle code,
 recovery policy, installed package, activation, gateway, release or deployment was
@@ -17,7 +20,7 @@ from certificate parsing, hostname or validity failure. The preceding interrupte
 HTTP-200 delivery does not establish the cause of a later certificate failure,
 successful generation, settlement or refund. Earlier billing remains unknown.
 
-## Source boundary
+## Pre-fix source boundary
 
 - [`certificate()` and `nativeRequest()`](../clients/pi/v3.ts): each request uses a
   fresh TLS socket. Exact endorsed SPKI, hostname and date checks precede HTTP
@@ -105,7 +108,7 @@ and [synthetic testing](../PRIVACY.md#synthetic-testing-exception). No logger,
 telemetry, support bundle, raw-error classification or diagnostic-triggered work
 was added. Pi/T3 native history persistence remains a separate boundary.
 
-## Smallest candidate correction — requires agreement, not implemented
+## Correction plan proposed at the initial checkpoint
 
 Keep the current fail-closed workaround. If automatic continuity is desired,
 request a narrow addition to the approved
@@ -140,3 +143,82 @@ and after-dispatch no-recovery tests. Requalify the emitted client in pinned Pi.
 The existing new-session workaround needs no recovery-policy expansion; client
 installation and user-controlled activation would require separate approval even
 after a source fix passes. No gateway redeployment is proposed.
+
+## Implemented correction and follow-up qualification
+
+The operator subsequently authorized this client fix, PR publication/merge and
+`no-rollout-needed`. This is not installation, activation or deployment authority.
+
+- `certificate()` validates parsing, hostname and dates before comparing SPKI.
+  Only its **actual TLS peer** call site can emit `trust/peer_key_mismatch`;
+  mismatch of the public certificate against attested facts stays
+  `trust/certificate`. Node's supported X509/TLS APIs remain the authority.
+- `eligibleSetup()` admits just that additional closed observation, still behind
+  the existing `!prepared.dispatched` boundary. The existing full verifier,
+  advancing freshness, three-attempt shared budget, fresh authentication/catalog,
+  coalescing and current account/run/cancellation guards are unchanged.
+- Any unsuccessful replacement (including unchanged evidence and budget
+  exhaustion) preserves the original peer-mismatch diagnostic and sticky trust
+  block, with a separately closed secondary recovery explanation. Cancellation
+  and obsolete account/run/session guards prevent late latching of a replacement
+  session. A mismatch during replacement authentication or after dispatch stays
+  fatal. A misleading/malicious peer can at most nominate bounded public
+  verification, never approve itself. The actual replacement peer must match
+  newly verified keys before any credentials or prompt cross.
+- `possums_trust_peer_key_mismatch` reports that the peer key differed from the
+  verified identity and explicitly leaves the underlying cause unknown. No raw
+  exception, key, certificate, URL or request data is included. Billing still
+  comes only from observed accounting evidence, not recovery success.
+
+Adjacent recovery behavior was reviewed. Known-expiry renewal, authorized caller
+eligibility, coalescing and the existing 401/403 and submission-422 paths already
+cover their approved cases. No evidence justified making arbitrary transport,
+invalid-certificate, crypto/integrity, unchanged/nonadvancing freshness or
+already-dispatched failures recoverable. Those were **not** loosened; neither was
+latched-trust recovery changed into silent credential-based reset. Status/checks
+remain offline, and generation replay/tool reruns remain forbidden.
+
+Added `tests/phase02_peer_recovery.mjs` to the normal scratch build/check runner.
+It combines actual loopback TLS with the real reference preparation/dispatch
+latch and provider recovery loop (candidate verification alone is synthetic):
+
+- catalog and submission-stage peer mismatches: zero HTTP on the rejected peer,
+  one replacement login and one generation dispatch, payload hook once;
+- healthy path: no additional public recovery/authentication;
+- unchanged evidence, verifier rejection and still-mismatched replacement peer:
+  no replacement credential/inference; original diagnostic and trust latch survive
+  run settlement and a later explicit run, with safe secondary diagnostics;
+- repeated rotations: at most three shared recovery attempts, no inference,
+  exhausted recovery retains the primary trust failure/latch;
+- post-dispatch mismatch: fatal, no HTTP transmission or recovery/replay;
+- cancellation, logout and session replacement: no late credentials/prompt;
+- concurrent waiters: one verifier/login owner; one caller's abort does not kill
+  the surviving request.
+
+The v3 TLS suite additionally exercises wrong-host, expired/not-yet-valid and
+unexpected date-check failures even when SPKI differs: all stay generic fatal
+certificate failures with zero HTTP requests. The existing public-evidence,
+unchanged/nonadvancing/advancing freshness, full verifier rejection, native
+Pi lifecycle/tools/compaction/account races and hostile-diagnostic suites remain
+in the full runner. These fixtures establish no production root cause, live
+hardware acceptance, accounting outcome or installed T3 UI/runtime qualification.
+
+Pinned offline build and the full `check.mjs` runner passed at
+`/tmp/possums-pi-build-session-recovery-43mu66pc`: 165 Pi groups, 47 v3 checks,
+12 TLS/provider recovery groups, 18 packaged-host and 31 discovery checks, plus
+the other unchanged reference/cache/stream/diagnostics/admission suites. Strict
+TypeScript compilation passed. The checkout-only LSP lacks installed Pi/Node
+declarations; its missing-module/cascading-any findings were dispositioned as
+environment-only after the pinned compiler passed, not suppressed in source.
+
+The same 12 TLS/provider recovery groups also passed in a separate scratch
+bundle resolving the current read-only Pi 1.2.0 peer packages. This is bounded
+adapter coverage, not full native Pi 1.2.0 lifecycle/T3 UI qualification or proof
+of the affected process's loaded artifact. No installed files were modified.
+
+The complete PR scope is client TypeScript/JS build-test wiring, synthetic tests
+and policy/evidence documentation only. No Rust gateway, image/configuration,
+attestation verifier, release workflow, gateway contract or deployed artifact
+changes; a gateway rollout is unnecessary. Existing source-versus-installed and
+Pi 1.2.0 peer-link qualifications above remain unresolved by this offline packet.
+The installed link/bundle must remain unchanged pending separate authorization.

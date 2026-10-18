@@ -31,7 +31,8 @@ type RecoveryScope = { account: number; attempts: number; pending?: Promise<void
   terminal?: ConnectionFailure; controller: AbortController; waiters: number; owners: number; idleCompaction?: boolean };
 const recoveryDelays = [0, 250, 1000] as const;
 function eligibleSetup(error: unknown): boolean {
-  return (error instanceof CatalogFailure && error.stage === 'http' &&
+  return (error instanceof DiagnosticFailure && error.stage === 'trust' && error.constraint === 'peer_key_mismatch') ||
+    (error instanceof CatalogFailure && error.stage === 'http' &&
       (error.status === 401 || error.status === 403) && error.reason === 'unauthorized') ||
     (error instanceof DiagnosticFailure && error.stage === 'submission' &&
       error.constraint === 'endpoint_binding' && error.status === 422) ||
@@ -857,6 +858,7 @@ export class PossumsProvider implements Provider {
     let failureStage: FailureStage = 'request';
     let submitted = false;
     let uncertainControl = false;
+    let setupRecoveryFailure: string | undefined;
     let textIndex: number | undefined;
     let thinkingIndex: number | undefined;
     const endThinking = () => {
@@ -983,7 +985,18 @@ export class PossumsProvider implements Provider {
               if ((error instanceof DiagnosticFailure && error.stage === 'submission') ||
                   (error instanceof GatewayError && error.billing === 'unknown')) uncertainControl = true;
               guard();
-              await this.recoverSetup(scope, options.signal);
+              try { await this.recoverSetup(scope, options.signal); }
+              catch (recoveryError) {
+                // Failure to replace unconfirmed trust cannot downgrade the
+                // triggering peer mismatch. Obsolete callers must not latch it.
+                if (error instanceof DiagnosticFailure && error.stage === 'trust' && error.constraint === 'peer_key_mismatch' &&
+                    epoch === this.epoch && account === this.accountEpoch && scope === this.runScope &&
+                    !this.sessionClosed && !options.signal?.aborted && !scope.controller.signal.aborted) {
+                  setupRecoveryFailure = safeFailure(recoveryError, 'trust');
+                  throw error;
+                }
+                throw recoveryError;
+              }
               guard();
               if (!this.client) throw new Error('possums_session_unavailable');
               const fresh = this.catalog.find(value => value.id === selected.id);
@@ -1062,6 +1075,7 @@ export class PossumsProvider implements Provider {
           `${safeFailure(error, failureStage).replace(/ Billing status: Charge unknown\..*$/, '')} Authenticated receipt: charge settled; not undone. Not replayed.` : options.signal?.aborted && !(error instanceof GatewayError) && !(error instanceof ConnectionFailure) ?
           'Possums: [possums_stream_interrupted] Stage: stream; constraint: interrupted. Delivery interrupted; charge unknown. Check connectivity and share only this code for support. Not replayed. A new request may incur another charge.' :
           safeFailure(error, failureStage, !submitted);
+        if (setupRecoveryFailure) output.errorMessage += ` Setup recovery also failed: ${setupRecoveryFailure}`;
         if (uncertainControl) {
           output.errorMessage += ' Earlier submission control outcome unknown; no inference request was replayed. A new request may incur another charge.';
         }
