@@ -127,4 +127,7 @@ this experiment does not authorize automatic cleanup/retry. Production unchanged
 The operator subsequently authorized retained-evidence inspection and one
 monitored attempt. Its separately approved cancellation, new failed rollout and
 monitoring coverage defect are recorded in [the subsequent record](tor-monitored-debug-verification.md),
-not treated as successful recovery of this historical attempt.
+not treated as successful recovery of this historical attempt. A third,
+separately authorized [corrected-monitor attempt](tor-corrected-monitor-debug-verification.md)
+subsequently captured degraded Tor descriptor-publication readiness and
+post-grace counted health failures; it also failed without changing health policy.

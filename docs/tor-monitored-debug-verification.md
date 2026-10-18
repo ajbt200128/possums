@@ -133,3 +133,8 @@ Another lifecycle/deployment action requires a new operator decision and fresh
 exact selection, accounting for the retained failed staged update. Do not remove
 the consumed marker, blindly retry, weaken health/trust checks, or relabel earlier
 `.2` Tor reachability as `.3` evidence. Production remains untouched.
+
+A subsequent **separately authorized** attempt with the corrected observer and a
+new consume-once marker captured actual candidate readiness/health/grace evidence;
+see [that trace](tor-corrected-monitor-debug-verification.md). It does not recover
+this attempt's missing runtime observations.

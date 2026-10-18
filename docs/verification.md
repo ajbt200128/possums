@@ -10,6 +10,18 @@ Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILE
 
 The operator explicitly removed startup self-appraisal and cached freshness gates through Tor bootstrap/launch, superseding the former fresh-A-before-B startup requirement only. [Scoped boundary and offline evidence](tor-startup-removal-verification.md) records local grant consistency versus independent client trust, unchanged per-request fail-closed verification, 531 default / 586 all-feature Rust passes, client/helper/privacy checks and remaining limits. Publication may precede available attestation; removal does not fix the acquisition 503 or qualify live Tor-client E2E. No production action or release was performed; parent security review remains required.
 
+## Nonproduction corrected-monitor Tor-gated trace
+
+A third separately authorized [debug attempt](tor-corrected-monitor-debug-verification.md)
+used the offline-corrected observer and captured actual health.3 image/controls:
+600s grace, process running, health not ready, then SDK `DegradedReachable` with
+`descriptor_upload` at its590–600s diagnostic deadline. Counted Docker failures
+appeared after grace; platform update failed and `.2` remained current. This
+supports failure to attain strict readiness, not an observed early-healthy flap.
+No unhealthy snapshot or upload-error subtype was captured; reachability,
+attestation and the exact platform terminal cause remain unproved. Both attempt
+markers remain consumed; no health-policy change or automatic replay followed.
+
 ## Nonproduction monitored Tor-gated debug attempt
 
 The operator subsequently authorized retained-evidence inspection and one
@@ -18,8 +30,9 @@ cancellation was independently confirmed, then one planned new update failed;
 `.2` remained current and `.3` failed. Candidate documents were briefly reachable,
 but no runtime health sample qualified. A duration-rendering bug in the scratch
 monitor was confirmed on the old reference, not as the rollout cause. No further
-attempt, production action or attestation probe followed; limits and offline
-monitor correction are recorded separately.
+attempt followed under that consumed authorization; no production action or
+attestation probe occurred. Limits and offline monitor correction are recorded
+separately; the newer independently authorized trace is linked above.
 
 ## Nonproduction Tor-gated health with ten-minute grace
 
