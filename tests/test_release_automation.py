@@ -597,17 +597,10 @@ class MutationTest(StopTest):
         self.stop("plan_configuration", d.inspect_plan, json.dumps(data).encode(), "v1.2.2", V)
 
     def test_native_cli_null_change_slices_preserve_zero_changes(self):
-        for additions in ((), sorted(d.TOR_REFS)):
-            data = plan()
-            for family in ("variables", "secrets", "ssh_keys"):
-                data["configuration_changes"][family] = dict.fromkeys(("added", "changed", "removed"))
-            if additions:
-                data["configuration_changes"]["secrets"]["added"] = additions
-            d.inspect_plan(json.dumps(data).encode(), "v1.2.2", V, approved_additions=additions)
-            if additions:
-                data["configuration_changes"]["secrets"]["added"] = None
-                self.stop("plan_configuration", lambda data=data, additions=additions: d.inspect_plan(
-                    json.dumps(data).encode(), "v1.2.2", V, approved_additions=additions))
+        data = plan()
+        for family in ("variables", "secrets", "ssh_keys"):
+            data["configuration_changes"][family] = dict.fromkeys(("added", "changed", "removed"))
+        d.inspect_plan(json.dumps(data).encode(), "v1.2.2", V)
         for invalid in (False, "", {}):
             data = plan()
             data["configuration_changes"]["secrets"]["changed"] = invalid
@@ -623,301 +616,6 @@ class MutationTest(StopTest):
                 self.stop("cli_uncertain", d.call, sys.executable, ["-c", "print('x'*100)"])
 
 
-class FirstTorActivationTest(StopTest):
-    def setUp(self):
-        environment = patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "TINFOIL_ADMIN_KEY": "synthetic"})
-        environment.start()
-        self.addCleanup(environment.stop)
-        self.before = view()
-        self.before["secrets"].append("EXISTING_OPAQUE_REF")
-        self.selection = self.before["secrets"] + sorted(d.TOR_REFS)
-        self.after = view(V)
-        self.after["secrets"] = list(reversed(self.selection))
-
-    def activation_plan(self):
-        data = plan()
-        data.update(instance_id=self.before["id"], name=d.NAME)
-        data["configuration_changes"]["secrets"] = {"added": sorted(d.TOR_REFS)}
-        if self.before["domain"] == d.OLD_DOMAIN:
-            data["configuration_changes"]["settings"] = ["custom_domain"]
-        return data
-
-    def cli_result(self, data=None):
-        return subprocess.CompletedProcess([], 0, b"opaque", json.dumps(
-            self.activation_plan() if data is None else data).encode())
-
-    def test_first_binding_preserves_all_names_in_plan_and_single_cli_call(self):
-        for domain in (d.OLD_DOMAIN, d.DOMAIN):
-            self.before["domain"] = domain
-            with self.subTest(domain=domain), patch.object(d.urllib.request, "build_opener") as build, \
-                    patch.object(d, "get", side_effect=[self.before, self.after]), \
-                    patch.object(d, "call", return_value=self.cli_result()) as call:
-                build.return_value.open.return_value = io.BytesIO(json.dumps(self.activation_plan()).encode())
-                gate = Mock()
-                result = d.update_once("unused", V, gate, first_tor_activation=True)
-                request = build.return_value.open.call_args.args[0]
-                self.assertEqual(json.loads(request.data), {
-                    "tag": V, "custom_domain": d.DOMAIN, "secrets": self.selection,
-                    "mark_latest_release": False})
-                self.assertEqual(call.call_args.args[1], ["container", "update", d.NAME, "--tag", V,
-                    "--custom-domain", d.DOMAIN, "--output", "json", "--mark-latest=false"] + [
-                        item for name in self.selection for item in ("--secret", name)])
-                self.assertEqual(call.call_args.kwargs, {"timeout": 1800})
-                self.assertNotIn("--yes", call.call_args.args[1])
-                self.assertNotIn("SYNTHETIC-SECRET", json.dumps(result))
-                self.assertTrue(result["approvedTorBindingsConfirmed"])
-                self.assertTrue(result["opaqueConfigurationPreserved"])
-                self.assertTrue(result["targetRunningNoPending"])
-                self.assertFalse(result["servingVerified"])
-                gate.assert_called_once_with()
-                call.assert_called_once()
-        self.assertFalse(d.stable_running(view(V), V, d.REQUIRED_REFS | d.TOR_REFS))
-        self.assertTrue(d.stable_running(self.after, V, d.REQUIRED_REFS | d.TOR_REFS))
-
-    def test_pending_old_current_references_wait_for_exact_completed_bindings(self):
-        pending = {**self.before, "update_tag": V, "update_status": "deploying"}
-        with patch.object(d, "plan_update"), \
-                patch.object(d, "get", side_effect=[self.before, pending, self.after]) as get, \
-                patch.object(d, "call", return_value=self.cli_result()) as call, \
-                patch.object(d.time, "sleep") as sleep:
-            gate = Mock()
-            result = d.update_once("unused", V, gate, first_tor_activation=True)
-            self.assertTrue(result["approvedTorBindingsConfirmed"])
-            self.assertTrue(result["targetRunningNoPending"])
-            self.assertFalse(result["servingVerified"])
-            self.assertEqual(get.call_count, 3)
-            sleep.assert_called_once_with(10)
-            gate.assert_called_once_with()
-            call.assert_called_once()
-
-    def test_pending_old_references_do_not_extend_deadline_or_hide_config_drift(self):
-        pending = {**self.before, "update_tag": V, "update_status": "deploying"}
-        with patch.object(d, "plan_update"), \
-                patch.object(d, "get", side_effect=[self.before, pending]), \
-                patch.object(d, "call", return_value=self.cli_result()) as call, \
-                patch.object(d.time, "monotonic", side_effect=[0, 1, 301]), \
-                patch.object(d.time, "sleep") as sleep:
-            self.stop("completion_timeout", d.update_once, "unused", V, Mock(), True)
-            call.assert_called_once()
-            sleep.assert_called_once_with(10)
-        pending = {**pending, "cpus": self.before["cpus"] + 1, "update_status": "failed"}
-        with patch.object(d, "plan_update"), \
-                patch.object(d, "get", side_effect=[self.before, pending]), \
-                patch.object(d, "call", return_value=self.cli_result()) as call, \
-                patch.object(d.time, "sleep") as sleep:
-            self.stop("configuration_changed", d.update_once, "unused", V, Mock(), True)
-            call.assert_called_once()
-            sleep.assert_not_called()
-
-    def test_observed_failed_target_candidate_is_not_a_binding_failure(self):
-        for names in (self.before["secrets"], self.selection):
-            pending = {**self.before, "secrets": names, "update_tag": V, "update_status": "failed"}
-            with self.subTest(names=names), patch.object(d, "plan_update"), \
-                    patch.object(d, "get", side_effect=[self.before, pending]) as get, \
-                    patch.object(d, "call", return_value=self.cli_result()) as call, \
-                    patch.object(d.time, "sleep") as sleep:
-                self.stop("candidate_failed", d.update_once, "unused", V, Mock(), True)
-                self.assertEqual(get.call_count, 2)
-                call.assert_called_once()
-                sleep.assert_not_called()
-        diagnostic = r.diagnostic("candidate_failed")
-        self.assertIn("initiating cause", diagnostic["action"])
-        self.assertIn("unknown", diagnostic["action"])
-        self.assertIn("no replay", diagnostic["action"])
-
-    def test_old_current_references_require_exact_pending_target(self):
-        variants = [
-            {**self.before, "update_tag": "v9.9.9", "update_status": "deploying"},
-            {**self.before, "update_tag": "", "update_status": ""},
-            {**self.before, "current_tag": V, "update_tag": V, "update_status": "deploying"},
-            {**self.before, "status": "failed", "update_tag": V, "update_status": "failed"},
-            {**self.before, "secrets": self.before["secrets"] + ["UNAPPROVED_REF"],
-             "update_tag": V, "update_status": "deploying"},
-            {**self.before, "secrets": self.before["secrets"] + [sorted(d.TOR_REFS)[0]],
-             "update_tag": V, "update_status": "deploying"},
-        ]
-        for pending in variants:
-            with self.subTest(pending=pending), patch.object(d, "plan_update"), \
-                    patch.object(d, "get", side_effect=[self.before, pending]), \
-                    patch.object(d, "call", return_value=self.cli_result()) as call, \
-                    patch.object(d.time, "sleep") as sleep:
-                self.stop("tor_binding_completion", d.update_once, "unused", V, Mock(), True)
-                call.assert_called_once()
-                sleep.assert_not_called()
-
-    def test_either_existing_tor_reference_blocks_before_planning_even_without_opt_in(self):
-        for refs in ([name] for name in sorted(d.TOR_REFS)):
-            self.check_existing_references(refs)
-        self.check_existing_references(sorted(d.TOR_REFS))
-
-    def check_existing_references(self, refs):
-        before = copy.deepcopy(self.before)
-        before["secrets"] += refs
-        for opt_in in (False, True):
-            with self.subTest(refs=refs, opt_in=opt_in), patch.object(d, "get", return_value=before), \
-                    patch.object(d, "plan_update") as planning, patch.object(d, "call") as call:
-                gate = Mock()
-                self.stop("tor_exclusive_publication", d.update_once, "unused", V, gate, opt_in)
-                planning.assert_not_called()
-                gate.assert_not_called()
-                call.assert_not_called()
-        diagnostic = r.diagnostic("tor_exclusive_publication")
-        self.assertIn("unknown", diagnostic["action"])
-        self.assertIn("qualify", diagnostic["action"])
-
-    def test_invalid_before_selection_is_closed_and_never_admitted(self):
-        for names in (None, "SYNTHETIC-SECRET", {}, [None], [{"private": "SYNTHETIC-SECRET"}],
-                      [""], self.selection[:1] * 2):
-            before = {**self.before, "secrets": names}
-            with self.subTest(names=names), patch.object(d, "get", return_value=before), \
-                    patch.object(d, "plan_update") as planning, patch.object(d, "call") as call:
-                gate = Mock()
-                self.stop("tor_binding", d.update_once, "unused", V, gate, True)
-                planning.assert_not_called()
-                gate.assert_not_called()
-                call.assert_not_called()
-                self.assertNotIn("SYNTHETIC-SECRET", json.dumps(r.diagnostic("tor_binding")))
-
-    def invalid_plans(self):
-        mutations = []
-        for added in ([], sorted(d.TOR_REFS)[:1], self.selection, sorted(d.TOR_REFS) + ["UNKNOWN"],
-                      sorted(d.TOR_REFS) * 2, "SYNTHETIC-SECRET", None, [False], [{"private": "SYNTHETIC-SECRET"}]):
-            mutations.append(("secrets", {"added": added}, "plan_configuration"))
-        for kind in ("changed", "removed", "unknown"):
-            mutations.append(("secrets", {"added": sorted(d.TOR_REFS), kind: ["EXISTING_OPAQUE_REF"]}, "plan_configuration"))
-        for family in ("variables", "ssh_keys", "volumes"):
-            mutations.append((family, {"added": ["SYNTHETIC-SECRET"]}, "plan_configuration"))
-        mutations += [("settings", ["debug"], "plan_configuration")]
-        for family, value, code in mutations:
-            data = self.activation_plan()
-            data["configuration_changes"][family] = value
-            yield data, code
-        for key, value, code in (("hold", True, "plan_strategy"), ("downtime_required", True, "plan_strategy"),
-                                 ("update_strategy", "replace", "plan_strategy"), ("read_only", False, "plan_target")):
-            data = self.activation_plan()
-            data[key] = value
-            yield data, code
-        for field in ("cpus", "gpus", "memory_mb"):
-            for both in (False, True):
-                data = self.activation_plan()
-                data["target"][field] += 1
-                if both:
-                    data["current"][field] += 1
-                yield data, "plan_configuration"
-        data = self.activation_plan()
-        data["target"]["gpus"] = False
-        yield data, "plan_configuration"
-
-    def test_invalid_preplans_never_reach_final_gate_or_cli(self):
-        for data, _ in self.invalid_plans():
-            with self.subTest(data=data), patch.object(d.urllib.request, "build_opener") as build, \
-                    patch.object(d, "get", return_value=self.before), patch.object(d, "call") as call:
-                build.return_value.open.return_value = io.BytesIO(json.dumps(data).encode())
-                gate = Mock()
-                self.stop("plan_rejected", d.update_once, "unused", V, gate, True)
-                gate.assert_not_called()
-                call.assert_not_called()
-
-    def test_cli_plans_are_independently_checked_after_one_mutation(self):
-        for data, code in self.invalid_plans():
-            with self.subTest(data=data), patch.object(d.urllib.request, "build_opener") as build, \
-                    patch.object(d, "get", return_value=self.before) as get, \
-                    patch.object(d, "call", return_value=self.cli_result(data)) as call:
-                build.return_value.open.return_value = io.BytesIO(json.dumps(self.activation_plan()).encode())
-                gate = Mock()
-                self.stop(code, d.update_once, "unused", V, gate, True)
-                gate.assert_called_once_with()
-                call.assert_called_once()
-                get.assert_called_once()
-        # A CLI re-review cannot hide a changed second plan behind an accepted first plan.
-        changed = self.activation_plan()
-        changed["hold"] = True
-        raw = json.dumps(self.activation_plan()).encode() + b"\n" + json.dumps(changed).encode()
-        self.stop("plan_strategy", d.inspect_plan, raw, "v1.2.2", V, d.DOMAIN, d.TOR_REFS)
-
-    def test_only_exact_fixed_approved_additions_are_allowed(self):
-        for additions in (["UNKNOWN"], sorted(d.TOR_REFS)[:1], sorted(d.TOR_REFS) * 2):
-            self.stop("plan_configuration", d.inspect_plan, json.dumps(self.activation_plan()).encode(),
-                      "v1.2.2", V, d.DOMAIN, additions)
-        self.stop("plan_configuration", d.inspect_plan, json.dumps(self.activation_plan()).encode(), "v1.2.2", V)
-
-    def test_after_selection_and_other_opaque_changes_remain_uncertain_without_replay(self):
-        variants = []
-        for names in (None, {}, "SYNTHETIC-SECRET", [None], [{"private": "SYNTHETIC-SECRET"}],
-                      self.selection[:-1], self.selection[1:], self.selection + ["UNKNOWN"],
-                      self.selection + self.selection[:1]):
-            variants.append(({**self.after, "secrets": names}, "tor_binding_completion"))
-        for field in d.STABLE:
-            if field not in ("secrets", "domain"):
-                variants.append(({**self.after, field: "SYNTHETIC-SECRET"}, "configuration_changed"))
-        for after, code in variants:
-            with self.subTest(after=after), patch.object(d, "plan_update"), \
-                    patch.object(d, "get", side_effect=[self.before, after]), \
-                    patch.object(d, "call", return_value=self.cli_result()) as call:
-                self.stop(code, d.update_once, "unused", V, lambda: None, True)
-                call.assert_called_once()
-                diagnostic = json.dumps(r.diagnostic(code))
-                self.assertIn("unknown", diagnostic)
-                self.assertIn("no replay", diagnostic)
-                self.assertNotIn("SYNTHETIC-SECRET", diagnostic)
-
-    def test_hostile_planning_and_cli_errors_remain_closed_without_replay(self):
-        for raw in (b'{"error":"SYNTHETIC-SECRET"}', b"SYNTHETIC-SECRET"):
-            with patch.object(d.urllib.request, "build_opener") as build, \
-                    patch.object(d, "get", return_value=self.before), patch.object(d, "call") as call:
-                build.return_value.open.return_value = io.BytesIO(raw)
-                gate = Mock()
-                self.stop("plan_rejected", d.update_once, "unused", V, gate, True)
-                gate.assert_not_called()
-                call.assert_not_called()
-        for result in (TimeoutError("SYNTHETIC-SECRET"), subprocess.CompletedProcess(
-                [], 1, b"SYNTHETIC-SECRET", b"SYNTHETIC-SECRET")):
-            with patch.object(d, "plan_update"), patch.object(d, "get", return_value=self.before), \
-                    patch.object(d, "call") as call:
-                if isinstance(result, Exception):
-                    call.side_effect = result
-                else:
-                    call.return_value = result
-                self.stop("cli_uncertain", d.update_once, "unused", V, lambda: None, True)
-                call.assert_called_once()
-                self.assertNotIn("SYNTHETIC-SECRET", json.dumps(r.diagnostic("cli_uncertain")))
-
-    def test_first_binding_still_requires_stable_source_and_final_admission(self):
-        for field, value in (("status", "updating"), ("update_tag", V), ("held", True),
-                             ("debug", True), ("disable_cc_mode", True),
-                             ("secrets", ["EXISTING_OPAQUE_REF"])):
-            before = {**self.before, field: value}
-            with self.subTest(field=field), patch.object(d, "get", return_value=before), \
-                    patch.object(d, "plan_update") as planning, patch.object(d, "call") as call:
-                gate = Mock()
-                self.stop("not_stable", d.update_once, "unused", V, gate, True)
-                planning.assert_not_called()
-                gate.assert_not_called()
-                call.assert_not_called()
-        with patch.object(d, "get", return_value=self.before), patch.object(d, "plan_update") as planning, \
-                patch.object(d, "call") as call:
-            gate = Mock(side_effect=r.Stop("stale"))
-            self.stop("stale", d.update_once, "unused", V, gate, True)
-            planning.assert_called_once_with(self.before, V, first_tor_activation=True)
-            gate.assert_called_once_with()
-            call.assert_not_called()
-
-    def test_protected_shipping_entry_explicitly_opts_in_after_existing_gates(self):
-        events = []
-        with patch.object(r, "valid_pins"), patch.object(d, "eligibility", side_effect=lambda *args: events.append("eligibility")), \
-                patch.object(d, "approved", side_effect=lambda *args: events.append("approved")), \
-                patch.object(r, "verify_public", side_effect=lambda *args: events.append("provenance")), \
-                patch.object(d, "serving_tool"), patch.object(d, "install_cli", return_value="pinned-cli"), \
-                patch.object(d, "update_once", return_value={}) as update, \
-                patch.object(d, "verify_serving"), patch("builtins.print"):
-            d.protected(S, R, V, D, "d" * 64, "7")
-            self.assertEqual(events, ["eligibility", "approved", "provenance"])
-            self.assertEqual(update.call_args.args[:2], ("pinned-cli", V))
-            self.assertEqual(update.call_args.kwargs, {"first_tor_activation": True})
-            update.call_args.args[2]()
-            self.assertEqual(events[-2:], ["eligibility", "approved"])
-
-
 class LatestReleasePolicyTest(StopTest):
     def setUp(self):
         environment = patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "TINFOIL_ADMIN_KEY": "synthetic"})
@@ -927,9 +625,7 @@ class LatestReleasePolicyTest(StopTest):
     def activation(self, flag=False):
         before, after, data = view(), view(V), plan()
         before["mark_latest_release"] = after["mark_latest_release"] = data["mark_latest_release"] = flag
-        after["secrets"] += sorted(d.TOR_REFS)
         data.update(instance_id=before["id"], name=d.NAME)
-        data["configuration_changes"]["secrets"] = {"added": sorted(d.TOR_REFS)}
         return before, after, data
 
     def invalid_flags(self, data, flipped=True):
@@ -950,7 +646,7 @@ class LatestReleasePolicyTest(StopTest):
                     patch.object(d, "call", return_value=response) as call:
                 build.return_value.open.return_value = io.BytesIO(json.dumps(data).encode())
                 gate = Mock()
-                result = d.update_once("unused", V, gate, True)
+                result = d.update_once("unused", V, gate)
                 sent = json.loads(build.return_value.open.call_args.args[0].data)
                 self.assertIs(sent["mark_latest_release"], flag)
                 self.assertIn("--mark-latest=" + str(flag).lower(), call.call_args.args[1])
@@ -966,12 +662,12 @@ class LatestReleasePolicyTest(StopTest):
             with patch.object(d, "get", return_value=bad), patch.object(d, "plan_update") as planning, \
                     patch.object(d, "call") as call:
                 gate = Mock()
-                self.stop("control_shape", d.update_once, "unused", V, gate, True)
+                self.stop("control_shape", d.update_once, "unused", V, gate)
                 planning.assert_not_called()
                 gate.assert_not_called()
                 call.assert_not_called()
             with patch.object(d.urllib.request, "build_opener") as build:
-                self.stop("plan_rejected", d.plan_update, bad, V, True)
+                self.stop("plan_rejected", d.plan_update, bad, V)
                 build.assert_not_called()
 
     def test_missing_untyped_or_lying_preplan_flags_never_admit(self):
@@ -982,7 +678,7 @@ class LatestReleasePolicyTest(StopTest):
                         patch.object(d, "get", return_value=before), patch.object(d, "call") as call:
                     build.return_value.open.return_value = io.BytesIO(json.dumps(bad).encode())
                     gate = Mock()
-                    self.stop("plan_rejected", d.update_once, "unused", V, gate, True)
+                    self.stop("plan_rejected", d.update_once, "unused", V, gate)
                     gate.assert_not_called()
                     call.assert_not_called()
 
@@ -996,7 +692,7 @@ class LatestReleasePolicyTest(StopTest):
                 with patch.object(d, "plan_update"), patch.object(d, "get", return_value=before) as get, \
                         patch.object(d, "call", return_value=response) as call:
                     gate = Mock()
-                    self.stop("plan_configuration", d.update_once, "unused", V, gate, True)
+                    self.stop("plan_configuration", d.update_once, "unused", V, gate)
                     gate.assert_called_once_with()
                     call.assert_called_once()
                     get.assert_called_once()
@@ -1013,7 +709,7 @@ class LatestReleasePolicyTest(StopTest):
                              subprocess.CompletedProcess([], 0, b"opaque", json.dumps(data).encode()),
                              subprocess.CompletedProcess([], 0, json.dumps(bad).encode(), b"")]
                 with patch.object(d, "plan_update"), patch.object(d, "call", side_effect=responses) as call:
-                    self.stop("configuration_changed", d.update_once, "unused", V, Mock(), True)
+                    self.stop("configuration_changed", d.update_once, "unused", V, Mock())
                     self.assertEqual(call.call_count, 3)
                     self.assertEqual(sum(item.args[1][1] == "update" for item in call.call_args_list), 1)
         diagnostic = json.dumps(r.diagnostic("configuration_changed"))
@@ -1028,7 +724,7 @@ class LatestReleasePolicyTest(StopTest):
                 patch.object(d, "get", return_value=before), patch.object(d, "call") as call:
             build.return_value.open.return_value = io.BytesIO(json.dumps(data).encode())
             gate = Mock()
-            self.stop("plan_rejected", d.update_once, "unused", V, gate, True)
+            self.stop("plan_rejected", d.update_once, "unused", V, gate)
             gate.assert_not_called()
             call.assert_not_called()
 

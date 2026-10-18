@@ -1,6 +1,11 @@
 # Automatic paid releases and approved production deployment
 
-**Release flow guide, not a live activation or deployment-status report.**
+**Inactive HTTPS-only backup release guide, not activation authority or a live deployment-status report.**
+Tor-specific activation/binding exceptions have been removed. Existing opaque
+secret references must remain identical; this source change does not delete
+runtime secrets. A Tor-configured instance may therefore refuse this candidate's
+no-drift plan: stop for a separately approved migration rather than relaxing the
+guard. See [backup verification](without-tor-backup-verification.md).
 The [2026-10-10 hosted qualification record](approved-main-release-qualification.md)
 records automatic `v0.0.22` and the then-pending simplified deployment gate;
 its disabled/pending statements describe that checkpoint, not current settings.
@@ -34,14 +39,13 @@ qualify later workflows or establish the currently served release.
    actual review history, immutable public provenance and current main before
    admitting one update. Only the latest main candidate may deploy at admission.
 8. The official checksum-pinned CLI updates once, preserving opaque settings and
-   secret references except the [first Tor binding exception](#first-tor-activation-only)
-   and explicitly approved hostname transition from
+   secret references, with only the explicitly approved hostname transition from
    `possum-phase0.possums.containers.tinfoil.dev` to `gateway.possums.dev`. Other
    source hostnames are rejected. A bounded, redirect-free read-only Admin API
    plan is checked before the CLI invocation using the production credential;
    it must identify this instance/current resources and only the approved
-   `custom_domain` setting change on the initial transition plus the exact two
-   Tor reference additions when opted in, with no other setting/reference changes.
+   `custom_domain` setting change on the initial transition, with no other
+   setting/reference changes.
    The update explicitly requests the new domain and repeats
    the plan constraints in post-call review. Bounded readback requires
    the new hostname, target running/no pending, confidential mode on and debug off.
@@ -56,50 +60,16 @@ update are not one transaction: a main push **after admission** does not cancel
 an already-started update. GitHub's pending-job ordering/replacement does not
 promise a release or approval for every intermediate main commit.
 
-## First Tor activation only
+## No configuration-binding exception
 
-The operator authorized the **existing current replica's first Tor activation**
-and binding the already-created organization-managed secret references
-`POSSUMS_TOR_IDENTITY_NATIVE_KEY` and `POSSUMS_TOR_EXPECTED_ONION`. This is the
-operator-selected test-one B identity, not permission to generate a replacement,
-replace existing references, create another replica or change other opaque
-configuration. Secret **values must never be read, displayed or recorded**.
-The shipping source already declares both environment secrets and explicit Tor
-enablement; the protected entry explicitly opts into this narrow exception.
-`update_once` and read-only planning default to no binding additions for existing
-helper callers. All S/R/D/tag, current-main, public provenance, environment,
-operator-approval and at-most-one-update gates remain required.
-
-Before planning, the reference selection must be a unique list of nonempty
-strings. If **either** Tor reference is already bound, admission stops with
-`RELEASE_TOR_EXCLUSIVE_PUBLICATION` before planning or mutation, including for
-non-opted-in updates. Existing bindings do not prove a current publisher, but
-exclusive publication is unknown. Subsequent Tor-bound blue/green updates need
-separate host-drain/exclusivity qualification; this packet authorizes no second
-publisher, stop/redeploy sequence, downtime, lease framework or auto-failover.
-
-For the first activation, the read-only plan explicitly submits **all existing
-reference names plus exactly these two names** with the tag/domain. The single
-checksum-pinned CLI 0.19.0 update repeats that full selection using `--secret NAME`
-for each reference, never a value/token argument. Other request settings remain
-omitted. Both pre-call and CLI post-call plans independently require exactly the
-two additions, no changed/removed references, unchanged variables/SSH keys and
-resources, blue/green, no hold/downtime, and only the existing approved domain
-transition. Readback compares the unique reference selection as an unordered set;
-all other opaque-field equality checks and domain completion rules remain intact.
-
-The parent-reviewed official [0.19.0 confirmation source](https://github.com/tinfoilsh/tinfoil-cli/blob/v0.19.0/update_plan.go)
-prompts for downtime or a changed re-review, not initial secret additions alone.
-Closed stdin and **no `--yes`** are retained: a changed CLI re-review cannot obtain
-interactive consent. CLI output review is still post-call, not a transactional
-lock. Missing/extra/duplicate references or changed opaque metadata after the call
-stop with an unknown completion outcome, without replay or rollback.
-
-`approvedTorBindingsConfirmed` reports only observed control-plane reference
-selection on a running/no-pending target. It proves neither secret mounting nor
-A/B identity use, exclusive instance ownership/publication, SDK runtime appraisal,
-Tor reachability or live Tor E2E. Those remain separately qualified runtime/live
-questions. This source packet performs **no mutation or live acceptance**.
+Both read-only and CLI plans must reject any added, changed or removed secret,
+variable or SSH-key selection. Omit `--secret`; preserve existing opaque metadata
+and require unchanged readback. No new Tor identity/binding, exclusivity rule,
+startup-readiness gate or automatic cleanup is part of this backup.
+Closed stdin, no `--yes`, one update at most, bounded observation, unknown-outcome
+handling and the separate serving check remain required. Historical first-Tor
+activation evidence is preserved in prior Git history and the dated verification
+records; it is not an applicable rollout recipe.
 
 ## no-rollout-needed
 
@@ -258,7 +228,9 @@ Deployment configuration stays opaque and memory-only; serving verification has
 no admin/GitHub credentials, prompt body or cookies. GitHub retains native workflow
 history and public release artifacts; this is **not** whole-process transience or
 an absence-of-platform-logs claim. No telemetry family, destination, retention or
-runtime privacy policy changed. `FirstTorActivationTest` in
+runtime privacy policy changed by that historical packet.
+
+**Historical pre-removal evidence, not this backup:** `FirstTorActivationTest` in
 `tests/test_release_automation.py` exercises full name-only selection, exact plan
 constraints before/after the call, already-bound refusal, unordered readback,
 opaque-field preservation, hostile metadata/errors and no replay. Existing CLI

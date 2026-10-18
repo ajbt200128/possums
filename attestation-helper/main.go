@@ -21,7 +21,6 @@ const (
 	nonceBytes       = 32
 	maxEvidenceBytes = 16 << 20
 	requestTimeout   = 30 * time.Second
-	readinessPoll    = 250 * time.Millisecond
 )
 
 type verifiedEvidence struct {
@@ -35,14 +34,7 @@ type verifiedEvidence struct {
 func main() {
 	socket := flag.String("socket", "/tinfoil/attestation.sock", "Tinfoil attestation socket")
 	repo := flag.String("repo", "", "trusted owner/repository[@tag][@sha256:digest]")
-	tor := flag.Bool("tor-nonce-stdin", false, "Tor self-appraisal with exactly 32 raw nonce bytes on stdin")
 	flag.Parse()
-	if *tor {
-		if err := json.NewEncoder(os.Stdout).Encode(torEvidence(os.Stdin, *socket, *repo)); err != nil {
-			os.Exit(1)
-		}
-		return
-	}
 	if *repo == "" {
 		os.Exit(1)
 	}
@@ -62,85 +54,6 @@ func main() {
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		os.Exit(1)
 	}
-}
-
-// Separate opt-in wire; the default native response is unchanged.
-type torResponse struct {
-	Evidence *verifiedTorEvidence `json:"evidence,omitempty"`
-	Failure  *nativeTorFailure    `json:"failure,omitempty"`
-}
-
-// Tor-native acquisition metadata only; shared/default/WASM Failure is unchanged.
-type nativeTorFailure struct {
-	*verifier.Failure
-	Status *int `json:"status,omitempty"`
-}
-
-type verifiedTorEvidence struct {
-	verifiedEvidence
-	TorEndorsementKey string `json:"tor_endorsement_key"`
-}
-
-func torEvidence(input io.Reader, socket, repo string) torResponse {
-	return torEvidenceContext(context.Background(), input, socket, repo)
-}
-
-func torEvidenceContext(ctx context.Context, input io.Reader, socket, repo string) (response torResponse) {
-	stage := "input"
-	defer func() {
-		if recover() != nil {
-			response = torResponse{Failure: torFailure(stage, "cause_unknown")}
-		}
-	}()
-	nonce, err := io.ReadAll(io.LimitReader(input, nonceBytes+1))
-	if err != nil {
-		return torResponse{Failure: torFailure(stage, "cause_unknown")}
-	}
-	if len(nonce) != nonceBytes {
-		return torResponse{Failure: torFailure(stage, "nonce")}
-	}
-	stage = "acquisition"
-	document, err := fetchTorEvidence(ctx, socket, nonce)
-	if err != nil {
-		return torResponse{Failure: torAcquisitionFailure(err)}
-	}
-	stage = "verification"
-	facts, failure := verifier.VerifyTor(document, nonce, repo)
-	if failure != nil {
-		return torResponse{Failure: &nativeTorFailure{Failure: failure}}
-	}
-	return torResponse{Evidence: &verifiedTorEvidence{
-		verifiedEvidence: verifiedEvidence{
-			Quote: json.RawMessage(document), IssuedAtUnix: time.Now().Unix(),
-			ReleaseDigest: facts.ReleaseDigest, EndpointKeySHA256: facts.TLSKeySHA256,
-			FreshnessExpiresAtUnix: facts.FreshnessExpiresAtUnix,
-		},
-		TorEndorsementKey: facts.TorEndorsementKey,
-	}}
-}
-
-func torFailure(stage, constraint string) *nativeTorFailure {
-	return &nativeTorFailure{Failure: &verifier.Failure{Code: "possums_v3_" + stage + "_" + constraint, Stage: stage, Constraint: constraint}}
-}
-
-func torAcquisitionFailure(err error) *nativeTorFailure {
-	var observed acquisitionHTTPStatus
-	if errors.As(err, &observed) {
-		if observed.status < 100 || observed.status > 999 {
-			return torFailure("acquisition", "cause_unknown")
-		}
-		failure := torFailure("acquisition", "http_status")
-		failure.Status = &observed.status
-		return failure
-	}
-	var acquisition acquisitionFailure
-	if errors.As(err, &acquisition) {
-		switch acquisition {
-		case acquisitionTransport, acquisitionStatus, acquisitionRead, acquisitionSize:
-			return torFailure("acquisition", string(acquisition))
-		}
-	}
-	return torFailure("acquisition", "cause_unknown")
 }
 
 func appraiseEvidence(document, nonce []byte, repo string) (verifiedEvidence, error) {
@@ -172,29 +85,6 @@ const (
 type acquisitionHTTPStatus struct{ status int }
 
 func (acquisitionHTTPStatus) Error() string { return string(acquisitionStatus) }
-
-// The local shim can listen before its attestation handler is ready. Only its
-// observed 503 permits reacquisition, never a failed appraisal or transport.
-// One deadline covers all attempts; keep the same fresh challenge throughout.
-func fetchTorEvidence(ctx context.Context, socket string, nonce []byte) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-	for {
-		body, err := fetchEvidenceContext(ctx, socket, nonce)
-		var status acquisitionHTTPStatus
-		if !errors.As(err, &status) || status.status != http.StatusServiceUnavailable {
-			return body, err
-		}
-		timer := time.NewTimer(readinessPoll)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			// Preserve the observed status, not an invented transport/root cause.
-			return nil, status
-		case <-timer.C:
-		}
-	}
-}
 
 func fetchEvidence(socket string, nonce []byte) ([]byte, error) {
 	return fetchEvidenceContext(context.Background(), socket, nonce)

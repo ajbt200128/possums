@@ -1,5 +1,10 @@
 # Independent offline Tor preparation and ingress integration
 
+> Historical evidence only in this inactive HTTPS-only backup. Tor code/assets
+> are removed; commands and authorizations below do not apply to this branch.
+> Results and unresolved failures retain their original scope. See
+> [backup verification](without-tor-backup-verification.md).
+
 Source-only independent tester, based on `dbc623391940131229b90c32df6cc6eb4e8af679`.
 No rollout, provisioning, approval, inference, public network probe, service
 bootstrap/publication or production mutation is authorized by this record.

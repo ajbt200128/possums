@@ -1,5 +1,10 @@
 # Bounded Arti embedding spike
 
+> Historical research only in this inactive HTTPS-only backup. Tor code/spikes
+> are removed; commands and authorizations below do not apply to this branch.
+> Results and limitations remain historical. See
+> [backup verification](without-tor-backup-verification.md).
+
 **Local source/compile and offline synthetic evidence only, 2026-10-13.**
 Feasibility exploration, not a shipping Tor implementation, measured image,
 installed client, live service, v3 success or privacy-policy change. Scope is only

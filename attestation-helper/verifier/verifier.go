@@ -5,7 +5,6 @@ package verifier
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -28,9 +27,7 @@ const (
 	MaxEvidenceBytes = 16 << 20
 	MaxManifestBytes = 512 << 10
 	Repository       = "ajbt200128/possums"
-	// TorEndorsementKeyID is fixed by the endorsement protocol version, not caller input.
-	TorEndorsementKeyID = "possums-tor-endorsement-v1"
-	workflow            = "https://github.com/" + Repository + "/.github/workflows/tinfoil-release-publish.yml"
+	workflow         = "https://github.com/" + Repository + "/.github/workflows/tinfoil-release-publish.yml"
 )
 
 var (
@@ -63,25 +60,11 @@ type Result struct {
 	FreshnessExpiresAtUnix int64  `json:"freshness_expires_at_unix"`
 }
 
-// TorResult is opt-in only; TorEndorsementKey is the endorsed raw 32-byte
-// Ed25519 public key in lowercase hex, not an onion identity or authorization.
-type TorResult struct {
-	Result
-	TorEndorsementKey string `json:"tor_endorsement_key"`
-}
-
 // Verify requires a caller-owned nonce and workload reference. The return value
 // is not cached authorization: callers must bind their connection to its keys
 // and refuse new work at or after FreshnessExpiresAtUnix.
 func Verify(evidence, nonce []byte, repository string) (Result, *Failure) {
-	result, failure := verifyEvidence(evidence, nonce, repository, nil, false)
-	return result.Result, failure
-}
-
-// VerifyTor is native self-appraisal: the same SDK/publisher checks as Verify,
-// with the fixed application-key projection. Client manifests remain mandatory.
-func VerifyTor(evidence, nonce []byte, repository string) (TorResult, *Failure) {
-	return verifyEvidence(evidence, nonce, repository, nil, true)
+	return verifyEvidence(evidence, nonce, repository, nil)
 }
 
 // VerifyClient additionally binds the downloaded release manifest to the
@@ -91,101 +74,51 @@ func VerifyClient(evidence, nonce []byte, repository string, manifest []byte) (R
 	if len(manifest) == 0 || len(manifest) > MaxManifestBytes {
 		return Result{}, fail("publisher", "manifest")
 	}
-	result, failure := verifyEvidence(evidence, nonce, repository, manifest, false)
-	return result.Result, failure
+	return verifyEvidence(evidence, nonce, repository, manifest)
 }
 
-// VerifyTorClient adds the fixed Tor signing-key projection only after the same
-// production SDK and complete publisher/manifest qualification as VerifyClient.
-// Consumers must enforce the returned expiry before accepting an endorsement.
-func VerifyTorClient(evidence, nonce []byte, repository string, manifest []byte) (TorResult, *Failure) {
-	if len(manifest) == 0 || len(manifest) > MaxManifestBytes {
-		return TorResult{}, fail("publisher", "manifest")
-	}
-	return verifyEvidence(evidence, nonce, repository, manifest, true)
-}
-
-func verifyEvidence(evidence, nonce []byte, repository string, manifest []byte, tor bool) (result TorResult, failure *Failure) {
+func verifyEvidence(evidence, nonce []byte, repository string, manifest []byte) (result Result, failure *Failure) {
 	stage := "input"
 	defer func() {
 		if recover() != nil {
-			result = TorResult{}
+			result = Result{}
 			failure = fail(stage, "cause_unknown")
 		}
 	}()
 	if len(evidence) == 0 || len(evidence) > MaxEvidenceBytes {
-		return TorResult{}, fail(stage, "size")
+		return Result{}, fail(stage, "size")
 	}
 	if len(nonce) != NonceBytes {
-		return TorResult{}, fail(stage, "nonce")
+		return Result{}, fail(stage, "nonce")
 	}
 	repo, _, _, err := tinfoil.ParseReference(repository)
 	if err != nil || repo != Repository {
-		return TorResult{}, fail(stage, "workload")
+		return Result{}, fail(stage, "workload")
 	}
 	stage = "envelope"
 	doc, err := document.Parse(evidence, nonce)
 	if err != nil {
-		return TorResult{}, fail(stage, "rejected")
+		return Result{}, fail(stage, "rejected")
 	}
 	stage = "verification"
 	appraiser, err := tinfoil.NewVerifier()
 	if err != nil {
-		return TorResult{}, fail(stage, "cause_unknown")
+		return Result{}, fail(stage, "cause_unknown")
 	}
 	verified, err := appraiser.VerifyV3(evidence, nonce, repository)
 	if err != nil {
 		var rejected *tinfoil.AttestationError
 		if errors.As(err, &rejected) {
-			return TorResult{}, fail(stage, "rejected")
+			return Result{}, fail(stage, "rejected")
 		}
-		return TorResult{}, fail(stage, "cause_unknown")
+		return Result{}, fail(stage, "cause_unknown")
 	}
 	stage = "publisher"
 	if failure := qualifyPublisher(doc, verified, manifest); failure != nil {
-		return TorResult{}, failure
+		return Result{}, failure
 	}
 	stage = "keys"
-	if tor {
-		return projectTor(verified, time.Now())
-	}
-	facts, failure := project(verified, time.Now())
-	return TorResult{Result: facts}, failure
-}
-
-func projectTor(verified *tinfoil.Verification, now time.Time) (TorResult, *Failure) {
-	facts, failure := project(verified, now)
-	if failure != nil {
-		return TorResult{}, failure
-	}
-	// The SDK parser rejects duplicate IDs, but its public accessor selects the
-	// first match. Preserve exact-one semantics even for a synthetic SDK record.
-	matches := 0
-	for _, item := range verified.CryptoMaterial {
-		if item.ID == TorEndorsementKeyID {
-			matches++
-		}
-	}
-	if matches != 1 {
-		return TorResult{}, fail("keys", "tor_endorsement_entry")
-	}
-	encoded, err := verified.CryptoMaterialData(TorEndorsementKeyID, document.KeySPKIV1Format)
-	if err != nil {
-		return TorResult{}, fail("keys", "tor_endorsement_format")
-	}
-	der, err := hex.DecodeString(encoded)
-	if err != nil || hex.EncodeToString(der) != encoded {
-		return TorResult{}, fail("keys", "tor_endorsement_spki")
-	}
-	key, err := x509.ParsePKIXPublicKey(der)
-	if err != nil {
-		return TorResult{}, fail("keys", "tor_endorsement_spki")
-	}
-	public, ok := key.(ed25519.PublicKey)
-	if !ok || len(public) != ed25519.PublicKeySize {
-		return TorResult{}, fail("keys", "tor_endorsement_algorithm")
-	}
-	return TorResult{Result: facts, TorEndorsementKey: hex.EncodeToString(public)}, nil
+	return project(verified, time.Now())
 }
 
 func project(verified *tinfoil.Verification, now time.Time) (Result, *Failure) {

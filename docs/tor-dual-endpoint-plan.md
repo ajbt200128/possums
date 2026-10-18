@@ -1,5 +1,11 @@
 # Tor v0: two stable endpoints, shared source prerequisite
 
+> Historical plan/evidence only in this inactive HTTPS-only backup. All Tor
+> runtime, client and release hooks are removed, not merely disabled. Commands,
+> continuation instructions and authorizations below do not apply here; prior
+> results and unresolved failures remain historical. See
+> [backup verification](without-tor-backup-verification.md).
+
 **Current continuation:** backend source integration and the opaque shim bridge
 below supersede the historical unwired/raw-HTTP plan. The operator now permits
 Monero-style optional SOCKS credentials/no-auth, backend deployment and live E2E;

@@ -21,9 +21,5 @@ pub mod server;
 #[allow(dead_code)]
 mod stream_owner;
 pub mod telemetry;
-pub mod tor_endorsement;
-#[cfg(feature = "tor")]
-pub mod tor_ingress;
-pub mod tor_runtime;
 
 pub const SERVICE_NAME: &str = "possums";

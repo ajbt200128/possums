@@ -1,5 +1,9 @@
 # Source-only Tor public setup response adapter
 
+> Historical evidence only in this inactive HTTPS-only backup. Tor code/assets
+> are removed; setup commands and authorizations below do not apply here.
+> No installed package was changed. See [backup verification](without-tor-backup-verification.md).
+
 ## Current client integration — offline only
 
 The following historical adapter packet is now used by the source candidate's

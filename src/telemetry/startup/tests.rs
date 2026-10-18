@@ -5,15 +5,12 @@ use tokio::{
     net::TcpListener,
 };
 
-const STAGES: [Stage; 8] = [
+const STAGES: [Stage; 5] = [
     Stage::Configuration,
     Stage::Accounts,
     Stage::Signal,
-    Stage::TorPreparation,
     Stage::Connect,
     Stage::Bind,
-    Stage::TorBootstrap,
-    Stage::TorLaunch,
 ];
 const HOSTILE: &str = "HOSTILE_SECRET_URL_ACCOUNT_ONION_PANIC";
 
@@ -191,8 +188,8 @@ async fn finite_stages_terminal_once_and_off_keeps_platform_observations() {
         }
         let state = startup.state.as_ref().unwrap();
         assert_eq!(state.records.len(), MAX_RECORDS - 1);
-        assert_eq!(state.seen, u8::MAX);
-        assert_eq!(state.current, Stage::TorLaunch);
+        assert_eq!(state.seen, (1 << STAGES.len()) - 1);
+        assert_eq!(state.current, Stage::Bind);
         for (record, stage) in state.records.iter().zip(STAGES) {
             assert_eq!(record.stage, stage);
             assert_eq!(record.outcome, None);
@@ -218,16 +215,6 @@ fn known_failures_and_stage_specific_unknowns_keep_safe_evidence() {
         Failure::Connect(InferenceFailure::CatalogFailed),
         Failure::Connect(InferenceFailure::TokenizerSendDeadline),
         Failure::Connect(InferenceFailure::TokenizerConnectFailed),
-        Failure::Tor(TorStartupFailure::Configuration),
-        Failure::Tor(TorStartupFailure::FeatureUnavailable),
-        Failure::Tor(TorStartupFailure::GrantRead),
-        Failure::Tor(TorStartupFailure::GrantInvalid),
-        Failure::Tor(TorStartupFailure::GrantMismatch),
-        Failure::Tor(TorStartupFailure::IdentityFileInvalid),
-        Failure::Tor(TorStartupFailure::IdentitySecretInvalid),
-        Failure::Tor(TorStartupFailure::State),
-        Failure::Tor(TorStartupFailure::Client),
-        Failure::Tor(TorStartupFailure::Bootstrap),
     ];
     for failure in failures {
         let record = Observation::new(Stage::Connect, Some(Outcome::Failed(failure)));
@@ -273,47 +260,7 @@ fn known_failures_and_stage_specific_unknowns_keep_safe_evidence() {
     }
 }
 
-#[cfg(feature = "tor")]
-#[test]
-fn nested_tor_codes_are_preserved_without_appraisal_status() {
-    use crate::{server::ServerFailure, tor_ingress};
-    let cases = [
-        (
-            Failure::Tor(TorStartupFailure::Identity(
-                tor_ingress::Failure::IdentityMismatch,
-            )),
-            "code=tor_identity_mismatch",
-        ),
-        (
-            Failure::TorLaunch(tor_ingress::ServeFailure {
-                source: Some(tor_ingress::Failure::Launch),
-                shared: Some(ServerFailure::ShutdownIntegrity),
-                reporting: Some(tor_ingress::ReportingFailure {
-                    original: tor_ingress::Failure::Disabled,
-                }),
-            }),
-            "code=tor_reporter_unknown",
-        ),
-    ];
-    for (failure, code) in cases {
-        let record = Observation::new(Stage::TorLaunch, Some(Outcome::Failed(failure)));
-        let body = record.to_string();
-        assert!(body.contains(code));
-        assert!(body.len() < 2048);
-        assert!(!body.contains(HOSTILE));
-        let bytes = logs(&[record]).encode_to_vec();
-        assert!(bytes
-            .windows(code.len())
-            .any(|window| window == code.as_bytes()));
-        // Status never becomes a startup metric dimension.
-        assert!(!String::from_utf8_lossy(&metrics(&[record]).encode_to_vec()).contains(code));
-    }
-    assert!(!Failure::Tor(TorStartupFailure::Bootstrap)
-        .to_string()
-        .contains("status="));
-}
-
-pub(super) async fn capture<S: AsyncRead + Unpin>(stream: &mut S, path: &str) -> Vec<u8> {
+async fn capture<S: AsyncRead + Unpin>(stream: &mut S, path: &str) -> Vec<u8> {
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
         assert!(header.len() < 4096);

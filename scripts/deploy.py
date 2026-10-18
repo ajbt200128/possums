@@ -25,7 +25,6 @@ CLI_SHA256 = "ef014c67a976b4b47941d084fb0a3837ba6eb59c9f4e662424c6826fb7a70f8c"
 CLI_URL = "https://github.com/tinfoilsh/tinfoil-cli/releases/download/v0.19.0/tinfoil-cli_0.19.0_linux_amd64.tar.gz"
 LIMIT = 16 << 20
 REQUIRED_REFS = {"POSSUMS_ACCOUNTS_JSON", "TINFOIL_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
-TOR_REFS = {"POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"}
 STABLE = ("id", "name", "repo", "project_id", "cpus", "gpus", "memory_mb", "variables", "secrets",
           "ssh_keys", "debug", "disable_cc_mode", "domain", "held", "volume_slots", "volumes",
           "host_gpu_type", "host_cpu_type")
@@ -54,16 +53,13 @@ r.CODES.update({
     "not_stable": ("plan", "Reconcile pending, held, debug, non-confidential or non-running production state before a new request."),
     "plan_http": ("pre-update-plan", "Check production admin planning access and the observed HTTP status; no update was sent."),
     "plan_fetch": ("pre-update-plan", "The read-only plan could not be acquired; cause unknown. Check control-plane connectivity; no update was sent."),
-    "plan_rejected": ("pre-update-plan", "The read-only plan did not match the release and approved hostname/first-Tor-binding constraints; no update was sent."),
+    "plan_rejected": ("pre-update-plan", "The read-only plan did not match the release and approved hostname and unchanged configuration constraints; no update was sent."),
     "plan_missing": ("post-call-plan", "The update may have happened. Privately reconcile the missing CLI plan; never replay automatically."),
     "plan_strategy": ("post-call-plan", "The update may have happened; completion is unknown. Privately reconcile the unexpected strategy, hold or downtime policy; no replay or rollback."),
     "plan_target": ("post-call-plan", "The update may have happened; completion is unknown. Privately reconcile the unexpected source or target; no replay or rollback."),
     "plan_configuration": ("post-call-plan", "The update may have happened; completion is unknown. Privately reconcile configuration/reference changes; no replay or rollback."),
     "cli_uncertain": ("mutation", "The update outcome is uncertain. Inspect state privately; never rerun or automatically roll back."),
     "configuration_changed": ("completion", "The update may have happened; completion is unknown. Privately reconcile changed opaque configuration; no replay or rollback."),
-    "tor_binding": ("first-tor-binding", "Require a unique nonempty-string secret-reference list before adding only the two approved Tor references; no update was sent."),
-    "tor_exclusive_publication": ("tor-publication", "Exclusive publication is unknown for an already Tor-bound instance. Separately qualify host drain/exclusivity before another update; no update was sent."),
-    "tor_binding_completion": ("completion-tor-binding", "The update may have happened; the approved secret-reference selection was not confirmed and completion is unknown. Reconcile privately; no replay or rollback."),
     "candidate_failed": ("completion-candidate", "The requested update candidate is reported failed; its initiating cause, cleanup and serving are unknown. Inspect supported startup diagnostics privately; no replay or rollback."),
     "domain_source": ("plan-domain", "Production must use the approved old or new hostname; reconcile its configuration before a new deployment."),
     "domain_completion": ("completion-domain", "The release is running but the approved hostname was not confirmed; reconcile privately without replay or rollback."),
@@ -225,27 +221,18 @@ def unique_names(value):
             and len(value) == len(set(value)))
 
 
-def first_tor_selection(before):
-    names = before.get("secrets")
-    r.require(unique_names(names), "tor_binding")
-    r.require(not TOR_REFS.intersection(names), "tor_exclusive_publication")
-    return [*names, *sorted(TOR_REFS)]
-
-
-def stable_running(view, tag, required_refs=REQUIRED_REFS):
+def stable_running(view, tag):
     return (view.get("repo") == r.REPO and view.get("current_tag") == tag
             and str(view.get("status")).lower() == "running" and not view.get("update_tag")
             and boolean(view.get("debug"), False) and boolean(view.get("disable_cc_mode"), False)
             and boolean(view.get("held"), False) and type(view.get("mark_latest_release")) is bool
             and unique_names(view.get("secrets"))
-            and required_refs.issubset(set(view["secrets"]))
+            and REQUIRED_REFS.issubset(set(view["secrets"]))
             and all(field in view for field in STABLE))
 
 
-def inspect_plan(raw, previous, tag, previous_domain=DOMAIN, approved_additions=(), current_resources=None):
+def inspect_plan(raw, previous, tag, previous_domain=DOMAIN, current_resources=None):
     try:
-        r.require(unique_names(list(approved_additions))
-                  and (not approved_additions or set(approved_additions) == TOR_REFS), "plan_configuration")
         text = raw.decode("utf-8").lstrip()
         plans = 0
         while text.startswith("{"):
@@ -272,11 +259,10 @@ def inspect_plan(raw, previous, tag, previous_domain=DOMAIN, approved_additions=
                 for kind in ("added", "changed", "removed"):
                     names = change.get(kind, [])
                     # The official Go CLI serializes nil change slices as null.
-                    # Preserve zero-change semantics; required additions still must match.
+                    # Preserve zero-change semantics.
                     if names is None:
                         names = []
-                    expected = set(approved_additions) if family == "secrets" and kind == "added" else set()
-                    r.require(unique_names(names) and set(names) == expected, "plan_configuration")
+                    r.require(unique_names(names) and not names, "plan_configuration")
             for field in ("cpus", "gpus", "memory_mb"):
                 r.require(type(plan["current"].get(field)) is int and type(plan["target"].get(field)) is int
                           and plan["current"][field] == plan["target"][field], "plan_configuration")
@@ -295,16 +281,13 @@ class NoPlanRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def plan_update(before, tag, first_tor_activation=False):
+def plan_update(before, tag):
     """The documented Admin API has a read-only plan route; the CLI has no plan-only command."""
     try:
-        selection = first_tor_selection(before) if first_tor_activation else None
         r.require(isinstance(before["id"], str) and re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", before["id"]), "plan_rejected")
         r.require(type(before.get("mark_latest_release")) is bool, "plan_rejected")
         fields = {"tag": tag, "custom_domain": DOMAIN,
                   "mark_latest_release": before["mark_latest_release"]}
-        if selection is not None:
-            fields["secrets"] = selection
         body = json.dumps(fields).encode()
         request = urllib.request.Request("https://api.tinfoil.sh/api/containers/" + before["id"] + "/update/plan",
             data=body, headers={"Authorization": "Bearer " + os.environ["TINFOIL_ADMIN_KEY"],
@@ -319,8 +302,7 @@ def plan_update(before, tag, first_tor_activation=False):
         r.require(isinstance(plan, dict), "plan_rejected")
         r.require(plan.get("instance_id") == before["id"] and plan.get("name") == NAME, "plan_rejected")
         try:
-            inspect_plan(raw, before["current_tag"], tag, before["domain"],
-                         approved_additions=TOR_REFS if first_tor_activation else (), current_resources=before)
+            inspect_plan(raw, before["current_tag"], tag, before["domain"], current_resources=before)
         except r.Stop:
             raise r.Stop("plan_rejected") from None
     except urllib.error.HTTPError as error:
@@ -337,7 +319,7 @@ def plan_update(before, tag, first_tor_activation=False):
         raise r.Stop("plan_fetch") from None
 
 
-def update_once(cli, tag, final_gate, first_tor_activation=False):
+def update_once(cli, tag, final_gate):
     """Testable mutation primitive; entry point verifies policy and public provenance.
 
     CLI's plan is reviewed POST-CALL: stable blue/green can already execute.
@@ -346,60 +328,37 @@ def update_once(cli, tag, final_gate, first_tor_activation=False):
     r.require(os.environ.get("GITHUB_RUN_ATTEMPT") == "1", "rerun")
     r.require(bool(os.environ.get("TINFOIL_ADMIN_KEY")), "credential")
     before = get(cli)
-    selection = first_tor_selection(before) if first_tor_activation else None
-    if not first_tor_activation and unique_names(before.get("secrets")):
-        r.require(not TOR_REFS.intersection(before["secrets"]), "tor_exclusive_publication")
     r.require(type(before.get("mark_latest_release")) is bool, "control_shape")
     previous = before.get("current_tag")
     r.require(before.get("domain") in (OLD_DOMAIN, DOMAIN), "domain_source")
     r.require(isinstance(previous, str) and re.fullmatch(r.VERSION, previous) is not None
               and previous != tag and stable_running(before, previous), "not_stable")
-    if first_tor_activation:
-        plan_update(before, tag, first_tor_activation=True)
-    else:
-        plan_update(before, tag)
+    plan_update(before, tag)
     arguments = ["container", "update", NAME, "--tag", tag,
                  "--custom-domain", DOMAIN, "--output", "json",
                  "--mark-latest=" + str(before["mark_latest_release"]).lower()]
-    if selection is not None:
-        for name in selection:
-            arguments.extend(["--secret", name])
     final_gate()  # Main/policy recheck AFTER approval and read-only planning, immediately before invocation.
     try:
         result = call(cli, arguments, timeout=1800)
     except Exception:
         raise r.Stop("cli_uncertain") from None
     r.require(result.returncode == 0, "cli_uncertain")
-    inspect_plan(result.stderr, previous, tag, before["domain"],
-                 approved_additions=TOR_REFS if first_tor_activation else (), current_resources=before)
+    inspect_plan(result.stderr, previous, tag, before["domain"], current_resources=before)
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         after = get(cli)
         r.require(type(after.get("mark_latest_release")) is bool
                   and after["mark_latest_release"] == before["mark_latest_release"], "configuration_changed")
-        if selection is not None:
-            # CLI JSON returns the initial response without following progress.
-            # Until promotion, the current instance may retain its old references.
-            pending_current = (after.get("current_tag") == previous
-                               and after.get("status") == "running"
-                               and after.get("update_tag") == tag
-                               and unique_names(after.get("secrets"))
-                               and set(after["secrets"]) == set(before["secrets"]))
-            r.require(unique_names(after.get("secrets"))
-                      and (set(after["secrets"]) == set(selection) or pending_current),
-                      "tor_binding_completion")
-        unchanged = [field for field in STABLE if field != "domain" and not (first_tor_activation and field == "secrets")]
+        unchanged = [field for field in STABLE if field != "domain"]
         r.require(all(before[field] == after[field] for field in unchanged)
                   and after.get("domain") in (before["domain"], DOMAIN), "configuration_changed")
         r.require(not (after.get("update_tag") == tag and after.get("update_status") == "failed"),
                   "candidate_failed")
-        if stable_running(after, tag, REQUIRED_REFS | TOR_REFS if first_tor_activation else REQUIRED_REFS):
+        if stable_running(after, tag):
             r.require(after["domain"] == DOMAIN, "domain_completion")
             result = {"cliSucceeded": True, "postCallPlanReviewed": True, "opaqueConfigurationPreserved": True,
                       "approvedDomainConfirmed": True,
                       "targetRunningNoPending": True, "mutationCommandCount": 1, "servingVerified": False}
-            if first_tor_activation:
-                result["approvedTorBindingsConfirmed"] = True
             return result
         time.sleep(10)
     raise r.Stop("completion_timeout")
@@ -418,7 +377,7 @@ def protected(source, release, tag, image, manifest, environment_id):
         eligibility(source, environment_id)
         approved(environment_id)
 
-    result = update_once(cli, tag, final_gate, first_tor_activation=True)
+    result = update_once(cli, tag, final_gate)
     # Preserve observed deployment success even if the later serving check fails.
     print(json.dumps(result), flush=True)
     verify_serving(tag, manifest)

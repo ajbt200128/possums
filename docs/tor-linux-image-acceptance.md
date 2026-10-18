@@ -1,5 +1,11 @@
 # Candidate Linux image: offline NSS/SDK acceptance
 
+> Historical Tor image qualification record only. This inactive HTTPS-only
+> backup removes the Tor probe/CI path; UID/GID 65532 NSS accounts and ordinary
+> image startup/health gates remain. Commands and requirements below are not
+> this branch's acceptance plan. Earlier failures remain unresolved at their
+> recorded scope. See [backup verification](without-tor-backup-verification.md).
+
 This is development/PR CI only, not deployment or live Tor acceptance. The draft
 PR's verification record must pin the tested head, check workflow run/attempt,
 Docker image ID and Linux architecture after CI finishes. Until that record has

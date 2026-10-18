@@ -257,7 +257,7 @@ async fn malformed_deep_dense_and_fragmented_api_json_never_reaches_inference() 
 }
 
 #[tokio::test]
-async fn removed_browser_routes_are_bounded_non_html_and_never_infer() {
+async fn removed_routes_are_bounded_non_html_and_never_infer() {
     use http_body_util::BodyExt;
     for path in [
         "/",
@@ -269,6 +269,8 @@ async fn removed_browser_routes_are_bounded_non_html_and_never_infer() {
         "/recovery",
         "/recovery/download",
         "/claims",
+        "/attestation/tor",
+        "/attestation/tor?nonce=hostile-prompt-canary",
     ] {
         for method in ["GET", "POST"] {
             let response = possums::server::router(state())

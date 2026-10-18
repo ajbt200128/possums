@@ -1,5 +1,12 @@
 # Finite Tor startup-readiness diagnostics — source only
 
+> Historical PR90 evidence only. This inactive HTTPS-only backup is composed on
+> exact PR90 merge `ca7243b88a6b5b11a930ff743206589633a497d6` and removes the
+> readiness modules, observer/delivery hooks, direct libc dependency and policy
+> exception. General startup diagnostics remain. No historical Linux gap or
+> production failure is claimed resolved. See
+> [backup verification](without-tor-backup-verification.md).
+
 Policy: [startup exception](../PRIVACY.md#startup-diagnostics-exception), [forbidden data](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [processor/retention/shutdown boundaries](../PRIVACY.md#processors-retention-access-and-shutdown), [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change). Earlier local-initialization evidence remains in [startup diagnostics](startup-diagnostics-verification.md).
 
 ## Narrow contract

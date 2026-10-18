@@ -43,10 +43,6 @@ run('phase01_stream_limits.mjs', { PHASE01_BUILD: output, PHASE02_CLIENT_INSTALL
 run('tinfoil_forwarding_client.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs') });
 run('phase02_release.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
 run('phase02_v3.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
-run('tor_channel.mjs', { PHASE02_RELEASE_SOURCE: packageSource,
-  POSSUMS_TOR_NATIVE_HELPER: path.join(scratch, 'package', 'possums-tor-native') });
-run('tor_selection.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
-run('tor_client_failures.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
 run('phase02_v3_package.mjs', { PHASE02_PACKAGE: path.join(scratch, 'package'), POSSUMS_PI_ROOT: piRoot });
 run('phase02_cache.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs') });
 run('phase02_thinking.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), POSSUMS_PI_ROOT: piRoot });

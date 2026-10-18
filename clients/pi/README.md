@@ -1,5 +1,17 @@
 # Possums provider for Pi 1.0.4
 
+## Inactive HTTPS-only backup
+
+This branch removes Tor selection flags, SOCKS/native helpers, onion setup and
+endorsement verification. Tor is unsupported; no Tor request is silently retried
+through HTTPS. Use only the existing verified HTTPS bootstrap. Old Tor-selected
+packages will fail against this candidate (the Tor endorsement route is absent).
+Previously installed packages/settings are untouched. Do not install or activate
+this scratch candidate without separate authorization. Shipped HTTPS decoder
+coverage and remaining compatibility/Linux/live gaps are recorded in
+[backup verification](../../docs/without-tor-backup-verification.md).
+The release/install observations below are historical, not this backup's status.
+
 The catalog-wide gateway tool profile is deployed as **v0.0.15** (the official gateway v3 helper compatibility fix is included; the separate 16-KiB tool-description cap remains removed, while other limits and the shared tool profile are unchanged). All authenticated catalog models advertise the assumed shared OpenAI-functions wire profile; this is not per-model compatibility qualification. A real Kimi Pi round with local `ls`/`read` execution and a correct final continuation was observed on v0.0.10; exact live billing/balance reconciliation remains unverified. See [release scope](../../docs/phase02-pi-release.md).
 
 ## Nonce-bound v3 client (source/scratch qualified; not installed)

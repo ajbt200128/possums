@@ -1,5 +1,11 @@
 # Configured NSS release-cache boundary followup
 
+> Historical graph/image evidence for the exact sources below. This inactive
+> HTTPS-only backup removes Tor graph members without changing the strict
+> checker or NSS account recipe. Its fresh partition check passed, but it has
+> no new Linux image identity or A/B evidence. See
+> [backup verification](without-tor-backup-verification.md).
+
 ## Scope and cause
 
 Source S: `bc34561fc8d4670a56e25778d01676d296b95c92` (PR #87).
