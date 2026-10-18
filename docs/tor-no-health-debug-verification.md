@@ -72,11 +72,51 @@ failed with closed `connect_unknown` and exit1 when no listener existed.
 The existing same-repository diagnostic release path commits that exact digest
 and uses the official pinned measurement/signing action with
 `mark-as-latest: false`; no current-main production dispatcher is used. This is
-not an independently reproduced production release. Signed release, deployed
-runtime and onion readiness remain pending.
+not an independently reproduced production release.
+
+[Signed release run 39146916679](https://github.com/ajbt200128/possums/actions/runs/39146916679),
+attempt one, succeeded for tag `v0.0.53-debug-tor-health.1`, release commit
+`82b8ff523c10a1c3c1727a9122e2855a45b4ebec`. The exact-source/image/config gate
+passed before the official pinned measurement/signing action. Downloaded public
+manifest/hash were checked with the existing repository manifest validator;
+`gh attestation verify` cryptographically verified the exact tagged
+`tinfoil-release.yml` signer, source/signer commit, predicate type and hosted
+runner. The verified statement's predicate and subject equal the checked
+manifest and its SHA256, and its invocation is that exact run/attempt.
+Manifest SHA256:
+`32f8a1c1190559c43feb120fa2c71e13d8affd02ec768b510d14007e5714a12b`.
+No production dispatcher or promotion was requested.
 
 Initial fresh selection: exact debug target/repository, five existing bindings,
 current `v0.0.49-debug-keys.1`, stopped, no pending update. The operator authorized
-restart after this was reported. No SSH or successful new debug deployment is
-established yet. Before any further mutation, reselect state and preserve opaque
+restart after this was reported. Subsequent fresh checks still selected that
+same stopped target, no pending update and five existing bindings. The known
+`mark_latest_release` setting is true; a debug deployment must explicitly decline
+promotion rather than promote this experiment. No successful setting change is
+established.
+
+The pinned native CLI start attempt exited1 without a safe exposed cause/status.
+It was not replayed. After signed release verification, one distinct new-tag
+start request to the CLI's documented `/start` boundary, using the observed
+legacy `mark_latest_release: false` field, returned HTTP404, with no successful
+start acknowledgement. One read-only `/update/plan` for the candidate returned
+HTTP409. Final read-only metadata still shows the old tag, stopped, no pending
+update. Neither response establishes physical cleanup or publication exclusivity.
+No other lifecycle mutation, cancellation, rollback, vault change or production
+operation was attempted.
+
+**External blocker:** the existing debug instance cannot currently be started
+through the pinned client's documented lifecycle endpoint, while the existing
+update-plan endpoint refuses the stopped state. The underlying control-plane
+cause is unknown; HTTP404 alone does not distinguish unavailable route from
+resource/admission concealment. No guessed mutation route, new instance,
+credential-scope upgrade or protected-admission bypass was attempted. A supported
+platform restart of this exact existing instance (or correction of that API
+boundary) is needed before deployment/SSH can continue. No toolbox docs could be
+reread remotely because no SSH session was established.
+
+No successful new debug deployment, runtime Tor startup, SSH inspection, onion
+publication/readiness or live attestation/inference probe is established. Source
+health independence is qualified above; actual Tor wait/root cause remains
+unknown. Before further mutation reselect exact state and preserve opaque
 settings, references and toolbox wiring. Metadata is not physical-cleanup proof.
