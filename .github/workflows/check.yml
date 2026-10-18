@@ -36,6 +36,8 @@ jobs:
         run: RELEASE_CACHE_GRAPH_CHECK=1 python3 -m unittest discover -s tests -p 'test_release_cache.py'
       - name: Test image-health qualification guards offline
         run: python3 -m unittest discover -s tests -p 'test_image_health.py'
+      - name: Test Tor-image qualification projections offline
+        run: python3 -m unittest discover -s tests -p 'test_image_tor.py'
       - name: Test standalone serving verifier without public traffic
         env:
           GOTOOLCHAIN: local
@@ -85,6 +87,10 @@ jobs:
         run: nix build .#gateway-smoke-image --out-link "$RUNNER_TEMP/fixture-image" --print-build-logs
       - name: Build production gateway image for packaged health qualification
         run: nix build .#gateway-image --out-link "$RUNNER_TEMP/production-image" --print-build-logs
+      - name: Build key-free Tor constructor probe with production dependencies
+        run: nix build .#tor-image-probe --out-link "$RUNNER_TEMP/tor-probe" --print-build-logs
+      - name: Qualify real NSS and SDK construction in the production rootfs offline
+        run: python3 tests/image_tor.py "$RUNNER_TEMP/production-image" "$RUNNER_TEMP/tor-probe/bin/tor-image-probe"
       - name: Qualify packaged production health probe against isolated synthetic fixture
         run: python3 tests/image_health.py "$RUNNER_TEMP/production-image" "$RUNNER_TEMP/fixture-image"
       - name: Smoke test read-only startup with a runtime account secret

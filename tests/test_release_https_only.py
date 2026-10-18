@@ -1,4 +1,4 @@
-"""Offline Tor-free backup guards; no runtime secrets, network or deployment."""
+"""Offline release/activation isolation guards; no secrets, network or deployment."""
 import copy
 import json
 import subprocess
@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from test_release_automation import ROOT, S, R, D, V, StopTest, d, plan, r, view
 
 
-class HTTPSOnlyReleaseTest(StopTest):
+class TorRestorationReleaseTest(StopTest):
     def setUp(self):
         environment = patch.dict(d.os.environ, {"GITHUB_RUN_ATTEMPT": "1", "TINFOIL_ADMIN_KEY": "synthetic"})
         environment.start()
@@ -82,18 +82,20 @@ class HTTPSOnlyReleaseTest(StopTest):
             update.call_args.args[2]()
             self.assertEqual(events[-2:], ["eligibility", "approved"])
 
-    def test_backup_build_and_measured_configuration_have_no_tor_activation(self):
+    def test_tor_capable_build_does_not_activate_or_change_measured_configuration(self):
         config = (ROOT / "tinfoil-config.yml").read_text()
         self.assertNotIn("POSSUMS_TOR_", config)
         self.assertNotIn("attested-keys:", config)
         self.assertNotIn("    keys:", config)
         for required in ("attestation: true", "read_only: true", 'size=512m,mode=1777'):
             self.assertIn(required, config)
-        for name in ("Cargo.toml", "flake.nix", "devenv.nix", ".github/workflows/check.yml",
-                     "scripts/deploy.py", "clients/pi/build.sh", "clients/pi/build.mjs"):
-            source = (ROOT / name).read_text()
-            for removed in ("POSSUMS_TOR_", "torCommon", "tor-image-probe", "first_tor_activation", "arti-client"):
-                self.assertNotIn(removed, source)
+        deploy = (ROOT / "scripts/deploy.py").read_text()
+        self.assertNotIn("first_tor_activation", deploy)
+        self.assertNotIn("POSSUMS_TOR_", deploy)
+        self.assertIn('torCommon = common // { cargoExtraArgs = "--locked --features tor"; };',
+                      (ROOT / "flake.nix").read_text())
+        self.assertIn('default = []', (ROOT / "Cargo.toml").read_text())
+        self.assertIn('tor-image-probe', (ROOT / ".github/workflows/check.yml").read_text())
         self.assertIn('User = "65532:65532"', (ROOT / "flake.nix").read_text())
         self.assertIn('gatewayAccounts', (ROOT / "flake.nix").read_text())
 
