@@ -405,7 +405,10 @@ async fn tor_health_requires_current_readiness_and_preserves_quiescence() {
         (true, StatusCode::NO_CONTENT),
     ] {
         ready.store(is_ready, Ordering::Release);
-        assert_eq!(app.clone().oneshot(check()).await.unwrap().status(), expected);
+        assert_eq!(
+            app.clone().oneshot(check()).await.unwrap().status(),
+            expected
+        );
     }
     // Quiescence must fail health even while the Tor readiness gate passes.
     state.lifecycle.quiesce();
