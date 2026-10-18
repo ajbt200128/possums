@@ -1,9 +1,9 @@
 # Inactive HTTPS-only backup — local verification
 
-> Historical checkpoint for the exact source below. Its statements that general
-> startup diagnostics and NSS records/checks are retained are superseded by the
-> operator-requested [NSS/startup isolation candidate](nss-startup-removal-verification.md).
-> All historical test counts, deployment limits and unresolved failures remain
+> Historical checkpoint for the exact source below. The operator-requested
+> [exact-v54/v59 re-release](v54-rerelease-v59.md) restores this Tor-free runtime
+> after the v56–v58 isolation controls, including general startup diagnostics and
+> NSS. Historical test counts, deployment limits and unresolved failures remain
 > scoped to this checkpoint, not current production inventory.
 
 **BACKUP ONLY: not merged, installed, activated, released or deployed.**

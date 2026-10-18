@@ -43,7 +43,7 @@ Do not retain or export client IPs for abuse controls. Transient account quota/c
 
 ## Telemetry: permitted signals and forbidden data
 
-**Request telemetry is metrics only.** The historical [startup diagnostics exception](#startup-diagnostics-exception) is withdrawn for the current NSS/startup isolation candidate: application startup logs and lifecycle snapshots are removed, not default-disabled. No production request logs or request-level traces. Apply the same collection policy to real traffic in testing. Do not use access logs, trace-to-metrics processing, log bridges, automatic HTTP/GenAI instrumentation, profiling or session replay as a back door to collecting request data. Aggregate directly from closed, typed observations in application memory. Never put raw requests or raw errors into the telemetry pipeline to redact later.
+**Request telemetry is metrics only.** The narrowly authorized [startup diagnostics exception](#startup-diagnostics-exception) permits startup-only logs and lifecycle counts. No production request logs or request-level traces. Apply the same collection policy to real traffic in testing. Do not use access logs, trace-to-metrics processing, log bridges, automatic HTTP/GenAI instrumentation, profiling or session replay as a back door to collecting request data. Aggregate directly from closed, typed observations in application memory. Never put raw requests or raw errors into the telemetry pipeline to redact later.
 
 Permitted after privacy gating:
 
@@ -94,16 +94,6 @@ The operator requested this extension after intake adopted mandatory interface-f
 
 ### Mandatory typed interface failures
 
-**Exact-image control exception:** the operator subsequently approved restoring
-all v43 image inputs under a new release identity. Tokenizer send classification
-returns to the existing coarse category (54 rather than 56 aggregate error labels);
-the helper no longer retains the finer acquisition wrapper and silently exits on
-failure. Missing finer causes are unavailable, not zero. This narrow diagnostic
-regression adds no collection/export, weakens no trust/accounting check and does
-not waive the requirements below for future implementation. See the
-[control record](docs/exact-v43-image-control.md) for source/check evidence and
-pending live qualification.
-
 Every project-controlled external-facing interface, inbound or outbound, and its supporting startup/background/cleanup paths must classify observed failures from supported typed sources and actual protocol evidence. Include API/listener/middleware, attestation/helper, authenticated catalog/tokenizer/inference, stream/delivery and accounting boundaries. A future gateway↔intake adapter inherits this policy but is not authorized by it. Existing client diagnostics must preserve categories; this extension authorizes no client telemetry upload or Pi/T3 host changes.
 
 Known errors retain a stable locally authored code, failing stage/constraint, actionable next step and independently evidence-supported operation/billing outcome. Unexpected exceptions require a stage-specific **cause unknown** type, not generic text, an invented root cause or exception-string classification. Raw causes, panic payloads and hostile values never enter diagnostics/metrics. Classification is mandatory even with telemetry disabled; process loss, external SDK-swallowed failures, startup/shutdown and incomplete/lost windows may prevent observation or delivery. Document these limits rather than promising every exception reaches Honeycomb.
@@ -126,7 +116,13 @@ Required evidence includes the boundary/type/owner inventory, negative known/unk
 
 ## Startup diagnostics exception
 
-**Historical exception, withdrawn for the current isolation candidate.** The operator explicitly requested removing NSS image contents and **all** application startup diagnostics for the next controlled attempt. The implementation restores v43's startup path: typed causes/nonzero exit codes remain, but no startup stderr records, Honeycomb logs, lifecycle snapshots or diagnostic delivery work. This intentional startup-silence exception does not weaken healthcheck/request diagnostics, ordinary aggregate metrics, trust or accounting gates. Native platform logs are outside this application's control. See [removal verification](docs/nss-startup-removal-verification.md) for source/check evidence and deployment limits. The paragraphs below describe the superseded implementation, not authority to re-enable it.
+**Restored for the operator-requested exact-v54/v59 re-release.** The v56–v58
+startup-silence/image controls are historical. The operator reported recovery
+after recreating the instance and then confirmed v54 works; the requested exact
+re-release reinstates v54's bounded general startup records and delivery under
+the unchanged restrictions below. This is not permission for Tor readiness,
+request logs/traces, new destinations or raw errors. See the
+[recovery/re-release record](docs/v54-rerelease-v59.md) for evidence and limits.
 
 The operator requested platform and Honeycomb startup logs plus aggregate startup metrics while investigating a failed rollout, and explicitly selected the **normal Honeycomb dataset**, not a separate startup dataset. Startup traces were also acceptable to the operator; this implementation selects only logs and metrics, without introducing a tracing framework. This exception changes startup observability only, not request collection, inference, recovery or deployment authorization.
 
@@ -141,7 +137,7 @@ The Tor-specific post-launch readiness exception is removed in this backup, alon
 
 ## Processors, retention, access and shutdown
 
-- **Honeycomb** is a third-party observability processor, not inside the attested boundary. Send only approved aggregates over authenticated TLS directly to the US endpoint (no Collector sidecar); the current candidate removes the historical startup-only signals. Honeycomb receives gateway network metadata as part of transport; it must not receive client addresses or request identifiers. Verify vendor-side transport/audit retention separately from metric retention.
+- **Honeycomb** is a third-party observability processor, not inside the attested boundary. Send only approved aggregates and the closed startup-only logs authorized above over authenticated TLS directly to the US endpoint (no Collector sidecar). Honeycomb receives gateway network metadata as part of transport; it must not receive client addresses or request identifiers. Verify vendor-side transport/audit retention separately from metric retention.
 - **MVP retention exception:** the operator accepts Honeycomb's provider-default metric retention; a custom seven-day setting is no longer required before first export. Public documentation describes 60 days for most customers, but that is not proof of this account's effective period. Record actual retention/deletion/backup information when available, and label unknowns accurately. Shorter retention (target: seven days) remains a post-MVP follow-up; do not silently extend retention beyond the accepted provider default.
 - **Tinfoil** provides the enclave/inference platform and already offers container resource metrics and billing/usage APIs. Its platform collection, access, retention and backup behavior are a separate boundary, not controlled by a seven-day Honeycomb setting. Verify/disclose these properties; do not claim that locally disabling export turns off platform observability. Do not import API-key billing breakdowns or provider resource identifiers into telemetry.
 - Limit Honeycomb access to named operators who need it; no public boards or unrestricted share links. Use environment-scoped ingestion-only keys where supported. Keep vendor/admin keys in runtime secret delivery, never a document or image. Do not place a Tinfoil admin key in the prompt-processing gateway.

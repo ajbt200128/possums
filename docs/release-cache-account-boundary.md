@@ -1,10 +1,9 @@
 # Configured NSS release-cache boundary followup
 
-> Historical graph/image evidence for the exact sources below. The subsequent
-> [NSS/startup isolation candidate](nss-startup-removal-verification.md) removes
-> the NSS recipe and its freshness members entirely while retaining the strict
-> checker and numerical UID/GID. Old NSS/image checks below do not qualify that
-> new image; its release must pass fresh A/B and normal provenance gates.
+> Historical graph/image evidence for the exact sources below. The
+> [exact-v54/v59 re-release](v54-rerelease-v59.md) restores NSS and its explicit
+> freshness members after the v56–v58 isolation controls. Fresh A/B and normal
+> provenance gates remain required; old image checks do not replace them.
 
 ## Scope and cause
 

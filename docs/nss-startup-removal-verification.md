@@ -1,5 +1,9 @@
 # NSS and startup-diagnostics isolation candidate
 
+> **Historical v56 removal:** the [exact-v54/v59 re-release](v54-rerelease-v59.md)
+> restores NSS and bounded general startup diagnostics after operator-reported
+> instance-recreation recovery. This removal was not a proven collateral fix.
+
 **Subsequent scoped control:** the [runtime-path regression control](runtime-path-regression-control.md)
 retains this NSS/startup removal and all three restored measured settings, but
 returns Rust to 1.88.0 and removes later upstream-client renewal/generalized
