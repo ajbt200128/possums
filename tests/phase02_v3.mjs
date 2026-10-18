@@ -44,7 +44,8 @@ export { Operation, DiagnosticFailure } from '../../examples/phase01/limits.ts';
     build.onResolve({ filter: /^\.\/verifier\.mjs$/ }, () => ({ path: 'bridge', namespace: 'synthetic' }));
     build.onLoad({ filter: /.*/, namespace: 'synthetic' }, () => ({ contents:
       `export class VerifierFailure extends Error {};
-       export const verifyV3 = (...args) => globalThis.__v3Appraise(...args);`, loader: 'js' }));
+       export const verifyV3 = (...args) => globalThis.__v3Appraise(...args);
+       export const verifyTorV3 = () => { throw new Error('unexpected_tor_appraisal_in_direct_fixture'); };`, loader: 'js' }));
   } }] });
 const test = await import(pathToFileURL(path.join(out, 'synthetic.mjs')));
 async function rejects(fn, constraint) {
