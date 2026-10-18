@@ -186,6 +186,40 @@ try {
       assert.equal(f.provider.recoveryBlocked, undefined, 'obsolete recovery must not latch a replacement session');
     } finally { release.resolve(); await f.close(); }
   });
+  for (const action of ['logout', 'newSession']) await check(action + ' during rejected recovery propagation cannot relatch replacement trust', async () => {
+    // Sweep the short rejection chain, including replacement after the verifier
+    // rejected but before the request owner's outer catch receives that error.
+    for (let depth = 0; depth <= 6; depth++) {
+      const f = await fixture(), changed = deferred();
+      try {
+        f.rotate();
+        f.provider.recover = async () => {
+          const schedule = remaining => queueMicrotask(() => {
+            if (remaining) schedule(remaining - 1);
+            else { f.provider[action](); changed.resolve(); }
+          });
+          schedule(depth);
+          throw new m.DiagnosticFailure('trust', 'verification');
+        };
+        const pending = f.invoke(); await changed.promise; await pending;
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(f.provider.recoveryBlocked, undefined, action + ' rejection depth ' + depth);
+        assert.equal(f.counts.sessions, 1); assert.equal(f.counts.submissions, 0); assert.equal(f.counts.chats, 0);
+      } finally { await f.close(); }
+    }
+  });
+  for (const action of ['logout', 'newSession']) await check(action + ' before a nonrecoverable TLS failure cannot relatch replacement trust', async () => {
+    const f = await fixture();
+    try {
+      f.provider.client.channel.models = async () => {
+        queueMicrotask(() => f.provider[action]());
+        throw new m.DiagnosticFailure('trust', 'certificate');
+      };
+      await f.invoke();
+      assert.equal(f.provider.recoveryBlocked, undefined);
+      assert.equal(f.counts.sessions, 1); assert.equal(f.counts.submissions, 0); assert.equal(f.counts.chats, 0);
+    } finally { await f.close(); }
+  });
   await check('concurrent peer mismatch waiters coalesce verification and keep one surviving request alive', async () => {
     const f = await fixture(), entered = deferred(), release = deferred(), canceled = new AbortController();
     try {

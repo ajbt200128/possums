@@ -852,6 +852,9 @@ export class PossumsProvider implements Provider {
     const epoch = this.epoch;
     const account = this.accountEpoch;
     let scope: RecoveryScope | undefined;
+    const ownsRequest = () => epoch === this.epoch && account === this.accountEpoch &&
+      !this.sessionClosed && !options.signal?.aborted &&
+      (!scope || (scope === this.runScope && !scope.controller.signal.aborted));
     const reconciliation = this.reconciliation;
     const args = new Map<number, { block: ToolCall; contentIndex: number; json: string }>();
     let started = false;
@@ -910,8 +913,7 @@ export class PossumsProvider implements Provider {
         failureStage = 'provider';
         const originalClient = this.client;
         const guard = () => {
-          if (epoch !== this.epoch || account !== this.accountEpoch || this.recoveryBlocked || this.renewalRequired ||
-              scope !== this.runScope || options.signal?.aborted || this.sessionClosed) {
+          if (!ownsRequest() || this.recoveryBlocked || this.renewalRequired) {
             throw new DiagnosticFailure('request', 'interrupted', 'uncertain');
           }
         };
@@ -984,14 +986,14 @@ export class PossumsProvider implements Provider {
               if (!scope || !this.recover || !eligibleSetup(error) || prepared.dispatched) throw error;
               if ((error instanceof DiagnosticFailure && error.stage === 'submission') ||
                   (error instanceof GatewayError && error.billing === 'unknown')) uncertainControl = true;
-              guard();
-              try { await this.recoverSetup(scope, options.signal); }
+              try { guard(); await this.recoverSetup(scope, options.signal); }
               catch (recoveryError) {
+                // Rejected promises may propagate after cancellation/replacement.
+                // They cannot publish a trust failure into the current session.
+                if (!ownsRequest()) throw new DiagnosticFailure('request', 'interrupted', 'uncertain');
                 // Failure to replace unconfirmed trust cannot downgrade the
-                // triggering peer mismatch. Obsolete callers must not latch it.
-                if (error instanceof DiagnosticFailure && error.stage === 'trust' && error.constraint === 'peer_key_mismatch' &&
-                    epoch === this.epoch && account === this.accountEpoch && scope === this.runScope &&
-                    !this.sessionClosed && !options.signal?.aborted && !scope.controller.signal.aborted) {
+                // triggering peer mismatch, including a concurrently blocked guard.
+                if (error instanceof DiagnosticFailure && error.stage === 'trust' && error.constraint === 'peer_key_mismatch') {
                   setupRecoveryFailure = safeFailure(recoveryError, 'trust');
                   throw error;
                 }
@@ -1080,7 +1082,7 @@ export class PossumsProvider implements Provider {
           output.errorMessage += ' Earlier submission control outcome unknown; no inference request was replayed. A new request may incur another charge.';
         }
         if (trustFailure(error)) {
-          this.recoveryBlocked = connectionFailure(error);
+          if (ownsRequest()) this.recoveryBlocked = connectionFailure(error);
           events.push({ type: 'error', reason: output.stopReason, error: output });
         } else {
           // Host stop is NOT successful backend generation. Provisional calls

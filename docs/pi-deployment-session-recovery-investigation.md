@@ -192,6 +192,9 @@ latch and provider recovery loop (candidate verification alone is synthetic):
   exhausted recovery retains the primary trust failure/latch;
 - post-dispatch mismatch: fatal, no HTTP transmission or recovery/replay;
 - cancellation, logout and session replacement: no late credentials/prompt;
+  logout/new-session replacement at rejection-propagation microtask depths 0–6
+  cannot relatch an obsolete verifier failure, and late nonrecoverable
+  certificate failures cannot mutate replacement trust state;
 - concurrent waiters: one verifier/login owner; one caller's abort does not kill
   the surviving request.
 
@@ -204,14 +207,14 @@ in the full runner. These fixtures establish no production root cause, live
 hardware acceptance, accounting outcome or installed T3 UI/runtime qualification.
 
 Pinned offline build and the full `check.mjs` runner passed at
-`/tmp/possums-pi-build-session-recovery-43mu66pc`: 165 Pi groups, 47 v3 checks,
-12 TLS/provider recovery groups, 18 packaged-host and 31 discovery checks, plus
+`/tmp/possums-pi-build-session-recovery-bls8bw_i`: 165 Pi groups, 47 v3 checks,
+16 TLS/provider recovery groups, 18 packaged-host and 31 discovery checks, plus
 the other unchanged reference/cache/stream/diagnostics/admission suites. Strict
 TypeScript compilation passed. The checkout-only LSP lacks installed Pi/Node
 declarations; its missing-module/cascading-any findings were dispositioned as
 environment-only after the pinned compiler passed, not suppressed in source.
 
-The same 12 TLS/provider recovery groups also passed in a separate scratch
+The same 16 TLS/provider recovery groups also passed in a separate scratch
 bundle resolving the current read-only Pi 1.2.0 peer packages. This is bounded
 adapter coverage, not full native Pi 1.2.0 lifecycle/T3 UI qualification or proof
 of the affected process's loaded artifact. No installed files were modified.
@@ -222,3 +225,13 @@ attestation verifier, release workflow, gateway contract or deployed artifact
 changes; a gateway rollout is unnecessary. Existing source-versus-installed and
 Pi 1.2.0 peer-link qualifications above remain unresolved by this offline packet.
 The installed link/bundle must remain unchanged pending separate authorization.
+
+Independent read-only review found and prompted two failure-path corrections:
+failed recovery must not downgrade the original peer trust failure, and an
+already-rejected trust error propagating after replacement must not poison the
+replacement session. The final implementation shares one current-request owner
+guard between dispatch and failure handling, converts obsolete recovery exits to
+interruption, and independently guards the final trust-latch mutation. Received
+accounting extraction is unchanged. Pending-cancellation and rejected-result
+propagation are tested separately; a passing pending-cancellation fixture alone
+was insufficient evidence for the latter race.
