@@ -11,6 +11,7 @@ const ENDPOINT: &str = "https://api.honeycomb.io";
 
 /// Only these four environment variables are read. No general OTEL discovery.
 /// No Debug representation can expose a credential or rejected input.
+#[derive(Clone)]
 pub struct Config {
     credential: Option<HeaderValue>,
 }

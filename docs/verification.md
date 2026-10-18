@@ -10,6 +10,19 @@ Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILE
 
 The operator explicitly removed startup self-appraisal and cached freshness gates through Tor bootstrap/launch, superseding the former fresh-A-before-B startup requirement only. [Scoped boundary and offline evidence](tor-startup-removal-verification.md) records local grant consistency versus independent client trust, unchanged per-request fail-closed verification, 531 default / 586 all-feature Rust passes, client/helper/privacy checks and remaining limits. Publication may precede available attestation; removal does not fix the acquisition 503 or qualify live Tor-client E2E. No production action or release was performed; parent security review remains required.
 
+## Arti fully-reachable health and debug-only background diagnostics — source
+
+The operator approved [Arti's fully-reachable health predicate](tor-fully-reachable-health-verification.md)
+and [ongoing closed debug-only SDK diagnostics](tor-arti-background-debug-verification.md),
+plus one later signed deployment with Honeycomb enablement to the existing debug
+instance. Health transition/fatal/quiescence regressions passed. Background source
+qualification passed: debug449/one ignored, normal Tor430/one ignored, binary6,
+15 actual-typed/synthetic-TLS privacy tests and2 bootstrap cancellation/no-replay
+regressions; full all-feature suites629 passed/five opt-in ignored. Formatting,
+strict Clippy/no-default and eight-file active LSP passed.
+Independent read-only review found no blocker. Release/runtime/ingestion remain
+pending in that record; no production/main action or attestation probe is implied.
+
 ## Nonproduction corrected-monitor Tor-gated trace
 
 A third separately authorized [debug attempt](tor-corrected-monitor-debug-verification.md)

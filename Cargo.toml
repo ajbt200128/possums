@@ -68,6 +68,8 @@ webpki-roots = "1"
 libc = "=0.2.189"
 
 [dev-dependencies]
+# Construct the SDK's already-locked nested retry errors in offline privacy tests.
+retry-error = "=0.14.0"
 # Historical stock-exporter qualification only; runtime uses its supported proto transform.
 opentelemetry-http = { version = "=0.29.0", default-features = false, features = ["hyper"] }
 opentelemetry-otlp = { version = "=0.29.0", default-features = false, features = ["http-proto", "hyper-client"] }

@@ -1,9 +1,12 @@
-//! Bounded startup records, not a readiness gate or request/runtime logger.
+//! Finite startup records and debug-only closed Arti background diagnostics.
+//! Neither observes request/peer callbacks or controls readiness/lifecycle.
 use super::*;
 use std::future::Future;
 use tokio::{sync::watch, time::Instant};
 use tor_hsservice::status::{Problem, State as OnionState};
 
+#[cfg(feature = "debug-tor-readiness")]
+mod background;
 mod platform;
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -170,6 +173,8 @@ struct Snapshot {
 /// Running followed by Broken during a stalled waiting export stays first-ready.
 #[derive(Clone)]
 pub struct Observer {
+    #[cfg(feature = "debug-tor-readiness")]
+    background: background::Observer,
     start: Instant,
     snapshot: watch::Sender<Snapshot>,
     local: std::sync::Arc<Local>,
@@ -187,15 +192,29 @@ impl Local {
     }
 }
 impl Observer {
+    #[cfg(feature = "debug-tor-readiness")]
+    pub(crate) fn observe_sdk_status(&self, status: &tor_hsservice::status::OnionServiceStatus) {
+        self.background.onion(status);
+    }
+    #[cfg(feature = "debug-tor-readiness")]
+    pub(crate) fn observe_bootstrap(&self, status: &arti_client::status::BootstrapStatus) {
+        self.background.bootstrap(status);
+    }
     pub(crate) fn observe(
         &self,
         state: OnionState,
         problem: ProblemKind,
         terminal: Option<Terminal>,
     ) {
+        #[cfg(feature = "debug-tor-readiness")]
+        if terminal == Some(Terminal::EngineFailure) {
+            self.background.failure(Terminal::EngineFailure);
+        }
         self.update(Some((state.into(), problem)), terminal);
     }
     pub(crate) fn failure(&self, terminal: Terminal) {
+        #[cfg(feature = "debug-tor-readiness")]
+        self.background.failure(terminal);
         self.update(None, Some(terminal));
     }
     fn update(&self, status: Option<(State, ProblemKind)>, terminal: Option<Terminal>) {
@@ -224,6 +243,8 @@ impl Observer {
 }
 
 pub(crate) fn new(config: Config) -> (Observer, impl Future<Output = ()>) {
+    #[cfg(feature = "debug-tor-readiness")]
+    let (background, background_worker) = background::new(config.clone());
     let start = Instant::now();
     let (snapshot, receiver) = watch::channel(Snapshot {
         latest: Record {
@@ -235,13 +256,22 @@ pub(crate) fn new(config: Config) -> (Observer, impl Future<Output = ()>) {
         first: None,
     });
     let observer = Observer {
+        #[cfg(feature = "debug-tor-readiness")]
+        background,
         start,
         snapshot,
         local: Default::default(),
     };
     let worker = observer.clone();
     (observer, async move {
-        // Disabled config never constructs transport/TLS or performs HTTP.
+        // Both futures are owned here, independently polled, and dropped with
+        // serving. A stalled background export cannot delay startup observation.
+        #[cfg(feature = "debug-tor-readiness")]
+        tokio::join!(
+            run(worker, receiver, config.into_client()),
+            background_worker
+        );
+        #[cfg(not(feature = "debug-tor-readiness"))]
         run(worker, receiver, config.into_client()).await;
     })
 }

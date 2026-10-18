@@ -448,6 +448,61 @@ async fn local_preparation_and_bootstrap_inputs_do_not_need_an_appraisal() {
     .is_none()); // Even the fixed mounted paths must not be read after shutdown.
 }
 
+#[cfg(feature = "debug-tor-readiness")]
+#[tokio::test]
+async fn bootstrap_diagnostic_stream_eof_preserves_one_original_operation() {
+    let calls = std::cell::Cell::new(0);
+    let final_calls = std::cell::Cell::new(0);
+    let (diagnostics, unused) = crate::telemetry::startup::readiness::new(
+        crate::telemetry::runtime::Config::from_lookup(|_| None),
+    );
+    drop(unused);
+    let work = async {
+        calls.set(calls.get() + 1);
+        tokio::task::yield_now().await;
+        Err::<(), u8>(7)
+    };
+    let statuses = futures_util::stream::iter([
+        arti_client::status::BootstrapStatus::default(),
+        arti_client::status::BootstrapStatus::default(),
+    ]);
+    let result = observe_bootstrap(
+        work,
+        statuses,
+        || {
+            final_calls.set(final_calls.get() + 1);
+            arti_client::status::BootstrapStatus::default()
+        },
+        &diagnostics,
+    )
+    .await;
+    assert_eq!(result, Err(7));
+    assert_eq!(calls.get(), 1);
+    assert_eq!(final_calls.get(), 1);
+}
+
+#[cfg(feature = "debug-tor-readiness")]
+#[tokio::test]
+async fn ready_shutdown_does_not_poll_bootstrap_diagnostics_or_operation() {
+    let calls = std::cell::Cell::new(0);
+    let (diagnostics, unused) = crate::telemetry::startup::readiness::new(
+        crate::telemetry::runtime::Config::from_lookup(|_| None),
+    );
+    drop(unused);
+    let work = observe_bootstrap(
+        async { calls.set(calls.get() + 1) },
+        futures_util::stream::pending(),
+        || panic!("final status must not be read after ready shutdown"),
+        &diagnostics,
+    );
+    let shutdown = std::future::ready(());
+    tokio::pin!(shutdown);
+    assert!(crate::tor_runtime::until_shutdown(shutdown.as_mut(), work)
+        .await
+        .is_none());
+    assert_eq!(calls.get(), 0);
+}
+
 // The official SSH SDK encodes deterministic public test material, entirely in memory.
 fn native_fixture(seed: u8) -> zeroize::Zeroizing<String> {
     let pair = synthetic_pair(seed).to_encodable_key();

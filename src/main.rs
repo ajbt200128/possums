@@ -246,7 +246,7 @@ async fn run(
         verifier,
     );
     #[cfg(feature = "debug-tor-readiness")]
-    let state = state.with_debug_tor_readiness(readiness);
+    let state = state.with_debug_tor_readiness(readiness.clone());
     startup.enter(Stage::Bind);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -255,7 +255,14 @@ async fn run(
     let tor_client = if let Some(prepared) = &prepared {
         startup.enter(Stage::TorBootstrap);
         let Some(client) = possums::tor_runtime::until_shutdown(shutdown.as_mut(), async {
-            prepared.bootstrap().await
+            #[cfg(feature = "debug-tor-readiness")]
+            let result = match &readiness {
+                Some(diagnostics) => prepared.bootstrap_with_diagnostics(diagnostics).await,
+                None => prepared.bootstrap().await,
+            };
+            #[cfg(not(feature = "debug-tor-readiness"))]
+            let result = prepared.bootstrap().await;
+            result
         })
         .await
         else {

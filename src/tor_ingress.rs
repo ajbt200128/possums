@@ -668,8 +668,27 @@ pub async fn serve_tcp_and_onion_until_initialized<F: Future<Output = ()>>(
             let (observer, worker) = debug_readiness();
             (observer, Box::pin(worker))
         };
+    #[cfg(feature = "debug-tor-readiness")]
+    let diagnostics = {
+        let bootstrap_observer = observer.clone();
+        let bootstrap_client = client.clone();
+        async move {
+            let bootstrap = async move {
+                let statuses = bootstrap_client.bootstrap_events();
+                tokio::pin!(statuses);
+                while let Some(status) = statuses.next().await {
+                    bootstrap_observer.observe_bootstrap(&status);
+                }
+            };
+            tokio::join!(diagnostics, bootstrap);
+        }
+    };
     let engine = stream::once(async {
-        let statuses = service.status_events().map(|status| {
+        #[cfg(feature = "debug-tor-readiness")]
+        let status_observer = observer.clone();
+        let statuses = service.status_events().map(move |status| {
+            #[cfg(feature = "debug-tor-readiness")]
+            status_observer.observe_sdk_status(&status);
             (
                 status.state(),
                 matches!(status.current_problem(), Some(Problem::Runtime(_))),

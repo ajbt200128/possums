@@ -104,6 +104,8 @@ mod enabled {
         tor_ingress::{require_identity, Failure},
     };
     use arti_client::{config::CfgPath, BootstrapBehavior, TorClient, TorClientConfig};
+    #[cfg(feature = "debug-tor-readiness")]
+    use futures_util::StreamExt;
     use rustls::pki_types::{pem::PemObject, PrivatePkcs8KeyDer, SubjectPublicKeyInfoDer};
     use spki::{der::Decode, ObjectIdentifier, SubjectPublicKeyInfoRef};
     use std::{fs, io::Read, path::Path, sync::Arc};
@@ -393,6 +395,27 @@ mod enabled {
         pub async fn bootstrap(
             &self,
         ) -> Result<Arc<TorClient<PreferredRuntime>>, TorStartupFailure> {
+            self.bootstrap_inner(
+                #[cfg(feature = "debug-tor-readiness")]
+                None,
+            )
+            .await
+        }
+
+        #[cfg(feature = "debug-tor-readiness")]
+        pub async fn bootstrap_with_diagnostics(
+            &self,
+            diagnostics: &crate::tor_ingress::DebugReadiness,
+        ) -> Result<Arc<TorClient<PreferredRuntime>>, TorStartupFailure> {
+            self.bootstrap_inner(Some(diagnostics)).await
+        }
+
+        async fn bootstrap_inner(
+            &self,
+            #[cfg(feature = "debug-tor-readiness")] diagnostics: Option<
+                &crate::tor_ingress::DebugReadiness,
+            >,
+        ) -> Result<Arc<TorClient<PreferredRuntime>>, TorStartupFailure> {
             let client = TorClient::builder()
                 .config(self.config.clone())
                 .bootstrap_behavior(BootstrapBehavior::Manual)
@@ -408,10 +431,22 @@ mod enabled {
                 pair,
                 &self.approved,
             )?;
-            client
-                .bootstrap()
+            #[cfg(feature = "debug-tor-readiness")]
+            let result = if let Some(diagnostics) = diagnostics {
+                diagnostics.observe_bootstrap(&client.bootstrap_status());
+                observe_bootstrap(
+                    client.bootstrap(),
+                    client.bootstrap_events(),
+                    || client.bootstrap_status(),
+                    diagnostics,
+                )
                 .await
-                .map_err(|_| TorStartupFailure::Bootstrap)?;
+            } else {
+                client.bootstrap().await
+            };
+            #[cfg(not(feature = "debug-tor-readiness"))]
+            let result = client.bootstrap().await;
+            result.map_err(|_| TorStartupFailure::Bootstrap)?;
             Ok(client)
         }
 
@@ -424,6 +459,30 @@ mod enabled {
         pub fn configure(&self, state: crate::server::AppState) -> crate::server::AppState {
             state.with_tor_endorsement(self.signer.clone())
         }
+    }
+
+    // Poll the supported SDK's existing status stream alongside the ONE
+    // bootstrap operation. Stream loss never starts another bootstrap/retry.
+    #[cfg(feature = "debug-tor-readiness")]
+    async fn observe_bootstrap<T>(
+        work: impl std::future::Future<Output = T>,
+        updates: impl futures_util::Stream<Item = arti_client::status::BootstrapStatus>,
+        final_status: impl FnOnce() -> arti_client::status::BootstrapStatus,
+        diagnostics: &crate::tor_ingress::DebugReadiness,
+    ) -> T {
+        tokio::pin!(work, updates);
+        let result = loop {
+            tokio::select! {
+                biased;
+                result = &mut work => break result,
+                status = updates.next() => match status {
+                    Some(status) => diagnostics.observe_bootstrap(&status),
+                    None => break work.await,
+                },
+            }
+        };
+        diagnostics.observe_bootstrap(&final_status());
+        result
     }
 
     #[cfg(test)]
