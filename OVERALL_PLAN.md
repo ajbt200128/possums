@@ -1,5 +1,10 @@
 # Possums — API-only roadmap
 
+**Inactive HTTPS-only backup:** Tor is removed and unsupported, not a future
+milestone of this branch. Earlier release/capacity statements below are historical
+context, not current deployed inventory or activation authority. See
+[backup verification](docs/without-tor-backup-verification.md).
+
 **Target, not a deployment claim.** `AGENTS.md` and `SPEC.md` govern the gateway. Earlier no-JavaScript HTML streaming, cookie/session and buffered proposals were explored and released in prior phases; their dated outcomes remain in [phase records](docs/phase0.md), [API investigation](docs/phase01.md) and [verification](docs/verification.md), not in the active roadmap. The current recorded deployed release is v0.0.15; an API-only image and deployment have not been verified by this documentation change.
 
 ## Product and boundaries
@@ -13,6 +18,6 @@ The gateway and Tinfoil handle plaintext in memory. Attestation is scoped to mea
 1. **API-only cutover:** remove HTML routes `/`, `/login`, `/logout`, `/chat`, `/chat/new`, `/recovery`, `/recovery/download`, `/claims`; browser cookies/CSRF, rendering/web stream and browser fixtures. Preserve JSON `/attestation`, `/v1`, Pi and accounting/attestation protections. Remove browser package/CI/Nix target and obsolete telemetry Web labels/New chat lane. Capacity target is connection 64, generation 4 (effective heavy bound), heavy 4, ingress 4, control 1. Verify API-only fixture, negative routes, privacy payloads, accounting, reproducible image and deployed identity separately; documentation is not a pass.
 2. **Pi client:** preserve verified streaming provider/tool/compaction and locally scoped client approval; do not infer every live-model or device result from synthetic checks. See [release record](docs/phase02-pi-release.md) and [client instructions](clients/pi/README.md).
 3. **Obsidian client (proposed):** qualify supported Android/macOS/Linux attestation and protected API credentials, scoped local note access and safe client rendering. It is not a gateway Web UI. See [plugin plan](docs/obsidian-plugin.md).
-4. **Later Tor and paid credits (separate decisions):** Tor endpoint and address-to-measurement binding; Stripe/Monero intake, durable failure-tested billing and reconciliation. Audit and independent general CLI/SDK integrations require separate scoping. No browser gateway tier is part of these milestones.
+4. **Later paid credits (separate decisions):** Stripe/Monero intake, durable failure-tested billing and reconciliation. Tor is unsupported in this backup. Audit and independent general CLI/SDK integrations require separate scoping. No browser gateway tier is part of these milestones.
 
 Acceptance requires measured release/provenance, negative trust/key-binding/catalog/reservation tests, scoped live billing and runtime/privacy checks; preserve explicit UNKNOWNs. Historical browser and buffered tests in [verification](docs/verification.md) remain genuine but do not qualify an API-only release.

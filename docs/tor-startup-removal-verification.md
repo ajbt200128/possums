@@ -1,5 +1,10 @@
 # Tor startup self-appraisal removal — source-only candidate
 
+> Historical evidence only in this inactive HTTPS-only backup. All Tor support,
+> not just startup self-appraisal, is removed. Commands and authorizations below
+> do not apply here; unresolved evidence remains historical. See
+> [backup verification](without-tor-backup-verification.md).
+
 ## Explicit operator decision and changed trust boundary
 
 The operator chose to remove Tor **startup** self-appraisal completely after

@@ -1,5 +1,10 @@
 # Phase 0 verification record
 
+> **Inactive HTTPS-only backup:** [current scope and checks](without-tor-backup-verification.md).
+> Tor is removed, including PR90 readiness. All earlier Tor instructions/results
+> below are historical, not activation authority or qualification of this backup.
+> No historical failure/unknown is upgraded by the removal.
+
 > **API-only cutover notice:** Browser routes, browser fixtures and six-lane/New chat observations below are historical evidence for earlier artifacts, not current product scope or evidence of an API-only deployment. The source retains JSON `/attestation`, `/v1` and Pi; it removes gateway Web UI and New chat admission. Fresh local results are recorded in [API-only cutover](#api-only-cutover--local-source-verification-2026-10-09); deployment remains unverified. Historical passes are not retroactive API-only passes.
 
 **Chronological evidence:** deployment/status statements belong to the release or packet where they were recorded, including the old buffered regime and later streaming entries. Current API `v0.0.11`/Pi acceptance is scoped in [the release record](phase02-pi-release.md). No historical FAILED or UNKNOWN result is upgraded by this checkout reconciliation.

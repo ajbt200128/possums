@@ -1,5 +1,12 @@
 # Startup diagnostics — source candidate
 
+> Historical evidence for the dated packets below, not the inactive HTTPS-only
+> backup's result. This backup retains general startup diagnostics with five
+> stages plus one terminal record (six maximum), but removes all Tor stages,
+> readiness handoff/FIFO delivery and related policy. Old nine-record/Tor test
+> counts and release outcomes remain historical, not requalified. See
+> [current backup checks](without-tor-backup-verification.md).
+
 ## Scope and status
 
 Policy: [startup-only exception](../PRIVACY.md#startup-diagnostics-exception), [processor boundaries](../PRIVACY.md#processors-retention-access-and-shutdown), [telemetry plan](telemetry-plan.md#startup-diagnostics-extension).

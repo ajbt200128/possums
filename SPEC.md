@@ -1,5 +1,13 @@
 # Possums API-only gateway specification
 
+**Inactive HTTPS-only backup.** Tor support is completely removed, including
+`/attestation/tor`, onion ingress, client selection and startup-readiness hooks.
+Previously shipped Tor-selected clients cannot use this candidate; there is no
+silent HTTPS downgrade. Deployment of this breaking cutover requires separate
+operator approval and matching-client qualification/installation/activation.
+Historical Tor/release records do not authorize activation. See
+[backup verification](docs/without-tor-backup-verification.md).
+
 **API-only source contract; deployment pending.** The existing v0.0.15 deployment and previous Phase 0 browser behavior are historical; see [phase evidence](docs/phase0.md) and [verification](docs/verification.md). This document does not certify an API-only deployment. `AGENTS.md` is authoritative where historical plans disagree.
 
 The measured clearnet gateway serves JSON `GET /attestation` and the authenticated `/v1` API (challenge, sessions, submissions, model discovery, streaming chat completions). No gateway HTML, `/app`, browser session cookies, CSRF forms, recovery/download or claims pages, web streaming, or browser UI is offered or planned. The Pi client remains supported. Obsidian is an independently proposed API client running outside the gateway, not a deferred gateway UI.

@@ -1,5 +1,10 @@
 # Local Tor developer tooling
 
+> Archived tooling record, not current setup instructions. This inactive
+> HTTPS-only backup removes Tor from Nix/devenv and removes `possums-tor`.
+> Do not run the commands below from this branch. Private configuration and
+> existing runtime state are untouched. See [backup verification](without-tor-backup-verification.md).
+
 Development convenience only: not installed-client, deployed-backend or transport
 qualification. The pinned Nix/devenv environments include Tor; neither starts it
 automatically. No flake input or lock update is required.

@@ -1,5 +1,10 @@
 # Tor v0: endorsed signing-key and onion signature primitives
 
+> Historical evidence only in this inactive HTTPS-only backup. Tor code/assets
+> are removed; commands and authorizations below do not apply to this branch.
+> Results and unresolved failures retain their original scope. See
+> [backup verification](without-tor-backup-verification.md).
+
 **Current continuation:** [backend source integration](#backend-source-integration--default-off) implements the earlier runtime seams. The operator subsequently **removed startup self-appraisal completely**, including cached freshness checks through bootstrap/launch; see [the new publication boundary](tor-startup-removal-verification.md). Local grant consistency is not appraisal. Fresh per-request and independent client verification remain required. Prior packet descriptions and acceptance remain historical; no deployed or positive live trust-chain claim follows.
 
 ## Scope and status

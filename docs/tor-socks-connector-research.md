@@ -1,5 +1,9 @@
 # SOCKS connector research — source review, 2026-10-14
 
+> Historical research only in this inactive HTTPS-only backup. Tor/SOCKS support
+> is removed; commands and authorizations below do not apply to this branch.
+> See [backup verification](without-tor-backup-verification.md).
+
 **Current operator decision:** use the user's existing Tor proxy with Monero-style
 SOCKS negotiation: optional credentials and no-auth selection are permitted; no
 credential-based circuit-isolation guarantee is made. The historical mandatory-auth
