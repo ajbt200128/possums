@@ -1,42 +1,11 @@
-import { CatalogFailure, CompletionFailure, GatewayError, gatewayDetailLabel, safeTorNativeDiagnostic, type Receipt } from '../../examples/phase01/client.js';
+import { CatalogFailure, GatewayError, gatewayDetailLabel, type Receipt } from '../../examples/phase01/client.js';
 
 export function settlementDescription(receipt: Readonly<Receipt>): string {
   return `Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits.${receipt.deliveryComplete === false ? ' Delivery incomplete; this does not establish successful completion.' : ''} Settlement is not tool-execution authorization; a new submission may incur another charge.`;
 }
 import { DiagnosticFailure } from '../../examples/phase01/limits.js';
 import { VerifierFailure } from './verifier.mjs';
-import { TorNativeTransportFailure, TorOnionFailure,
-  TorSetupFailure, TorSetupBackendFailure, TorEndorsementFailure, isTorConnectionFailure } from './tor-connection.js';
-type TorFailure = TorNativeTransportFailure | TorOnionFailure | TorSetupFailure | TorSetupBackendFailure | TorEndorsementFailure;
-
-function torDescription(error: TorFailure): string {
-  if (error instanceof TorNativeTransportFailure) {
-    const safe = safeTorNativeDiagnostic(error);
-    return `[${safe.code}] Stage: ${safe.stage}; constraint: ${safe.constraint}. ${safe.action} ${safe.outcome}`;
-  }
-  if (error instanceof TorOnionFailure) {
-    return '[possums_tor_onion_invalid] Stage: configuration; constraint: canonical_v3_address_checksum. Select the approved canonical v3 host; do not send credentials or prompts.';
-  }
-  // These immutable closed carriers author code/action locally. Reconstruct
-  // anyway so neither Error.message nor a prototype-shaped impostor is used.
-  const safe = error instanceof TorSetupBackendFailure ? new TorSetupBackendFailure(error.stage, error.constraint, error.status)
-    : error instanceof TorSetupFailure ? new TorSetupFailure(error.stage, error.constraint)
-    : new TorEndorsementFailure(error.stage, error.constraint);
-  return `[${safe.code}] Stage: ${safe.stage}; constraint: ${safe.constraint}. ${safe.action}` +
-    (safe.constraint.endsWith('unknown') ? ' The underlying cause is unknown.' : '') +
-    (safe instanceof TorSetupBackendFailure
-      ? ` UNAUTHENTICATED public backend diagnostic.${safe.status === undefined ? '' : ` Observed acquisition HTTP status: ${safe.status} (not necessarily gateway response status).`} Backend authenticity, service availability and billing are not established.` : '');
-}
-
 export function diagnosticDescription(failure: DiagnosticFailure): string {
-  if (failure instanceof CompletionFailure && failure.nativeDiagnostic) {
-    const native = failure.nativeDiagnostic;
-    const outcome = failure.settlement
-      ? 'Remote completion is unknown. Received authenticated billing evidence is retained; delivery completion is not established. No request was replayed; a deliberate new submission may incur another charge.'
-      : native.outcome;
-    return `[${native.code}] Stage: ${failure.stage}; constraint: ${failure.constraint}. Native stage: ${native.stage}; constraint: ${native.constraint}.` +
-      (failure.status === undefined ? '' : ` Observed HTTP status: ${failure.status}.`) + ` ${native.action} ${outcome}`;
-  }
   const actions = {
     trust: 'Start a new Pi session to verify again; do not bypass verification. Re-entering credentials does not renew trust.',
     challenge: 'Check connectivity and try /login again; credential validity is not established.',
@@ -82,10 +51,6 @@ const reasons = Object.freeze({
   credential_entry_failed: 'Credential entry did not complete. Try /login again; do not share credentials. Cause unknown unless you deliberately cancelled.',
   authentication_diagnostic: 'Gateway authentication did not complete.',
   connection_diagnostic: 'The verified connection did not complete.',
-  tor_transport_diagnostic: 'The selected Tor transport did not complete. No direct fallback was attempted.',
-  tor_selection_invalid: 'Local Tor selection is invalid. Select a canonical v3 host with --possums-tor-onion and a numeric loopback host:port with --possums-tor-proxy (default 127.0.0.1:19050). Do not combine Tor with --possums-manifest or select a proxy alone. Proxy-only username/password must both be absent or locally configured together, each nonempty and at most 255 UTF-8 bytes; do not share them.',
-  route_selection_changed: 'Route or manifest flags changed after trust selection. Restore the original flags or restart Pi with the intended setup; no route was switched.',
-  tor_cleanup_unknown: 'Native child exit could not be confirmed during Tor scope cleanup; cause unknown. Restart Pi before another setup attempt. Remote completion and prior billing are unknown.',
   approval_expired: 'The installed client approval has expired. ' + update,
   approval_unavailable: 'No usable local client approval is available. ' + update,
   manifest_unavailable: 'The public release manifest is missing, unreadable or exceeds local limits. ' + update,
@@ -144,7 +109,7 @@ export function approvalSummary(release?: Readonly<{ tag: string; expires: numbe
 export class ConnectionFailure extends Error {
   readonly observation?: EvidenceObservation;
   readonly diagnostic?: DiagnosticFailure;
-  constructor(readonly code: ConnectionFailureCode, catalog?: CatalogFailure | GatewayError | DiagnosticFailure | EvidenceObservation | VerifierFailure | TorFailure) {
+  constructor(readonly code: ConnectionFailureCode, catalog?: CatalogFailure | GatewayError | DiagnosticFailure | EvidenceObservation | VerifierFailure) {
     if (!Object.hasOwn(reasons, code)) throw new Error('possums_connection_diagnostic_invalid');
     // The immutable carrier validates these fields; never use its error.message.
     const observed = catalog instanceof CatalogFailure && catalog.stage === 'http'
@@ -152,14 +117,11 @@ export class ConnectionFailure extends Error {
     const evidence = catalog instanceof EvidenceObservation
       ? ` Stage: ${catalog.stage} (${evidenceStages[catalog.stage]}); constraint: ${catalog.constraint} (${evidenceConstraints[catalog.constraint]}).${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}${catalog.constraint === 'rate_limited' ? ' Wait before starting a new Pi session; re-entering credentials will not fix this.' : ''}` :
       catalog instanceof GatewayError ? ` Stage: admission; constraint: service_quiescing.${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}` :
-      code === 'tor_cleanup_unknown' ? ' Stage: tor_cleanup; constraint: cause_unknown.' :
-      ` Stage: ${catalog instanceof CatalogFailure ? 'catalog' : code === 'tor_selection_invalid' || code === 'route_selection_changed' ? 'configuration' : 'connection'}; constraint: ${catalog instanceof CatalogFailure ? catalog.stage : code}.${catalog instanceof CatalogFailure && catalog.reason === 'service_quiescing' ? ' Gateway stage: admission; constraint: service_quiescing.' : ''}`;
+      ` Stage: ${catalog instanceof CatalogFailure ? 'catalog' : 'connection'}; constraint: ${catalog instanceof CatalogFailure ? catalog.stage : code}.${catalog instanceof CatalogFailure && catalog.reason === 'service_quiescing' ? ' Gateway stage: admission; constraint: service_quiescing.' : ''}`;
     const compatibilityCode = code === 'verification_failed' && catalog instanceof DiagnosticFailure
       && catalog.stage === 'trust' && catalog.constraint === 'unexpected' ? '[possums_verification_failed] ' : '';
-    const outcome = code === 'tor_cleanup_unknown'
-      ? 'No request was replayed; a deliberate new submission may incur another charge.'
-      : 'No inference request was sent by this connection attempt. Cached models do not authorize inference. Prior billing outcomes are not established by this check.';
-    super(`${compatibilityCode}${catalog && isTorConnectionFailure(catalog) ? `[possums_${code}] ${reasons[code]} ${torDescription(catalog)}` : catalog instanceof VerifierFailure ? catalog.message : catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} ${outcome}`);
+    const outcome = 'No inference request was sent by this connection attempt. Cached models do not authorize inference. Prior billing outcomes are not established by this check.';
+    super(`${compatibilityCode}${catalog instanceof VerifierFailure ? catalog.message : catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} ${outcome}`);
     if (catalog instanceof EvidenceObservation) this.observation = catalog;
     if (catalog instanceof DiagnosticFailure) this.diagnostic = catalog;
     Object.freeze(this);
@@ -167,7 +129,7 @@ export class ConnectionFailure extends Error {
 }
 export function catalogConnectionFailure(error: unknown): ConnectionFailure {
   if (error instanceof ConnectionFailure) return error;
-  if (error instanceof DiagnosticFailure || isTorConnectionFailure(error)) return connectionFailure(error);
+  if (error instanceof DiagnosticFailure) return connectionFailure(error);
   if (!(error instanceof CatalogFailure)) return new ConnectionFailure('catalog_unavailable');
   const codes = { request: 'catalog_request_failed', http: 'catalog_http_rejected', body: 'catalog_body_invalid',
     validation: 'catalog_validation_failed', conversion: 'catalog_conversion_failed' } as const;
@@ -175,16 +137,6 @@ export function catalogConnectionFailure(error: unknown): ConnectionFailure {
 }
 export function connectionFailure(error: unknown): ConnectionFailure {
   if (error instanceof ConnectionFailure) return error;
-  if (error instanceof TorNativeTransportFailure) return new ConnectionFailure(
-    safeTorNativeDiagnostic(error).code === 'possums_tor_native_configuration' ? 'tor_selection_invalid' : 'tor_transport_diagnostic', error);
-  if (error instanceof TorOnionFailure) return new ConnectionFailure('tor_selection_invalid', error);
-  if (error instanceof TorSetupBackendFailure || error instanceof TorSetupFailure || error instanceof TorEndorsementFailure) {
-    // Operational acquisition/interruption is not distrust. Signature, binding,
-    // appraisal and malformed public trust evidence still fail closed/fatal.
-    const operational = error instanceof TorSetupBackendFailure && ['acquisition', 'backend', 'input', 'response'].includes(error.stage)
-      || error.stage === 'authorization' && error.constraint === 'interrupted';
-    return new ConnectionFailure(operational ? 'tor_transport_diagnostic' : 'verification_failed', error);
-  }
   if (error instanceof GatewayError && error.reason === 'service_quiescing') return new ConnectionFailure('service_quiescing', error);
   if (error instanceof VerifierFailure) return new ConnectionFailure('verification_failed', error);
   if (error instanceof DiagnosticFailure) return new ConnectionFailure(error.stage === 'trust' ? error.constraint === 'expired' ? 'trust_expired' : 'verification_failed' : error.stage === 'authentication' || error.stage === 'challenge' ? 'authentication_diagnostic' : 'connection_diagnostic', error);

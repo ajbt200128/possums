@@ -9,7 +9,7 @@ const constraints = Object.freeze({
   envelope: ['rejected', 'cause_unknown'],
   verification: ['rejected', 'result', 'cause_unknown'],
   publisher: ['schema', 'certificate', 'identity', 'artifact', 'manifest', 'cause_unknown'],
-  freshness: ['expired'], keys: ['tls', 'hpke', 'cause_unknown', 'tor_endorsement_entry', 'tor_endorsement_format', 'tor_endorsement_spki', 'tor_endorsement_algorithm'],
+  freshness: ['expired'], keys: ['tls', 'hpke', 'cause_unknown'],
   bridge: ['cause_unknown', 'cleanup_cause_unknown', 'interrupted', 'deadline', 'schema', 'artifact_unavailable'],
 });
 const actions = Object.freeze({
@@ -32,7 +32,7 @@ export class VerifierFailure extends Error {
     Object.freeze(this);
   }
 }
-function qualified(message, tor) {
+function qualified(message) {
   if (!message || typeof message !== 'object' || Array.isArray(message)) throw new VerifierFailure('bridge', 'schema');
   if (Object.keys(message).join(',') === 'failure') {
     const failure = message.failure;
@@ -42,17 +42,15 @@ function qualified(message, tor) {
       failure.code !== `possums_v3_${failure.stage}_${failure.constraint}`) throw new VerifierFailure('bridge', 'schema');
     throw new VerifierFailure(failure.stage, failure.constraint);
   }
-  const responseField = tor ? 'tor_result' : 'result';
-  if (Object.keys(message).join(',') !== responseField) throw new VerifierFailure('bridge', 'schema');
-  const result = message[responseField];
+  if (Object.keys(message).join(',') !== 'result') throw new VerifierFailure('bridge', 'schema');
+  const result = message.result;
   const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
-  const fields = result && Object.keys(result).filter(key => !tor || key !== 'tor_endorsement_key').sort().join(',');
+  const fields = result && Object.keys(result).sort().join(',');
   if (!result || !['freshness_expires_at_unix,hpke_key,release_digest,release_tag,tls_key_sha256', 'freshness_expires_at_unix,release_digest,release_tag,tls_key_sha256'].includes(fields) ||
     !hash(result.release_digest) || !hash(result.tls_key_sha256) ||
     typeof result.release_tag !== 'string' || result.release_tag.length > 64 || !/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(result.release_tag) ||
     !Number.isSafeInteger(result.freshness_expires_at_unix)) throw new VerifierFailure('bridge', 'schema');
   if (!hash(result.hpke_key)) throw new VerifierFailure('keys', 'hpke');
-  if (tor && !hash(result.tor_endorsement_key)) throw new VerifierFailure('bridge', 'schema');
   if (result.freshness_expires_at_unix <= Math.floor(Date.now() / 1000)) throw new VerifierFailure('freshness', 'expired');
   return Object.freeze({ ...result });
 }
@@ -61,17 +59,10 @@ function qualified(message, tor) {
 // exact EHBP configuration equality and its actual TLS/HPKE transport binding.
 // A new worker is terminated on every outcome; no public evidence is persisted.
 export async function verifyV3(evidence, nonce, repository = 'ajbt200128/possums', signal, manifest) {
-  return appraise(evidence, nonce, repository, signal, manifest, false);
+  return appraise(evidence, nonce, repository, signal, manifest);
 }
 
-// Opt-in projection only. The caller still owns onion endorsement validation,
-// address equality and expiry; this performs no Tor transport or signature check.
-export async function verifyTorV3(evidence, nonce, manifest, repository = 'ajbt200128/possums', signal) {
-  if (manifest === undefined) throw new VerifierFailure('publisher', 'manifest');
-  return appraise(evidence, nonce, repository, signal, manifest, true);
-}
-
-async function appraise(evidence, nonce, repository, signal, manifest, tor) {
+async function appraise(evidence, nonce, repository, signal, manifest) {
   if (!(evidence instanceof Uint8Array) || !evidence.length || evidence.length > MAX_EVIDENCE) throw new VerifierFailure('input', 'size');
   if (!(nonce instanceof Uint8Array) || nonce.length !== 32) throw new VerifierFailure('input', 'nonce');
   if (typeof repository !== 'string' || repository.length > 256) throw new VerifierFailure('input', 'workload');
@@ -82,7 +73,6 @@ async function appraise(evidence, nonce, repository, signal, manifest, tor) {
   try {
     worker = new Worker(new URL('./verifier-worker.mjs', import.meta.url), {
       workerData: { evidence: Buffer.from(evidence).toString('base64'), nonce: Buffer.from(nonce).toString('base64'), repository,
-        ...(tor ? { action: 'tor_endorsement_key_v1' } : {}),
         ...(manifest === undefined ? {} : { manifest: Buffer.from(manifest).toString('base64') }) },
       env: {}, execArgv: [], stdout: true, stderr: true,
     });
@@ -103,7 +93,7 @@ async function appraise(evidence, nonce, repository, signal, manifest, tor) {
       signal?.addEventListener('abort', abort, { once: true });
       worker.once('message', message => {
         if (signal?.aborted) return abort();
-        try { finish(undefined, qualified(message, tor)); }
+        try { finish(undefined, qualified(message)); }
         catch (error) { finish(error instanceof VerifierFailure ? error : new VerifierFailure()); }
       });
       worker.once('error', () => finish(new VerifierFailure('bridge', 'artifact_unavailable')));

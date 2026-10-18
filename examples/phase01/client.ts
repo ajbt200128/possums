@@ -1,7 +1,5 @@
 import { Channel, hasByteReadTimeout, type ResponseOptions } from './transport.js';
-import type { V3Input, TorV3Input } from '../../clients/pi/v3.js';
-import type { TorConnection } from '../../clients/pi/tor-connection.js';
-import { TorNativeTransportFailure, torNativeTransportDiagnostic, type TorNativeDiagnostic } from '../../clients/pi/tor-native-transport.mjs';
+import type { V3Input } from '../../clients/pi/v3.js';
 import { ChannelError, DiagnosticFailure, LIMITS, Operation, OperationFailure, cleanup, parseJSON, requireThat, serialize,
   type FailureConstraint, type FailureStage } from './limits.js';
 import { admitReasoning, reasoningParams, type ReasoningParams, type ReasoningOptions } from './reasoning.js';
@@ -36,31 +34,13 @@ export type Receipt = { finish?: 'stop' | 'length' | 'tool_calls'; inputTokens: 
   complete?: boolean; outcome?: 'settled' | 'refunded'; reservedMicrounits?: string; cachedTokens?: number; quotedCachedInputMicrounitsPerMillion?: string | null; evidence?: string;
   usageAvailable?: boolean; deliveryComplete?: boolean };
 export type Completion = Partial<Receipt> & { finish: NonNullable<Receipt['finish']> };
-function closedTorNativeDiagnostic(observed?: Readonly<TorNativeDiagnostic>): Readonly<TorNativeDiagnostic> {
-  // Only the allowlisted kind selects locally authored fields. Neither mutable
-  // diagnostic replacements nor raw exception/cause/stack become retained data.
-  try {
-    const code = observed?.code;
-    const kind = typeof code === 'string' && code.startsWith('possums_tor_native_')
-      ? code.slice('possums_tor_native_'.length) : undefined;
-    return torNativeTransportDiagnostic(new TorNativeTransportFailure(kind));
-  } catch { return torNativeTransportDiagnostic(new TorNativeTransportFailure('ipc_unknown')); }
-}
-export function safeTorNativeDiagnostic(error: TorNativeTransportFailure): Readonly<TorNativeDiagnostic> {
-  try { return closedTorNativeDiagnostic(torNativeTransportDiagnostic(error)); }
-  catch { return closedTorNativeDiagnostic(); }
-}
 const interruptedReceipts = new WeakMap<CompletionFailure, Readonly<Receipt>>();
-const nativeDiagnostics = new WeakMap<CompletionFailure, Readonly<TorNativeDiagnostic>>();
 export class CompletionFailure extends DiagnosticFailure {
-  constructor(stage: FailureStage, constraint: FailureConstraint, receipt?: Readonly<Receipt>, status?: number,
-    native?: Readonly<TorNativeDiagnostic>) {
+  constructor(stage: FailureStage, constraint: FailureConstraint, receipt?: Readonly<Receipt>, status?: number) {
     super(stage, constraint, 'uncertain', status);
     if (receipt) interruptedReceipts.set(this, Object.freeze({ ...receipt, deliveryComplete: false }));
-    if (native) nativeDiagnostics.set(this, closedTorNativeDiagnostic(native));
   }
   get settlement(): Readonly<Receipt> | undefined { return interruptedReceipts.get(this); }
-  get nativeDiagnostic(): Readonly<TorNativeDiagnostic> | undefined { return nativeDiagnostics.get(this); }
 }
 export type BalanceSnapshot = Readonly<{ availableMicrounits: string; inFlight: number; completedRequests: string }>;
 export class BalanceFailure extends ChannelError {
@@ -355,8 +335,6 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
       try { next = await op.wait(reader.read(), hasByteReadTimeout(body) ? null : LIMITS.idleMs); }
       catch (error) {
         if (error instanceof OperationFailure || error instanceof DiagnosticFailure) throw error;
-        if (error instanceof TorNativeTransportFailure) throw new CompletionFailure(atEOF() ? 'stream' : 'transport',
-          atEOF() ? 'eof' : 'fetch', undefined, httpStatus, safeTorNativeDiagnostic(error));
         throw new DiagnosticFailure(atEOF() ? 'stream' : 'transport', atEOF() ? 'eof' : 'fetch', 'uncertain');
       }
       if (next.done) {
@@ -395,16 +373,14 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
     // A later integrity failure must not be hidden by an earlier operational
     // error frame. Keep received money, but preserve the fatal trust category.
     if (error instanceof DiagnosticFailure && (error.stage === 'trust' || ['endpoint_binding', 'decryption', 'frames'].includes(error.constraint))) {
-      throw new CompletionFailure(error.stage, error.constraint, receipt, error.status ?? httpStatus,
-        error instanceof CompletionFailure ? error.nativeDiagnostic : undefined);
+      throw new CompletionFailure(error.stage, error.constraint, receipt, error.status ?? httpStatus);
     }
     if (failure) {
       const interrupted = new GatewayError(failure.reason, failure.detail, 'unknown', failure.status);
       if (receipt) confirmedSettlements.set(interrupted, Object.freeze({ ...receipt, deliveryComplete: false }));
       throw interrupted; // An error's refund claim alone still needs authenticated EOF.
     }
-    if (error instanceof DiagnosticFailure) throw new CompletionFailure(error.stage, error.constraint, receipt, error.status ?? httpStatus,
-      error instanceof CompletionFailure ? error.nativeDiagnostic : undefined);
+    if (error instanceof DiagnosticFailure) throw new CompletionFailure(error.stage, error.constraint, receipt, error.status ?? httpStatus);
     if (error instanceof OperationFailure) throw new CompletionFailure(stage, error.constraint, receipt, httpStatus);
     throw new CompletionFailure(stage, constraint, receipt, httpStatus);
   }
@@ -442,8 +418,8 @@ export class ReferenceClient {
   static async published(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal): Promise<ReferenceClient> {
     return new ReferenceClient(await Channel.published(bundle, manifest, keyConfig, signal));
   }
-  static async v3(input: V3Input | TorV3Input, signal?: AbortSignal, scope?: TorConnection): Promise<ReferenceClient> {
-    return new ReferenceClient(await Channel.v3(input, signal, scope));
+  static async v3(input: V3Input, signal?: AbortSignal): Promise<ReferenceClient> {
+    return new ReferenceClient(await Channel.v3(input, signal));
   }
   get release() { return this.channel.release; }
   get authExpiresAt(): number | undefined { return this.#authExpiresAt; }
@@ -472,7 +448,6 @@ export class ReferenceClient {
       this.#authExpiresAt = issuedAfter + session.expires_in * 1000;
     } catch (error) {
       if (error instanceof DiagnosticFailure || error instanceof CatalogFailure || error instanceof GatewayError) throw error;
-      if (error instanceof TorNativeTransportFailure) throw new CompletionFailure(stage, constraint, undefined, undefined, safeTorNativeDiagnostic(error));
       if (error instanceof OperationFailure) throw new DiagnosticFailure(stage, error.constraint, started ? 'uncertain' : 'rejected');
       throw new DiagnosticFailure(stage, constraint, op.controller.signal.aborted || (error instanceof ChannelError && error.code === 'uncertain') ? 'uncertain' : 'rejected');
     } finally { op.close(); }
@@ -483,7 +458,6 @@ export class ReferenceClient {
       requireThat(this.#bearer); value = await this.channel.models(this.#bearer, signal);
     } catch (error) {
       if (error instanceof CatalogFailure || error instanceof DiagnosticFailure) throw error;
-      if (error instanceof TorNativeTransportFailure) throw new CompletionFailure('catalog', 'fetch', undefined, undefined, safeTorNativeDiagnostic(error));
       throw new CatalogFailure('request', error instanceof ChannelError ? error.code : 'rejected');
     }
     try { return validateModels(value); }
@@ -496,8 +470,6 @@ export class ReferenceClient {
       value = await this.channel.balance(this.#bearer, signal);
     } catch (error) {
       if (error instanceof GatewayError) throw error;
-      if (error instanceof TorNativeTransportFailure) throw new BalanceFailure('request', 'uncertain',
-        new CompletionFailure('balance', 'fetch', undefined, undefined, safeTorNativeDiagnostic(error)));
       throw new BalanceFailure('request', error instanceof ChannelError ? error.code : 'rejected', error instanceof DiagnosticFailure ? error : undefined);
     }
     try {
@@ -566,7 +538,7 @@ export class ReferenceClient {
     try { requireThat(bearer); op = new Operation(null, state.options!.signal); }
     catch { state.busy = false; throw new DiagnosticFailure('request', 'schema'); }
     const { payload, options: opts, onDelta, model, newConversation } = state;
-    let issued = false, hookThrown = false, guardThrown = false, stage: FailureStage = 'request', constraint: FailureConstraint = 'encoding';
+    let issued = false, hookThrown = false, stage: FailureStage = 'request', constraint: FailureConstraint = 'encoding';
     let status: number | undefined;
     try {
       op.check(); stage = 'catalog'; constraint = 'fetch';
@@ -588,8 +560,7 @@ export class ReferenceClient {
       op.check(); requireThat(!state.closed); stage = 'transport'; constraint = 'fetch';
       // The owner checks session/account/run and cancellation synchronously at
       // the last possible boundary, after all awaited setup and hooks.
-      try { beforeDispatch?.(); }
-      catch (error) { guardThrown = true; throw error; }
+      beforeDispatch?.();
       op.check(); requireThat(!state.closed);
       state.dispatched = true;
       const body = await this.channel.chat({ ...payload!, submission: issuance.submission }, bearer,
@@ -609,8 +580,7 @@ export class ReferenceClient {
       }
       if (error instanceof CatalogFailure) throw error;
       if (hookThrown) throw new DiagnosticFailure('hook', 'unexpected', 'uncertain', status);
-      if (error instanceof CompletionFailure) throw new CompletionFailure(error.stage, error.constraint, error.settlement, error.status ?? status, error.nativeDiagnostic);
-      if (!guardThrown && error instanceof TorNativeTransportFailure) throw new CompletionFailure(stage, constraint, undefined, status, safeTorNativeDiagnostic(error));
+      if (error instanceof CompletionFailure) throw new CompletionFailure(error.stage, error.constraint, error.settlement, error.status ?? status);
       if (error instanceof DiagnosticFailure) {
         if ((issued && error.code !== 'uncertain') || (error.status === undefined && status !== undefined)) {
           throw new DiagnosticFailure(error.stage, error.constraint, issued ? 'uncertain' : error.code, error.status ?? status);
