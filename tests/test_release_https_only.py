@@ -90,6 +90,16 @@ class HTTPSOnlyReleaseTest(StopTest):
         self.assertIn('User = "65532:65532"', (ROOT / "flake.nix").read_text())
         self.assertIn('gatewayAccounts', (ROOT / "flake.nix").read_text())
 
+    def test_pr90_readiness_modules_hooks_and_direct_libc_are_removed(self):
+        for name in ("src/telemetry/startup/readiness.rs", "src/telemetry/startup/readiness",
+                     "src/tor_ingress/readiness_tests.rs", "src/tor_ingress/readiness_tests"):
+            self.assertFalse((ROOT / name).exists(), name)
+        for name in ("src/main.rs", "src/telemetry/startup.rs"):
+            source = (ROOT / name).read_text()
+            for removed in ("startup_readiness", "readiness::", "mod readiness", "libc::"):
+                self.assertNotIn(removed, source)
+        self.assertNotRegex((ROOT / "Cargo.toml").read_text(), r"(?m)^libc\s*=")
+
 
 if __name__ == "__main__":
     unittest.main()
