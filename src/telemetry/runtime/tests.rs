@@ -145,7 +145,7 @@ async fn configured_sender_rewarms_after_invalidation_without_replay() {
         crate::server::admission_capacities(),
     ));
     tokio::time::timeout(Duration::from_secs(2), async {
-        while metrics.epoch.load(SeqCst) % 2 == 0 {
+        while metrics.epoch.load(SeqCst).is_multiple_of(2) {
             tokio::task::yield_now().await;
         }
     })

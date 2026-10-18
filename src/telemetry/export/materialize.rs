@@ -214,7 +214,7 @@ fn append(
     }
 }
 fn request_window(window: Window) -> bool {
-    window.start_ns % 300_000_000_000 == 0
+    window.start_ns.is_multiple_of(300_000_000_000)
         && window.end_ns.checked_sub(window.start_ns) == Some(300_000_000_000)
 }
 // The supported prost transform maps an out-of-range u64 to zero. Reject the
@@ -492,7 +492,7 @@ fn append_requests(
 
 /// Independent minute, end timestamp only; absent/invalid source points stay absent.
 pub(super) fn infrastructure(t: &Infrastructure, window: Window) -> Option<ResourceMetrics> {
-    if window.start_ns % 60_000_000_000 != 0
+    if !window.start_ns.is_multiple_of(60_000_000_000)
         || window.end_ns.checked_sub(window.start_ns) != Some(60_000_000_000)
     {
         return None;

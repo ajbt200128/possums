@@ -70,7 +70,27 @@ func appraiseEvidence(document, nonce []byte, repo string) (verifiedEvidence, er
 	}, nil
 }
 
+// Closed acquisition categories only; never retain a net/HTTP/parser cause.
+type acquisitionFailure string
+
+func (failure acquisitionFailure) Error() string { return string(failure) }
+
+const (
+	acquisitionTransport acquisitionFailure = "transport_unknown"
+	acquisitionStatus    acquisitionFailure = "http_status"
+	acquisitionRead      acquisitionFailure = "body_read_unknown"
+	acquisitionSize      acquisitionFailure = "size"
+)
+
+type acquisitionHTTPStatus struct{ status int }
+
+func (acquisitionHTTPStatus) Error() string { return string(acquisitionStatus) }
+
 func fetchEvidence(socket string, nonce []byte) ([]byte, error) {
+	return fetchEvidenceContext(context.Background(), socket, nonce)
+}
+
+func fetchEvidenceContext(ctx context.Context, socket string, nonce []byte) ([]byte, error) {
 	if len(nonce) != nonceBytes {
 		return nil, errors.New("invalid nonce length")
 	}
@@ -85,24 +105,24 @@ func fetchEvidence(socket string, nonce []byte) ([]byte, error) {
 		"http://localhost/.well-known/tinfoil-attestation?nonce=%s",
 		hex.EncodeToString(nonce),
 	)
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, acquisitionTransport
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("attestation returned HTTP %d", response.StatusCode)
+		return nil, acquisitionHTTPStatus{status: response.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxEvidenceBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, acquisitionRead
 	}
 	if len(body) == 0 || len(body) > maxEvidenceBytes {
-		return nil, errors.New("invalid attestation size")
+		return nil, acquisitionSize
 	}
 	return body, nil
 }

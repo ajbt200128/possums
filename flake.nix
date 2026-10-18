@@ -39,8 +39,9 @@
                 ./vendor/tinfoil/assets/trusted_root.json
                 ./vendor/tinfoil/assets/rekor_test_bundle.json
               ];
+              helperTestAssets = map toString [ ./tests/fixtures/attestation-helper.sh ];
             in
-            (craneLib.filterCargoSources path type || builtins.elem (toString path) sdkAssets) &&
+            (craneLib.filterCargoSources path type || builtins.elem (toString path) (sdkAssets ++ helperTestAssets)) &&
             base != ".pi" && base != ".env";
         };
         common = {
@@ -49,7 +50,7 @@
           SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         };
         cargoArtifacts = craneLib.buildDepsOnly common;
-        # Tests have their own check; image builds should not compile/run them again.
+        # Tests have their own checks, not an image-build side effect.
         gateway = craneLib.buildPackage (common // {
           inherit cargoArtifacts;
           doCheck = false;
@@ -76,10 +77,15 @@
           ulimit -c 0
           exec ${gateway}/bin/possums
         '';
+        # Preserve the normal unprivileged runtime's passwd/group records.
+        gatewayAccounts = pkgs.dockerTools.fakeNss.override {
+          extraPasswdLines = [ "possums:!:65532:65532:Possums gateway:/tmp:/noshell" ];
+          extraGroupLines = [ "possums:!:65532:" ];
+        };
         gatewayImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway";
           tag = "phase0";
-          contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert ];
+          contents = [ gateway gatewayEntrypoint attestationHelper pkgs.cacert gatewayAccounts ];
           config = {
             Entrypoint = [ "${gatewayEntrypoint}/bin/possums-entrypoint" ];
             Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
@@ -99,15 +105,18 @@
           contents = [ pkgs.cacert ];
           config = { };
         };
+        # Inspect fakeNss's declared recipe inputs without changing its image output.
+        # Wrapping the join itself would prewarm the configured passwd/group files.
+        gatewayAccountFiles = (gatewayAccounts.override { symlinkJoin = args: args; }).paths;
         releaseBuildDeps = (pkgs.linkFarm "release-build-deps"
           (pkgs.lib.imap0 (n: drv: {
             name = toString n;
             # Nix 2.34 rejects 25.05's null structured checks on input-only wrappers.
             # Remove those checks only here; real image output constraints stay intact.
             path = builtins.derivation (builtins.removeAttrs drv.inputDerivation.drvAttrs [ "outputChecks" ]);
-          }) ([ gateway attestationHelper ] ++ imageStages dependencyImage))).overrideAttrs (_: {
+          }) ([ gateway attestationHelper ] ++ gatewayAccountFiles ++ imageStages dependencyImage))).overrideAttrs (_: {
             passthru.rebuildDerivations = map (drv: drv.drvPath)
-              ([ gateway attestationHelper gatewayEntrypoint ] ++ imageStages gatewayImage);
+              ([ gateway attestationHelper gatewayEntrypoint gatewayAccounts ] ++ gatewayAccountFiles ++ imageStages gatewayImage);
           });
         smokeImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway-smoke";
@@ -133,6 +142,11 @@
         };
         checks = {
           inherit gateway;
+          gateway-accounts = pkgs.runCommand "gateway-account-records-check" { } ''
+            grep -Fxq 'possums:!:65532:65532:Possums gateway:/tmp:/noshell' ${gatewayAccounts}/etc/passwd
+            grep -Fxq 'possums:!:65532:' ${gatewayAccounts}/etc/group
+            touch "$out"
+          '';
           fmt = craneLib.cargoFmt { inherit src; };
           clippy = craneLib.cargoClippy (common // {
             inherit cargoArtifacts;
@@ -141,6 +155,8 @@
           tests = craneLib.cargoTest (common // { inherit cargoArtifacts; });
           attestation-helper = attestationHelper;
         };
-        devShells.default = craneLib.devShell { checks = self.checks.${system}; };
+        devShells.default = craneLib.devShell {
+          checks = self.checks.${system};
+        };
       });
 }

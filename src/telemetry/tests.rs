@@ -916,12 +916,12 @@ fn infrastructure_six_intervals_and_availability() {
 fn frozen_cardinality_and_layout_ceilings() {
     assert_eq!(REQUEST_SERIES, 1051);
     assert_eq!(REQUEST_CELLS, 3256);
-    assert_eq!(EXTENSION_POINTS, 63);
-    assert_eq!(REQUEST_SERIES + EXTENSION_POINTS, 1114);
-    assert_eq!(REQUEST_CELLS + EXTENSION_POINTS, 3319);
-    assert_eq!(std::mem::size_of::<errors::ErrorTotals>(), 440);
+    assert_eq!(EXTENSION_POINTS, 65);
+    assert_eq!(REQUEST_SERIES + EXTENSION_POINTS, 1116);
+    assert_eq!(REQUEST_CELLS + EXTENSION_POINTS, 3321);
+    assert_eq!(std::mem::size_of::<errors::ErrorTotals>(), 456);
     assert_eq!(std::mem::size_of::<tokens::TokenTotals>(), 80);
-    assert_eq!(std::mem::size_of::<RequestTables>(), 32_376);
+    assert_eq!(std::mem::size_of::<RequestTables>(), 32_392);
     assert_eq!(INFRASTRUCTURE_SERIES, 19);
     assert!(std::mem::size_of::<RequestTables>() <= 67_456);
     assert!(std::mem::size_of::<Infrastructure>() <= 2048);
