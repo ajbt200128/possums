@@ -58,4 +58,14 @@ privacy tests remain in the full debug suite. No SDK bootstrap or publication
 occurs in these tests. Positive Linux FIFO behavior is left to the hosted Linux
 suite, not claimed from the Darwin run.
 
-Signed build/release, actual debug rollout and runtime health remain pending.
+[Hosted Linux build39152985349](https://github.com/ajbt200128/possums/actions/runs/39152985349),
+attempt1, passed from exact source `e964d1cbfc2218192d62b9b080dfe3cc63dca779`:
+normal/debug tests, formatting, strict Clippy, pinned image build and archive/
+registry equality. Independently inspected the downloaded archive with supported
+Skopeo: digest, Linux/amd64, UID/GID65532, source/debug labels and Nix-store debug
+entrypoint matched the recipe. Exact digest:
+`sha256:8667405e5469618437259700a06c63bc73d540ac07d5ef5a65e7a325bf715491`.
+The config-only image replacement retains the prior600s grace, all remaining
+controls and disabled export. No raw image configuration was printed or retained
+as diagnostics. Signed release, actual debug rollout and runtime health remain
+pending.
