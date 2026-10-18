@@ -1,5 +1,58 @@
 use super::*;
 
+#[tokio::test]
+async fn sdk_certificate_rejection_still_fails_closed_as_tokenizer_connect_failure() {
+    use rustls::pki_types::PrivateKeyDer;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![certified.cert.der().clone()],
+            PrivateKeyDer::Pkcs8(certified.key_pair.serialize_der().into()),
+        )
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        // No authenticated HTTP request can follow this TLS rejection.
+        assert!(tokio_rustls::TlsAcceptor::from(Arc::new(config))
+            .accept(socket)
+            .await
+            .is_err());
+    });
+    let verifier = tinfoil::verifier::tls::PinnedCertVerifier::new("0".repeat(64)).unwrap();
+    let tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .use_preconfigured_tls(tls)
+        .build()
+        .unwrap();
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        client
+            .get(format!("https://{address}/HOSTILE_PRIVATE_MARKER"))
+            .send(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.is_connect());
+    assert!(!error.is_timeout());
+    let failure = tokenizer_send_failure(error.is_timeout(), error.is_connect());
+    assert_eq!(failure, InferenceFailure::TokenizerConnectFailed);
+    assert!(!failure.to_string().contains("HOSTILE_PRIVATE_MARKER"));
+    drop(error);
+    tokio::time::timeout(Duration::from_secs(5), peer)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[test]
 fn tokenizer_send_predicates_prefer_deadline_without_guessing_connection_cause() {
     for (timeout, connect, expected) in [
