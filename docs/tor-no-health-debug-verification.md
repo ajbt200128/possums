@@ -105,18 +105,96 @@ update. Neither response establishes physical cleanup or publication exclusivity
 No other lifecycle mutation, cancellation, rollback, vault change or production
 operation was attempted.
 
-**External blocker:** the existing debug instance cannot currently be started
+**External blocker at that attempt:** the existing debug instance could not be started
 through the pinned client's documented lifecycle endpoint, while the existing
 update-plan endpoint refuses the stopped state. The underlying control-plane
 cause is unknown; HTTP404 alone does not distinguish unavailable route from
 resource/admission concealment. No guessed mutation route, new instance,
 credential-scope upgrade or protected-admission bypass was attempted. A supported
 platform restart of this exact existing instance (or correction of that API
-boundary) is needed before deployment/SSH can continue. No toolbox docs could be
-reread remotely because no SSH session was established.
+boundary) was needed before deployment/SSH could continue. No toolbox docs could
+be reread remotely at that point because no SSH session was established.
 
-No successful new debug deployment, runtime Tor startup, SSH inspection, onion
-publication/readiness or live attestation/inference probe is established. Source
-health independence is qualified above; actual Tor wait/root cause remains
-unknown. Before further mutation reselect exact state and preserve opaque
+At that stopping point no successful new debug deployment, runtime Tor startup
+or SSH inspection was established. The operator deployment and subsequent
+observations below supersede that operational blocker, not the historical
+HTTP responses. Before further mutation reselect exact state and preserve opaque
 settings, references and toolbox wiring. Metadata is not physical-cleanup proof.
+
+## Operator deployment and SSH observation
+
+The operator subsequently reported deploying the candidate. Fresh pinned
+native/Admin selection confirmed the exact existing debug target/repository,
+`debug=true`, current `v0.0.53-debug-tor-health.1`, running, no pending update,
+five managed bindings. The agent did not submit another deployment/start request.
+
+SSH succeeded using freshly selected metadata, the existing operator key,
+`StrictHostKeyChecking=accept-new` (never replace changed keys), no forwarding,
+and bounded noninteractive commands. Installed toolbox README and AGENTS were
+read fully before workload inspection. The toolbox remained untouched. Each SSH
+operation compared opaque settings and references before/after in memory; no
+unexpected pending update or setting/reference change was observed.
+
+Actual runtime checks, projected on the VM before SSH output:
+
+- Gateway image exactly matches the signed debug digest above, source label
+  `ebaf98473836c87dcd2bf3d498a216ca4de88687`, diagnostic label
+  `tor-no-health-v53`.
+- Gateway running, Docker healthy, exit0, no observed OOM. Fixed credential-free
+  `/bin/possums --healthcheck` succeeded (HTTP204).
+- Tor enabled; `OTEL_SDK_DISABLED=true`. Only exact boolean matches were returned,
+  not environment/configuration contents.
+- Existing healthcheck retained: 300s grace, 10s interval, 5s timeout, three
+  retries. Root read-only; /tmp512MiB. No timeout lengthening or healthcheck removal.
+- Nine closed startup milestones included preparation, bootstrap, launch and
+  local initialization completion. By the unchanged owner ordering, mounted
+  identity checks and the official `client.bootstrap().await` returned before
+  service launch. This does not prove descriptor publication or attested serving.
+- Three bounded observation commands read only the existing locally authored
+  startup/readiness records. One deliberately waited150s before its single
+  observation; there was no retry/reboot, new logger or diagnostic exporter.
+
+The complete finite Tor readiness handoff observed:
+
+| Coarse elapsed bucket | Outcome | SDK onion state | Problem kind |
+| --- | --- | --- | --- |
+| 30s to under60s | waiting | bootstrapping | none |
+| 180s or more | unconfirmed | bootstrapping | none |
+
+At the terminal snapshot the gateway remained Docker healthy and the direct
+healthcheck still returned204. This is actual-image/runtime evidence that Tor
+unreadiness no longer gates debug container health. No additional process-exit
+relaxation was needed for this observed run. The two-record observer ends after
+180s; it cannot establish the service's current status later, or establish that
+Running was never reached after that window.
+
+### What Tor is waiting on, and the remaining SDK boundary
+
+The observed wait is **after successful directory bootstrap and local onion
+service launch, before the SDK reports fully established onion service state**.
+It is not the earlier preparation/self-appraisal gate. No attestation probe was
+made and no collateral failure is inferred from these observations.
+
+Pinned official `tor-hsservice0.47.0/src/status.rs` keeps IPT-manager and publisher
+component states private. Its supported status API exposes only the combined
+`state()` and selected `current_problem()` (plus an unrelated unimplemented key
+expiry accessor). In `publish/reactor.rs:1165–1182`, AwaitingIpts, UploadScheduled
+and RateLimited all project to Bootstrapping with no problem. Therefore these
+actual closed snapshots cannot distinguish introduction-point establishment,
+descriptor upload scheduling/retry/rate limiting, or an unreported/stale internal
+failure. `problem_kind=none` is not proof that the network or publisher is healthy.
+Effective egress restrictions and the precise blocking cause remain unknown.
+
+The smallest useful next diagnostic boundary is an upstream-supported closed
+projection of IPT component state, publisher phase and terminal failure category
+at their existing typed owners. No addresses, peer/onion IDs, raw errors or
+formatted Debug values should enter that projection. This run did not fork the
+SDK, scrape its Debug formatting, enable raw Arti/global logs, inspect private
+key bytes, test onion publication by contacting the identity, or weaken any
+client/per-request verification. A further app-only formatting change cannot
+recover component fields the SDK does not expose.
+
+No production operation, configuration edit, boot/restart, new container, key
+provisioning, paid/live inference or new attestation probe was performed in this
+SSH follow-up. Publication exclusivity, successful onion reachability, native-v3
+signer compatibility and platform retention/erasure remain unproved.
