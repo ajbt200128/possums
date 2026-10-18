@@ -13,8 +13,9 @@ the route; there is no HTTPS downgrade or inference replay. See
 [current restoration record](../../docs/tor-main-restoration.md).
 
 Previously installed packages/settings are untouched. Do not install or activate
-this scratch candidate without separate authorization. Default gateway measured
-configuration is not Tor-activated by this PR. Historical release/install and
+this scratch candidate without separate authorization. The PR now enables Tor in
+the gateway's measured source configuration, with its attested A grant/mount and
+B secret references. No live deployment or binding was changed. Historical release/install and
 [backup evidence](../../docs/without-tor-backup-verification.md) below are not
 new qualification; shipped-client, Linux, freshness and live gaps remain.
 

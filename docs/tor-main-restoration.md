@@ -7,7 +7,9 @@ on the diagnostic branch. This source authorization supersedes the historical
 Tor-removal restriction only for implementation, offline testing, small commits,
 push and PR creation. It authorizes **no merge, release dispatch/publication,
 deployment, client installation/activation, runtime/key-binding mutation,
-inference, attestation or live Tor probe**. Degraded-state investigation is deferred.
+inference, attestation or live Tor probe**. The operator subsequently requests
+that this PR turn Tor on in measured source configuration; that change does not
+authorize live mutation. Degraded-state investigation is deferred.
 
 Base: `04abc9efab5557705284779719c4701527631dae` (PR97 recreated gateway target),
 confirmed against origin/main before implementation. The original diagnostic
@@ -23,7 +25,8 @@ worktree is untouched. Donors are inspected through Git objects:
 Later main's verified upstream renewal, tokenizer diagnostics, NSS accounts,
 startup ownership, API/accounting behavior, release/provenance/protected-approval
 controls and `scripts/deploy.py`'s recreated `gateway` target are preserved.
-`tinfoil-config.yml` and release workflow are byte-unchanged from the base:
+The release workflow is byte-unchanged from the base. `tinfoil-config.yml` now
+enables Tor and declares its attested A grant/mount and B secret references;
 open egress, 300-second grace, 512 MiB memory-only `/tmp`, existing image pin and
 export settings remain. No signed debug image, 600-second grace, debug-only
 logging, export activation or one-shot signing workflow override is imported.
@@ -35,15 +38,22 @@ nonce-bound `/attestation/tor`, official helper/WASM Tor appraisal, Pi explicit
 selection and route-preserving renewal, native `tor-socksproto` transport,
 packaging and paired offline tests. Existing pinned Rust 1.92 supports Arti;
 SDK/dependency versions are not upgraded. The Nix shipping binary is Tor-capable;
-Cargo's default features remain empty and runtime opt-in remains absent/false.
+Cargo's default features remain empty. The measured configuration explicitly
+sets `POSSUMS_TOR_ENABLED=true`, declares the `possums-tor-endorsement-v1`
+Ed25519 A key owned by UID/GID 65532, grants it to the gateway, and references
+`POSSUMS_TOR_IDENTITY_NATIVE_KEY` and `POSSUMS_TOR_EXPECTED_ONION` for approved B.
+Missing required inputs fail closed; this source change is not proof that the
+platform has provisioned them.
 
-The measured deployment configuration remains HTTPS-only, deliberately not a
-first-Tor activation recipe. A separately reviewed activation would need the
-platform attested Ed25519 A grant/mount, approved B custody/reference delivery,
-explicit runtime opt-in and exclusive publication/old-candidate cleanup evidence.
-Neither this PR nor its unchanged deploy script adds or removes secret bindings.
-Do not use historical/debug commands as activation authority. An already-running
-shared identity is not evidence that another publisher is safe.
+Separately reviewed activation still needs approved B custody/reference delivery
+and exclusive publication/old-candidate cleanup evidence. The deploy wrapper
+continues to prohibit secret/reference mutation and now rejects an already
+Tor-bound instance before planning/updating: automatic blue/green overlap could
+publish B from multiple instances. It provides neither first-activation nor
+exclusive-host handover automation. Neither this PR nor its tests mutate live
+bindings or the release image pin. Do not use historical/debug commands as
+activation authority. An already-running shared identity is not evidence that
+another publisher is safe.
 
 Alternative curl/Undici/SOCKS transport candidates, historical spikes, private-key
 probe scripts, PR90 post-launch readiness export and debug-only ongoing diagnostics
@@ -99,8 +109,9 @@ Python is explicitly locked nixpkgs `python312` 3.12.12, not ambient shell Pytho
 - Package formatting and strict all-target/all-feature Clippy passed; existing
   vendored Tinfoil unused-method warning remains. Nine changed Rust paths passed
   active LSP with no errors/inconclusive outcomes. Whitespace check passed.
-- Explicit Python 3.12 offline discovery: 97 tests, zero failures, one existing
-  opt-in skip. Includes release/approval/target preservation, no activation,
+- Initial capability-only candidate: explicit Python 3.12 offline discovery
+  passed 97 tests, zero failures, one existing opt-in skip. Includes
+  release/approval/target preservation, no live activation,
   image-health 300-second controls and key-free Tor-image projections. Separate
   opt-in actual release-cache graph checks passed all 13 tests. Pinned Nix
   `checks.aarch64-darwin.gateway-accounts` also passed.
@@ -142,6 +153,21 @@ still fails health. This is offline SDK-assessment evidence, not Tor connectivit
 Local TLS/HTTP/appraisal fixtures do not prove hardware trust or live settlement.
 New-head Linux rootfs/NSS/probe execution and hosted CI remain unqualified locally;
 restored CI performs only key-free network-denied fixture construction.
+
+## Subsequent Tor-on PR amendment
+
+At the operator's request, the candidate now enables Tor in measured source
+configuration instead of merely shipping dormant capability. The exact A grant,
+gateway mount, B references and unchanged 300-second/512-MiB controls have offline
+regressions. The deploy guard rejects either existing B reference before planning
+or mutation, preserving the separate exclusive-publication requirement.
+
+Fresh pinned Python 3.12.12 discovery: **98 tests, zero failures, one existing
+opt-in skip**. All four changed Python/YAML paths passed active LSP diagnostics;
+`git diff --check` passed. Independent read-only Sol review found no source-only
+blocker and independently reproduced the 98-test result. Rust/client source is
+unchanged by this amendment; their earlier completed evidence remains scoped
+above. No live action or new runtime qualification occurred.
 
 ## Compatibility and remaining limits
 

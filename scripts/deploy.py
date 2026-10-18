@@ -25,6 +25,7 @@ CLI_SHA256 = "ef014c67a976b4b47941d084fb0a3837ba6eb59c9f4e662424c6826fb7a70f8c"
 CLI_URL = "https://github.com/tinfoilsh/tinfoil-cli/releases/download/v0.19.0/tinfoil-cli_0.19.0_linux_amd64.tar.gz"
 LIMIT = 16 << 20
 REQUIRED_REFS = {"POSSUMS_ACCOUNTS_JSON", "TINFOIL_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
+TOR_REFS = {"POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"}
 STABLE = ("id", "name", "repo", "project_id", "cpus", "gpus", "memory_mb", "variables", "secrets",
           "ssh_keys", "debug", "disable_cc_mode", "domain", "held", "volume_slots", "volumes",
           "host_gpu_type", "host_cpu_type")
@@ -60,6 +61,7 @@ r.CODES.update({
     "plan_configuration": ("post-call-plan", "The update may have happened; completion is unknown. Privately reconcile configuration/reference changes; no replay or rollback."),
     "cli_uncertain": ("mutation", "The update outcome is uncertain. Inspect state privately; never rerun or automatically roll back."),
     "configuration_changed": ("completion", "The update may have happened; completion is unknown. Privately reconcile changed opaque configuration; no replay or rollback."),
+    "tor_exclusive_publication": ("tor-publication", "Exclusive publication is unknown for an already Tor-bound instance. Separately qualify host drain/exclusivity before another update; no update was sent."),
     "candidate_failed": ("completion-candidate", "The requested update candidate is reported failed; its initiating cause, cleanup and serving are unknown. Inspect supported startup diagnostics privately; no replay or rollback."),
     "domain_source": ("plan-domain", "Production must use the approved old or new hostname; reconcile its configuration before a new deployment."),
     "domain_completion": ("completion-domain", "The release is running but the approved hostname was not confirmed; reconcile privately without replay or rollback."),
@@ -328,6 +330,8 @@ def update_once(cli, tag, final_gate):
     r.require(os.environ.get("GITHUB_RUN_ATTEMPT") == "1", "rerun")
     r.require(bool(os.environ.get("TINFOIL_ADMIN_KEY")), "credential")
     before = get(cli)
+    if unique_names(before.get("secrets")):
+        r.require(not TOR_REFS.intersection(before["secrets"]), "tor_exclusive_publication")
     r.require(type(before.get("mark_latest_release")) is bool, "control_shape")
     previous = before.get("current_tag")
     r.require(before.get("domain") in (OLD_DOMAIN, DOMAIN), "domain_source")

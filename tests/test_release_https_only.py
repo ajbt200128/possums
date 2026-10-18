@@ -35,6 +35,16 @@ class TorRestorationReleaseTest(StopTest):
             self.assertNotIn("--secret", call.call_args.args[1])
             call.assert_called_once()
 
+    def test_tor_bound_update_requires_separate_exclusive_publication_qualification(self):
+        for references in (["POSSUMS_TOR_IDENTITY_NATIVE_KEY"], ["POSSUMS_TOR_EXPECTED_ONION"], sorted(d.TOR_REFS)):
+            before = view()
+            before["secrets"].extend(references)
+            with patch.object(d, "get", return_value=before), patch.object(d, "plan_update") as planning, \
+                    patch.object(d, "call") as call:
+                self.stop("tor_exclusive_publication", d.update_once, "unused", V, Mock())
+                planning.assert_not_called()
+                call.assert_not_called()
+
     def test_pending_current_waits_without_extending_deadline(self):
         pending = {**view(), "update_tag": V, "update_status": "deploying"}
         with patch.object(d, "plan_update"), patch.object(d, "get", side_effect=[view(), pending]), \
@@ -82,16 +92,23 @@ class TorRestorationReleaseTest(StopTest):
             update.call_args.args[2]()
             self.assertEqual(events[-2:], ["eligibility", "approved"])
 
-    def test_tor_capable_build_does_not_activate_or_change_measured_configuration(self):
+    def test_measured_configuration_enables_tor_with_fixed_grant_and_identity_references(self):
         config = (ROOT / "tinfoil-config.yml").read_text()
-        self.assertNotIn("POSSUMS_TOR_", config)
-        self.assertNotIn("attested-keys:", config)
-        self.assertNotIn("    keys:", config)
+        self.assertEqual(config.count('      - POSSUMS_TOR_ENABLED: "true"\n'), 1)
+        self.assertIn('attested-keys:\n  - id: possums-tor-endorsement-v1\n'
+                      '    key: ed25519\n    uid: 65532\n    gid: 65532\n', config)
+        self.assertEqual(config.count('    keys: [possums-tor-endorsement-v1]\n'), 1)
+        for reference in ("POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"):
+            self.assertEqual(config.count('      - ' + reference + '\n'), 1)
+        self.assertNotIn('POSSUMS_TOR_IDENTITY_DIRECTORY', config)
+        self.assertNotIn('OTEL_SDK_DISABLED', config)
+        self.assertIn('      start_period: 300s\n', config)
+        self.assertIn('    egress: open\n', config)
         for required in ("attestation: true", "read_only: true", 'size=512m,mode=1777'):
             self.assertIn(required, config)
         deploy = (ROOT / "scripts/deploy.py").read_text()
         self.assertNotIn("first_tor_activation", deploy)
-        self.assertNotIn("POSSUMS_TOR_", deploy)
+        self.assertEqual(d.TOR_REFS, {"POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"})
         self.assertIn('torCommon = common // { cargoExtraArgs = "--locked --features tor"; };',
                       (ROOT / "flake.nix").read_text())
         self.assertIn('default = []', (ROOT / "Cargo.toml").read_text())

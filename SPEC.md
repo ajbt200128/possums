@@ -3,8 +3,10 @@
 **Tor source-restoration candidate; not activated or deployed.** The operator
 authorizes restoring optional onion ingress, fresh nonce-bound
 `/attestation/tor` endorsements and matching Pi native SOCKS transport/trust
-integration on current main. Default measured configuration and deployment
-bindings remain unchanged: source capability is not activation authority.
+integration on current main. At the operator's subsequent request the measured
+source configuration enables Tor and declares the attested A grant/mount plus
+approved B secret references. Live bindings are untouched; deployment and
+exclusive publication qualification remain separate.
 No direct fallback, uncertain inference replay, startup self-appraisal gate or
 post-launch diagnostic observer is introduced. Local A consistency and approved B
 custody precede launch; clients independently verify fresh nonce/release/A/B/TLS/

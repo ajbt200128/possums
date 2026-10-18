@@ -10,7 +10,13 @@ deployment target, verified renewal, bounded general startup diagnostics, open
 egress, 300-second startup grace, 512 MiB memory-only `/tmp`, and all release,
 provenance and protected-approval gates. Do not merge, deploy, dispatch releases,
 install/activate clients, change runtime/key bindings or perform live probes.
-Degraded-state investigation is deferred; Tor health flapping remains unresolved.
+The operator subsequently requires this PR's measured configuration to enable
+Tor: restore `POSSUMS_TOR_ENABLED=true`, the platform attested A grant/mount and
+the two approved B identity secret references in source. This supersedes the
+initial runtime-off PR configuration, not the prohibition on live mutation.
+Existing deployment gates still apply; secret delivery and exclusive publication
+must be separately qualified before rollout. Degraded-state investigation is
+deferred; Tor health flapping remains unresolved.
 
 Local mounted A private/public consistency and approved B custody remain required
 before launch; startup self-appraisal/freshness is not a launch gate. Every

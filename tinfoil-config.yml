@@ -1,6 +1,11 @@
 cvm-version: 0.14.12
 cpus: 2
 memory: 8192
+attested-keys:
+  - id: possums-tor-endorsement-v1
+    key: ed25519
+    uid: 65532
+    gid: 65532
 networks:
   inference:
     egress: open
@@ -10,6 +15,7 @@ containers:
     env:
       - HOME: "/tmp"
       - POSSUMS_BIND: "0.0.0.0:8080"
+      - POSSUMS_TOR_ENABLED: "true"
       - POSSUMS_GATEWAY_ATTESTATION_SOCKET: "/tinfoil/attestation.sock"
       - POSSUMS_GATEWAY_REPOSITORY: "ajbt200128/possums"
       - POSSUMS_TINFOIL_HOST: "inference.tinfoil.sh"
@@ -18,6 +24,7 @@ containers:
       - OTEL_SERVICE_NAME: "possums-gateway"
     networks: [inference]
     attestation: true
+    keys: [possums-tor-endorsement-v1]
     healthcheck:
       test: ["CMD", "/bin/possums", "--healthcheck"]
       interval: 10s
@@ -32,6 +39,8 @@ containers:
       - POSSUMS_ACCOUNTS_JSON
       - TINFOIL_API_KEY
       - OTEL_EXPORTER_OTLP_HEADERS
+      - POSSUMS_TOR_IDENTITY_NATIVE_KEY
+      - POSSUMS_TOR_EXPECTED_ONION
 shim:
   upstream-port: 8080
   paths:
