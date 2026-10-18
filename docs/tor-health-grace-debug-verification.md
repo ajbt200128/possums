@@ -67,5 +67,59 @@ entrypoint matched the recipe. Exact digest:
 `sha256:8667405e5469618437259700a06c63bc73d540ac07d5ef5a65e7a325bf715491`.
 The config-only image replacement retains the prior600s grace, all remaining
 controls and disabled export. No raw image configuration was printed or retained
-as diagnostics. Signed release, actual debug rollout and runtime health remain
-pending.
+as diagnostics.
+
+## Signed release
+
+[Publication39154073031](https://github.com/ajbt200128/possums/actions/runs/39154073031),
+attempt1, passed for `v0.0.53-debug-tor-health.3`, release commit
+`c5696be5068083b3cbb6a5bd3ddc50c613d91e01`. The existing repository manifest
+validator checked exact committed config/image and downloaded manifest/hash.
+Supported `gh attestation verify` checked the exact tagged diagnostic workflow,
+source/signer commit, supported repository predicate and hosted runner. Additional
+checks bound the signed subject/predicate and exact run/attempt, successful job,
+build parent and config-only image replacement. Manifest SHA256:
+`f1f4f78e8ef5a5467ee4d2c1e4b2b49d757bdc74f96ac3db445e8b9fefb6ca18`.
+Promotion was disabled. These are public release-signing checks, not fresh device
+attestation or production admission. The separate attestation investigation was
+not probed or changed.
+
+## Actual rollout — failed, no replay
+
+Fresh exact existing debug selection found `.2/running`, no pending update and
+five managed bindings. Two read-only plans (standalone and immediately before
+submission) approved `.3`, blue-green/no downtime/no hold, promotion false,
+unchanged resources/opaque variables/references/SSH settings and only the exact
+existing five secret refresh names. One update POST was acknowledged. Readback
+progressed through pending and started, then **update failed** while `.2` remained
+current/running. Opaque settings/references and promotion false were preserved.
+No replay, acceptance, cancellation, rollback, relaunch, direct toolbox boot or
+production/main action occurred.
+
+| Boundary | Observed result |
+| --- | --- |
+| Source tests and image build | Passed |
+| Signed release/config/image binding | Passed |
+| Debug update | `DEBUG_UPDATE_FAILED_NO_REPLAY`; platform-reported failed |
+| Current release after failure | `.2/running` |
+| Pending release after failure | `.3/failed` |
+| New candidate runtime readiness/health/grace | Unknown; not qualified |
+
+The fresh root metadata retained a linked candidate debug SSH port. One bounded
+read-only SSH attempt used that port under the exact `.2/current/.3/failed` root
+selection, accept-new/never-replace-changed host keys and no forwarding. The
+required installed toolbox README/AGENTS could not be obtained, so inspection
+stopped at `DEBUG_FAILED_CANDIDATE_TOOLBOX_DOCUMENT_MISSING` before any gateway
+inspection/probe. Neither candidate image identity nor runtime Tor state, Docker
+health, effective grace or startup logs were established. The SSH/candidate
+availability cause is unknown; port metadata alone is not a live-host guarantee.
+No raw SSH/platform errors, logs, config, identifiers or private data were
+printed or retained as diagnostics. Final native read-only update status still
+reported failed; its underlying cause was not available through the closed
+projection. Thus this does **not** establish that Tor missed600s, that the new
+binary started, or that attestation caused the rollout failure. Prior `.2`
+readiness/reachability evidence must not be relabeled as `.3` evidence.
+
+The failed pending operation remains in place. Another update or lifecycle action
+requires a separately reviewed operator decision and fresh exact state selection;
+this experiment does not authorize automatic cleanup/retry. Production unchanged.
