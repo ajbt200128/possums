@@ -1,18 +1,80 @@
-# Legacy entry point now uses the same exact-main reproducible release path.
-name: Tinfoil Release
+# NONPRODUCTION only. Existing same-repository diagnostic publication path.
+name: Tinfoil Release - NONPRODUCTION Tor health image
+run-name: NONPRODUCTION Tor health image ${{ github.sha }}
 on:
   workflow_dispatch:
+concurrency:
+  group: debug-tor-health-v53
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
-  prepare-release:
-    if: github.repository == 'ajbt200128/possums' && github.ref == 'refs/heads/main' && vars.RELEASE_AUTOMATION_ENABLED == 'true'
+  diagnostic-image:
+    if: github.repository == 'ajbt200128/possums' && github.ref == 'refs/tags/v0.0.53-debug-tor-health.1-build' && github.run_attempt == 1
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
-      actions: write
+      contents: read
+      packages: write
     steps:
-      - name: Dispatch the gated reproducible release path
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require exact v53 debug branch
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git merge-base --is-ancestor baeb334664df3e5406cad9b27f7db66dcb273b02 HEAD
+          grep -F 'debug-tor-no-health = ["tor"]' Cargo.toml
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+        with:
+          diagnostic-endpoint: ""
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          diagnostic-endpoint: ""
+          use-flakehub: false
+          use-gha-cache: true
+          source-revision: baeb334664df3e5406cad9b27f7db66dcb273b02
+      - name: Focused debug and retained normal health gates
+        run: |
+          nix develop --command bash -c 'set -e; cargo fmt --check; cargo test --locked --features tor tor_health_policy; cargo test --locked --features debug-tor-no-health tor_health_policy; cargo test --locked --features debug-tor-no-health health::tests; cargo clippy --locked --all-targets --all-features -- -D warnings'
+      - name: Build pinned debug image
+        run: nix build .#debug-tor-image --option builders "" --print-build-logs
+      - name: Inspect and publish source-bound debug image
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: gh workflow run publish-image.yml --ref main
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cp -L result gateway-image.tar.gz
+          nix shell --inputs-from . nixpkgs#skopeo --command skopeo inspect docker-archive:gateway-image.tar.gz > image-public.json
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          image = json.loads(Path('image-public.json').read_text())
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', image['Digest'])
+          assert image['Labels']['org.opencontainers.image.revision'] == os.environ['GITHUB_SHA']
+          assert image['Labels']['possums.diagnostic'] == 'tor-no-health-v53'
+          assert image['Architecture'] == 'amd64' and image['Os'] == 'linux'
+          Path('digest').write_text(image['Digest'] + '\n')
+          Path('diagnostic-identity.json').write_text(json.dumps({'source': os.environ['GITHUB_SHA'], 'digest': image['Digest'], 'run': os.environ['GITHUB_RUN_ID'], 'attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'production_qualified': False}, sort_keys=True) + '\n')
+          PY
+          printf '%s' "$GHCR_TOKEN" | nix shell --inputs-from . nixpkgs#skopeo --command skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          nix shell --inputs-from . nixpkgs#skopeo --command skopeo copy --preserve-digests docker-archive:gateway-image.tar.gz "docker://ghcr.io/ajbt200128/possums-gateway:debug-tor-health-${GITHUB_SHA}"
+          nix shell --inputs-from . nixpkgs#skopeo --command skopeo inspect "docker://ghcr.io/ajbt200128/possums-gateway:debug-tor-health-${GITHUB_SHA}" > registry-public.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          assert json.loads(Path('registry-public.json').read_text())['Digest'] == Path('digest').read_text().strip()
+          print('DEBUG_REGISTRY_DIGEST_MATCH')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: debug-tor-health-${{ github.sha }}-${{ github.run_id }}-1
+          path: |
+            gateway-image.tar.gz
+            diagnostic-identity.json
+            digest
+          compression-level: 0
+          retention-days: 1
