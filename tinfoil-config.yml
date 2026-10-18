@@ -11,7 +11,7 @@ networks:
     egress: open
 containers:
   - name: gateway
-    image: ghcr.io/ajbt200128/possums-gateway@sha256:5f38cfe0cf5c3b49cd15a8daf68bcbdb326767e80e9eb8450847efe1eb9738f5
+    image: ghcr.io/ajbt200128/possums-gateway@sha256:33eb3605cde1f84473ab521b8b587230447f64564dddc9fb7019edc77ece07a7
     env:
       - HOME: "/tmp"
       - POSSUMS_BIND: "0.0.0.0:8080"
@@ -22,6 +22,7 @@ containers:
       - POSSUMS_TINFOIL_REPOSITORY: "tinfoilsh/confidential-model-router"
       - OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io"
       - OTEL_SERVICE_NAME: "possums-gateway"
+      - OTEL_SDK_DISABLED: "true"
     networks: [inference]
     attestation: true
     keys: [possums-tor-endorsement-v1]
