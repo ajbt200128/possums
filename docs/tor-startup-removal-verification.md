@@ -1,5 +1,9 @@
 # Tor startup self-appraisal removal — source-only candidate
 
+> Current source-restoration scope: [Tor main restoration](tor-main-restoration.md).
+> The startup-removal trust decision below is retained; historical tests are not
+> new verification or activation permission.
+>
 > Historical evidence only in this inactive HTTPS-only backup. All Tor support,
 > not just startup self-appraisal, is removed. Commands and authorizations below
 > do not apply here; unresolved evidence remains historical. See

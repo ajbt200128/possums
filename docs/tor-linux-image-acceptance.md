@@ -1,5 +1,9 @@
 # Candidate Linux image: offline NSS/SDK acceptance
 
+> Current source-restoration scope: [Tor main restoration](tor-main-restoration.md).
+> The key-free image probe and CI path are restored. The historical evidence
+> below does not qualify this new head; new Linux execution remains required.
+>
 > Historical Tor image qualification record only. This inactive HTTPS-only
 > backup removes the Tor probe/CI path; UID/GID 65532 NSS accounts and ordinary
 > image startup/health gates remain. Commands and requirements below are not

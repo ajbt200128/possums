@@ -1,16 +1,22 @@
 # Possums provider for Pi 1.0.4
 
-## Inactive HTTPS-only backup
+## Tor restoration candidate — source/offline only
 
-This branch removes Tor selection flags, SOCKS/native helpers, onion setup and
-endorsement verification. Tor is unsupported; no Tor request is silently retried
-through HTTPS. Use only the existing verified HTTPS bootstrap. Old Tor-selected
-packages will fail against this candidate (the Tor endorsement route is absent).
+Optional Tor selection, the native SOCKS helper, nonce-bound onion setup and
+endorsement verification are restored on current main. Explicit
+`--possums-tor-onion` locks the route; optional `--possums-tor-proxy` selects a
+numeric-loopback SOCKS listener (default `127.0.0.1:19050`). Selection does not
+start a daemon. Native remote destination resolution, independent fresh trust,
+TLS peer binding before headers/body and HPKE remain required. Renewal retains
+the route; there is no HTTPS downgrade or inference replay. See
+[setup/trust details](../../docs/tor-client-setup.md) and the
+[current restoration record](../../docs/tor-main-restoration.md).
+
 Previously installed packages/settings are untouched. Do not install or activate
-this scratch candidate without separate authorization. Shipped HTTPS decoder
-coverage and remaining compatibility/Linux/live gaps are recorded in
-[backup verification](../../docs/without-tor-backup-verification.md).
-The release/install observations below are historical, not this backup's status.
+this scratch candidate without separate authorization. Default gateway measured
+configuration is not Tor-activated by this PR. Historical release/install and
+[backup evidence](../../docs/without-tor-backup-verification.md) below are not
+new qualification; shipped-client, Linux, freshness and live gaps remain.
 
 The catalog-wide gateway tool profile is deployed as **v0.0.15** (the official gateway v3 helper compatibility fix is included; the separate 16-KiB tool-description cap remains removed, while other limits and the shared tool profile are unchanged). All authenticated catalog models advertise the assumed shared OpenAI-functions wire profile; this is not per-model compatibility qualification. A real Kimi Pi round with local `ls`/`read` execution and a correct final continuation was observed on v0.0.10; exact live billing/balance reconciliation remains unverified. See [release scope](../../docs/phase02-pi-release.md).
 
