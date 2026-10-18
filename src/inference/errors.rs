@@ -17,15 +17,8 @@ pub enum InferenceFailure {
     RequestEncodingFailed,
     #[error("The model has no qualified tool profile.")]
     ToolProfileUnqualified,
-    #[error("The tokenizer request could not be sent; the underlying cause is unknown.")]
+    #[error("The tokenizer request could not be sent or timed out.")]
     TokenizerSendFailed,
-    // Keep shipped clients' closed detail vocabulary; internal causes stay distinct.
-    #[serde(rename = "tokenizer_send_failed")]
-    #[error("The tokenizer request exceeded its send deadline.")]
-    TokenizerSendDeadline,
-    #[serde(rename = "tokenizer_send_failed")]
-    #[error("The tokenizer connection failed; the underlying connection cause is unknown.")]
-    TokenizerConnectFailed,
     #[error("The tokenizer returned an unsuccessful HTTP status.")]
     TokenizerHttpFailed,
     #[error("The tokenizer response is invalid or incomplete.")]
@@ -110,14 +103,6 @@ mod tests {
             ),
             (
                 InferenceFailure::TokenizerSendFailed,
-                "tokenizer_send_failed",
-            ),
-            (
-                InferenceFailure::TokenizerSendDeadline,
-                "tokenizer_send_failed",
-            ),
-            (
-                InferenceFailure::TokenizerConnectFailed,
                 "tokenizer_send_failed",
             ),
             (
@@ -206,15 +191,7 @@ mod tests {
             ),
             (InferenceFailure::SettlementFailed, "settlement_failed"),
         ];
-        assert_eq!(cases.len(), 37);
-        assert_eq!(
-            cases
-                .iter()
-                .map(|(_, code)| *code)
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            35
-        );
+        assert_eq!(cases.len(), 35);
         for (failure, code) in cases {
             assert_eq!(serde_json::to_value(failure).unwrap(), code);
             let error = crate::inference::InferenceError::from(failure);

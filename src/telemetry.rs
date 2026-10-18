@@ -338,7 +338,7 @@ impl<C: Clock> AggregateMetrics<C> {
             .is_ok()
     }
     fn time(&self, state: &mut State) -> Option<(u64, u64)> {
-        if state.epoch != self.epoch.load(Ordering::SeqCst) || state.epoch.is_multiple_of(2) {
+        if state.epoch != self.epoch.load(Ordering::SeqCst) || state.epoch % 2 == 0 {
             return None;
         }
         let result = self.clock.now().and_then(|now| state.check_clock(now));
@@ -769,7 +769,7 @@ impl<C: Clock> AggregateMetrics<C> {
         if start >= state.infrastructure.eligible
             && end_ns > start
             && Some(end_ns) <= start.checked_add(INFRA_WINDOW)
-            && (end_ns - start).is_multiple_of(10 * SECOND)
+            && (end_ns - start) % (10 * SECOND) == 0
         {
             observe(
                 &mut state.infrastructure.active,

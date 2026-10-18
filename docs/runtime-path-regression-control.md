@@ -1,5 +1,9 @@
 # Bounded runtime-path regression control
 
+> **Historical v57 packet:** the subsequent [exact-v43 image control](exact-v43-image-control.md)
+> also restores the remaining image/test inputs, removing the retained tokenizer
+> refinements and newer fixtures described below. This record remains scoped to v57.
+
 ## Operator decision and intentional regression
 
 **This candidate intentionally removes later verified upstream-client renewal.**

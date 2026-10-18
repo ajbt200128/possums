@@ -1,5 +1,10 @@
 # Tokenizer send failures — 2026-10-15
 
+> **Historical refinement:** the subsequent operator-approved
+> [exact-v43 image control](exact-v43-image-control.md) removes the deadline/connect
+> refinements and restores the coarse send category. The finer diagnostics/tests
+> below are not current-source coverage; no new live acceptance is implied.
+
 ## Scope and privacy
 
 Operator requested read-only aggregate-metric investigation, then more specific tokenizer failures. This is a gateway source candidate, not a deployment, client installation or new live probe. Apply [typed error aggregates](../PRIVACY.md#typed-interface-failures-and-token-aggregate-extension), [forbidden signals](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data), [complete aggregation](../PRIVACY.md#aggregation-is-necessary-not-sufficient), [processor/retention limits](../PRIVACY.md#processors-retention-access-and-shutdown) and [required evidence](../PRIVACY.md#required-evidence-for-every-telemetry-change).

@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,19 +13,6 @@ import (
 	"github.com/ajbt200128/possums/attestation-helper/verifier"
 	"github.com/tinfoilsh/tinfoil-go/document"
 )
-
-func TestNativeAndWASMResponseSchemasRemainUnchanged(t *testing.T) {
-	// The shared verifier Failure (including WASM) still has exactly three fields.
-	encoded, _ := json.Marshal(&verifier.Failure{Code: "possums_v3_keys_tls", Stage: "keys", Constraint: "tls"})
-	if string(encoded) != `{"code":"possums_v3_keys_tls","stage":"keys","constraint":"tls"}` {
-		t.Fatal("default verifier failure schema changed")
-	}
-	encoded, _ = json.Marshal(verifiedEvidence{Quote: json.RawMessage(`{}`)})
-	var old map[string]json.RawMessage
-	if json.Unmarshal(encoded, &old) != nil || len(old) != 5 || old["status"] != nil || old["failure"] != nil {
-		t.Fatal("default native success schema changed")
-	}
-}
 
 func TestFetchEvidenceUsesNonceAndRejectsInvalidInput(t *testing.T) {
 	socket := filepath.Join(os.TempDir(), fmt.Sprintf("possums-attestation-%d.sock", os.Getpid()))
@@ -113,12 +98,6 @@ func TestFetchEvidenceResponseBounds(t *testing.T) {
 				}
 			} else if err == nil || body != nil {
 				t.Fatal("invalid response returned evidence")
-			}
-			if test.status != http.StatusOK {
-				var observed acquisitionHTTPStatus
-				if !errors.As(err, &observed) || observed.status != test.status {
-					t.Fatal("acquisition boundary discarded observed HTTP status")
-				}
 			}
 		})
 	}
