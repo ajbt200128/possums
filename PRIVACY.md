@@ -94,6 +94,16 @@ The operator requested this extension after intake adopted mandatory interface-f
 
 ### Mandatory typed interface failures
 
+**Exact-image control exception:** the operator subsequently approved restoring
+all v43 image inputs under a new release identity. Tokenizer send classification
+returns to the existing coarse category (54 rather than 56 aggregate error labels);
+the helper no longer retains the finer acquisition wrapper and silently exits on
+failure. Missing finer causes are unavailable, not zero. This narrow diagnostic
+regression adds no collection/export, weakens no trust/accounting check and does
+not waive the requirements below for future implementation. See the
+[control record](docs/exact-v43-image-control.md) for source/check evidence and
+pending live qualification.
+
 Every project-controlled external-facing interface, inbound or outbound, and its supporting startup/background/cleanup paths must classify observed failures from supported typed sources and actual protocol evidence. Include API/listener/middleware, attestation/helper, authenticated catalog/tokenizer/inference, stream/delivery and accounting boundaries. A future gateway↔intake adapter inherits this policy but is not authorized by it. Existing client diagnostics must preserve categories; this extension authorizes no client telemetry upload or Pi/T3 host changes.
 
 Known errors retain a stable locally authored code, failing stage/constraint, actionable next step and independently evidence-supported operation/billing outcome. Unexpected exceptions require a stage-specific **cause unknown** type, not generic text, an invented root cause or exception-string classification. Raw causes, panic payloads and hostile values never enter diagnostics/metrics. Classification is mandatory even with telemetry disabled; process loss, external SDK-swallowed failures, startup/shutdown and incomplete/lost windows may prevent observation or delivery. Document these limits rather than promising every exception reaches Honeycomb.

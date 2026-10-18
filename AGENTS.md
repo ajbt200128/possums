@@ -12,6 +12,15 @@ apply to this backup. Older release-status statements below are dated context,
 not current production inventory. See [backup verification](docs/without-tor-backup-verification.md).
 No installation, activation, release or deployment follows from local checks.
 
+## Exact-v43 image control
+
+The subsequent operator-approved [exact-image control](docs/exact-v43-image-control.md)
+restores v43 image inputs on current main, with normal release/deployment gates.
+Its tokenizer diagnostics are intentionally coarser and its helper acquisition
+wrapper is historical; no raw error export or weaker trust/accounting gate is
+permitted. Do not restore later image inputs during this control or treat local
+identity/tests as deployment or serving acceptance.
+
 ## Minimum implementation per phase
 
 - Build only what is needed to complete the current phase. Do not pull future-phase infrastructure or speculative hardening into the implementation.
