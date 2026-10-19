@@ -105,7 +105,7 @@ pub struct AppState {
     #[cfg(feature = "tor")]
     tor_signer: Option<Arc<crate::tor_endorsement::TorEndorsementSigner>>,
     #[cfg(feature = "tor")]
-    pub(crate) tor_ready: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) tor_ready: Option<Arc<crate::tor_ingress::health::TorReadiness>>,
     #[cfg(test)]
     preflight_hooks: Arc<resource_streaming_tests::PreflightHooks>,
     #[cfg(test)]
@@ -222,16 +222,18 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
         .with_state(state);
     // A credential-free process readiness check, outside application admission,
     // evidence, authentication and request-observation middleware.
-    Router::new().merge(app).route(
+    let health_check = health.clone();
+    #[cfg(feature = "tor")]
+    let tor_check = tor_ready.clone();
+    let app = Router::new().merge(app).route(
         "/healthz",
         get(move || {
-            let health = health.clone();
+            let health = health_check.clone();
             #[cfg(feature = "tor")]
-            let tor_ready = tor_ready.clone();
+            let tor_ready = tor_check.clone();
             async move {
                 #[cfg(feature = "tor")]
-                if tor_ready.is_some_and(|ready| !ready.load(std::sync::atomic::Ordering::Acquire))
-                {
+                if tor_ready.is_some_and(|ready| !ready.is_ready()) {
                     return StatusCode::SERVICE_UNAVAILABLE;
                 }
                 if health.is_serving() {
@@ -241,7 +243,33 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
                 }
             }
         }),
-    )
+    );
+    #[cfg(feature = "tor")]
+    let app = if let Some(tor_ready) = tor_ready {
+        app.route(
+            "/healthz/diagnostics",
+            get(move || {
+                let health = health.clone();
+                let tor_ready = tor_ready.clone();
+                async move {
+                    let diagnostic = tor_ready.diagnostic(health.is_serving());
+                    let status = if diagnostic.ready {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    };
+                    (
+                        status,
+                        [(header::CACHE_CONTROL, "no-store")],
+                        axum::Json(diagnostic),
+                    )
+                }
+            }),
+        )
+    } else {
+        app
+    };
+    app
 }
 
 /// Closed, content-free serving failures behind the public `io::Result` shape.

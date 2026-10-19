@@ -242,7 +242,7 @@ async fn readiness_tracks_reachability_and_clears_on_recovery_and_terminal_eof()
     };
     use tower::ServiceExt;
 
-    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ready = Arc::new(TorReadiness::default());
     let mut state = state();
     state.tor_ready = Some(ready.clone());
     let app = crate::server::router(state);
@@ -253,7 +253,7 @@ async fn readiness_tracks_reachability_and_clears_on_recovery_and_terminal_eof()
     );
     let (send, mut recv) = tokio::sync::mpsc::channel(1);
     let statuses = stream::poll_fn(move |cx| recv.poll_recv(cx));
-    let monitor = engine_status(statuses, Some(ready.clone()));
+    let monitor = engine_status(statuses.map(EngineStatus::test), Some(ready.clone()));
     tokio::pin!(monitor);
     for (state, expected) in [
         (State::Shutdown, false),
@@ -272,7 +272,7 @@ async fn readiness_tracks_reachability_and_clears_on_recovery_and_terminal_eof()
         bounded(async {
             loop {
                 assert!(poll!(&mut monitor).is_pending());
-                if ready.load(Ordering::Acquire) == expected {
+                if ready.is_ready() == expected {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -290,7 +290,7 @@ async fn readiness_tracks_reachability_and_clears_on_recovery_and_terminal_eof()
     }
     drop(send);
     assert_eq!(bounded(monitor).await, Failure::Engine);
-    assert!(!ready.load(Ordering::Acquire));
+    assert!(!ready.is_ready());
     assert_eq!(
         app.oneshot(check()).await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
@@ -299,7 +299,7 @@ async fn readiness_tracks_reachability_and_clears_on_recovery_and_terminal_eof()
 
 #[tokio::test]
 async fn fatal_status_eof_and_panic_clear_readiness() {
-    for statuses in [
+    for (statuses, expected_code) in [
         stream::iter([(State::Running, true)])
             .chain(stream::pending())
             .boxed(),
@@ -308,13 +308,26 @@ async fn fatal_status_eof_and_panic_clear_readiness() {
             .boxed(),
         stream::empty().boxed(),
         stream::poll_fn(|_| panic!("HOSTILE_STATUS_PANIC_SECRET")).boxed(),
-    ] {
-        let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    ]
+    .into_iter()
+    .zip([
+        "tor_reachability_unconfirmed",
+        "tor_reachability_unconfirmed",
+        "tor_status_stream_ended",
+        "tor_status_stream_interrupted",
+    ]) {
+        let ready = Arc::new(TorReadiness::default());
+        ready.mark_running();
         assert_eq!(
-            engine_status(statuses, Some(ready.clone())).await,
+            engine_status(statuses.map(EngineStatus::test), Some(ready.clone())).await,
             Failure::Engine
         );
-        assert!(!ready.load(Ordering::Acquire));
+        assert!(!ready.is_ready());
+        let diagnostic = ready.diagnostic(true);
+        assert_eq!(diagnostic.code, expected_code);
+        assert!(!serde_json::to_string(&diagnostic)
+            .unwrap()
+            .contains("HOSTILE"));
     }
 }
 
