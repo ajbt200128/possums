@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-from test_release_automation import D, R, ROOT, S, V, StopTest, d, plan, r, view
+from test_release_automation import ROOT, D, R, S, V, StopTest, d, plan, r, view
 
 
 class TorRestorationReleaseTest(StopTest):
