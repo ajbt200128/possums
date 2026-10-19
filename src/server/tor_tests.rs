@@ -420,6 +420,111 @@ async fn enabled_health_requires_sdk_reachability_and_serving_lifecycle() {
     );
 }
 
+#[tokio::test]
+async fn typed_timeout_sources_reach_actual_diagnostic_response_without_payloads_or_work() {
+    use retry_error::RetryError;
+    use tor_hsservice::{
+        status::{DescUploadRetryError, Problem, State},
+        DescUploadError,
+    };
+
+    let (state, inference, tor) = tor_fixture();
+    let health = state.tor_ready.as_ref().unwrap();
+    let app = router(state.clone());
+    let check = || {
+        Request::get("/healthz/diagnostics")
+            .body(Body::empty())
+            .unwrap()
+    };
+    health.observe_sdk(State::DegradedUnreachable, None);
+    let response = app.clone().oneshot(check()).await.unwrap();
+    let mut baseline: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(baseline.as_object().unwrap().len(), 8);
+
+    let request = DescUploadError::Request(tor_dirclient::RequestFailedError {
+        source: None,
+        error: tor_dirclient::RequestError::HttpStatus(
+            503,
+            "HOSTILE_REQUEST_SECRET https://private.invalid prompt=PRIVATE".into(),
+        ),
+    });
+    let internal = DescUploadError::Bug(tor_error::Bug::new(
+        tor_error::ErrorKind::Internal,
+        "HOSTILE_INTERNAL_SECRET account=PRIVATE",
+    ));
+    for (sources, expected) in [
+        (vec![], "descriptor_timeout_no_recorded_source"),
+        (
+            vec![DescUploadError::Circuit(tor_circmgr::Error::RequestTimeout)],
+            "descriptor_timeout_circuit",
+        ),
+        (
+            vec![DescUploadError::Stream(tor_circmgr::Error::RequestTimeout)],
+            "descriptor_timeout_stream",
+        ),
+        (vec![request.clone()], "descriptor_timeout_request"),
+        (vec![internal.clone()], "descriptor_timeout_internal"),
+        (vec![request, internal], "descriptor_timeout_mixed"),
+    ] {
+        let mut retries =
+            RetryError::in_attempt_to("HOSTILE_CONTEXT_SECRET https://private.invalid");
+        for source in sources {
+            retries.push(source);
+        }
+        let problem = Problem::DescriptorUpload(vec![DescUploadRetryError::Timeout(retries)]);
+        health.observe_sdk(State::DegradedUnreachable, Some(&problem));
+        drop(problem);
+        // No credential or attestation is needed to read this closed projection.
+        let response = app.clone().oneshot(check()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert!(response.extensions().get::<InterfaceError>().is_none());
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.len() < 1024);
+        let text = String::from_utf8_lossy(&bytes);
+        for sentinel in [
+            "HOSTILE",
+            "PRIVATE",
+            "https://",
+            "private.invalid",
+            "prompt=",
+            "account=",
+        ] {
+            assert!(!text.contains(sentinel));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        baseline["tor_problem"] = json!(expected);
+        assert_eq!(value, baseline);
+        assert_eq!(value["code"], "tor_reachability_unconfirmed");
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["lifecycle_serving"], true);
+        assert!(!health.is_ready());
+        let old_health = app
+            .clone()
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(old_health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(old_health
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+    }
+    assert!(tor.challenges.lock().unwrap().is_empty());
+    for counter in [
+        &inference.catalog_calls,
+        &inference.tokenize_calls,
+        &inference.calls,
+        &inference.document_calls,
+    ] {
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+}
 
 #[tokio::test]
 async fn request_only_readiness_diagnostic_is_closed_uncached_and_initiates_no_work() {

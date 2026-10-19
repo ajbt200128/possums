@@ -165,10 +165,34 @@ underlying cause and fresh client trust/challenge acceptance remain unconfirmed.
 ## Refinement qualification and rollout
 
 Baseline: exact main `059629624794c0ab5f541533da730aeae9f9e48c`; identify the
-candidate by its reviewed PR head. Offline qualification of the refinement,
-independent review, exact-head/main CI, reproducible provenance, protected
-rollout and bounded public checks are **PENDING**. The preceding full-suite
-counts qualify the initial route, not this refinement. Record only content-free
-reviewed observations, not raw SDK errors, identifiers, private config or response
-archives. Neither successful deployment nor a diagnostic response establishes
-restored Tor availability or completed fresh client trust/challenge acceptance.
+candidate by its reviewed PR head. Pinned Rust/Cargo 1.92 qualification used
+`nix develop --offline` and Cargo `--offline --locked`:
+
+- All targets/all features: **603 passed, 5 ignored**.
+- All targets/no default features: **531 passed, 4 ignored**.
+- Strict all-target/all-feature Clippy, package formatting and whitespace passed;
+  only the existing vendored unused-method warning remains.
+- Pinned Python 3.12 release/image suites: **100 run, zero failures, one existing
+  skip**.
+- Active LSP checks of the three changed Rust paths: no warnings/errors and no
+  unsupported, failed or inconclusive checks.
+- Independent read-only review found no concrete blockers and executed the
+  focused Tor-enabled actual-route regression. A prior zero-selected-test run
+  without Tor features is not test evidence.
+
+Real pinned SDK fixtures cover circuit, stream, request, internal, mixed and
+empty retained sources; source/row permutations, outer priority, all sixteen
+ordinals/readiness bits, concurrent snapshots and actual engine EOF/poll unwind
+are exercised. The actual Axum route excludes hostile source/context payloads,
+returns only the existing eight bounded fields/no-store, preserves empty legacy
+health responses and initiates no evidence, catalog or inference work. A future
+non-exhaustive SDK source variant cannot be constructed with the pinned SDK;
+only its local unknown/mixed fallback is tested. Three dev-only SDK dependencies
+reuse already locked 0.47.0 packages; lockfile changes are root edges only, not
+runtime upgrades or configuration changes.
+
+Exact-head/main CI, reproducible provenance, protected rollout and bounded public
+checks remain **PENDING**. Record only content-free reviewed observations, not
+raw SDK errors, identifiers, private config or response archives. Neither
+successful deployment nor a diagnostic response establishes restored Tor
+availability or completed fresh client trust/challenge acceptance.
