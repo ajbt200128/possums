@@ -23,8 +23,18 @@ preserve secret/reference delivery, approved B custody, local A/B consistency,
 CI, release provenance, no configuration drift and protected approval. No client
 installation/activation, paid inference, arbitrary key/binding change or debug
 export is authorized. This supersedes the earlier source-only merge/deployment
-restriction above, not the remaining gates. Degraded-state investigation is
-deferred; Tor health flapping remains unresolved.
+restriction above, not the remaining gates. The subsequent operator selection
+of “Prepare PR and protected rollout” authorizes the privacy-reviewed,
+request-only `GET /healthz/diagnostics` source PR and protected rollout after
+source review, required CI, provenance and protected approval, followed by
+bounded public read-only checks. Degraded-state investigation is now authorized
+only within that scope, superseding the earlier investigation deferral; Tor
+health flapping and its root cause remain unresolved. This grants no blanket
+diagnostic export permission, restored PR90 background observer/FIFO/logs,
+debug mode, paid inference, client installation/activation, key/reference
+changes or automatic retries/replay. Preserve `/healthz` and actual
+readiness/shutdown semantics. See the [request-only diagnostic contract](docs/tor-request-readiness-diagnostics.md)
+and [narrow privacy exception](PRIVACY.md#request-only-readiness-diagnostics-exception).
 
 Local mounted A private/public consistency and approved B custody remain required
 before launch; startup self-appraisal/freshness is not a launch gate. Every

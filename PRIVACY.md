@@ -37,6 +37,7 @@ The following remain explicit risks: network timing and source-address visibilit
 | Operational request statistics | Locally sanitized, privacy-gated aggregates only | No event-level records. Honeycomb US, **provider-default retention for the MVP**, with the effective period disclosed when verified. Seven days is the future goal. No secondary archive or dashboard export that extends retention. |
 | CPU, memory, capacity and service-health statistics | Coarse infrastructure health by operator-assigned gateway slot | No process arguments, environment, paths, addresses, user identifiers or content. Correlation with sparse traffic is still a risk. |
 | Public Pi verification evidence | One replaceable local public acquisition entry: GitHub manifest/provenance and AMD VCEK DER, fixed publisher associations and attestation-byte hash hint | Operator-authorized AMD extension permits the public VCEK's embedded **gateway hardware ID**, not bare chip IDs or raw attestation reports. No full KDS URLs, credentials, auth/account/request/history data, failures or verdicts; no telemetry/log/support export. Matching legacy entries may retain their GitHub bytes while acquiring only AMD. Every process must independently reverify all trust checks; no evidence TTL or cached authorization. Source/installation status is recorded in [cache verification](docs/pi-public-evidence-cache-verification.md). |
+| Request-only readiness diagnostic | Credential-free explicit `GET /healthz/diagnostics`; fixed enum snapshot from the existing operational engine status owner | Only the [narrow response contract](#request-only-readiness-diagnostics-exception), with `Cache-Control: no-store`; no history, logs, telemetry or background diagnostic export. External capture/retention remains unknown. |
 | Voluntary support contact | Only what the user deliberately shares | Ask for a content-free error code, not credentials/history. Do not auto-upload diagnostics. Public support retention/deletion terms remain to be defined. |
 
 Do not retain or export client IPs for abuse controls. Transient account quota/concurrency controls are permitted. An IP-keyed control needs a later explicit threat-model decision. Local SDK prompt-cache persistence and unintended persistence must be explicitly disabled. The narrow operator-authorized upstream session-prefix reuse above does not authorize a shared environment namespace, cache warming, replay, local prompt files or cache/token/cost telemetry except the narrowly approved five-minute numeric token aggregates below. Cache scopes and provider costs remain prohibited. The opaque random scope is still a sensitive session-linked pseudonym: gateway/inference compromise can expose it and its mapping; shared hit timing can correlate conversations within a session. Fresh logins avoid deliberate namespace linkage but do not prevent network/cache timing correlation. Removing gateway session state is not upstream deletion or immediate memory erasure. Runtime roots should be read-only and writable storage memory-only where supported; deployed enforcement remains a verification question.
@@ -135,7 +136,50 @@ The operator requested platform and Honeycomb startup logs plus aggregate startu
 - Deliver logs and startup metrics best-effort once under a finite shared deadline, with owned cancellable transport and no retry, spool, detached upload, global logger/log bridge or automatic HTTP/GenAI instrumentation. Preserve the original startup failure/exit code if delivery fails. A closed local delivery warning must not recursively export itself. `OTEL_SDK_DISABLED=true` disables both Honeycomb signals, not separately captured platform stderr. Diagnostics must initiate no inference or replay and must not weaken trust/accounting/drain ownership.
 - Pre-main/runtime-construction faults, panic/abort/OOM/SIGKILL, blocked/lost platform stderr, unavailable credentials/network and process termination can prevent delivery. Do not promise every failure reaches Honeycomb. Successful HTTP submission does not prove query visibility, retention or serving. Platform boot/container/shim failures before this executable runs remain outside its reporting boundary.
 
-The Tor-specific post-launch readiness exception remains removed in the Tor source-restoration candidate, along with its observer, FIFO presentation and delivery hooks. Debug-only ongoing/background diagnostics and export activation are not restored. Historical PR90 evidence remains in [the readiness record](docs/tor-startup-readiness-diagnostics-verification.md), not current collection authority. General startup implementation and historical offline evidence are tracked in [startup diagnostics verification](docs/startup-diagnostics-verification.md); current removal checks are in [backup verification](docs/without-tor-backup-verification.md). The failed v0.0.48 update remains unreconciled; this authorization permits no automatic update/retry/cancel/rollback, live probe or export activation.
+The historical Tor-specific post-launch background readiness exception remains removed in the Tor source-restoration candidate, along with its observer, FIFO presentation and delivery hooks. The separate request-only exception below does not restore them. Debug-only ongoing/background diagnostics and export activation are not restored. Historical PR90 evidence remains in [the readiness record](docs/tor-startup-readiness-diagnostics-verification.md), not current collection authority. General startup implementation and historical offline evidence are tracked in [startup diagnostics verification](docs/startup-diagnostics-verification.md); current removal checks are in [backup verification](docs/without-tor-backup-verification.md). The failed v0.0.48 update remains unreconciled; this authorization permits no automatic update/retry/cancel/rollback, live probe or export activation.
+
+## Request-only readiness diagnostics exception
+
+The operator selected “Prepare PR and protected rollout” for a privacy-reviewed
+request-only readiness diagnostic: source review, required CI, release provenance
+and protected approval must precede rollout, then bounded public read-only checks.
+This is authorization, not deployment or verification evidence. See the
+[design and verification plan](docs/tor-request-readiness-diagnostics.md).
+
+- Permit only credential-free explicit `GET /healthz/diagnostics`, outside
+  authentication, admission, attestation, inference and request-observation paths
+  like existing health. Preserve the existing `/healthz` status/body and actual
+  readiness, shutdown and health semantics; diagnostics cannot mask failure or
+  weaken health. Requests initiate no inference, extra probes, retry or replay.
+- Return only closed, locally authored `code`/`stage`/`constraint`/`action`
+  strings, `lifecycle_serving`/`ready` booleans, and fixed `tor_state`/`tor_problem`
+  categories from the **existing operational engine status owner**. Its snapshot stores only the fixed enum
+  projection, never raw SDK errors, `Debug`/`Display` text, panic payloads,
+  configuration, keys, identities, URLs, user data, timestamps, counters or
+  history. Engine source EOF/panic must remain unhealthy with a content-free
+  unknown-cause classification, never fabricated causal attribution.
+- SDK events may coalesce; `current_problem` exposes only one prioritized and
+  possibly last problem. Categories describe observed failures, not root cause.
+  No timestamp, exhaustive history, liveness, exclusive-publication or serving
+  guarantee follows from this snapshot. A false Arti `is_fully_reachable` value
+  does not prove unreachability; descriptor republishing may report Bootstrapping.
+- Set `Cache-Control: no-store`. This permits the bounded response to its caller,
+  not automatic retention or export. No scheduled diagnostic observer/probe,
+  logger, FIFO, export hook, telemetry, new destination, flag or metric/aggregate
+  dimension is authorized. The removed PR90 background readiness observer and
+  delivery remain prohibited; the separate startup-only exception is unchanged.
+- The public route discloses coarse operational state and permits repeated
+  callers to correlate transitions. No whole-process transience claim is made:
+  platform/proxy capture and Pi/T3 history/persistence boundaries remain unknown.
+  No debug mode, paid inference, client installation/activation, key/reference
+  change or automatic retry/replay is authorized.
+
+The [data handling boundaries](#data-handling-boundaries),
+[forbidden telemetry](#telemetry-permitted-signals-and-forbidden-data) and
+[typed failure requirements](#mandatory-typed-interface-failures) remain binding.
+Offline negative/schema, ownership, compatibility and non-interference evidence
+must be recorded in the linked plan before claiming qualification; no tests or
+runtime checks are established by this policy text.
 
 ## Processors, retention, access and shutdown
 

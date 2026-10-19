@@ -3285,6 +3285,7 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "reqwest",
+ "retry-error",
  "ring",
  "rustls",
  "serde",

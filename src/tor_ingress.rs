@@ -9,15 +9,17 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tor_cell::relaycell::msg::{Connected, End, EndReason};
 use tor_hscrypto::pk::{HsId, HsIdKey, HsIdKeypair};
 use tor_hsservice::{
-    status::{Problem, State},
-    HsIdKeypairSpecifier, HsIdPublicKeySpecifier, HsNickname, OnionServiceConfig, RendRequest,
-    StreamRequest,
+    status::State, HsIdKeypairSpecifier, HsIdPublicKeySpecifier, HsNickname, OnionServiceConfig,
+    RendRequest, StreamRequest,
 };
 use tor_keymgr::KeyMgr;
 use tor_proto::stream::IncomingStreamRequest;
 use tor_rtcompat::PreferredRuntime;
 
 use crate::server::{serve_connections_until, AppState, Incoming, ServerFailure};
+
+pub(crate) mod health;
+use health::{EngineStatus, ProblemKind, TorReadiness};
 
 /// Closed diagnostics only. No SDK error, peer, key, argument or payload is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -383,29 +385,30 @@ async fn accept_stream(request: StreamRequest, report: ReportOwner) -> Option<Bo
 
 #[cfg(test)]
 async fn engine_failure(statuses: impl Stream<Item = (State, bool)>) -> Failure {
-    engine_status(statuses, None).await
+    engine_status(statuses.map(EngineStatus::test), None).await
 }
 
 async fn engine_status(
-    statuses: impl Stream<Item = (State, bool)>,
-    ready: Option<Arc<std::sync::atomic::AtomicBool>>,
+    statuses: impl Stream<Item = EngineStatus>,
+    ready: Option<Arc<TorReadiness>>,
 ) -> Failure {
     let mut statuses = Box::pin(AssertUnwindSafe(statuses).catch_unwind());
     let mut started = false;
     while let Some(status) = statuses.next().await {
-        let Ok((state, fatal)) = status else {
+        let Ok(status) = status else {
             if let Some(ready) = &ready {
-                ready.store(false, std::sync::atomic::Ordering::Release);
+                ready.ended(true);
             }
             return Failure::Engine;
         };
+        let state = status.state;
         if let Some(ready) = &ready {
-            ready.store(
-                state.is_fully_reachable() && !fatal,
-                std::sync::atomic::Ordering::Release,
-            );
+            ready.observe(status);
         }
-        if fatal || state == State::Broken || started && state == State::Shutdown {
+        if status.problem.is_fatal()
+            || state == State::Broken
+            || started && state == State::Shutdown
+        {
             return Failure::Engine;
         }
         // Arti starts in Shutdown before background tasks report progress.
@@ -414,7 +417,7 @@ async fn engine_status(
         tokio::task::yield_now().await;
     }
     if let Some(ready) = &ready {
-        ready.store(false, std::sync::atomic::Ordering::Release);
+        ready.ended(false);
     }
     Failure::Engine
 }
@@ -607,11 +610,9 @@ pub async fn serve_tcp_and_onion_until_initialized<F: Future<Output = ()>>(
         Some((accepted, listener))
     });
     let engine = stream::once(async {
-        let statuses = service.status_events().map(|status| {
-            (
-                status.state(),
-                matches!(status.current_problem(), Some(Problem::Runtime(_))),
-            )
+        let statuses = service.status_events().map(|status| EngineStatus {
+            state: status.state(),
+            problem: ProblemKind::from_sdk(status.current_problem()),
         });
         Err(engine_status(statuses, readiness).await)
     });
