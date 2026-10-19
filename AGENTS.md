@@ -29,8 +29,13 @@ request-only `GET /healthz/diagnostics` source PR and protected rollout after
 source review, required CI, provenance and protected approval, followed by
 bounded public read-only checks. Degraded-state investigation is now authorized
 only within that scope, superseding the earlier investigation deferral; Tor
-health flapping and its root cause remain unresolved. This grants no blanket
-diagnostic export permission, restored PR90 background observer/FIFO/logs,
+health flapping and its root cause remain unresolved. After the v0.0.63 rollout,
+the operator again selected “Prepare PR and protected rollout” for a minimal
+request-only descriptor-timeout source-stage refinement, with the same review,
+CI, provenance, protected approval and bounded public-check gates. Retained SDK
+sources can be empty or describe earlier failures; this is not authorization to
+claim a root cause or change availability, retry or health policy. This grants no
+blanket diagnostic export permission, restored PR90 background observer/FIFO/logs,
 debug mode, paid inference, client installation/activation, key/reference
 changes or automatic retries/replay. Preserve `/healthz` and actual
 readiness/shutdown semantics. See the [request-only diagnostic contract](docs/tor-request-readiness-diagnostics.md)

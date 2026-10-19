@@ -8,7 +8,10 @@ This supersedes the degraded-investigation deferral only for this scope. No debu
 mode, paid inference, client installation/activation, key/reference changes,
 automatic inference retries/replay, background diagnostic observer/FIFO/logs or
 new telemetry/export is authorized. Preserve the accepted single-address risk
-and all existing trust/accounting/release gates.
+and all existing trust/accounting/release gates. Following the v0.0.63 rollout,
+the operator again selected **Prepare PR and protected rollout** for the minimal
+timeout-source refinement described below; the same gates precede one new
+protected deployment and bounded public checks.
 
 Applicable policy: [current authority](../AGENTS.md#current-tor-source-restoration-authority),
 [data handling](../PRIVACY.md#data-handling-boundaries),
@@ -65,6 +68,46 @@ are `none_observed`, `runtime`, `descriptor_upload`, `introduction_point`,
 `descriptor_fatal`, `descriptor_retry_exhausted`, `descriptor_timeout`,
 `descriptor_internal` and `unknown`. No unreported problem is fabricated.
 
+### Descriptor-timeout source refinement candidate
+
+Only the selected outer `descriptor_timeout` classification is refined. Existing
+outer priority and all other categories remain unchanged. The candidate adds
+seven closed values:
+
+- `descriptor_timeout_circuit`
+- `descriptor_timeout_stream`
+- `descriptor_timeout_request`
+- `descriptor_timeout_internal`
+- `descriptor_timeout_mixed`
+- `descriptor_timeout_no_recorded_source`
+- `descriptor_timeout_unknown`
+
+The existing owner classifies only public typed `DescUploadError` variants in
+already retained `RetryError::sources()` values. Equal classes remain one class;
+different classes across timeout failures yield `mixed`. No raw source, count,
+order, timestamp or history is stored or returned. Fatal/internal outer failures
+still outrank timeout; an inner source never changes runtime fatality. Sixteen
+fixed problem values fit the existing atomic representation without changing its
+readiness bit or adding another snapshot field.
+
+Pinned Arti's timeout is a per-HSDir **five-minute overall upload retry budget**;
+reporting can occur later while a retry delay finishes. Individual-attempt
+timeouts are not recorded as typed sources. `no_recorded_source` therefore means
+only that the SDK retained no completed typed source in those timeout values,
+not that no attempt failed. Nonempty sources describe earlier completed failures,
+not necessarily the operation interrupted last or the cause of a later SOCKS
+failure. `unknown` covers an unsupported future SDK source variant. The legacy
+bare `descriptor_timeout` label does not establish that sources were absent;
+older diagnostic responses did not classify them.
+
+These are diagnostic-only enum additions, not changes to shipped Pi
+authentication, attestation, catalog, inference, stream, accounting or receipt
+contracts. Strict manual diagnostic allowlists need the candidate's closed
+catalog to interpret its new labels; unknown labels must not authorize a private
+request or be treated as success. No compatibility with an old manual diagnostic
+allowlist is claimed. Exactly eight response fields and all existing health,
+readiness, shutdown, retry and trust semantics remain unchanged.
+
 SDK events can coalesce; `current_problem()` exposes one prioritized, possibly
 last problem, not all causes. Snapshot age is unknown. These fields prove neither
 freshness, liveness, publisher attribution/exclusivity, end-to-end serving nor
@@ -100,12 +143,32 @@ readiness predicate and legacy route are exercised directly; no installed-client
 upgrade/artifact qualification is claimed. Existing telemetry-off/outage tests
 run in the full suite; no new metrics/export hooks exist.
 
-## Remaining rollout evidence
+## Initial v0.0.63 rollout evidence
 
-Independent final read-only source/SDK review found no concrete blockers after
-panic-constraint wording and exact wire/evidence documentation corrections.
-Required exact-head/main CI, reproducible release provenance, protected deployment
-and bounded public diagnostics remain **PENDING**. Record only content-free reviewed observations, not raw SDK errors,
-identifiers, private config or response archives. Neither successful deployment
-nor a diagnostic response establishes restored Tor availability or completed
-fresh client trust/challenge acceptance.
+PR101 merged at `059629624794c0ab5f541533da730aeae9f9e48c` after exact-head CI
+39279271750. Exact-main CI 39286316590 and publisher 39292325558 passed. Public
+signed release provenance was independently verified before one protected
+approval for deployment run 39295070153, attempt 1. The exact one-update completion
+receipt and separate bound-serving receipt passed independent checks. Current
+control-plane readback showed v0.0.63 running/no pending update, confidential mode
+on, debug off and the approved domain/configuration/reference selections.
+
+One strict-TLS public clearnet diagnostic qualified HTTP 200, no-store and the
+closed schema, reporting local readiness and a descriptor-timeout problem in
+`degraded_reachable`. A subsequent owned isolated Tor client bootstrapped, but
+its single health HEAD and single diagnostic GET both failed during the SOCKS
+handshake, before TLS or HTTP. No diagnostic schema/headers over Tor were
+qualified; no retry, fallback, private request or inference was performed. Owned
+process/controller/temp-state cleanup completed, not proof of erasure. The
+underlying cause and fresh client trust/challenge acceptance remain unconfirmed.
+
+## Refinement qualification and rollout
+
+Baseline: exact main `059629624794c0ab5f541533da730aeae9f9e48c`; identify the
+candidate by its reviewed PR head. Offline qualification of the refinement,
+independent review, exact-head/main CI, reproducible provenance, protected
+rollout and bounded public checks are **PENDING**. The preceding full-suite
+counts qualify the initial route, not this refinement. Record only content-free
+reviewed observations, not raw SDK errors, identifiers, private config or response
+archives. Neither successful deployment nor a diagnostic response establishes
+restored Tor availability or completed fresh client trust/challenge acceptance.
