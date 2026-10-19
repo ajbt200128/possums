@@ -259,6 +259,9 @@ async fn readiness_tracks_reachability_and_clears_on_recovery_and_terminal_eof()
         (State::Shutdown, false),
         (State::Bootstrapping, false),
         (State::Running, true),
+        // The SDK also reports Bootstrapping during descriptor republishing.
+        (State::Bootstrapping, false),
+        (State::Running, true),
         (State::DegradedReachable, true),
         (State::DegradedUnreachable, false),
         (State::DegradedReachable, true),
