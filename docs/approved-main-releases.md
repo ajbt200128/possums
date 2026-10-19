@@ -1,5 +1,15 @@
 # Automatic paid releases and approved production deployment
 
+**Current Tor rollout overlay:** the operator authorizes merge and normal
+protected deployment with one stable onion identity, accepting possible
+blue/green publication overlap and temporary Tor availability/routing failures.
+The source-restoration scope supersedes the backup's Tor-removal restriction;
+exclusive handoff and alternating identities are deferred. The flow below still
+requires exact-main CI, reproducible provenance, protected approval, one update
+without replay and unchanged secret/reference selections. No first-binding or
+identity-rotation exception is added. See the [accepted single-address
+scope](tor-main-restoration.md#accepted-single-address-rollout--supersedes-the-overlap-blocker).
+
 **Inactive HTTPS-only backup release guide, not activation authority or a live deployment-status report.**
 Tor-specific activation/binding exceptions have been removed. Existing opaque
 secret references must remain identical; this source change does not delete

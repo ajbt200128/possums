@@ -1,14 +1,14 @@
-"""Offline Tor-free backup guards; no runtime secrets, network or deployment."""
+"""Offline release/activation isolation guards; no secrets, network or deployment."""
 import copy
 import json
 import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-from test_release_automation import ROOT, S, R, D, V, StopTest, d, plan, r, view
+from test_release_automation import D, R, ROOT, S, V, StopTest, d, plan, r, view
 
 
-class HTTPSOnlyReleaseTest(StopTest):
+class TorRestorationReleaseTest(StopTest):
     def setUp(self):
         environment = patch.dict(d.os.environ, {"GITHUB_RUN_ATTEMPT": "1", "TINFOIL_ADMIN_KEY": "synthetic"})
         environment.start()
@@ -33,6 +33,29 @@ class HTTPSOnlyReleaseTest(StopTest):
             result = d.update_once("unused", V, Mock())
             self.assertTrue(result["opaqueConfigurationPreserved"])
             self.assertNotIn("--secret", call.call_args.args[1])
+            call.assert_called_once()
+
+    def test_single_address_rollout_preserves_existing_tor_references(self):
+        before, after = view(), view(V)
+        references = ["POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"]
+        before["secrets"].extend(references)
+        after["secrets"] = copy.deepcopy(before["secrets"])
+        with patch.object(d, "plan_update") as planning, patch.object(d, "get", side_effect=[before, after]), \
+                patch.object(d, "call", return_value=self.result()) as call:
+            result = d.update_once("unused", V, Mock())
+            self.assertTrue(result["opaqueConfigurationPreserved"])
+            planning.assert_called_once()
+            call.assert_called_once()
+            self.assertNotIn("--secret", call.call_args.args[1])
+            self.assertNotIn("--yes", call.call_args.args[1])
+
+    def test_single_address_rollout_still_rejects_changed_tor_reference_readback(self):
+        before, after = view(), view(V)
+        before["secrets"].extend(["POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"])
+        after["secrets"] = before["secrets"][:-1]
+        with patch.object(d, "plan_update"), patch.object(d, "get", side_effect=[before, after]), \
+                patch.object(d, "call", return_value=self.result()) as call:
+            self.stop("configuration_changed", d.update_once, "unused", V, Mock())
             call.assert_called_once()
 
     def test_pending_current_waits_without_extending_deadline(self):
@@ -82,18 +105,26 @@ class HTTPSOnlyReleaseTest(StopTest):
             update.call_args.args[2]()
             self.assertEqual(events[-2:], ["eligibility", "approved"])
 
-    def test_backup_build_and_measured_configuration_have_no_tor_activation(self):
+    def test_measured_configuration_enables_tor_with_fixed_grant_and_identity_references(self):
         config = (ROOT / "tinfoil-config.yml").read_text()
-        self.assertNotIn("POSSUMS_TOR_", config)
-        self.assertNotIn("attested-keys:", config)
-        self.assertNotIn("    keys:", config)
+        self.assertEqual(config.count('      - POSSUMS_TOR_ENABLED: "true"\n'), 1)
+        self.assertIn('attested-keys:\n  - id: possums-tor-endorsement-v1\n'
+                      '    key: ed25519\n    uid: 65532\n    gid: 65532\n', config)
+        self.assertEqual(config.count('    keys: [possums-tor-endorsement-v1]\n'), 1)
+        for reference in ("POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"):
+            self.assertEqual(config.count('      - ' + reference + '\n'), 1)
+        self.assertNotIn('POSSUMS_TOR_IDENTITY_DIRECTORY', config)
+        self.assertNotIn('OTEL_SDK_DISABLED', config)
+        self.assertIn('      start_period: 300s\n', config)
+        self.assertIn('    egress: open\n', config)
         for required in ("attestation: true", "read_only: true", 'size=512m,mode=1777'):
             self.assertIn(required, config)
-        for name in ("Cargo.toml", "flake.nix", "devenv.nix", ".github/workflows/check.yml",
-                     "scripts/deploy.py", "clients/pi/build.sh", "clients/pi/build.mjs"):
-            source = (ROOT / name).read_text()
-            for removed in ("POSSUMS_TOR_", "torCommon", "tor-image-probe", "first_tor_activation", "arti-client"):
-                self.assertNotIn(removed, source)
+        deploy = (ROOT / "scripts/deploy.py").read_text()
+        self.assertNotIn("first_tor_activation", deploy)
+        self.assertIn('torCommon = common // { cargoExtraArgs = "--locked --features tor"; };',
+                      (ROOT / "flake.nix").read_text())
+        self.assertIn('default = []', (ROOT / "Cargo.toml").read_text())
+        self.assertIn('tor-image-probe', (ROOT / ".github/workflows/check.yml").read_text())
         self.assertIn('User = "65532:65532"', (ROOT / "flake.nix").read_text())
         self.assertIn('gatewayAccounts', (ROOT / "flake.nix").read_text())
 

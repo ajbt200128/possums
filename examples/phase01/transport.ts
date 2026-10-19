@@ -1,5 +1,6 @@
 import { Identity, type RequestContext } from 'ehbp';
-import { qualifyV3, V3_EVIDENCE_LIMIT, type V3Input, type V3Identity } from '../../clients/pi/v3.js';
+import { qualifyV3, qualifyTorV3, V3_EVIDENCE_LIMIT, type V3Input, type TorV3Input, type V3Identity } from '../../clients/pi/v3.js';
+import { TorConnection, TorNativeTransportFailure, isTorConnectionFailure, collectTorBody } from '../../clients/pi/tor-connection.js';
 import { CatalogFailure, GatewayError, gatewayError } from './client.js';
 import { PUBLISHER, qualifyApi, qualifyPublished, requireApiApproval, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';
 import { LIMITS, ChannelError, DiagnosticFailure, OperationFailure, type FailureConstraint, Operation, cleanup, collect, parseJSON, requireThat, serialize, utf8 } from './limits.js';
@@ -47,7 +48,7 @@ export function encodeChat(chat: Chat): Uint8Array<ArrayBuffer> {
 }
 // Check complete framing and the authentication-tag minimum only.
 // Authentication, decryption and native decoder limits remain published EHBP.
-type TransportFailure = DiagnosticFailure;
+type TransportFailure = DiagnosticFailure | TorNativeTransportFailure;
 function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation, onFailure: (failure: TransportFailure) => void): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   let sawFrame = false, length = 0, prefix = 0, remaining = 0;
@@ -75,7 +76,7 @@ function encryptedFrames(body: ReadableStream<Uint8Array>, op: Operation, onFail
         }
         controller.enqueue(value);
       } catch (error) {
-        const failure = error instanceof DiagnosticFailure ? error : new DiagnosticFailure('transport', error instanceof OperationFailure ? error.constraint : error instanceof ChannelError ? 'frames' : 'fetch', 'uncertain');
+        const failure = error instanceof DiagnosticFailure || error instanceof TorNativeTransportFailure ? error : new DiagnosticFailure('transport', error instanceof OperationFailure ? error.constraint : error instanceof ChannelError ? 'frames' : 'fetch', 'uncertain');
         // EHBP's wait can observe our cancellation before its decoder sees this error.
         onFailure(failure);
         await cancel(); controller.error(failure);
@@ -101,7 +102,7 @@ function plaintext(body: ReadableStream<Uint8Array>, op: Operation, sse: boolean
         if (sse) decoder.decode(value, { stream: true });
         controller.enqueue(value);
       } catch (error) {
-        const failure = frameFailure() ?? (error instanceof DiagnosticFailure ? error : new DiagnosticFailure('transport', error instanceof OperationFailure ? error.constraint : constraint, 'uncertain'));
+        const failure = frameFailure() ?? (error instanceof DiagnosticFailure || error instanceof TorNativeTransportFailure ? error : new DiagnosticFailure('transport', error instanceof OperationFailure ? error.constraint : constraint, 'uncertain'));
         op.close(); await cleanup(reader.cancel()); controller.error(failure);
       }
     }, async cancel() { op.close(); await cleanup(reader.cancel()); },
@@ -117,7 +118,8 @@ export class Channel {
   readonly #v3: V3Identity | undefined;
   get endpointIdentity(): V3Identity | undefined { return this.#v3; }
   requireRenewal(previous: Channel): void {
-    if (previous.#v3 && (!this.#v3 || this.#v3.freshness <= previous.#v3.freshness))
+    if (previous.#v3 && (!this.#v3 || this.#v3.onionIdentity !== previous.#v3.onionIdentity
+      || this.#v3.freshness <= previous.#v3.freshness))
       throw new DiagnosticFailure('trust', 'policy');
   }
   get release(): PublishedRelease | undefined { return this.#release; }
@@ -156,7 +158,7 @@ export class Channel {
       return new Channel(channelAuthority, PUBLISHER.origin, identity, check, release);
     } catch (error) { throw error instanceof DiagnosticFailure ? error : new DiagnosticFailure('trust', signal?.aborted ? 'interrupted' : constraint); }
   }
-  static async v3(input: V3Input, signal?: AbortSignal): Promise<Channel> {
+  static async v3(input: V3Input | TorV3Input, signal?: AbortSignal, scope?: TorConnection): Promise<Channel> {
     // Never accept standalone facts or caller-provided authority. Qualify exactly
     // the immutable bytes from which this instance's keys and policy are made.
     if (!(input && typeof input === 'object' && input.evidence instanceof Uint8Array && input.evidence.length > 0 && input.evidence.length <= V3_EVIDENCE_LIMIT &&
@@ -166,7 +168,7 @@ export class Channel {
     if (!(input.config instanceof Uint8Array && input.config.length === LIMITS.key)) throw new DiagnosticFailure('trust', 'key_config');
     const snapshot = { ...input, evidence: new Uint8Array(input.evidence), nonce: new Uint8Array(input.nonce),
       manifest: new Uint8Array(input.manifest), config: new Uint8Array(input.config) };
-    const verified = await qualifyV3(snapshot, signal);
+    const verified = scope === undefined ? await qualifyV3(snapshot, signal) : await qualifyTorV3(snapshot as TorV3Input, scope, signal);
     let identity: Identity;
     try { identity = await Identity.unmarshalPublicConfig(snapshot.config); }
     catch { throw new DiagnosticFailure('trust', 'key_config'); }
@@ -186,13 +188,13 @@ export class Channel {
   async models(bearer: string, signal?: AbortSignal): Promise<unknown> {
     try { return await this.#get('/v1/models', LIMITS.catalog, bearer, signal); }
     catch (error) {
-      if (error instanceof CatalogFailure || error instanceof DiagnosticFailure) throw error;
+      if (error instanceof CatalogFailure || error instanceof DiagnosticFailure || isTorConnectionFailure(error)) throw error;
       throw new CatalogFailure('request', error instanceof ChannelError ? error.code : 'rejected');
     }
   }
   async challenge(signal?: AbortSignal): Promise<unknown> { return this.#get('/v1/auth/challenge', LIMITS.control, undefined, signal); }
   #collect(body: ReadableStream<Uint8Array> | null, cap: number, op: Operation): Promise<Uint8Array<ArrayBuffer>> {
-    return collect(body, cap, op);
+    return this.#v3?.onionIdentity === undefined ? collect(body, cap, op) : collectTorBody(body, cap, op);
   }
   async #get(path: '/v1/models' | '/v1/auth/challenge', cap: number, bearer?: string, signal?: AbortSignal): Promise<unknown> {
     this.#policyCheck();
@@ -221,7 +223,7 @@ export class Channel {
       return parseJSON(await this.#collect(res.body, cap, op), cap);
     } catch (error) {
       const code = sent && op.controller.signal.aborted ? 'uncertain' : 'rejected';
-      if (error instanceof DiagnosticFailure || error instanceof GatewayError) throw error;
+      if (error instanceof DiagnosticFailure || error instanceof GatewayError || isTorConnectionFailure(error)) throw error;
       if (catalog) {
         if (error instanceof CatalogFailure) throw error;
         throw new CatalogFailure(status === undefined ? 'request' : status >= 200 && status < 300 ? 'body' : 'http', code, status);
@@ -253,7 +255,7 @@ export class Channel {
       return value;
     }
     catch (error) {
-      if (error instanceof GatewayError) throw error;
+      if (error instanceof GatewayError || isTorConnectionFailure(error)) throw error;
       if (error instanceof DiagnosticFailure) throw new DiagnosticFailure(error.stage, error.constraint, error.code, error.status ?? status);
       throw new DiagnosticFailure(path === '/v1/sessions' ? 'authentication' : 'submission', error instanceof OperationFailure ? error.constraint : 'body', 'uncertain', status);
     } finally { op.close(); }
@@ -278,7 +280,7 @@ export class Channel {
       if (status !== 200) throw new DiagnosticFailure('balance', 'http', 'uncertain', status);
       return value;
     } catch (error) {
-      if (error instanceof GatewayError) throw error;
+      if (error instanceof GatewayError || isTorConnectionFailure(error)) throw error;
       if (error instanceof DiagnosticFailure) throw new DiagnosticFailure(error.stage, error.constraint, error.code, error.status ?? status);
       throw new DiagnosticFailure('balance', error instanceof OperationFailure ? error.constraint : constraint, 'uncertain', status);
     } finally { op.close(); }
@@ -320,8 +322,9 @@ export class Channel {
       const observedFailure = frameFailure;
       op.close();
       if (res?.body && !res.body.locked) await cleanup(res.body.cancel());
+      if (observedFailure instanceof TorNativeTransportFailure) throw observedFailure;
       if (observedFailure) throw new DiagnosticFailure(observedFailure.stage, observedFailure.constraint, observedFailure.code, status);
-      if (error instanceof DiagnosticFailure) throw error;
+      if (error instanceof DiagnosticFailure || isTorConnectionFailure(error)) throw error;
       throw new DiagnosticFailure(path === '/v1/sessions' ? 'authentication' : path === '/v1/submissions' ? 'submission' : 'transport', error instanceof OperationFailure ? error.constraint : constraint, sent ? 'uncertain' : 'rejected', status);
     }
   }

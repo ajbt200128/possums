@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,15 +12,52 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ajbt200128/possums/attestation-helper/verifier"
 	"github.com/tinfoilsh/tinfoil-go/document"
 )
 
-func TestNativeAndWASMResponseSchemasRemainUnchanged(t *testing.T) {
+func TestTorNonceStdinIsExactAndFailureEnvelopeIsClosed(t *testing.T) {
+	for _, length := range []int{0, 31, 33, 4096} {
+		response := torEvidence(bytes.NewReader(bytes.Repeat([]byte{0x23}, length)), "unused", verifier.Repository)
+		if response.Evidence != nil || response.Failure == nil || response.Failure.Code != "possums_v3_input_nonce" {
+			t.Fatal("invalid stdin nonce was not rejected before acquisition")
+		}
+	}
+	response := torEvidence(bytes.NewReader(bytes.Repeat([]byte{0x23}, nonceBytes)), filepath.Join(t.TempDir(), "missing"), verifier.Repository)
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Failure == nil || response.Failure.Code != "possums_v3_acquisition_transport_unknown" || response.Evidence != nil {
+		t.Fatal("acquisition failure was not classified")
+	}
+	for _, forbidden := range []string{"missing", "socket", "23", "HOSTILE", "quote", "tor_endorsement_key"} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatal("closed failure retained sensitive data")
+		}
+	}
+}
+
+func TestTorAcquisitionFailureStatusAndUnknownsAreClosed(t *testing.T) {
+	for _, status := range []int{100, 503, 999} {
+		failure := torAcquisitionFailure(acquisitionHTTPStatus{status: status})
+		encoded, err := json.Marshal(failure)
+		if err != nil || string(encoded) != fmt.Sprintf(`{"code":"possums_v3_acquisition_http_status","stage":"acquisition","constraint":"http_status","status":%d}`, status) {
+			t.Fatal("observed numeric status was not preserved in Tor-only RPC")
+		}
+	}
+	for _, err := range []error{errors.New("HOSTILE_SECRET_URL"), acquisitionFailure("HOSTILE_SECRET_URL"), acquisitionHTTPStatus{status: 99}, acquisitionHTTPStatus{status: 1000}} {
+		failure := torAcquisitionFailure(err)
+		encoded, _ := json.Marshal(failure)
+		if failure.Code != "possums_v3_acquisition_cause_unknown" || failure.Status != nil || bytes.Contains(encoded, []byte("HOSTILE")) {
+			t.Fatal("unexpected acquisition error was not closed")
+		}
+	}
 	// The shared verifier Failure (including WASM) still has exactly three fields.
-	encoded, _ := json.Marshal(&verifier.Failure{Code: "possums_v3_keys_tls", Stage: "keys", Constraint: "tls"})
-	if string(encoded) != `{"code":"possums_v3_keys_tls","stage":"keys","constraint":"tls"}` {
+	encoded, _ := json.Marshal(&verifier.Failure{Code: "possums_v3_keys_tor_endorsement_spki", Stage: "keys", Constraint: "tor_endorsement_spki"})
+	if string(encoded) != `{"code":"possums_v3_keys_tor_endorsement_spki","stage":"keys","constraint":"tor_endorsement_spki"}` {
 		t.Fatal("default verifier failure schema changed")
 	}
 	encoded, _ = json.Marshal(verifiedEvidence{Quote: json.RawMessage(`{}`)})
@@ -119,6 +157,12 @@ func TestFetchEvidenceResponseBounds(t *testing.T) {
 				if !errors.As(err, &observed) || observed.status != test.status {
 					t.Fatal("acquisition boundary discarded observed HTTP status")
 				}
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+				response := torEvidenceContext(ctx, bytes.NewReader(make([]byte, nonceBytes)), socket, verifier.Repository)
+				if response.Failure == nil || response.Failure.Code != "possums_v3_acquisition_http_status" || response.Failure.Status == nil || *response.Failure.Status != test.status || response.Evidence != nil {
+					t.Fatal("actual Tor native acquisition did not retain observed HTTP status")
+				}
 			}
 		})
 	}
@@ -157,5 +201,18 @@ func TestAppraiseEvidenceRejectsInvalidDocuments(t *testing.T) {
 				t.Fatal("rejected document returned verified evidence")
 			}
 		})
+	}
+}
+
+func TestNativeAndWASMResponseSchemasRemainUnchanged(t *testing.T) {
+	// The shared verifier Failure (including WASM) still has exactly three fields.
+	encoded, _ := json.Marshal(&verifier.Failure{Code: "possums_v3_keys_tls", Stage: "keys", Constraint: "tls"})
+	if string(encoded) != `{"code":"possums_v3_keys_tls","stage":"keys","constraint":"tls"}` {
+		t.Fatal("default verifier failure schema changed")
+	}
+	encoded, _ = json.Marshal(verifiedEvidence{Quote: json.RawMessage(`{}`)})
+	var old map[string]json.RawMessage
+	if json.Unmarshal(encoded, &old) != nil || len(old) != 5 || old["status"] != nil || old["failure"] != nil {
+		t.Fatal("default native success schema changed")
 	}
 }
