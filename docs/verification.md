@@ -17,6 +17,20 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
+## Request-only Tor diagnostics — timeout-source refinement candidate
+
+The [request-only contract and scoped evidence](tor-request-readiness-diagnostics.md)
+record the verified v0.0.63 deployment separately from its unresolved Tor SOCKS
+failures. The operator authorized another reviewed/protected rollout for seven
+closed descriptor-timeout source categories under the [narrow privacy exception](../PRIVACY.md#request-only-readiness-diagnostics-exception),
+not raw SDK errors, background observation or an availability-policy change.
+Fresh pinned offline qualification: **603 all-feature / 531 no-default Rust
+passes**, strict Clippy/formatting, **100 Python tests** (one existing skip),
+three-path active LSP and independent source/actual-route review passed. The
+SDK may retain no underlying source; categories are not root-cause evidence.
+New exact-head/main CI, release provenance, protected deployment and public
+checks remain pending. No inference or client installation/activation occurred.
+
 ## NSS and all startup diagnostics removal — isolation candidate
 
 The operator requested a combined reversion of NSS image contents and all application startup diagnostics, retaining Rust 1.92, the egress allowlist, 60-second startup grace and 64 MiB memory-only `/tmp`. [Scoped evidence](nss-startup-removal-verification.md) records the exact v43 startup-path restoration, retained typed exits/ordinary metrics, offline checks and remaining image/deployment limits. This is an isolation experiment, not an established collateral-503 fix. Earlier NSS/startup records below remain historical.

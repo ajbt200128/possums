@@ -143,7 +143,10 @@ The historical Tor-specific post-launch background readiness exception remains r
 The operator selected “Prepare PR and protected rollout” for a privacy-reviewed
 request-only readiness diagnostic: source review, required CI, release provenance
 and protected approval must precede rollout, then bounded public read-only checks.
-This is authorization, not deployment or verification evidence. See the
+The operator subsequently selected the same source-review/protected-rollout
+scope for a minimal refinement of observed descriptor-timeout failures into
+closed SDK source-stage categories, not an availability fix. This is
+authorization, not deployment or verification evidence. See the
 [design and verification plan](docs/tor-request-readiness-diagnostics.md).
 
 - Permit only credential-free explicit `GET /healthz/diagnostics`, outside
@@ -160,6 +163,12 @@ This is authorization, not deployment or verification evidence. See the
   unknown-cause classification, never fabricated causal attribution.
 - SDK events may coalesce; `current_problem` exposes only one prioritized and
   possibly last problem. Categories describe observed failures, not root cause.
+  Descriptor-timeout refinement may classify already retained typed SDK retry
+  sources as circuit, stream, request, internal, mixed, no recorded source or
+  unknown. Export no source objects, text, counts, order or history. Completed
+  retry sources may precede the final interrupted attempt; an empty source list
+  does not prove no attempt failed. The legacy bare timeout category alone does
+  not establish that sources were absent. These categories are not root causes.
   No timestamp, exhaustive history, liveness, exclusive-publication or serving
   guarantee follows from this snapshot. A false Arti `is_fully_reachable` value
   does not prove unreachability; descriptor republishing may report Bootstrapping.
