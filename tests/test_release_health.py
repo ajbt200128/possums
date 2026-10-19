@@ -16,7 +16,7 @@ HEALTH = b'''    healthcheck:
       interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 300s
+      start_period: 600s
 '''
 
 

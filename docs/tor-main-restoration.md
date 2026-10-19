@@ -263,3 +263,49 @@ identity. This thread did not repeat it. Exclusive publication, old physical
 candidate cleanup, current fresh attestation, Linux runtime/resources, upstream
 billing/invoice parity and broader runtime/privacy properties remain unproved.
 Tor is not claimed solved or production-ready by this PR.
+
+## Failed v0.0.61 rollout and ten-minute grace amendment
+
+PR #99 merged normally; exact-main CI and independent reproducible publication
+passed for v0.0.61. One protected approval admitted one update. Deployment run
+39196698284 ended with `RELEASE_COMPLETION_TIMEOUT`; subsequent control-plane
+readback independently reported v0.0.60 current/running and v0.0.61's candidate
+failed. No completion receipt or serving verification was observed. The release
+configured `start_period: 300s`, not the historical diagnostic build's `600s`;
+the wrapper also had a separate 300-second completion observation window.
+Neither deadline establishes why the platform candidate failed.
+
+Read-only Honeycomb investigation followed
+[the startup-only exception](../PRIVACY.md#startup-diagnostics-exception), using
+bounded closed-field aggregate queries, not raw rows or bodies. In the rollout
+window 2026-10-19 03:30–04:11 UTC, `possums.startup` had 18 records: two entered
+records for each of eight stages and two `initialization_complete` records at
+`tor_launch`, constrained to `local_initialization_only_not_verified_serving`.
+There were no failed/interrupted records in that classified result. These events
+are not release/instance-attributed and do not establish verified serving,
+later health, or the candidate failure cause. No debug export was activated;
+no raw logs, private configuration or key material were retained.
+
+The operator requests a fresh normal-gated attempt with 600-second measured
+startup grace. The wrapper's fixed observation budget becomes 900 seconds so
+it can observe completion after that grace; the budget is not renewed on each
+readback and adds no update replay. Existing failed-candidate, drift, provenance
+and protected-approval gates remain. A first healthy check still ends Docker's
+startup exemption; this amendment is not evidence that longer grace fixes Tor.
+
+Separately authorized cancellation sent exactly one supported `container cancel`
+without `--rollback-latest`. Readback confirmed no pending candidate, unchanged
+current v0.0.60/running, debug off/confidential mode on, and equality of all
+existing opaque configuration fields. This proves control-plane reconciliation,
+not physical cleanup or serving/onion health. There was no rollback, binding
+change, client activation or inference probe.
+
+Pinned Python 3.12.12 discovery passed **100 tests, zero failures, one existing
+opt-in skip**. Fixtures assert 600-second measured grace and release-transform
+preservation; synthetic monotonic time observes completion after 601 seconds
+with only one update, while the fixed 900-second timeout and failed-candidate
+paths still stop without replay. Active LSP found no diagnostics on the four
+changed Python paths; whitespace checks passed. Independent read-only Sol review
+found no blocker and reproduced the test run. Hosted CI/release/deployment evidence
+for this new amendment is pending; v0.0.61 remains a failed rollout, not a deployed
+fix.

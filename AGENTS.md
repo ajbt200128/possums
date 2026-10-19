@@ -7,7 +7,7 @@ independent PR, superseding the historical Tor-removal restriction **for source
 work only**. Restore gateway ingress/endorsements and helper/Pi trust/transport
 integration with offline tests. Preserve later main fixes, the recreated gateway
 deployment target, verified renewal, bounded general startup diagnostics, open
-egress, 300-second startup grace, 512 MiB memory-only `/tmp`, and all release,
+egress, 600-second startup grace, 512 MiB memory-only `/tmp`, and all release,
 provenance and protected-approval gates. Do not merge, deploy, dispatch releases,
 install/activate clients, change runtime/key bindings or perform live probes.
 The operator subsequently requires this PR's measured configuration to enable

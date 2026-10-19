@@ -581,7 +581,7 @@ class MutationTest(StopTest):
         with patch.object(d, "get", side_effect=[view(), changed]), patch.object(d, "call", return_value=self.result()):
             self.stop("configuration_changed", d.update_once, "unused", V, lambda: None)
         with patch.object(d, "get", return_value=view()), patch.object(d, "call", return_value=self.result()) as call, \
-                patch.object(d.time, "monotonic", side_effect=[0, 301]):
+                patch.object(d.time, "monotonic", side_effect=[0, d.COMPLETION_TIMEOUT_SECONDS + 1]):
             self.stop("completion_timeout", d.update_once, "unused", V, lambda: None)
             call.assert_called_once()
 
