@@ -11,7 +11,11 @@ new telemetry/export is authorized. Preserve the accepted single-address risk
 and all existing trust/accounting/release gates. Following the v0.0.63 rollout,
 the operator again selected **Prepare PR and protected rollout** for the minimal
 timeout-source refinement described below; the same gates precede one new
-protected deployment and bounded public checks.
+protected deployment and bounded public checks. The operator subsequently
+requested maximum useful already available typed evidence for circuit acquisition,
+directory-stream opening, upload requests and related supported causes, **no Arti
+patch**, then deployment under the same gates. This authorizes the explicit rich
+view below, not raw logs, changed retry/health policy or extra production updates.
 
 Applicable policy: [current authority](../AGENTS.md#current-tor-source-restoration-authority),
 [data handling](../PRIVACY.md#data-handling-boundaries),
@@ -43,6 +47,10 @@ HTTP 200 when the existing local readiness/lifecycle predicates pass, otherwise
 `code`, `stage`, `constraint`, `action`, `lifecycle_serving`, `ready`, `tor_state`
 and `tor_problem`. The two booleans distinguish local lifecycle state from the
 combined readiness decision. Other fields are closed locally authored strings.
+That default response remains unchanged. Only the exact literal query
+`?detail=descriptor` opts into one additional `descriptor_evidence` object; other
+queries, including extra/unknown parameters, retain the default contract without
+reflecting query values. Both views use the same readiness/status/no-store rules.
 
 Existing `/healthz` statuses and empty bodies, serving/drain ownership, startup
 and all shipped authentication/catalog/inference/stream/receipt contracts remain
@@ -116,6 +124,100 @@ independent verification gates. The public response exposes coarse process
 state; repeated callers can correlate transitions. `no-store` cannot prevent
 capture or prove erasure. Platform/proxy retention and native Pi/T3 history are
 separate unknown boundaries. No automatic support archive is created.
+
+## Typed descriptor evidence candidate
+
+This candidate uses existing public Arti 0.47 typed APIs, not dependency-source
+patches, tracing or a new observer. The gateway embeds Cargo crates; changing a
+separate Nix `arti`/C Tor package would not change this SDK. Any necessary direct
+type/trait dependencies reuse the existing locked versions and Tor-only features.
+
+The opt-in view preserves the default eight fields and adds only
+`descriptor_evidence`. Its fixed schema distinguishes an unobserved snapshot,
+a different selected problem, and selected descriptor-upload evidence. It reports
+sets of outer retry outcomes and retained source categories, with independent
+circuit, directory-stream and request-origin buckets. Supported nested typed
+causes may distinguish circuit-build versus circuit-request timeout, no path,
+channel/protocol/guard/state/internal failures, directory timeout, truncated
+headers, parser/encoding/size rejection, I/O kind, HTTP rejection or clock skew.
+Valid observed HTTP status values are limited to 100–599; reason phrases and
+invalid values never escape. Labels come from reviewed local catalogs, not error
+formatting. Related internal/unknown evidence cannot invent phase attribution.
+
+No source object, relay/onion/circuit association, formatted error, content,
+operation string, size, OS error number, timestamp, attempt count or ordering is
+retained or returned. Unique category presence is not an error/attempt count.
+Nested traversal has fixed depth/work bounds and closed coverage-limit flags;
+unsupported or incomplete evidence cannot be interpreted as healthy absence.
+Sets describe the selected SDK batch, not all components or prior history.
+
+Arti's `publish/backoff.rs` discards individual wrapper-timeout errors and returns
+previously retained completed errors when the overall budget expires. The active
+upload spans circuit acquisition, directory-stream creation and request/response
+processing. Its interrupted phase is unavailable through these APIs. This patch
+must not claim to reconstruct it or confuse source origin with the last phase.
+`current_problem()` prioritizes components rather than newest chronology; SDK
+watch updates can coalesce and snapshot age remains unknown.
+
+Keep the existing atomic readiness word/default reader. A small fixed evidence
+snapshot is synchronized with every owner update; the opt-in reader holds that
+synchronization while reading readiness and evidence together. No SDK work or
+await occurs under the lock. Stream EOF/poll-unwind clears readiness but preserves
+last known problem/evidence; subsequent SDK status replaces/clears evidence. No
+history, health/fatality/retry/timer/drain change or diagnostic-triggered work.
+
+Compatibility: the existing default strict eight-field decoder remains valid;
+only an explicit new reader accepts the nine-field rich view. Private Pi/client
+attestation, catalog, inference, stream and accounting contracts are untouched.
+Tests must cover actual SDK hostile fixtures, every reachable mapping, mixed and
+empty sets, nested limits/unknowns, deterministic replacement and concurrent
+coherence, original ordinal/readiness behavior, finite worst-case serialization,
+actual Axum opt-in/default/hostile query handling/no-store and no private work.
+
+The rich object has exactly seven fields: `selection`, `outcomes`, `coverage`,
+`circuit`, `stream`, `request` and `unphased`. Each bucket has the same four
+fixed sets: `variants`, `kinds`, `io_kinds` and `http_statuses`. Selection separates
+`no_snapshot`, `no_problem_selected`, `other_problem_selected` and
+`descriptor_upload_selected`. Coverage includes retained-only, empty/absent source,
+nested absence, unsupported variant/kind/I/O kind, and depth/node-limit labels.
+Depth is bounded at 8 and total visited typed nodes at 128, with limit flags rather
+than silent truncation. Snapshot storage is at most 512 bytes; the intentionally
+unreachable all-flags/all-statuses serialization over-approximation is below
+32 KiB. The default eight-field response has not acquired these fields.
+
+**Local source qualification:** the parent inspected the actual implementation
+and independently ran the already-installed exact Nix-store Rust/Cargo **1.92.0**
+with `--offline --locked`: **615 passed, 5 ignored** for all targets/all features;
+**531 passed, 4 ignored** without default features. Package formatting and strict
+all-target/all-feature Clippy passed. Pinned Python 3.12 release/image suites:
+**100 tests, zero failures, one existing skip**. Active seven-path LSP found no
+errors/warnings or inconclusive paths; one unrelated informational refactoring
+suggestion was not applied. Independent Luna source review found no concrete
+security/privacy/concurrency/correctness blockers; it did not execute the tests.
+
+Actual SDK fixtures exercise all request structures, constructible circuit
+structures, nested constituent kinds, all projected kind and I/O labels, every
+u16 HTTP-status input, hostile payload exclusion, phase separation, duplicate/
+permutation behavior, limits, replacement/clearing, poison recovery, coherent
+concurrent snapshots and operational EOF/poll-unwind. Actual Tor-enabled Axum
+checks cover both exact response shapes, literal opt-in/hostile query defaults,
+no-store/status/quiescing/disabled-route behavior and zero evidence/catalog/
+tokenizer/document/inference work. Some circuit/source-identity structures lack
+direct fixtures; their ignored payload paths were source-reviewed. Future SDK
+variants cannot be constructed: only local unknown fallback paths are exercised.
+
+**Environment limit:** recreating `nix develop --offline --no-write-lock-file`
+initially failed before Cargo on an unavailable legacy `bmake` build source. The
+exact build-tool outputs were restored from the trusted signed cache and their
+content/signatures verified, without pin/profile changes. Shell recreation then
+attempted a large dependency bootstrap and exceeded its bounded time budget,
+still before Cargo. The successful direct pinned-toolchain tests above are not
+a successful recreated-dev-shell check. Exact Linux Nix CI/image qualification
+remains mandatory and **PENDING**, along with signed reproducible provenance,
+protected deployment and bounded public rich-view verification. No Arti source
+patch, dependency version upgrade, runtime configuration change, inference or
+candidate deployment occurred. This is diagnostic evidence, not an availability
+fix or fresh client trust/inference acceptance.
 
 ## Offline evidence
 
@@ -191,8 +293,21 @@ only its local unknown/mixed fallback is tested. Three dev-only SDK dependencies
 reuse already locked 0.47.0 packages; lockfile changes are root edges only, not
 runtime upgrades or configuration changes.
 
-Exact-head/main CI, reproducible provenance, protected rollout and bounded public
-checks remain **PENDING**. Record only content-free reviewed observations, not
-raw SDK errors, identifiers, private config or response archives. Neither
-successful deployment nor a diagnostic response establishes restored Tor
-availability or completed fresh client trust/challenge acceptance.
+That timeout-source refinement subsequently shipped as **v0.0.64**, from source
+`b4890cb34011d44cfaf3942e677581c308d4f9e6`, release-only commit
+`285e14b6e65b19d81487e401bc9251fa62548b34`. Exact-main CI 39312285393 and publisher
+39315597438 passed. Existing public signature/build verification passed before one
+protected approval for run 39318276378, attempt 1. The exact single-update completion
+receipt, separate bound-serving receipt and running/no-pending readback passed
+independent parent checks. One bounded strict-TLS clearnet diagnostic returned
+HTTP 200/no-store/closed schema, locally ready with `degraded_reachable` and
+`descriptor_timeout_mixed`. The constituent categories were not available in that
+view. A subsequent explicitly authorized isolated SOCKS-only check reported
+`proxy_reported_ttl_expired`; no onion TLS/HTTP/application bytes or inference.
+These are separate observations, not a demonstrated causal relationship.
+
+The richer typed-evidence candidate above still requires its own review,
+qualification, exact CI/provenance, protected approval and one new deployment.
+Record only content-free reviewed conclusions, not raw SDK errors, identifiers,
+private config or response archives. Neither deployment nor a diagnostic response
+establishes restored Tor availability or completed fresh client trust/challenge.
