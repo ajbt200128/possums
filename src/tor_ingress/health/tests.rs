@@ -74,10 +74,10 @@ fn supported_sdk_problems_are_projected_without_formatting_or_retaining_payloads
     ];
     let health = TorReadiness::default();
     for (problem, expected) in cases {
-        health.observe(EngineStatus {
-            state: State::DegradedUnreachable,
-            problem: ProblemKind::from_sdk(problem.as_ref()),
-        });
+        health.observe(EngineStatus::from_sdk(
+            State::DegradedUnreachable,
+            problem.as_ref(),
+        ));
         drop(problem);
         let observation = health.diagnostic(true);
         assert_eq!(observation.tor_problem, expected);
@@ -116,6 +116,7 @@ fn later_stream_failure_preserves_known_problem_and_has_unknown_cause_diagnostic
         health.observe(EngineStatus {
             state: State::DegradedUnreachable,
             problem: ProblemKind::DescriptorTimeoutUnknown,
+            evidence: DescriptorEvidence::default(),
         });
         health.ended(interrupted);
         let observation = health.diagnostic(true);
@@ -144,6 +145,7 @@ fn concurrent_readers_never_combine_different_status_events() {
             writer.observe(EngineStatus {
                 state: State::Bootstrapping,
                 problem: ProblemKind::DescriptorTimeoutUnknown,
+                evidence: DescriptorEvidence::default(),
             });
         }
     });
@@ -342,7 +344,7 @@ fn all_sixteen_problem_ordinals_preserve_state_readiness_and_fatality() {
     assert_eq!(kinds.len(), 16);
     assert_eq!(PROBLEMS.len(), kinds.len());
     assert_eq!(
-        std::mem::size_of::<TorReadiness>(),
+        std::mem::size_of_val(&TorReadiness::default().0),
         std::mem::size_of::<AtomicU16>()
     );
     for (ordinal, kind) in kinds.into_iter().enumerate() {
@@ -359,6 +361,7 @@ fn all_sixteen_problem_ordinals_preserve_state_readiness_and_fatality() {
             health.observe(EngineStatus {
                 state,
                 problem: kind,
+                evidence: DescriptorEvidence::default(),
             });
             let observation = health.diagnostic(true);
             assert_eq!(observation.tor_problem, PROBLEMS[ordinal]);
@@ -375,6 +378,116 @@ fn all_sixteen_problem_ordinals_preserve_state_readiness_and_fatality() {
         PROBLEMS[ProblemKind::DescriptorTimeout as usize],
         "descriptor_timeout"
     );
+}
+
+#[test]
+fn evidence_is_replaced_cleared_and_coherent_with_word_even_after_poison() {
+    let health = std::sync::Arc::new(TorReadiness::default());
+    let problem = upload_problem(timeout([request()]));
+    health.observe_sdk(State::Running, Some(&problem));
+    let before = serde_json::to_value(health.descriptor_diagnostic(true)).unwrap();
+    assert_eq!(
+        before["descriptor_evidence"]["request"]["http_statuses"],
+        serde_json::json!([503])
+    );
+    for interrupted in [false, true] {
+        health.ended(interrupted);
+        let after = serde_json::to_value(health.descriptor_diagnostic(true)).unwrap();
+        assert_eq!(before["descriptor_evidence"], after["descriptor_evidence"]);
+        assert_eq!(before["tor_problem"], after["tor_problem"]);
+        assert_eq!(after["ready"], false);
+    }
+    let poisoned = health.clone();
+    assert!(std::thread::spawn(move || {
+        let _guard = poisoned.1.lock().unwrap();
+        panic!("HOSTILE_POISON_SECRET");
+    })
+    .join()
+    .is_err());
+    health.observe_sdk(State::Bootstrapping, Some(&Problem::Ipt(vec![])));
+    let replaced = serde_json::to_value(health.descriptor_diagnostic(true)).unwrap();
+    assert_eq!(
+        replaced["descriptor_evidence"]["selection"],
+        "other_problem_selected"
+    );
+    assert_eq!(
+        replaced["descriptor_evidence"]["request"]["http_statuses"],
+        serde_json::json!([])
+    );
+    health.observe_sdk(State::Running, None);
+    let cleared = serde_json::to_value(health.descriptor_diagnostic(true)).unwrap();
+    assert_eq!(
+        cleared["descriptor_evidence"]["selection"],
+        "no_problem_selected"
+    );
+    assert_eq!(cleared["ready"], true);
+
+    let writer = health.clone();
+    let task = std::thread::spawn(move || {
+        for _ in 0..5_000 {
+            writer.observe_sdk(State::Bootstrapping, Some(&problem));
+            writer.observe_sdk(State::Running, None);
+        }
+    });
+    for _ in 0..5_000 {
+        let snapshot = serde_json::to_value(health.descriptor_diagnostic(true)).unwrap();
+        match snapshot["descriptor_evidence"]["selection"]
+            .as_str()
+            .unwrap()
+        {
+            "no_problem_selected" => {
+                assert_eq!(snapshot["tor_state"], "running");
+                assert_eq!(snapshot["tor_problem"], "none_observed");
+                assert_eq!(snapshot["ready"], true);
+            }
+            "descriptor_upload_selected" => {
+                assert_eq!(snapshot["tor_state"], "bootstrapping");
+                assert_eq!(snapshot["tor_problem"], "descriptor_timeout_request");
+                assert_eq!(
+                    snapshot["descriptor_evidence"]["request"]["http_statuses"],
+                    serde_json::json!([503])
+                );
+                assert_eq!(snapshot["ready"], false);
+            }
+            _ => panic!("unexpected local selection"),
+        }
+    }
+    task.join().unwrap();
+}
+
+#[tokio::test]
+async fn operational_stream_eof_and_poll_unwind_preserve_last_typed_evidence() {
+    use futures_util::{stream, StreamExt};
+    let problem = upload_problem(timeout([request(), circuit()]));
+    for interrupted in [false, true] {
+        let health = std::sync::Arc::new(TorReadiness::default());
+        let status = EngineStatus::from_sdk(State::Running, Some(&problem));
+        let expected = serde_json::to_value(status.evidence).unwrap();
+        let statuses = stream::iter([status]);
+        let statuses = if interrupted {
+            statuses
+                .chain(stream::poll_fn(|_| panic!("HOSTILE_POLL_SECRET")))
+                .boxed()
+        } else {
+            statuses.boxed()
+        };
+        assert!(matches!(
+            crate::tor_ingress::engine_status(statuses, Some(health.clone())).await,
+            crate::tor_ingress::Failure::Engine
+        ));
+        let snapshot = serde_json::to_value(health.descriptor_diagnostic(true)).unwrap();
+        assert_eq!(snapshot["descriptor_evidence"], expected);
+        assert_eq!(snapshot["tor_problem"], "descriptor_timeout_mixed");
+        assert_eq!(snapshot["ready"], false);
+        assert_eq!(
+            snapshot["tor_state"],
+            if interrupted {
+                "status_stream_interrupted"
+            } else {
+                "status_stream_ended"
+            }
+        );
+    }
 }
 
 #[tokio::test]
@@ -395,6 +508,7 @@ async fn operational_stream_eof_and_poll_unwind_keep_highest_refined_problem() {
             let statuses = stream::iter([EngineStatus {
                 state: State::Running,
                 problem: kind,
+                evidence: DescriptorEvidence::default(),
             }]);
             let statuses = if interrupted {
                 statuses

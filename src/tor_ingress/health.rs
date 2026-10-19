@@ -1,6 +1,12 @@
 //! Request-only, closed projection of the existing operational status stream.
 //! No SDK error, identifier, timestamp, history or diagnostic work is retained.
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{
+    atomic::{AtomicU16, Ordering},
+    Mutex, PoisonError,
+};
+
+mod evidence;
+use evidence::DescriptorEvidence;
 
 use serde::Serialize;
 use tor_hsservice::{
@@ -160,9 +166,18 @@ const _: () = {
 pub(super) struct EngineStatus {
     pub(super) state: State,
     pub(super) problem: ProblemKind,
+    evidence: DescriptorEvidence,
 }
 
 impl EngineStatus {
+    pub(super) fn from_sdk(state: State, problem: Option<&Problem>) -> Self {
+        Self {
+            state,
+            problem: ProblemKind::from_sdk(problem),
+            evidence: DescriptorEvidence::from_sdk(problem),
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn test((state, fatal): (State, bool)) -> Self {
         Self {
@@ -172,6 +187,7 @@ impl EngineStatus {
             } else {
                 ProblemKind::NoneObserved
             },
+            evidence: DescriptorEvidence::from_sdk(None),
         }
     }
 }
@@ -179,7 +195,7 @@ impl EngineStatus {
 /// One coherent word keeps readiness and its explanation from different events
 /// from being combined. Only the existing engine owner writes it.
 #[derive(Default)]
-pub(crate) struct TorReadiness(AtomicU16);
+pub(crate) struct TorReadiness(AtomicU16, Mutex<DescriptorEvidence>);
 
 impl TorReadiness {
     pub(super) fn observe(&self, status: EngineStatus) {
@@ -194,6 +210,10 @@ impl TorReadiness {
             _ => UNKNOWN_STATE,
         };
         let ready = status.state.is_fully_reachable() && !status.problem.is_fatal();
+        // No SDK work or await under this lock. Recovering poison is safe:
+        // writers only replace Copy state and store the matching atomic word.
+        let mut evidence = self.1.lock().unwrap_or_else(PoisonError::into_inner);
+        *evidence = status.evidence;
         self.0.store(
             state | ((status.problem as u16) << PROBLEM_SHIFT) | if ready { READY } else { 0 },
             Ordering::Release,
@@ -201,6 +221,7 @@ impl TorReadiness {
     }
 
     pub(super) fn ended(&self, interrupted: bool) {
+        let _evidence = self.1.lock().unwrap_or_else(PoisonError::into_inner);
         let problem = self.0.load(Ordering::Relaxed) & (FIELD_MASK << PROBLEM_SHIFT);
         let state = if interrupted {
             STREAM_INTERRUPTED
@@ -218,14 +239,19 @@ impl TorReadiness {
 
     #[cfg(test)]
     pub(crate) fn observe_sdk(&self, state: State, problem: Option<&Problem>) {
-        self.observe(EngineStatus {
-            state,
-            problem: ProblemKind::from_sdk(problem),
-        });
+        self.observe(EngineStatus::from_sdk(state, problem));
     }
 
     pub(crate) fn is_ready(&self) -> bool {
         self.0.load(Ordering::Acquire) & READY != 0
+    }
+
+    pub(crate) fn descriptor_diagnostic(&self, lifecycle_serving: bool) -> DescriptorDiagnostic {
+        let evidence = self.1.lock().unwrap_or_else(PoisonError::into_inner);
+        DescriptorDiagnostic {
+            readiness: self.diagnostic(lifecycle_serving),
+            descriptor_evidence: *evidence,
+        }
     }
 
     pub(crate) fn diagnostic(&self, lifecycle_serving: bool) -> ReadinessDiagnostic {
@@ -276,6 +302,13 @@ pub(crate) struct ReadinessDiagnostic {
     pub(crate) ready: bool,
     tor_state: &'static str,
     tor_problem: &'static str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct DescriptorDiagnostic {
+    #[serde(flatten)]
+    pub(crate) readiness: ReadinessDiagnostic,
+    descriptor_evidence: DescriptorEvidence,
 }
 
 #[cfg(test)]

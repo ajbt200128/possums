@@ -7,12 +7,15 @@ publish = false
 
 [features]
 default = []
-tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-hscrypto", "dep:tor-keymgr", "dep:tor-cell", "dep:tor-proto", "dep:tor-rtcompat", "dep:tokio-util", "dep:fs-mistrust", "dep:tor-llcrypto", "dep:tempfile", "dep:spki", "dep:ssh-key", "dep:zeroize"]
+tor = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-hscrypto", "dep:tor-keymgr", "dep:tor-cell", "dep:tor-proto", "dep:tor-rtcompat", "dep:tokio-util", "dep:fs-mistrust", "dep:tor-llcrypto", "dep:tempfile", "dep:spki", "dep:ssh-key", "dep:zeroize", "dep:tor-circmgr", "dep:tor-dirclient", "dep:tor-error"]
 
 [dependencies]
 # Same released APIs/features as the isolated Arti spike; never enabled by default.
 arti-client = { version = "=0.47.0", optional = true, default-features = false, features = ["tokio", "rustls", "onion-service-service", "onion-service-cli-extra", "memquota", "vanguards", "static-sqlite", "ephemeral-keystore"] }
 tor-hsservice = { version = "=0.47.0", optional = true }
+tor-circmgr = { version = "=0.47.0", optional = true, default-features = false }
+tor-dirclient = { version = "=0.47.0", optional = true, default-features = false }
+tor-error = { version = "=0.47.0", optional = true, default-features = false }
 tor-hscrypto = { version = "=0.47.0", optional = true }
 tor-keymgr = { version = "=0.47.0", optional = true }
 tor-cell = { version = "=0.47.0", optional = true }
@@ -64,6 +67,7 @@ webpki-roots = "1"
 [dev-dependencies]
 # Construct the SDK's existing typed upload failures in offline privacy tests.
 retry-error = "=0.14.0"
+httparse = "=1.10.1"
 tor-circmgr = { version = "=0.47.0", default-features = false }
 tor-dirclient = { version = "=0.47.0", default-features = false }
 tor-error = { version = "=0.47.0", default-features = false }

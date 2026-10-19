@@ -527,6 +527,165 @@ async fn typed_timeout_sources_reach_actual_diagnostic_response_without_payloads
 }
 
 #[tokio::test]
+async fn descriptor_detail_is_exact_opt_in_coherent_and_initiates_no_work() {
+    use retry_error::RetryError;
+    use tor_hsservice::{
+        status::{DescUploadRetryError, Problem, State},
+        DescUploadError,
+    };
+    let (state, inference, tor) = tor_fixture();
+    let health = state.tor_ready.as_ref().unwrap();
+    let app = router(state.clone());
+    let mut sources = RetryError::in_attempt_to("HOSTILE_CONTEXT_SECRET");
+    sources.push(DescUploadError::Circuit(tor_circmgr::Error::CircTimeout(
+        None,
+    )));
+    sources.push(DescUploadError::Stream(tor_circmgr::Error::RequestTimeout));
+    sources.push(DescUploadError::Request(
+        tor_dirclient::RequestFailedError {
+            source: None,
+            error: tor_dirclient::RequestError::HttpStatus(503, "HOSTILE_REASON_SECRET".into()),
+        },
+    ));
+    let problem = Problem::DescriptorUpload(vec![DescUploadRetryError::Timeout(sources)]);
+    for (phase, expected_status, expected_code) in [
+        (
+            0,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tor_status_not_observed",
+        ),
+        (
+            1,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tor_reachability_unconfirmed",
+        ),
+        (2, StatusCode::OK, "gateway_ready"),
+        (3, StatusCode::SERVICE_UNAVAILABLE, "gateway_not_serving"),
+    ] {
+        match phase {
+            1 => health.observe_sdk(State::Bootstrapping, Some(&problem)),
+            2 => health.observe_sdk(State::Running, None),
+            3 => {
+                state.lifecycle.quiesce();
+            }
+            _ => {}
+        }
+        let mut baseline = None;
+        for query in [
+            "",
+            "?",
+            "?unknown=HOSTILE_PRIVATE_QUERY",
+            "?detail=descriptor&extra=HOSTILE_PRIVATE_QUERY",
+            "?detail=descriptor&detail=descriptor",
+            "?detail=Descriptor",
+            "?detail=%64escriptor",
+            "?%64etail=descriptor",
+            "?detail=descriptor&",
+            "?detail=descriptor%00",
+            "?detail=descriptor",
+        ] {
+            let rich = query == "?detail=descriptor";
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/healthz/diagnostics{query}"))
+                        .header("authorization", "HOSTILE_PRIVATE_HEADER")
+                        .body(Body::from("HOSTILE_PRIVATE_BODY"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert!(response.extensions().get::<InterfaceError>().is_none());
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(bytes.len() < 32 * 1024 + 1024);
+            assert!(!String::from_utf8_lossy(&bytes).contains("HOSTILE"));
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["code"], expected_code);
+            assert_eq!(value.as_object().unwrap().len(), if rich { 9 } else { 8 });
+            if rich {
+                let evidence = value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("descriptor_evidence")
+                    .unwrap();
+                assert_eq!(evidence.as_object().unwrap().len(), 7);
+                assert_eq!(
+                    evidence["selection"],
+                    match phase {
+                        0 => "no_snapshot",
+                        1 => "descriptor_upload_selected",
+                        _ => "no_problem_selected",
+                    }
+                );
+                if phase == 1 {
+                    assert_eq!(evidence["outcomes"], json!(["timeout"]));
+                    assert_eq!(evidence["circuit"]["variants"], json!(["circuit_timeout"]));
+                    assert_eq!(evidence["stream"]["variants"], json!(["request_timeout"]));
+                    assert_eq!(evidence["request"]["http_statuses"], json!([503]));
+                } else {
+                    assert_eq!(evidence["outcomes"], json!([]));
+                    assert_eq!(evidence["request"]["http_statuses"], json!([]));
+                }
+            }
+            if let Some(baseline) = &baseline {
+                assert_eq!(&value, baseline);
+            } else {
+                baseline = Some(value);
+            }
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/healthz?detail=descriptor")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if phase == 2 {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        );
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+    }
+    assert!(tor.challenges.lock().unwrap().is_empty());
+    for counter in [
+        &inference.catalog_calls,
+        &inference.tokenize_calls,
+        &inference.calls,
+        &inference.document_calls,
+    ] {
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+    let (plain, _, _) = fixture_state();
+    assert_eq!(
+        router(plain)
+            .oneshot(
+                Request::get("/healthz/diagnostics?detail=descriptor")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn request_only_readiness_diagnostic_is_closed_uncached_and_initiates_no_work() {
     let (state, inference, tor) = tor_fixture();
     let app = router(state.clone());

@@ -19,7 +19,7 @@ use tor_rtcompat::PreferredRuntime;
 use crate::server::{serve_connections_until, AppState, Incoming, ServerFailure};
 
 pub(crate) mod health;
-use health::{EngineStatus, ProblemKind, TorReadiness};
+use health::{EngineStatus, TorReadiness};
 
 /// Closed diagnostics only. No SDK error, peer, key, argument or payload is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -610,10 +610,9 @@ pub async fn serve_tcp_and_onion_until_initialized<F: Future<Output = ()>>(
         Some((accepted, listener))
     });
     let engine = stream::once(async {
-        let statuses = service.status_events().map(|status| EngineStatus {
-            state: status.state(),
-            problem: ProblemKind::from_sdk(status.current_problem()),
-        });
+        let statuses = service
+            .status_events()
+            .map(|status| EngineStatus::from_sdk(status.state(), status.current_problem()));
         Err(engine_status(statuses, readiness).await)
     });
     let onion = stream::select(onion_streams(requests, report.clone()), engine);

@@ -36,10 +36,25 @@ upload-request evidence **without patching Arti**, under the updated
 The default eight-field response remains unchanged; only `?detail=descriptor`
 opts into the bounded closed evidence object. No raw errors, identifiers, history,
 background export, new inference or availability-policy change is authorized.
-Candidate implementation/review/full pinned offline checks, exact-head/main CI,
-signed reproducible provenance, one new protected update and bounded public
-verification are **PENDING**. No candidate deployment or client installation/
-activation is established by this record; fresh Tor trust/E2E remains unresolved.
+Parent-inspected implementation and independent Luna source review found no
+concrete blockers. Parent checks with the already-installed exact Nix-store
+Rust/Cargo **1.92.0**, `--offline --locked`: **615 all-feature / 531 no-default
+passes**, respectively five/four ignored; package formatting, strict Clippy,
+**100 Python tests** (one existing skip) and active seven-path LSP passed, apart
+from one unrelated informational suggestion. These include actual SDK hostile
+fixtures, bounded nested classification, every u16 status input, coherent owner
+replacement/EOF and actual Axum opt-in/default/privacy/no-work checks. Some
+circuit/source-identity fixtures and future SDK variants remain unconstructible
+or unexercised; limits are disclosed in the linked record.
+
+The recreated offline Nix development shell never reached Cargo: after restoring
+and signature/content-verifying the exact missing `bmake` tool from the trusted
+cache, a larger dependency bootstrap exceeded its time budget. Successful direct
+pinned-toolchain checks do not qualify that recreated shell. Exact-head/main
+Linux Nix CI/image checks, signed reproducible provenance, one new protected
+update and bounded public verification are still **PENDING**. No candidate
+deployment or client installation/activation is established by this record;
+fresh Tor trust/E2E remains unresolved.
 
 ## NSS and all startup diagnostics removal — isolation candidate
 

@@ -248,23 +248,34 @@ pub fn router_with_body_deadline(state: AppState, body_deadline: Duration) -> Ro
     let app = if let Some(tor_ready) = tor_ready {
         app.route(
             "/healthz/diagnostics",
-            get(move || {
-                let health = health.clone();
-                let tor_ready = tor_ready.clone();
-                async move {
-                    let diagnostic = tor_ready.diagnostic(health.is_serving());
-                    let status = if diagnostic.ready {
-                        StatusCode::OK
-                    } else {
-                        StatusCode::SERVICE_UNAVAILABLE
-                    };
-                    (
-                        status,
-                        [(header::CACHE_CONTROL, "no-store")],
-                        axum::Json(diagnostic),
-                    )
-                }
-            }),
+            get(
+                move |axum::extract::RawQuery(query): axum::extract::RawQuery| {
+                    // Reduce before async capture; no query value enters the snapshot.
+                    let descriptor = query.as_deref() == Some("detail=descriptor");
+                    drop(query);
+                    let health = health.clone();
+                    let tor_ready = tor_ready.clone();
+                    async move {
+                        let serving = health.is_serving();
+                        let (ready, body) = if descriptor {
+                            let diagnostic = tor_ready.descriptor_diagnostic(serving);
+                            (
+                                diagnostic.readiness.ready,
+                                axum::Json(diagnostic).into_response(),
+                            )
+                        } else {
+                            let diagnostic = tor_ready.diagnostic(serving);
+                            (diagnostic.ready, axum::Json(diagnostic).into_response())
+                        };
+                        let status = if ready {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        };
+                        (status, [(header::CACHE_CONTROL, "no-store")], body)
+                    }
+                },
+            ),
         )
     } else {
         app

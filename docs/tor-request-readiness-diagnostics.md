@@ -174,10 +174,50 @@ empty sets, nested limits/unknowns, deterministic replacement and concurrent
 coherence, original ordinal/readiness behavior, finite worst-case serialization,
 actual Axum opt-in/default/hostile query handling/no-store and no private work.
 
-**Candidate evidence:** implementation, independent review, pinned offline full
-qualification, exact CI/provenance, protected rollout and bounded public rich-view
-verification remain **PENDING**. This is an evidence collection refinement, not
-a proven Tor availability fix or fresh client trust/inference acceptance.
+The rich object has exactly seven fields: `selection`, `outcomes`, `coverage`,
+`circuit`, `stream`, `request` and `unphased`. Each bucket has the same four
+fixed sets: `variants`, `kinds`, `io_kinds` and `http_statuses`. Selection separates
+`no_snapshot`, `no_problem_selected`, `other_problem_selected` and
+`descriptor_upload_selected`. Coverage includes retained-only, empty/absent source,
+nested absence, unsupported variant/kind/I/O kind, and depth/node-limit labels.
+Depth is bounded at 8 and total visited typed nodes at 128, with limit flags rather
+than silent truncation. Snapshot storage is at most 512 bytes; the intentionally
+unreachable all-flags/all-statuses serialization over-approximation is below
+32 KiB. The default eight-field response has not acquired these fields.
+
+**Local source qualification:** the parent inspected the actual implementation
+and independently ran the already-installed exact Nix-store Rust/Cargo **1.92.0**
+with `--offline --locked`: **615 passed, 5 ignored** for all targets/all features;
+**531 passed, 4 ignored** without default features. Package formatting and strict
+all-target/all-feature Clippy passed. Pinned Python 3.12 release/image suites:
+**100 tests, zero failures, one existing skip**. Active seven-path LSP found no
+errors/warnings or inconclusive paths; one unrelated informational refactoring
+suggestion was not applied. Independent Luna source review found no concrete
+security/privacy/concurrency/correctness blockers; it did not execute the tests.
+
+Actual SDK fixtures exercise all request structures, constructible circuit
+structures, nested constituent kinds, all projected kind and I/O labels, every
+u16 HTTP-status input, hostile payload exclusion, phase separation, duplicate/
+permutation behavior, limits, replacement/clearing, poison recovery, coherent
+concurrent snapshots and operational EOF/poll-unwind. Actual Tor-enabled Axum
+checks cover both exact response shapes, literal opt-in/hostile query defaults,
+no-store/status/quiescing/disabled-route behavior and zero evidence/catalog/
+tokenizer/document/inference work. Some circuit/source-identity structures lack
+direct fixtures; their ignored payload paths were source-reviewed. Future SDK
+variants cannot be constructed: only local unknown fallback paths are exercised.
+
+**Environment limit:** recreating `nix develop --offline --no-write-lock-file`
+initially failed before Cargo on an unavailable legacy `bmake` build source. The
+exact build-tool outputs were restored from the trusted signed cache and their
+content/signatures verified, without pin/profile changes. Shell recreation then
+attempted a large dependency bootstrap and exceeded its bounded time budget,
+still before Cargo. The successful direct pinned-toolchain tests above are not
+a successful recreated-dev-shell check. Exact Linux Nix CI/image qualification
+remains mandatory and **PENDING**, along with signed reproducible provenance,
+protected deployment and bounded public rich-view verification. No Arti source
+patch, dependency version upgrade, runtime configuration change, inference or
+candidate deployment occurred. This is diagnostic evidence, not an availability
+fix or fresh client trust/inference acceptance.
 
 ## Offline evidence
 
