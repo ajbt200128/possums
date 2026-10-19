@@ -24,6 +24,7 @@ DOMAIN = "gateway.possums.dev"
 CLI_SHA256 = "ef014c67a976b4b47941d084fb0a3837ba6eb59c9f4e662424c6826fb7a70f8c"
 CLI_URL = "https://github.com/tinfoilsh/tinfoil-cli/releases/download/v0.19.0/tinfoil-cli_0.19.0_linux_amd64.tar.gz"
 LIMIT = 16 << 20
+COMPLETION_TIMEOUT_SECONDS = 900
 REQUIRED_REFS = {"POSSUMS_ACCOUNTS_JSON", "TINFOIL_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
 STABLE = ("id", "name", "repo", "project_id", "cpus", "gpus", "memory_mb", "variables", "secrets",
           "ssh_keys", "debug", "disable_cc_mode", "domain", "held", "volume_slots", "volumes",
@@ -344,7 +345,7 @@ def update_once(cli, tag, final_gate):
         raise r.Stop("cli_uncertain") from None
     r.require(result.returncode == 0, "cli_uncertain")
     inspect_plan(result.stderr, previous, tag, before["domain"], current_resources=before)
-    deadline = time.monotonic() + 300
+    deadline = time.monotonic() + COMPLETION_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         after = get(cli)
         r.require(type(after.get("mark_latest_release")) is bool

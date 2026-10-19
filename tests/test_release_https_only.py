@@ -62,10 +62,19 @@ class TorRestorationReleaseTest(StopTest):
         pending = {**view(), "update_tag": V, "update_status": "deploying"}
         with patch.object(d, "plan_update"), patch.object(d, "get", side_effect=[view(), pending]), \
                 patch.object(d, "call", return_value=self.result()) as call, \
-                patch.object(d.time, "monotonic", side_effect=[0, 1, 301]), patch.object(d.time, "sleep") as sleep:
+                patch.object(d.time, "monotonic", side_effect=[0, 1, d.COMPLETION_TIMEOUT_SECONDS + 1]), patch.object(d.time, "sleep") as sleep:
             self.stop("completion_timeout", d.update_once, "unused", V, Mock())
             call.assert_called_once()
             sleep.assert_called_once_with(10)
+
+    def test_completion_after_ten_minute_grace_is_observed_without_another_update(self):
+        self.assertEqual(d.COMPLETION_TIMEOUT_SECONDS, 900)
+        with patch.object(d, "plan_update"), patch.object(d, "get", side_effect=[view(), view(V)]), \
+                patch.object(d, "call", return_value=self.result()) as call, \
+                patch.object(d.time, "monotonic", side_effect=[0, 601]):
+            result = d.update_once("unused", V, Mock())
+            self.assertTrue(result["targetRunningNoPending"])
+            call.assert_called_once()
 
     def test_failed_candidate_keeps_closed_diagnostic_without_replay(self):
         pending = {**view(), "update_tag": V, "update_status": "failed"}
@@ -115,7 +124,7 @@ class TorRestorationReleaseTest(StopTest):
             self.assertEqual(config.count('      - ' + reference + '\n'), 1)
         self.assertNotIn('POSSUMS_TOR_IDENTITY_DIRECTORY', config)
         self.assertNotIn('OTEL_SDK_DISABLED', config)
-        self.assertIn('      start_period: 300s\n', config)
+        self.assertIn('      start_period: 600s\n', config)
         self.assertIn('    egress: open\n', config)
         for required in ("attestation: true", "read_only: true", 'size=512m,mode=1777'):
             self.assertIn(required, config)
