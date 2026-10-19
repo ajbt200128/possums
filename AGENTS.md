@@ -41,6 +41,19 @@ changes or automatic retries/replay. Preserve `/healthz` and actual
 readiness/shutdown semantics. See the [request-only diagnostic contract](docs/tor-request-readiness-diagnostics.md)
 and [narrow privacy exception](PRIVACY.md#request-only-readiness-diagnostics-exception).
 
+The operator subsequently authorizes richer typed descriptor-upload evidence for
+circuit acquisition, directory-stream opening, upload request/response failures
+and related supported typed causes, **without patching Arti**, followed by normal
+reviewed PR and protected deployment. Preserve the default eight-field diagnostic
+contract; only the explicit `?detail=descriptor` view may add the reviewed bounded
+`descriptor_evidence` projection. This permits closed typed sets and valid
+observed HTTP status codes, not raw errors, identities, source objects, counts,
+order, timestamps, history, debug logs or background export. Preserve retry,
+timeout, readiness, fatality, trust/accounting and configuration/reference policy.
+This authorizes one new protected update after exact CI, public signed provenance
+and protected approval, not replay, client activation or paid inference. See the
+[typed evidence contract](docs/tor-request-readiness-diagnostics.md#typed-descriptor-evidence-candidate).
+
 Local mounted A private/public consistency and approved B custody remain required
 before launch; startup self-appraisal/freshness is not a launch gate. Every
 `/attestation/tor` request and client still independently verifies fresh

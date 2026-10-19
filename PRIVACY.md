@@ -146,7 +146,13 @@ and protected approval must precede rollout, then bounded public read-only check
 The operator subsequently selected the same source-review/protected-rollout
 scope for a minimal refinement of observed descriptor-timeout failures into
 closed SDK source-stage categories, not an availability fix. This is
-authorization, not deployment or verification evidence. See the
+authorization, not deployment or verification evidence. The operator subsequently
+authorized maximizing already available typed evidence for circuit acquisition,
+directory-stream opening, upload request/response failures and related supported
+typed causes, without patching Arti, followed by the same reviewed protected
+rollout. The explicit view and limits below supersede only the default-only
+response restriction, not the ban on raw logging, background export or changed
+availability policy. See the
 [design and verification plan](docs/tor-request-readiness-diagnostics.md).
 
 - Permit only credential-free explicit `GET /healthz/diagnostics`, outside
@@ -156,8 +162,11 @@ authorization, not deployment or verification evidence. See the
   weaken health. Requests initiate no inference, extra probes, retry or replay.
 - Return only closed, locally authored `code`/`stage`/`constraint`/`action`
   strings, `lifecycle_serving`/`ready` booleans, and fixed `tor_state`/`tor_problem`
-  categories from the **existing operational engine status owner**. Its snapshot stores only the fixed enum
-  projection, never raw SDK errors, `Debug`/`Display` text, panic payloads,
+  categories from the **existing operational engine status owner**. Preserve those
+  exact eight fields, types, labels and status semantics by default. Only the
+  literal opt-in `?detail=descriptor` may add one reviewed `descriptor_evidence`
+  object as described below. Its snapshot stores only fixed bounded enum/bitset
+  projections, never raw SDK errors, `Debug`/`Display` text, panic payloads,
   configuration, keys, identities, URLs, user data, timestamps, counters or
   history. Engine source EOF/panic must remain unhealthy with a content-free
   unknown-cause classification, never fabricated causal attribution.
@@ -172,6 +181,24 @@ authorization, not deployment or verification evidence. See the
   No timestamp, exhaustive history, liveness, exclusive-publication or serving
   guarantee follows from this snapshot. A false Arti `is_fully_reachable` value
   does not prove unreachability; descriptor republishing may report Bootstrapping.
+- The opt-in typed descriptor evidence may expose deterministic sets of existing
+  public SDK retry outcomes, retained source classes and supported nested typed
+  failure categories separately for circuit, stream and request origin. Related
+  internal/unknown categories remain explicit and unassigned to a phase unless
+  evidence supports it. Only locally authored closed labels, standard I/O kinds
+  and valid observed HTTP status codes (100–599, no reason phrase) are permitted.
+  Ignore all identifying/string payloads, OS error numbers, source descriptions,
+  relay/circuit associations, sizes and attempt metadata. Sets describe category
+  presence in one selected SDK snapshot, never failure counts or chronology.
+- Distinguish no observation, a different prioritized problem, empty retained
+  evidence and incomplete/unsupported classification. Bound typed traversal depth
+  and total work; expose closed coverage-limit flags rather than silently truncating
+  or claiming exhaustive evidence. Do not persist or export traversal counters.
+  Arti's discarded individual-attempt timeouts and interrupted phases cannot be
+  reconstructed from earlier completed failures. No new SDK observer or polling is
+  authorized. The rich view must read a coherent readiness/evidence snapshot from
+  the same owner and preserve the last known problem/evidence across later stream
+  EOF/unwind. A later SDK event replaces or clears it; never retain a history.
 - Set `Cache-Control: no-store`. This permits the bounded response to its caller,
   not automatic retention or export. No scheduled diagnostic observer/probe,
   logger, FIFO, export hook, telemetry, new destination, flag or metric/aggregate

@@ -17,19 +17,29 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
-## Request-only Tor diagnostics — timeout-source refinement candidate
+## Request-only Tor diagnostics — typed evidence candidate
 
 The [request-only contract and scoped evidence](tor-request-readiness-diagnostics.md)
-record the verified v0.0.63 deployment separately from its unresolved Tor SOCKS
-failures. The operator authorized another reviewed/protected rollout for seven
-closed descriptor-timeout source categories under the [narrow privacy exception](../PRIVACY.md#request-only-readiness-diagnostics-exception),
-not raw SDK errors, background observation or an availability-policy change.
-Fresh pinned offline qualification: **603 all-feature / 531 no-default Rust
-passes**, strict Clippy/formatting, **100 Python tests** (one existing skip),
-three-path active LSP and independent source/actual-route review passed. The
-SDK may retain no underlying source; categories are not root-cause evidence.
-New exact-head/main CI, release provenance, protected deployment and public
-checks remain pending. No inference or client installation/activation occurred.
+record v0.0.63 and the subsequent **v0.0.64** timeout-source refinement separately
+from unresolved Tor connectivity. v0.0.64 exact-main CI 39312285393, publisher
+39315597438, public signature/build provenance, one protected approval/update in
+39318276378 attempt 1, separate bound-serving receipt and running/no-pending
+readback passed independent checks. Its bounded public diagnostic reported local
+readiness and `descriptor_timeout_mixed`, not constituent categories or root cause.
+Prior offline refinement evidence remains **603 all-feature / 531 no-default Rust
+passes**, strict Clippy/formatting, **100 Python tests** (one existing skip), active
+LSP and independent source/actual-route review. These are not candidate test counts.
+
+The operator now authorizes maximum useful existing typed circuit, stream and
+upload-request evidence **without patching Arti**, under the updated
+[narrow privacy exception](../PRIVACY.md#request-only-readiness-diagnostics-exception).
+The default eight-field response remains unchanged; only `?detail=descriptor`
+opts into the bounded closed evidence object. No raw errors, identifiers, history,
+background export, new inference or availability-policy change is authorized.
+Candidate implementation/review/full pinned offline checks, exact-head/main CI,
+signed reproducible provenance, one new protected update and bounded public
+verification are **PENDING**. No candidate deployment or client installation/
+activation is established by this record; fresh Tor trust/E2E remains unresolved.
 
 ## NSS and all startup diagnostics removal — isolation candidate
 
