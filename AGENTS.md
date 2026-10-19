@@ -14,8 +14,16 @@ The operator subsequently requires this PR's measured configuration to enable
 Tor: restore `POSSUMS_TOR_ENABLED=true`, the platform attested A grant/mount and
 the two approved B identity secret references in source. This supersedes the
 initial runtime-off PR configuration, not the prohibition on live mutation.
-Existing deployment gates still apply; secret delivery and exclusive publication
-must be separately qualified before rollout. Degraded-state investigation is
+The operator subsequently authorizes merge and protected deployment using one
+stable onion address, accepting possible overlapping publication and Tor
+availability/routing failures during blue/green updates. Alternating identities,
+exclusive publication and seamless handoff are deferred, not rollout gates for
+this accepted single-address mode. Remove only the overlap-specific refusal;
+preserve secret/reference delivery, approved B custody, local A/B consistency,
+CI, release provenance, no configuration drift and protected approval. No client
+installation/activation, paid inference, arbitrary key/binding change or debug
+export is authorized. This supersedes the earlier source-only merge/deployment
+restriction above, not the remaining gates. Degraded-state investigation is
 deferred; Tor health flapping remains unresolved.
 
 Local mounted A private/public consistency and approved B custody remain required
@@ -94,7 +102,7 @@ For the API-only target, follow this file first, then `SPEC.md`. `docs/phase0.md
 - Do not impose a product-level byte cap on submitted conversation history, but retain defensive HTTP/parser/memory ceilings. Enforce each model's context window before inference.
 - Use high-entropy copy/paste recovery credentials, not 16-digit account numbers. Clients store recovery credentials locally according to their own documented boundary; the gateway does not offer browser cookies or recovery pages.
 - Initial payment policy is a $5 minimum and a 30% markup over upstream inference cost.
-- Tor source support is authorized by the current restoration scope above; activation remains separate. Monero, additional CLI/SDK integrations, replicas, and an external audit are deferred. A gateway `/app` or no-JavaScript Web UI is not a future feature.
+- Tor source support and the single-address protected rollout are authorized by the current restoration scope above; seamless handoff and alternating identities remain deferred. Monero, additional CLI/SDK integrations, replicas, and an external audit are deferred. A gateway `/app` or no-JavaScript Web UI is not a future feature.
 
 ## Security model
 

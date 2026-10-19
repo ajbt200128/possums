@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-from test_release_automation import ROOT, S, R, D, V, StopTest, d, plan, r, view
+from test_release_automation import D, R, ROOT, S, V, StopTest, d, plan, r, view
 
 
 class TorRestorationReleaseTest(StopTest):
@@ -35,15 +35,28 @@ class TorRestorationReleaseTest(StopTest):
             self.assertNotIn("--secret", call.call_args.args[1])
             call.assert_called_once()
 
-    def test_tor_bound_update_requires_separate_exclusive_publication_qualification(self):
-        for references in (["POSSUMS_TOR_IDENTITY_NATIVE_KEY"], ["POSSUMS_TOR_EXPECTED_ONION"], sorted(d.TOR_REFS)):
-            before = view()
-            before["secrets"].extend(references)
-            with patch.object(d, "get", return_value=before), patch.object(d, "plan_update") as planning, \
-                    patch.object(d, "call") as call:
-                self.stop("tor_exclusive_publication", d.update_once, "unused", V, Mock())
-                planning.assert_not_called()
-                call.assert_not_called()
+    def test_single_address_rollout_preserves_existing_tor_references(self):
+        before, after = view(), view(V)
+        references = ["POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"]
+        before["secrets"].extend(references)
+        after["secrets"] = copy.deepcopy(before["secrets"])
+        with patch.object(d, "plan_update") as planning, patch.object(d, "get", side_effect=[before, after]), \
+                patch.object(d, "call", return_value=self.result()) as call:
+            result = d.update_once("unused", V, Mock())
+            self.assertTrue(result["opaqueConfigurationPreserved"])
+            planning.assert_called_once()
+            call.assert_called_once()
+            self.assertNotIn("--secret", call.call_args.args[1])
+            self.assertNotIn("--yes", call.call_args.args[1])
+
+    def test_single_address_rollout_still_rejects_changed_tor_reference_readback(self):
+        before, after = view(), view(V)
+        before["secrets"].extend(["POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"])
+        after["secrets"] = before["secrets"][:-1]
+        with patch.object(d, "plan_update"), patch.object(d, "get", side_effect=[before, after]), \
+                patch.object(d, "call", return_value=self.result()) as call:
+            self.stop("configuration_changed", d.update_once, "unused", V, Mock())
+            call.assert_called_once()
 
     def test_pending_current_waits_without_extending_deadline(self):
         pending = {**view(), "update_tag": V, "update_status": "deploying"}
@@ -108,7 +121,6 @@ class TorRestorationReleaseTest(StopTest):
             self.assertIn(required, config)
         deploy = (ROOT / "scripts/deploy.py").read_text()
         self.assertNotIn("first_tor_activation", deploy)
-        self.assertEqual(d.TOR_REFS, {"POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"})
         self.assertIn('torCommon = common // { cargoExtraArgs = "--locked --features tor"; };',
                       (ROOT / "flake.nix").read_text())
         self.assertIn('default = []', (ROOT / "Cargo.toml").read_text())

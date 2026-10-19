@@ -45,15 +45,14 @@ Ed25519 A key owned by UID/GID 65532, grants it to the gateway, and references
 Missing required inputs fail closed; this source change is not proof that the
 platform has provisioned them.
 
-Separately reviewed activation still needs approved B custody/reference delivery
-and exclusive publication/old-candidate cleanup evidence. The deploy wrapper
-continues to prohibit secret/reference mutation and now rejects an already
-Tor-bound instance before planning/updating: automatic blue/green overlap could
-publish B from multiple instances. It provides neither first-activation nor
-exclusive-host handover automation. Neither this PR nor its tests mutate live
-bindings or the release image pin. Do not use historical/debug commands as
-activation authority. An already-running shared identity is not evidence that
-another publisher is safe.
+Approved B custody/reference delivery remains required. The operator now accepts
+single-address blue/green overlap, deferring exclusive publication and seamless
+handoff. The deploy wrapper preserves existing secret/reference selections and
+normal no-drift/provenance/approval gates; it does not rotate identities or
+provision missing bindings. It provides neither first-binding nor exclusive-host
+handover automation. Neither this PR nor its tests mutate live bindings or the
+release image pin. Do not use historical/debug commands as activation authority.
+An already-running shared identity is not evidence of a seamless handover.
 
 Alternative curl/Undici/SOCKS transport candidates, historical spikes, private-key
 probe scripts, PR90 post-launch readiness export and debug-only ongoing diagnostics
@@ -195,6 +194,49 @@ Deployment remains blocked on demonstrated required secret delivery and exclusiv
 host publication, including old-candidate cleanup, and a qualified activation
 procedure. The existing wrapper neither provisions the new references nor
 permits automatic updates of already Tor-bound instances. No gate was relaxed.
+
+## Accepted single-address rollout — supersedes the overlap blocker
+
+After discussing directory descriptor replacement, the operator explicitly asks
+to proceed with one stable address and fix handoff later. Same-key publication
+is not intrinsically impossible: higher descriptor revision counters can replace
+older descriptors, but concurrent publishers, propagation and client caching do
+not implement exclusive ownership or a deterministic release cutover. Existing
+connections do not migrate. Stopping an old publisher can disrupt clients still
+using its descriptor. Shim routing and TLS/HPKE context mismatch can fail trust
+checks; no client may weaken them or replay uncertain inference to hide this.
+
+The accepted rollout permits temporary same-B publication during normal
+blue/green replacement. Alternating onion identities, exclusive-host proof and
+seamless handoff are deferred, not prerequisites for this expressly accepted
+mode. This supersedes earlier blocking statements in the two amendment records
+above. It does not authorize key rotation, arbitrary binding changes, debug
+export, client installation or paid inference. Health flapping remains unresolved.
+
+Remove only the overlap-specific deploy refusal. Preserve exact-main CI,
+reproducible image/provenance, protected approval, one update without replay,
+read-only plan validation and unchanged opaque secret/reference readback.
+Existing startup checks still require mounted A private/public consistency and
+approved B identity consistency; requests/clients independently verify fresh
+nonce-bound release/A/B/TLS/HPKE evidence. The normal protected serving check is
+not a Tor-positive connectivity or exclusive-publication test.
+
+Read-only control-plane inventory returned running/no pending update, debug off,
+confidential mode on, and both required Tor secret references already selected.
+Only closed booleans were projected; no key values, identifiers or raw output
+were displayed or retained. This demonstrates reference selection, not secret
+contents, runtime consistency, current onion availability or custody provenance.
+No new binding delivery procedure is needed if the unchanged-reference plan and
+runtime checks accept the existing operator-approved B selections.
+
+Fresh pinned Python 3.12.12 discovery passed **99 tests, zero failures, one
+existing opt-in skip**. Regressions permit unchanged existing Tor references,
+retain one update without secret-selection/downtime overrides, and reject changed
+reference readback. Active LSP on both changed Python paths and whitespace checks
+passed. Independent read-only Sol review found no blocker and independently
+reproduced the 99-test result. Runtime/client code and measured configuration
+are unchanged by this policy amendment; their earlier evidence remains separately
+scoped.
 
 ## Compatibility and remaining limits
 

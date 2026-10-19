@@ -5,8 +5,11 @@ authorizes restoring optional onion ingress, fresh nonce-bound
 `/attestation/tor` endorsements and matching Pi native SOCKS transport/trust
 integration on current main. At the operator's subsequent request the measured
 source configuration enables Tor and declares the attested A grant/mount plus
-approved B secret references. Live bindings are untouched; deployment and
-exclusive publication qualification remain separate.
+approved B secret references. The operator subsequently authorizes normal gated
+merge/deployment with one stable address, accepting possible overlapping
+publication and Tor availability/routing failures during blue/green. Exclusive
+handoff and alternating identities are deferred; secret custody/delivery,
+consistency, trust, provenance and protected approval remain required.
 No direct fallback, uncertain inference replay, startup self-appraisal gate or
 post-launch diagnostic observer is introduced. Local A consistency and approved B
 custody precede launch; clients independently verify fresh nonce/release/A/B/TLS/
@@ -14,9 +17,10 @@ HPKE binding before credentials or inference. Health uses Arti's fully-reachable
 assessment, not proof of availability or attestation; health flapping remains
 unresolved. See [current scope and evidence](docs/tor-main-restoration.md).
 The [HTTPS-only backup record](docs/without-tor-backup-verification.md) remains
-historical, including its compatibility limitations. No merge, release, deploy,
-client installation/activation, runtime/key-binding mutation or live probe is
-authorized by this source restoration.
+historical, including its compatibility limitations. Source restoration alone
+was not deployment authority; the subsequent single-address rollout instruction
+is separately recorded. It authorizes no client installation/activation, arbitrary
+key/binding change, inference or independent live Tor probe.
 
 **API-only source contract; deployment pending.** The existing v0.0.15 deployment and previous Phase 0 browser behavior are historical; see [phase evidence](docs/phase0.md) and [verification](docs/verification.md). This document does not certify an API-only deployment. `AGENTS.md` is authoritative where historical plans disagree.
 
