@@ -130,12 +130,12 @@ async function send(pathname, pin = tls, signal, check = () => {}) {
   } finally { op.close(); }
 }
 try {
-  await rejects(() => send('/', '00'.repeat(32)), 'certificate');
+  await rejects(() => send('/', '00'.repeat(32)), 'peer_key_mismatch');
   assert.equal(requests, 0); passed++;
   const blocked = new test.Operation(5000);
   try {
     await rejects(() => test.pinnedRequest(new Request(url + '/', { method: 'POST', body: 'SYNTHETIC_PRIVATE_BODY',
-      headers: { authorization: 'Bearer synthetic' } }), blocked, '00'.repeat(32), () => {}), 'certificate');
+      headers: { authorization: 'Bearer synthetic' } }), blocked, '00'.repeat(32), () => {}), 'peer_key_mismatch');
     assert.equal(requests, 0); passed++;
   } finally { blocked.close(); }
   await assert.rejects(() => send('/encoding'), error => error.constraint === 'body' && error.status === 503 && !error.message.includes('HOSTILE')); passed++;
@@ -145,6 +145,41 @@ try {
     assert.equal(response.status, 302); await response.body.cancel(); assert.equal(requests, beforeRedirect + 1); passed++;
   } finally { redirectOp.close(); }
   assert.deepEqual(await send('/'), { ok: true }); passed++;
+  // Same address, new endpoint key: an old live trust context fails before
+  // HTTP, while an independently supplied new pin can reach the same server.
+  // The new pin here is synthetic, not evidence of public attestation success.
+  execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(out, 'rotated-key.pem'),
+    '-out', path.join(out, 'rotated-cert.pem'), '-days', '1', '-subj', '/CN=localhost',
+    '-addext', 'subjectAltName=DNS:localhost'], { stdio: 'ignore' });
+  const rotatedCert = await readFile(path.join(out, 'rotated-cert.pem'), 'utf8');
+  const rotatedPin = sha(new X509Certificate(rotatedCert).publicKey.export({ type: 'spki', format: 'der' }));
+  assert.notEqual(rotatedPin, tls);
+  server.setSecureContext({ key: await readFile(path.join(out, 'rotated-key.pem')), cert: rotatedCert });
+  const beforeRotation = requests;
+  await rejects(() => send('/'), 'peer_key_mismatch');
+  assert.equal(requests, beforeRotation); passed++;
+  // Invalid dates take precedence over a key mismatch, never nominate recovery.
+  const now = Date.now, rotated = new X509Certificate(rotatedCert);
+  try {
+    for (const date of [Date.parse(rotated.validFrom) - 1, Date.parse(rotated.validTo)]) {
+      Date.now = () => date;
+      await rejects(() => send('/'), 'certificate');
+      assert.equal(requests, beforeRotation); passed++;
+    }
+    Date.now = () => { throw new Error('HOSTILE date failure'); };
+    await rejects(() => send('/'), 'certificate');
+    assert.equal(requests, beforeRotation); passed++;
+  } finally { Date.now = now; }
+  assert.deepEqual(await send('/', rotatedPin), { ok: true });
+  assert.equal(requests, beforeRotation + 1); passed++;
+  execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(out, 'wrong-host-key.pem'),
+    '-out', path.join(out, 'wrong-host-cert.pem'), '-days', '1', '-subj', '/CN=wrong.invalid',
+    '-addext', 'subjectAltName=DNS:wrong.invalid'], { stdio: 'ignore' });
+  server.setSecureContext({ key: await readFile(path.join(out, 'wrong-host-key.pem')), cert: await readFile(path.join(out, 'wrong-host-cert.pem')) });
+  const beforeWrongHost = requests;
+  await rejects(() => send('/'), 'certificate');
+  assert.equal(requests, beforeWrongHost); passed++;
+  server.setSecureContext({ key: await readFile(path.join(out, 'key.pem')), cert: certPEM });
   assert.deepEqual(await send('/'), { ok: true }); passed++;
   const cancelled = new test.Operation(5000);
   const response = await test.pinnedRequest(new Request(url + '/stream'), cancelled, tls, () => {});

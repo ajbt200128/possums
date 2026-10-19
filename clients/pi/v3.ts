@@ -17,13 +17,19 @@ export type V3Input = { evidence: Uint8Array; nonce: Uint8Array; manifest: Uint8
 export type TorV3Input = V3Input & { payload: Uint8Array; signature: Uint8Array };
 export type V3Identity = Readonly<{ tag: string; digest: string; tls: string; config: string; freshness: number; onionIdentity?: string }>;
 const spki = (cert: X509Certificate) => createHash('sha256').update(cert.publicKey.export({ type: 'spki', format: 'der' })).digest('hex');
-function certificate(bytes: string | Buffer, host: string, fingerprint: string): X509Certificate {
+function certificate(bytes: string | Buffer, host: string, fingerprint: string, peer = false): X509Certificate {
+  let cert: X509Certificate, actual: string;
   try {
-    const cert = new X509Certificate(bytes);
-    requireThat(spki(cert) === fingerprint && cert.checkHost(host, { subject: 'never' }) !== undefined);
-    requireThat(Date.now() >= Date.parse(cert.validFrom) && Date.now() < Date.parse(cert.validTo));
-    return cert;
+    cert = new X509Certificate(bytes);
+    requireThat(cert.checkHost(host, { subject: 'never' }) !== undefined);
+    const now = Date.now();
+    requireThat(now >= Date.parse(cert.validFrom) && now < Date.parse(cert.validTo));
+    actual = spki(cert);
   } catch { throw new DiagnosticFailure('trust', 'certificate'); }
+  // Only a real, otherwise valid TLS peer can nominate pre-dispatch recovery.
+  // Public certificate/evidence mismatches remain terminal verification errors.
+  if (actual !== fingerprint) throw new DiagnosticFailure('trust', peer ? 'peer_key_mismatch' : 'certificate');
+  return cert;
 }
 export async function qualifyV3(input: V3Input, signal?: AbortSignal) {
   return qualify(input, signal);
@@ -132,7 +138,7 @@ async function nativeRequest(req: Request, op: Operation, fingerprint: string | 
         try {
           check(); op.check();
           requireThat(!peer.isSessionReused() && peer.getPeerCertificate().raw);
-          if (fingerprint !== undefined) certificate(peer.getPeerCertificate().raw, url.hostname, fingerprint);
+          if (fingerprint !== undefined) certificate(peer.getPeerCertificate().raw, url.hostname, fingerprint, true);
           else requireThat(peer.authorized);
           resolve(peer);
         } catch (error) { peer.destroy(); reject(error instanceof DiagnosticFailure || isTorConnectionFailure(error)

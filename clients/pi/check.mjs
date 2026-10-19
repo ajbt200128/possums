@@ -53,6 +53,7 @@ run('phase02_v3_package.mjs', { PHASE02_PACKAGE: path.join(scratch, 'package'), 
 run('phase02_cache.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs') });
 run('phase02_thinking.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), POSSUMS_PI_ROOT: piRoot });
 run('phase02_pi.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), PHASE02_SCRATCH: path.join(scratch, 'checks/pi-cases'), POSSUMS_PI_ROOT: piRoot });
+run('phase02_peer_recovery.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), PHASE02_SCRATCH: path.join(scratch, 'checks/peer-recovery'), POSSUMS_PI_ROOT: piRoot });
 run('phase02_discovery.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs'), PHASE02_SCRATCH: path.join(scratch, 'checks/discovery-cases'), POSSUMS_PI_ROOT: piRoot });
 const text = await readFile(path.join(testSource, 'phase01_transport.mjs'), 'utf8');
 const start = text.indexOf('async function admissionRegressions('), end = text.indexOf('\nconst admissionNode =', start);

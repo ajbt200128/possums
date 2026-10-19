@@ -169,6 +169,33 @@ blocker and independently reproduced the 98-test result. Rust/client source is
 unchanged by this amendment; their earlier completed evidence remains scoped
 above. No live action or new runtime qualification occurred.
 
+## Main integration before requested merge/deployment
+
+The operator subsequently requested merge and deployment. That authorizes the
+normal gated flow, not bypassing secret-delivery, custody or exclusive-publication
+qualification. No merge into main or deployment has occurred at this checkpoint.
+
+Integrated main `16ce000` (PR98): retain its verified TLS peer-key pre-dispatch
+recovery and obsolete-context guards together with Tor route isolation. The
+pinned peer branch keeps the new mismatch category; public Tor acquisition still
+requires native WebPKI. Build/check wiring retains both recovery and Tor suites.
+
+Fresh Node 24.13.0/Pi 1.0.4 scratch TypeScript/build and full normal runner passed,
+including v3 47, Tor channel 84, packaged-WASM identity 31/setup 193, actual Pi
+SDK/RPC 165, peer-key recovery 18 and discovery 31. The existing integrity-checked
+scratch dependencies/runtime described above were reused; no installation or
+public-network test occurred. Pinned Python discovery again passed 98 tests
+with one existing opt-in skip. Shell syntax and whitespace checks passed.
+Independent read-only Sol review compared both parents and cleared integration;
+it did not rerun tests. Checkout LSP reports missing Node/Pi dependency types;
+the actual pinned scratch compiler passed, rather than changing source to silence
+an unprovisioned editor workspace.
+
+Deployment remains blocked on demonstrated required secret delivery and exclusive
+host publication, including old-candidate cleanup, and a qualified activation
+procedure. The existing wrapper neither provisions the new references nor
+permits automatic updates of already Tor-bound instances. No gate was relaxed.
+
 ## Compatibility and remaining limits
 
 Default HTTPS/API/accounting and default native/WASM helper schemas are retained;
