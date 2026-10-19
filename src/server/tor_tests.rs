@@ -431,14 +431,39 @@ async fn request_only_readiness_diagnostic_is_closed_uncached_and_initiates_no_w
             state.tor_ready.as_ref().unwrap().mark_running();
         }
         let old_health = app.clone().oneshot(check()).await.unwrap();
-        assert_eq!(old_health.status(), if running { StatusCode::NO_CONTENT } else { StatusCode::SERVICE_UNAVAILABLE });
-        assert!(old_health.into_body().collect().await.unwrap().to_bytes().is_empty());
-        let response = app.clone().oneshot(
-            Request::get("/healthz/diagnostics?credential=HOSTILE_PRIVATE_QUERY")
-                .header("authorization", "HOSTILE_PRIVATE_HEADER")
-                .body(Body::from("HOSTILE_PRIVATE_BODY")).unwrap()
-        ).await.unwrap();
-        assert_eq!(response.status(), if running { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE });
+        assert_eq!(
+            old_health.status(),
+            if running {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        );
+        assert!(old_health
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/healthz/diagnostics?credential=HOSTILE_PRIVATE_QUERY")
+                    .header("authorization", "HOSTILE_PRIVATE_HEADER")
+                    .body(Body::from("HOSTILE_PRIVATE_BODY"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if running {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        );
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
         assert!(response.extensions().get::<InterfaceError>().is_none());
@@ -446,24 +471,67 @@ async fn request_only_readiness_diagnostic_is_closed_uncached_and_initiates_no_w
         assert!(bytes.len() < 1024);
         assert!(!String::from_utf8_lossy(&bytes).contains("HOSTILE"));
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let keys: std::collections::BTreeSet<_> = value.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["code", "stage", "constraint", "action", "lifecycle_serving", "ready", "tor_state", "tor_problem"].into_iter().collect());
+        let keys: std::collections::BTreeSet<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "code",
+                "stage",
+                "constraint",
+                "action",
+                "lifecycle_serving",
+                "ready",
+                "tor_state",
+                "tor_problem"
+            ]
+            .into_iter()
+            .collect()
+        );
         assert_eq!(value["code"], expected_code);
         assert_eq!(value["ready"], running);
         assert_eq!(value["lifecycle_serving"], true);
         assert_eq!(state.tor_ready.as_ref().unwrap().is_ready(), running);
     }
     state.lifecycle.quiesce();
-    let response = app.oneshot(Request::get("/healthz/diagnostics").body(Body::empty()).unwrap()).await.unwrap();
+    let response = app
+        .oneshot(
+            Request::get("/healthz/diagnostics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let value: serde_json::Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(value["code"], "gateway_not_serving");
     assert_eq!(value["ready"], false);
     assert_eq!(value["lifecycle_serving"], false);
     assert!(tor.challenges.lock().unwrap().is_empty());
-    for counter in [&inference.catalog_calls, &inference.tokenize_calls, &inference.calls, &inference.document_calls] {
+    for counter in [
+        &inference.catalog_calls,
+        &inference.tokenize_calls,
+        &inference.calls,
+        &inference.document_calls,
+    ] {
         assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
     let (plain, _, _) = fixture_state();
-    assert_eq!(router(plain).oneshot(Request::get("/healthz/diagnostics").body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        router(plain)
+            .oneshot(
+                Request::get("/healthz/diagnostics")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
