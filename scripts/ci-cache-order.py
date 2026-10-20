@@ -28,11 +28,11 @@ def main():
         path = directory / "nix/nix.conf"
         updated = upstream_first(path.read_text())
         path.write_text(updated)
-    except ProxyEntryMismatch:
-        print(json.dumps({"code": "CI_CACHE_CONFIG_MISMATCH", "stage": "cache-priority",
-                          "constraint": "pinned_proxy_entry",
-                          "action": "Check the pinned cache setup before building; proxy priority was not changed."}))
-        return 1
+    except (ProxyEntryMismatch, FileNotFoundError):
+        print(json.dumps({"code": "CI_CACHE_ORDER_UNQUALIFIED", "stage": "cache-priority",
+                          "constraint": "pinned_proxy_unavailable_or_changed", "applied": False,
+                          "action": "No pinned proxy entry was updated. Continue normal checks and review cache setup privately; lookup-order optimization is unqualified."}))
+        return 0
     except Exception:
         print(json.dumps({"code": "CI_CACHE_CONFIG_UNKNOWN", "stage": "cache-priority",
                           "constraint": "configuration_io_cause_unknown",

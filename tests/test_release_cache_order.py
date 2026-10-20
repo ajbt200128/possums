@@ -54,10 +54,15 @@ class CacheOrderTests(unittest.TestCase):
             config.write_text("SYNTHETIC-PRIVATE")
             output = io.StringIO()
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}), contextlib.redirect_stdout(output):
-                self.assertEqual(cache_order.main(), 1)
-            self.assertEqual(json.loads(output.getvalue())["code"], "CI_CACHE_CONFIG_MISMATCH")
+                self.assertEqual(cache_order.main(), 0)
+            self.assertEqual(json.loads(output.getvalue())["code"], "CI_CACHE_ORDER_UNQUALIFIED")
+            self.assertIs(json.loads(output.getvalue())["applied"], False)
             self.assertNotIn("SYNTHETIC", output.getvalue())
             self.assertEqual(config.read_text(), "SYNTHETIC-PRIVATE")
+        output = io.StringIO()
+        with patch.object(Path, "read_text", side_effect=FileNotFoundError), contextlib.redirect_stdout(output):
+            self.assertEqual(cache_order.main(), 0)
+        self.assertEqual(json.loads(output.getvalue())["code"], "CI_CACHE_ORDER_UNQUALIFIED")
         for operation in ("read_text", "write_text"):
             output = io.StringIO()
             with patch.object(Path, "read_text", return_value=cache_order.PROXY), \
