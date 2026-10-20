@@ -50,6 +50,9 @@ jobs:
           nix build --no-write-lock-file .#attestation-go --out-link "$RUNNER_TEMP/possums-serving-go"
           "$RUNNER_TEMP/possums-serving-go/bin/go" -C attestation-helper test -mod=readonly \
             ../scripts/verify-serving/main.go ../scripts/verify-serving/main_test.go
+          "$RUNNER_TEMP/possums-serving-go/bin/go" -C attestation-helper build -mod=readonly \
+            -o "$RUNNER_TEMP/possums-verify-serving" ../scripts/verify-serving/main.go
+          python3 scripts/deploy.py qualify-serving-tool
       - run: nix flake check --no-write-lock-file --print-build-logs
       # Reuse this runner's realized dependency artifacts, not a best-effort cache
       # round trip. Downstream jobs consume this producer's immutable artifact IDs.
@@ -63,6 +66,7 @@ jobs:
           cp -L "$RUNNER_TEMP/production-image" "$RUNNER_TEMP/ci-production/production-image.tar.gz"
           cp -L "$RUNNER_TEMP/fixture-image" "$RUNNER_TEMP/ci-fixture/fixture-image.tar.gz"
           cp -L "$RUNNER_TEMP/tor-probe/bin/tor-image-probe" "$RUNNER_TEMP/ci-fixture/tor-image-probe"
+          cp -L "$RUNNER_TEMP/possums-verify-serving" "$RUNNER_TEMP/ci-fixture/possums-verify-serving"
       - id: production
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -113,6 +117,11 @@ jobs:
           merge-multiple: true
       - name: Prepare the key-free probe executable
         run: chmod +x "$RUNNER_TEMP/ci-fixture/tor-image-probe"
+      - name: Qualify transferred serving verifier without public traffic
+        run: |
+          cp "$RUNNER_TEMP/ci-fixture/possums-verify-serving" "$RUNNER_TEMP/possums-verify-serving"
+          chmod 700 "$RUNNER_TEMP/possums-verify-serving"
+          python3 scripts/deploy.py qualify-serving-tool
       - name: Qualify real NSS and SDK construction in the production rootfs offline
         run: python3 tests/image_tor.py "$RUNNER_TEMP/ci-production/production-image.tar.gz" "$RUNNER_TEMP/ci-fixture/tor-image-probe"
       - name: Qualify packaged production health probe against isolated synthetic fixture

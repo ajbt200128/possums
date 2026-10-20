@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -213,10 +214,15 @@ class SafetyTest(StopTest):
                     policy.assert_not_called()
 
     def test_serving_tool_required_before_approval_without_serving_traffic(self):
+        launch = subprocess.CompletedProcess([], 1, b"", b'{"code":"SERVING_ARGUMENTS"}')
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
-                "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": directory, "SERVING_VERIFIED": "true"}), \
+                "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": directory, "SERVING_VERIFIED": "true",
+                "PATH": "/synthetic/bin", "SSL_CERT_FILE": "/synthetic/ca.pem",
+                "HOME": "/must-not-inherit", "GH_TOKEN": "must-not-inherit",
+                "TINFOIL_ADMIN_KEY": "must-not-inherit", "TINFOIL_API_KEY": "must-not-inherit",
+                "HTTP_PROXY": "must-not-inherit"}, clear=True), \
                 patch.object(d, "eligibility", return_value="7"), patch.object(r, "verify_public"), \
-                patch.object(r, "output") as output, patch.object(r, "capture") as capture:
+                patch.object(r, "output") as output, patch.object(r, "capture", return_value=launch) as capture:
             self.stop("serving_tool", d.preflight, S, R, V, D, "d" * 64)
             output.assert_not_called()
             capture.assert_not_called()
@@ -225,7 +231,9 @@ class SafetyTest(StopTest):
             tool.chmod(0o700)
             d.preflight(S, R, V, D, "d" * 64)
             output.assert_called_once_with(environment_id="7")
-            capture.assert_not_called()
+            capture.assert_called_once_with([str(tool)], env={
+                "PATH": "/synthetic/bin", "SSL_CERT_FILE": "/synthetic/ca.pem", "HOME": directory},
+                timeout=10, limit=65536, code="serving_tool")
 
     def test_authenticated_review_not_gate_bypass_authorizes_run(self):
         receipt = {"state": "approved", "environments": [{"id": 7, "name": "production"}],
@@ -279,6 +287,113 @@ class SafetyTest(StopTest):
                 [sys.executable, "-c", f"import sys; sys.{stream}.write('x'*10000)"], limit=32))
         self.stop("command", lambda: r.capture(
             [sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.01))
+
+
+class ServingToolQualificationTest(StopTest):
+    def test_failed_qualification_blocks_preflight_and_protected_mutation(self):
+        results = {
+            "missing": None,
+            "permission": None,
+            "runtime": OSError("SYNTHETIC-SECRET"),
+            "timeout": r.Stop("serving_tool"),
+            "unexpected": RuntimeError("SYNTHETIC-SECRET"),
+            "wrong_failure": r.Stop("command"),
+            "success_is_not_argument_rejection": subprocess.CompletedProcess([], 0, b"", b'{"code":"SERVING_ARGUMENTS"}'),
+            "loader_exit": subprocess.CompletedProcess([], 127, b"", b"SYNTHETIC-SECRET"),
+            "signal": subprocess.CompletedProcess([], -11, b"", b"SYNTHETIC-SECRET"),
+            "stdout": subprocess.CompletedProcess([], 1, b"SYNTHETIC-SECRET", b'{"code":"SERVING_ARGUMENTS"}'),
+            "invalid_json": subprocess.CompletedProcess([], 1, b"", b"SYNTHETIC-SECRET"),
+            "invalid_utf8": subprocess.CompletedProcess([], 1, b"", b"\xff"),
+            "wrong_shape": subprocess.CompletedProcess([], 1, b"", b'[{"code":"SERVING_ARGUMENTS"}]'),
+            "unknown": subprocess.CompletedProcess([], 1, b"", b'{"code":"SYNTHETIC-SECRET"}'),
+            "serving_failure": subprocess.CompletedProcess([], 1, b"", b'{"code":"SERVING_UNKNOWN"}'),
+            "trailing_output": subprocess.CompletedProcess([], 1, b"", b'{"code":"SERVING_ARGUMENTS"}\nSYNTHETIC-SECRET'),
+        }
+        for operation in ("preflight", "protected"):
+            for case, result in results.items():
+                with self.subTest(operation=operation, case=case), tempfile.TemporaryDirectory() as directory, \
+                        patch.dict(os.environ, {"RUNNER_TEMP": directory, "GITHUB_RUN_ATTEMPT": "1"}), \
+                        patch.object(d, "eligibility", return_value="7"), patch.object(d, "approved"), \
+                        patch.object(r, "verify_public"), patch.object(r, "output") as output, \
+                        patch.object(d, "install_cli") as install, patch.object(d, "update_once") as update, \
+                        patch.object(d, "verify_serving") as serving, patch.object(r, "capture") as capture:
+                    tool = Path(directory) / "possums-verify-serving"
+                    if case != "missing":
+                        tool.write_text("synthetic executable")
+                        tool.chmod(0o600 if case == "permission" else 0o700)
+                    if isinstance(result, Exception):
+                        capture.side_effect = result
+                    else:
+                        capture.return_value = result
+                    args = (S, R, V, D, "d" * 64) + (("7",) if operation == "protected" else ())
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(r.Stop) as caught:
+                        getattr(d, operation)(*args)
+                    self.assertEqual(caught.exception.code, "serving_tool")
+                    self.assertIsNone(caught.exception.status)
+                    diagnostic = json.dumps(r.diagnostic(caught.exception.code))
+                    self.assertNotIn("SYNTHETIC-SECRET", diagnostic)
+                    self.assertIn("cause unknown", diagnostic)
+                    self.assertEqual(stdout.getvalue() + stderr.getvalue(), "")
+                    output.assert_not_called()
+                    install.assert_not_called()
+                    update.assert_not_called()
+                    serving.assert_not_called()
+                    if case in ("missing", "permission"):
+                        capture.assert_not_called()
+                    else:
+                        self.assertEqual(capture.call_args.args, ([str(tool)],))
+
+    def test_protected_qualification_does_not_replace_fresh_serving_check(self):
+        events = []
+
+        def capture(args, **kwargs):
+            if len(args) == 1:
+                events.append("offline-launch")
+                return subprocess.CompletedProcess(args, 1, b"", b'{"code":"SERVING_ARGUMENTS"}')
+            self.assertEqual(args[1:], [V, "d" * 64])
+            events.append("actual-serving")
+            return subprocess.CompletedProcess(args, 0, b'{"stage":"serving","passed":true}', b"")
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                "RUNNER_TEMP": directory, "GITHUB_RUN_ATTEMPT": "1"}), \
+                patch.object(d, "eligibility", return_value="7"), patch.object(d, "approved"), \
+                patch.object(r, "verify_public"), patch.object(d, "install_cli", return_value="pinned-cli"), \
+                patch.object(d, "update_once", side_effect=lambda *args: events.append("update") or {}), \
+                patch.object(r, "capture", side_effect=capture), patch("builtins.print"):
+            tool = Path(directory) / "possums-verify-serving"
+            tool.write_text("synthetic executable")
+            tool.chmod(0o700)
+            d.protected(S, R, V, D, "d" * 64, "7")
+        self.assertEqual(events, ["offline-launch", "update", "offline-launch", "actual-serving"])
+
+    def test_ci_qualification_entrypoint_performs_no_deployment_admission(self):
+        with patch.object(sys, "argv", ["deploy.py", "qualify-serving-tool"]), \
+                patch.object(d, "serving_tool") as tool, patch.object(d, "eligibility") as admit, \
+                patch.object(d, "update_once") as update, patch("builtins.print"):
+            d.main()
+            tool.assert_called_once_with()
+            admit.assert_not_called()
+            update.assert_not_called()
+        with patch.object(sys, "argv", ["deploy.py", "qualify-serving-tool", "extra"]):
+            self.stop("arguments", d.main)
+
+    def test_real_capture_qualifies_only_synthetic_no_argument_process(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                "RUNNER_TEMP": directory, "GH_TOKEN": "must-not-inherit",
+                "TINFOIL_ADMIN_KEY": "must-not-inherit", "TINFOIL_API_KEY": "must-not-inherit"}, clear=True):
+            tool = Path(directory) / "possums-verify-serving"
+            tool.write_text(f"#!{sys.executable}\n"
+                            "import os, sys\n"
+                            "assert len(sys.argv) == 1\n"
+                            "assert not ({'GH_TOKEN', 'TINFOIL_ADMIN_KEY', 'TINFOIL_API_KEY'} & os.environ.keys())\n"
+                            "assert os.environ['HOME'] == os.path.dirname(sys.argv[0])\n"
+                            "sys.stderr.write('{\"code\":\"SERVING_ARGUMENTS\"}')\n"
+                            "sys.exit(1)\n")
+            tool.chmod(0o700)
+            self.assertEqual(d.serving_tool(), str(tool))
+            tool.write_text("not an executable format; SYNTHETIC-SECRET")
+            self.stop("serving_tool", d.serving_tool)
 
 
 class TreeTest(StopTest):
@@ -745,8 +860,80 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", production)
         self.assertNotIn("cancel-in-progress: true", image + deployment)
         self.assertNotIn("pending_deployments", image + deployment)
-        self.assertIn("go" , preflight)
-        self.assertIn("../scripts/verify-serving/main.go", production)
+        self.assertIn("../scripts/verify-serving/main.go", preflight)
+        self.assertNotIn("../scripts/verify-serving/main.go", production)
+
+    def test_serving_verifier_compiles_once_and_uses_exact_current_run_artifact(self):
+        deployment = (ROOT / ".github/workflows/deploy-production.yml").read_text()
+        preflight, production = deployment.split("  production:\n")
+        build = ('          nix build .#attestation-go --out-link "$RUNNER_TEMP/possums-serving-go"\n'
+                 '          "$RUNNER_TEMP/possums-serving-go/bin/go" -C attestation-helper build -mod=readonly \\\n'
+                 '            -o "$RUNNER_TEMP/possums-verify-serving" ../scripts/verify-serving/main.go')
+        self.assertIn(build, preflight)
+        self.assertIn("GOTOOLCHAIN: local", preflight)
+        self.assertEqual(deployment.count("../scripts/verify-serving/main.go"), 1)
+        self.assertEqual(deployment.count("DeterminateSystems/nix-installer-action@"), 1)
+        self.assertNotIn("nix", production)
+        self.assertNotIn("attestation-go", production)
+        self.assertIn("runs-on: ubuntu-latest", preflight)
+        self.assertIn("runs-on: ubuntu-latest", production)
+        self.assertIn("serving_artifact_id: ${{ steps.serving-artifact.outputs.artifact-id }}", preflight)
+        gate = 'run: python3 scripts/deploy.py preflight "$SOURCE" "$RELEASE" "$TAG" "$IMAGE" "$MANIFEST"'
+        self.assertLess(preflight.index(gate), preflight.index("      - id: serving-artifact\n"))
+        upload = preflight.split("      - id: serving-artifact\n")[1]
+        self.assertEqual(upload, '''        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: serving-verifier-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/possums-verify-serving
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+''')
+        download = '''      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.preflight.outputs.serving_artifact_id }}
+          path: ${{ runner.temp }}
+          merge-multiple: true
+'''
+        download_start = production.index("      - uses: actions/download-artifact@")
+        self.assertEqual(production[download_start:].split("\n      - ", 1)[0] + "\n", download)
+        self.assertEqual(deployment.count("actions/upload-artifact@"), 1)
+        self.assertEqual(deployment.count("actions/download-artifact@"), 1)
+        guard = production.index("      - name: Require exact preflight serving artifact ID\n")
+        restore = production.index('run: chmod 700 "$RUNNER_TEMP/possums-verify-serving"')
+        protected = production.index('run: python3 scripts/deploy.py protected "$SOURCE" "$RELEASE" "$TAG" "$IMAGE" "$MANIFEST" "$ENVIRONMENT_ID"')
+        self.assertLess(guard, production.index(download))
+        self.assertLess(production.index(download), restore)
+        self.assertLess(restore, protected)
+        for job in (preflight, production):
+            self.assertIn("ref: ${{ github.sha }}", job)
+            self.assertIn("fetch-depth: 0", job)
+            self.assertIn("persist-credentials: false", job)
+        self.assertIn("needs: preflight", production)
+        self.assertIn("environment: production", production)
+        self.assertIn("group: production-update", production)
+        self.assertIn("cancel-in-progress: false", production)
+        self.assertIn("TINFOIL_ADMIN_KEY: ${{ secrets.TINFOIL_PRODUCTION_ADMIN_KEY }}", production)
+        self.assertIn("ENVIRONMENT_ID: ${{ needs.preflight.outputs.environment_id }}", production)
+        self.assertNotIn("continue-on-error", deployment)
+        self.assertNotIn("always()", deployment)
+
+    def test_artifact_id_guard_rejects_empty_and_hostile_values_before_download(self):
+        deployment = (ROOT / ".github/workflows/deploy-production.yml").read_text()
+        guard = deployment.split("      - name: Require exact preflight serving artifact ID\n")[1].split("      - uses:")[0]
+        self.assertIn("SERVING_ARTIFACT_ID: ${{ needs.preflight.outputs.serving_artifact_id }}", guard)
+        shell = "\n".join(line.removeprefix("          ") for line in guard.split("        run: |\n")[1].splitlines())
+        for value in ("", "0", "01", "-1", "1,2", "1 2", "１２３", "123\nSYNTHETIC-SECRET", "SYNTHETIC-SECRET", "$(exit 0)"):
+            with self.subTest(value=value):
+                result = subprocess.run(["bash", "-c", shell], env={"SERVING_ARTIFACT_ID": value},
+                                        capture_output=True, timeout=5, check=False)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(b"RELEASE_SERVING_TOOL", result.stdout)
+                self.assertNotIn(b"SYNTHETIC-SECRET", result.stdout + result.stderr)
+        result = subprocess.run(["bash", "-c", shell], env={"SERVING_ARTIFACT_ID": "123"},
+                                capture_output=True, timeout=5, check=False)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout + result.stderr, b"")
 
 
 if __name__ == "__main__":

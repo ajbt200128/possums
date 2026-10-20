@@ -44,6 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       environment_id: ${{ steps.gate.outputs.environment_id }}
+      serving_artifact_id: ${{ steps.serving-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -65,6 +66,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/deploy.py preflight "$SOURCE" "$RELEASE" "$TAG" "$IMAGE" "$MANIFEST"
+      - id: serving-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: serving-verifier-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/possums-verify-serving
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
   production:
     needs: preflight
     environment: production
@@ -79,16 +88,21 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
-        with:
-          diagnostic-endpoint: ""
-      - name: Build credential-free serving verifier with the pinned compiler
+      - name: Require exact preflight serving artifact ID
         env:
-          GOTOOLCHAIN: local
+          SERVING_ARTIFACT_ID: ${{ needs.preflight.outputs.serving_artifact_id }}
         run: |
-          nix build .#attestation-go --out-link "$RUNNER_TEMP/possums-serving-go"
-          "$RUNNER_TEMP/possums-serving-go/bin/go" -C attestation-helper build -mod=readonly \
-            -o "$RUNNER_TEMP/possums-verify-serving" ../scripts/verify-serving/main.go
+          if [[ ! "$SERVING_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::RELEASE_SERVING_TOOL: missing or invalid preflight artifact ID; no update was sent. Check the successful preflight upload.'
+            exit 1
+          fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.preflight.outputs.serving_artifact_id }}
+          path: ${{ runner.temp }}
+          merge-multiple: true
+      - name: Restore serving verifier executable permission
+        run: chmod 700 "$RUNNER_TEMP/possums-verify-serving"
       - name: Reverify after approval; admit at most one update
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

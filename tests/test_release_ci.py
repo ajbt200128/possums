@@ -25,6 +25,10 @@ class CiImageHandoffTests(unittest.TestCase):
             self.assertIn(suite, job("flake"))
         self.assertIn("RELEASE_CACHE_GRAPH_CHECK=1", job("flake"))
         self.assertIn("../scripts/verify-serving/main_test.go", job("flake"))
+        self.assertIn('-o "$RUNNER_TEMP/possums-verify-serving" ../scripts/verify-serving/main.go', job("flake"))
+        self.assertIn("python3 scripts/deploy.py qualify-serving-tool", job("flake"))
+        self.assertIn("python3 scripts/deploy.py qualify-serving-tool", job("image-startup"))
+        self.assertIn('chmod 700 "$RUNNER_TEMP/possums-verify-serving"', job("image-startup"))
 
     def test_consumers_use_only_current_job_artifact_ids(self):
         for name in ("image", "image-startup"):
@@ -57,7 +61,7 @@ class CiImageHandoffTests(unittest.TestCase):
             self.assertIn(constraint, startup)
         self.assertIn("linux/amd64", job("image"))
 
-    def test_staging_copies_only_archives_and_public_probe(self):
+    def test_staging_copies_only_archives_and_public_verifiers(self):
         # Execute the actual staging script with a synthetic Nix boundary. No
         # Docker, credentials, network, application launch or store realization.
         match = re.search(r"(?ms)^      - name: Build CI images and key-free Tor probe once\n"
@@ -83,16 +87,19 @@ class CiImageHandoffTests(unittest.TestCase):
                            '  *) exit 1;;\n'
                            'esac\n')
             nix.chmod(0o755)
+            (root / "possums-verify-serving").write_bytes(b"serving-verifier")
             subprocess.run(["bash", "-e", "-c", script], check=True, capture_output=True,
                            env={**os.environ, "PATH": str(binary) + os.pathsep + os.environ["PATH"],
                                 "RUNNER_TEMP": directory})
             production = root / "ci-production"
             fixture = root / "ci-fixture"
             self.assertEqual([p.name for p in production.iterdir()], ["production-image.tar.gz"])
-            self.assertEqual({p.name for p in fixture.iterdir()}, {"fixture-image.tar.gz", "tor-image-probe"})
+            self.assertEqual({p.name for p in fixture.iterdir()},
+                             {"fixture-image.tar.gz", "tor-image-probe", "possums-verify-serving"})
             self.assertEqual((production / "production-image.tar.gz").read_bytes(), b".#gateway-image")
             self.assertEqual((fixture / "fixture-image.tar.gz").read_bytes(), b".#gateway-smoke-image")
             self.assertEqual((fixture / "tor-image-probe").read_bytes(), b"probe")
+            self.assertEqual((fixture / "possums-verify-serving").read_bytes(), b"serving-verifier")
             failed = root / "failed"
             failed.mkdir()
             result = subprocess.run(["bash", "-e", "-c", script], check=False, capture_output=True,
