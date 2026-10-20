@@ -34,6 +34,8 @@ jobs:
           use-flakehub: false
           use-gha-cache: true
           source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - name: Prefer upstream before GitHub cache lookups
+        run: python3 scripts/ci-cache-order.py
       - run: python3 -m unittest discover -s tests -p 'test_release*.py'
       - name: Check pinned Linux release-cache graph partition without building outputs
         run: RELEASE_CACHE_GRAPH_CHECK=1 python3 -m unittest discover -s tests -p 'test_release_cache.py'
