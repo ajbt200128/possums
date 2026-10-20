@@ -172,7 +172,8 @@
           '';
           fmt = craneLib.cargoFmt { inherit src; };
           clippy = craneLib.cargoClippy (common // {
-            inherit cargoArtifacts;
+            # All-features Clippy needs the Tor dependency fingerprints too.
+            cargoArtifacts = torCargoArtifacts;
             cargoClippyExtraArgs = "--all-targets --all-features -- -D warnings";
           });
           tests = craneLib.cargoTest (common // { inherit cargoArtifacts; });

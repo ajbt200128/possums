@@ -112,6 +112,19 @@ class ReleaseCacheTests(unittest.TestCase):
         for drv in image.values():
             release_cache.inputs(drv)  # Retain the dynamic-derivation rejection.
 
+    @unittest.skipUnless(os.environ.get("RELEASE_CACHE_GRAPH_CHECK") == "1", "opt-in pinned Linux graph evaluation")
+    def test_clippy_reuses_tor_artifacts_without_relaxing_lints(self):
+        clippy = release_cache.nix_json(
+            "eval", "--json", ".#checks.x86_64-linux.clippy",
+            "--apply", "drv: { artifacts = drv.cargoArtifacts.drvPath; command = drv.buildPhase; }",
+        )
+        tor_artifacts = release_cache.nix_json(
+            "eval", "--json", ".#checks.x86_64-linux.tor-tests.cargoArtifacts.drvPath",
+        )
+        self.assertEqual(clippy["artifacts"], tor_artifacts)
+        self.assertIn("cargoWithProfile clippy --locked --all-targets --all-features -- -D warnings",
+                      clippy["command"].splitlines())
+
     def test_modern_store_relative_graph(self):
         modern = {}
         for path, drv in graph().items():
