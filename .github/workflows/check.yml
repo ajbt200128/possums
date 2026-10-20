@@ -18,6 +18,9 @@ permissions:
 jobs:
   flake:
     runs-on: ubuntu-latest
+    outputs:
+      production-artifact: ${{ steps.production.outputs.artifact-id }}
+      fixture-artifact: ${{ steps.fixture.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -31,6 +34,8 @@ jobs:
           use-flakehub: false
           use-gha-cache: true
           source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
+      - name: Prefer upstream before GitHub cache lookups
+        run: python3 scripts/ci-cache-order.py
       - run: python3 -m unittest discover -s tests -p 'test_release*.py'
       - name: Check pinned Linux release-cache graph partition without building outputs
         run: RELEASE_CACHE_GRAPH_CHECK=1 python3 -m unittest discover -s tests -p 'test_release_cache.py'
@@ -42,30 +47,56 @@ jobs:
         env:
           GOTOOLCHAIN: local
         run: |
-          nix build .#attestation-go --out-link "$RUNNER_TEMP/possums-serving-go"
+          nix build --no-write-lock-file .#attestation-go --out-link "$RUNNER_TEMP/possums-serving-go"
           "$RUNNER_TEMP/possums-serving-go/bin/go" -C attestation-helper test -mod=readonly \
             ../scripts/verify-serving/main.go ../scripts/verify-serving/main_test.go
-      - run: nix flake check --print-build-logs
-      - name: Seed API smoke and image outputs
-        run: nix build .#api-smoke-fixture .#gateway-image .#gateway-smoke-image --no-link --print-build-logs
+          "$RUNNER_TEMP/possums-serving-go/bin/go" -C attestation-helper build -mod=readonly \
+            -o "$RUNNER_TEMP/possums-verify-serving" ../scripts/verify-serving/main.go
+          python3 scripts/deploy.py qualify-serving-tool
+      - run: nix flake check --no-write-lock-file --print-build-logs
+      # Reuse this runner's realized dependency artifacts, not a best-effort cache
+      # round trip. Downstream jobs consume this producer's immutable artifact IDs.
+      - name: Build CI images and key-free Tor probe once
+        run: |
+          nix build --no-write-lock-file .#gateway-image .#gateway-smoke-image .#tor-image-probe --no-link --print-build-logs
+          nix build --no-write-lock-file .#gateway-image --out-link "$RUNNER_TEMP/production-image"
+          nix build --no-write-lock-file .#gateway-smoke-image --out-link "$RUNNER_TEMP/fixture-image"
+          nix build --no-write-lock-file .#tor-image-probe --out-link "$RUNNER_TEMP/tor-probe"
+          mkdir -p "$RUNNER_TEMP/ci-production" "$RUNNER_TEMP/ci-fixture"
+          cp -L "$RUNNER_TEMP/production-image" "$RUNNER_TEMP/ci-production/production-image.tar.gz"
+          cp -L "$RUNNER_TEMP/fixture-image" "$RUNNER_TEMP/ci-fixture/fixture-image.tar.gz"
+          cp -L "$RUNNER_TEMP/tor-probe/bin/tor-image-probe" "$RUNNER_TEMP/ci-fixture/tor-image-probe"
+          cp -L "$RUNNER_TEMP/possums-verify-serving" "$RUNNER_TEMP/ci-fixture/possums-verify-serving"
+      - id: production
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-production-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/ci-production/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - id: fixture
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-fixture-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/ci-fixture/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
   image:
     needs: flake
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
-        with:
-          diagnostic-endpoint: ""
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
-        with:
-          diagnostic-endpoint: ""
-          use-flakehub: false
-          use-gha-cache: true
-          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
-      - run: nix build .#gateway-image --print-build-logs
+          artifact-ids: ${{ needs.flake.outputs.production-artifact }}
+          path: ${{ runner.temp }}/ci-production
+          merge-multiple: true
+      - name: Load the exact CI production archive and require Linux amd64
+        run: |
+          docker load < "$RUNNER_TEMP/ci-production/production-image.tar.gz"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' possums-gateway:phase0)" = linux/amd64
 
   image-startup:
     needs: flake
@@ -74,28 +105,30 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          diagnostic-endpoint: ""
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+          artifact-ids: ${{ needs.flake.outputs.production-artifact }}
+          path: ${{ runner.temp }}/ci-production
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          diagnostic-endpoint: ""
-          use-flakehub: false
-          use-gha-cache: true
-          source-revision: 5a7f052c8f0c6511bbef3570eeed4d39242171ef
-      - name: Build isolated synthetic API smoke image
-        run: nix build .#gateway-smoke-image --out-link "$RUNNER_TEMP/fixture-image" --print-build-logs
-      - name: Build production gateway image for packaged health qualification
-        run: nix build .#gateway-image --out-link "$RUNNER_TEMP/production-image" --print-build-logs
-      - name: Build key-free Tor constructor probe with production dependencies
-        run: nix build .#tor-image-probe --out-link "$RUNNER_TEMP/tor-probe" --print-build-logs
+          artifact-ids: ${{ needs.flake.outputs.fixture-artifact }}
+          path: ${{ runner.temp }}/ci-fixture
+          merge-multiple: true
+      - name: Prepare the key-free probe executable
+        run: chmod +x "$RUNNER_TEMP/ci-fixture/tor-image-probe"
+      - name: Qualify transferred serving verifier without public traffic
+        run: |
+          cp "$RUNNER_TEMP/ci-fixture/possums-verify-serving" "$RUNNER_TEMP/possums-verify-serving"
+          chmod 700 "$RUNNER_TEMP/possums-verify-serving"
+          python3 scripts/deploy.py qualify-serving-tool
       - name: Qualify real NSS and SDK construction in the production rootfs offline
-        run: python3 tests/image_tor.py "$RUNNER_TEMP/production-image" "$RUNNER_TEMP/tor-probe/bin/tor-image-probe"
+        run: python3 tests/image_tor.py "$RUNNER_TEMP/ci-production/production-image.tar.gz" "$RUNNER_TEMP/ci-fixture/tor-image-probe"
       - name: Qualify packaged production health probe against isolated synthetic fixture
-        run: python3 tests/image_health.py "$RUNNER_TEMP/production-image" "$RUNNER_TEMP/fixture-image"
+        run: python3 tests/image_health.py "$RUNNER_TEMP/ci-production/production-image.tar.gz" "$RUNNER_TEMP/ci-fixture/fixture-image.tar.gz"
       - name: Smoke test read-only startup with a runtime account secret
         run: |
-          docker load < "$RUNNER_TEMP/fixture-image"
+          docker load < "$RUNNER_TEMP/ci-fixture/fixture-image.tar.gz"
           accounts='[{"id":"startup-canary","credential_sha256":"g80hPkaKL7rbUpYj1pvTaDr7jxOh8KvDFn00a94wNxk","demo_microunits":1000}]'
           container=$(docker run -d --network none --read-only --tmpfs /tmp:rw,size=64m,mode=1777 \
             -e POSSUMS_ACCOUNTS_JSON="$accounts" possums-gateway-smoke:phase0)

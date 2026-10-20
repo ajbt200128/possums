@@ -112,6 +112,76 @@ class ReleaseCacheTests(unittest.TestCase):
         for drv in image.values():
             release_cache.inputs(drv)  # Retain the dynamic-derivation rejection.
 
+    @unittest.skipUnless(os.environ.get("RELEASE_CACHE_GRAPH_CHECK") == "1", "opt-in pinned Linux graph evaluation")
+    def test_clippy_reuses_tor_artifacts_without_relaxing_lints(self):
+        clippy = release_cache.nix_json(
+            "eval", "--json", ".#checks.x86_64-linux.clippy",
+            "--apply", "drv: { artifacts = drv.cargoArtifacts.drvPath; command = drv.buildPhase; }",
+        )
+        tor_artifacts = release_cache.nix_json(
+            "eval", "--json", ".#checks.x86_64-linux.tor-tests.cargoArtifacts.drvPath",
+        )
+        self.assertEqual(clippy["artifacts"], tor_artifacts)
+        self.assertIn("cargoWithProfile clippy --locked --all-targets --all-features -- -D warnings",
+                      clippy["command"].splitlines())
+
+    @unittest.skipUnless(os.environ.get("RELEASE_CACHE_GRAPH_CHECK") == "1", "opt-in pinned Linux graph evaluation")
+    def test_terminal_checks_skip_archiving_but_shared_dependencies_retain_it(self):
+        checks = release_cache.nix_json(
+            "eval", "--json", ".#checks.x86_64-linux",
+            "--apply", """checks: builtins.mapAttrs (_: drv: {
+              installArtifacts = drv.doInstallCargoArtifacts;
+              doCheck = drv.doCheck;
+              buildPhase = drv.buildPhase;
+              checkPhase = drv.checkPhase;
+              artifacts = if (drv.cargoArtifacts or null) != null then drv.cargoArtifacts.drvPath else null;
+              nativeInputs = map (input: {
+                name = input.pname or input.name;
+                version = input.version or "";
+              }) drv.nativeBuildInputs;
+            }) {
+              inherit (checks) clippy tests tor-tests;
+              dependencies = checks.tests.cargoArtifacts;
+              torDependencies = checks.tor-tests.cargoArtifacts;
+            }""",
+        )
+        for name in ["clippy", "tests", "tor-tests"]:
+            with self.subTest(check=name):
+                self.assertIs(checks[name]["installArtifacts"], False)
+        self.assertEqual(checks["clippy"]["buildPhase"],
+                         "runHook preBuild\ncargo --version\n"
+                         "cargoWithProfile clippy --locked --all-targets --all-features -- -D warnings\n"
+                         "runHook postBuild\n")
+        for name, arguments in [("tests", "--locked"), ("tor-tests", "--locked --features tor")]:
+            with self.subTest(check=name):
+                self.assertIs(checks[name]["doCheck"], True)
+                self.assertEqual(checks[name]["buildPhase"],
+                                 "runHook preBuild\ncargo --version\n\nrunHook postBuild\n")
+                self.assertEqual(checks[name]["checkPhase"],
+                                 f"runHook preCheck\ncargoWithProfile test {arguments} \nrunHook postCheck\n")
+        self.assertNotEqual(checks["tests"]["artifacts"], checks["tor-tests"]["artifacts"])
+        self.assertEqual(checks["clippy"]["artifacts"], checks["tor-tests"]["artifacts"])
+        for package, check in [("api-smoke-fixture", "tests"), ("default", "tor-tests")]:
+            with self.subTest(package=package):
+                artifacts = release_cache.nix_json(
+                    "eval", "--json", f".#packages.x86_64-linux.{package}.cargoArtifacts.drvPath",
+                )
+                self.assertEqual(checks[check]["artifacts"], artifacts)
+        # Crane folds nativeCheckInputs into the derivation's nativeBuildInputs.
+        self.assertTrue(any(input["name"] == "nodejs" and input["version"].startswith("24.")
+                            for input in checks["tor-tests"]["nativeInputs"]))
+        for name, arguments in [("dependencies", "--locked"), ("torDependencies", "--locked --features tor")]:
+            with self.subTest(dependencies=name):
+                self.assertIs(checks[name]["installArtifacts"], True)
+                self.assertIs(checks[name]["doCheck"], True)
+                self.assertEqual(checks[name]["buildPhase"],
+                                 "runHook preBuild\ncargo --version\n"
+                                 f"cargoWithProfile check {arguments} --all-targets\n"
+                                 f"cargoWithProfile build {arguments}\n\nrunHook postBuild\n")
+                self.assertEqual(checks[name]["checkPhase"],
+                                 f"runHook preCheck\ncargoWithProfile test {arguments} --no-run\n"
+                                 "\nrunHook postCheck\n")
+
     def test_modern_store_relative_graph(self):
         modern = {}
         for path, drv in graph().items():

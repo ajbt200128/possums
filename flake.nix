@@ -172,12 +172,18 @@
           '';
           fmt = craneLib.cargoFmt { inherit src; };
           clippy = craneLib.cargoClippy (common // {
-            inherit cargoArtifacts;
+            # All-features Clippy needs the Tor dependency fingerprints too.
+            cargoArtifacts = torCargoArtifacts;
             cargoClippyExtraArgs = "--all-targets --all-features -- -D warnings";
+            doInstallCargoArtifacts = false;
           });
-          tests = craneLib.cargoTest (common // { inherit cargoArtifacts; });
+          tests = craneLib.cargoTest (common // {
+            inherit cargoArtifacts;
+            doInstallCargoArtifacts = false;
+          });
           tor-tests = craneLib.cargoTest (torCommon // {
             cargoArtifacts = torCargoArtifacts;
+            doInstallCargoArtifacts = false;
             nativeCheckInputs = [ unstablePkgs.nodejs_24 ];
           });
           attestation-helper = attestationHelper;

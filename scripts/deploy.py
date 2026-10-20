@@ -35,7 +35,7 @@ r.CODES.update({
     "reviewer": ("approval-policy", "Require only the approved operator account as reviewer, with self-review permitted."),
     "approval": ("approval-policy", "Require the operator's authenticated production review on this exact run; bypassing a gate is not approval."),
     "branch_policy": ("approval-policy", "Restrict production deployment branches to main only, with no tag patterns."),
-    "serving_tool": ("serving", "Build the reviewed serving verifier with the pinned Go compiler before requesting approval."),
+    "serving_tool": ("serving", "Local executable qualification failed; cause unknown. Restore the reviewed verifier built with the pinned Go compiler and check runner compatibility; do not accept serving verification."),
     "SERVING_ARGUMENTS": ("serving-input", "Provide only the verified paid tag and manifest digest."),
     "SERVING_SDK_CONFIG": ("serving-configuration", "Check the pinned SDK and release reference; do not accept serving verification."),
     "SERVING_SDK_FETCH": ("serving-evidence", "Check public attestation availability; no deployment was replayed."),
@@ -136,20 +136,31 @@ def approved(environment_id):
     r.require(user["login"] == "ajbt200128" and user["id"] == reviewer["id"], "approval")
 
 
+def serving_environment():
+    # No admin/GitHub keys, cookies or ambient SDK configuration reach this tool.
+    env = {key: os.environ[key] for key in ("PATH", "SSL_CERT_FILE") if key in os.environ}
+    env["HOME"] = os.environ["RUNNER_TEMP"]
+    return env
+
+
 def serving_tool():
     try:
         path = Path(os.environ["RUNNER_TEMP"]) / "possums-verify-serving"
         r.require(path.is_file() and os.access(path, os.X_OK), "serving_tool")
+        # Empty arguments fail before SDK construction: qualify local execution,
+        # not serving, without credentials or network requests on either runner.
+        result = r.capture([str(path)], env=serving_environment(), timeout=10, limit=65536,
+                           code="serving_tool")
+        r.require(result.returncode == 1 and result.stdout == b"", "serving_tool")
+        failure = r.parse_json(result.stderr, "serving_tool")
+        r.require(isinstance(failure, dict) and failure.get("code") == "SERVING_ARGUMENTS", "serving_tool")
         return str(path)
-    except (KeyError, OSError):
+    except Exception:
         raise r.Stop("serving_tool") from None
 
 
 def verify_serving(tag, manifest):
-    # No admin/GitHub keys, cookies or ambient SDK configuration reach this tool.
-    env = {key: os.environ[key] for key in ("PATH", "SSL_CERT_FILE") if key in os.environ}
-    env["HOME"] = os.environ["RUNNER_TEMP"]
-    result = r.capture([serving_tool(), tag, manifest], env=env, timeout=180, limit=65536,
+    result = r.capture([serving_tool(), tag, manifest], env=serving_environment(), timeout=180, limit=65536,
                        code="SERVING_UNKNOWN")
     if result.returncode == 0:
         r.require(r.parse_json(result.stdout, "SERVING_UNKNOWN") == {"stage": "serving", "passed": True},
@@ -391,6 +402,9 @@ def main():
         preflight(*args)
     elif operation == "protected" and len(args) == 6:
         protected(*args)
+    elif operation == "qualify-serving-tool" and not args:
+        serving_tool()
+        print(json.dumps({"passed": True, "stage": "serving-tool"}))
     else:
         raise r.Stop("arguments")
 
