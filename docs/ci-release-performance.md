@@ -113,18 +113,33 @@ causal benchmark, SLA, measured Clippy saving or proof of cache health. Runner
 and cache conditions varied. A cold flake build can still exceed the publisher
 wait budget.
 
-Draft PR105 adds only a test-only Markdown file on top of PR104. All seven Linux
+Draft PR105's measured head `f470117abe7b046250325a05fc91612b72d169d5`
+adds only a test-only Markdown file on PR104 head `b734ed1`. All seven Linux
 check and eight package derivation identities were verified identical across
-those exact heads before its sequential first/repeat CI measurements. It is a
-probe, not a candidate to merge; its results do not qualify the later cuts below.
+those exact heads. Run `39363503353` passed its initial attempt and exactly one
+subsequent authorized whole-workflow rerun, without debug logging:
+
+- Attempt 1: job span **1,345s (22m25s)**, flake **1,325s**, flake check **1,069s**,
+  image/probe build **129s**, uploads **2s/1s**, image/startup **17s/14s**.
+- Attempt 2: job span **1,309s (21m49s)**, flake **1,289s**, flake check **1,059s**,
+  image/probe build **121s**, uploads **1s/1s**, image/startup **12s/17s**.
+
+Parent independently checked both exact run attempts' head/workflow identity and
+all three job successes. The 36-second repeat difference does not establish warm
+cache reuse; no additional cache-log evidence was retrieved for this probe.
+Both attempts retain the large downstream handoff improvement versus historical
+main, but producer execution remains dominant and runner/cache conditions are
+uncontrolled. This is a test-only probe, not a candidate to merge. Its results
+do not qualify later cuts, establish cross-PR cache visibility, or exempt any
+exact-tag checks.
 
 ## Preserved release gates and deferred orchestration
 
 `release.py` and the strict release-cache checker are unchanged. The publisher's
 only follow-up change is cache lookup ordering before dependency prewarming;
 its fresh-build commands remain unchanged. CI artifacts never enter release
-builders. Two fresh independent application/helper/NSS/image builds, no substitution/remote builders for fresh
-outputs, digest agreement, fresh-A qualification, exact release-only identity,
+builders. Two fresh independent application/helper/NSS/image builds,
+no substitution/remote builders for fresh outputs, digest agreement, fresh-A qualification, exact release-only identity,
 exact-tag CI, signed public provenance, actual invocation/attempt/artifact
 binding, current-main admission, protected operator approval, immutable tags and
 assets, configuration/reference integrity and one-update/no-replay remain.
