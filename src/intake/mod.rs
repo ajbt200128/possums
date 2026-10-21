@@ -5,6 +5,12 @@
 pub(crate) mod diagnostics;
 mod protocol;
 mod transport;
+#[cfg(test)]
+pub(crate) use protocol::cutoff_fixture;
+pub(crate) use protocol::{
+    Error, ErrorKind, Intake, Principal, RenewalReply, Reservation, TerminalOutcome,
+    TerminalReceipt,
+};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Serialize;

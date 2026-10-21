@@ -158,7 +158,7 @@ async fn unexpected_body_sdk_error_is_counted_but_physical_io_propagation_is_not
     };
     let bytes = send(
         &app,
-        request(Method::POST, "/v1/balance", body()),
+        request(Method::POST, "/v1/submissions", body()),
         StatusCode::SERVICE_UNAVAILABLE,
     )
     .await;
@@ -167,7 +167,7 @@ async fn unexpected_body_sdk_error_is_counted_but_physical_io_propagation_is_not
         .contains("HOSTILE_BODY_CANARY"));
     // The independent connection owner already observed this physical I/O fault.
     metrics.interface_error(InterfaceError::ConnectionUnknown);
-    let mut propagated = request(Method::POST, "/v1/balance", body());
+    let mut propagated = request(Method::POST, "/v1/submissions", body());
     propagated
         .extensions_mut()
         .insert(ConnectionIoFailure(Arc::new(
@@ -264,7 +264,9 @@ async fn ordinary_upload_eof_is_not_a_fabricated_read_or_connection_fault() {
     }));
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     client
-        .write_all(b"POST /v1/balance HTTP/1.1\r\nHost: fixture\r\nContent-Length: 32\r\n\r\n{}")
+        .write_all(
+            b"POST /v1/submissions HTTP/1.1\r\nHost: fixture\r\nContent-Length: 32\r\n\r\n{}",
+        )
         .await
         .unwrap();
     client.shutdown().await.unwrap();

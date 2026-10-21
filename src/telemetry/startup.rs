@@ -68,6 +68,7 @@ pub enum Failure {
     ConfigurationMissing,
     ConfigurationEncodingInvalid,
     AccountsInvalid,
+    AccountsUnknown,
     SignalUnknown,
     Connect(InferenceFailure),
     BindUnknown,
@@ -90,8 +91,13 @@ impl Failure {
             ),
             Self::AccountsInvalid => (
                 "startup_accounts_invalid",
-                "validated_demo_accounts",
-                "check_approved_account_configuration_offline",
+                "intake_https_and_ledger_auth_configuration",
+                "check_approved_intake_origin_and_accounting_key_offline",
+            ),
+            Self::AccountsUnknown => (
+                "startup_accounts_unknown",
+                "intake_client_setup_cause_unknown",
+                "check_intake_client_configuration_and_runtime_offline",
             ),
             Self::SignalUnknown => (
                 "startup_signal_unknown",
@@ -141,7 +147,9 @@ impl fmt::Display for Failure {
             Self::Tor(cause) => write!(f, "; {cause}"),
             #[cfg(feature = "tor")]
             Self::TorLaunch(cause) => write!(f, "; {cause}"),
-            Self::SignalUnknown | Self::BindUnknown => f.write_str(" cause=unknown"),
+            Self::SignalUnknown | Self::BindUnknown | Self::AccountsUnknown => {
+                f.write_str(" cause=unknown")
+            }
             _ => Ok(()),
         }
     }

@@ -21,8 +21,8 @@ use std::{
 };
 use tokio::{sync::oneshot, task::JoinHandle};
 
-/// One synchronous terminal attempt, including when the task is never polled.
-/// Only prompt-free accounting state is retained here; no inference data/errors.
+/// A linear terminal capability. Synthetic cleanup is synchronous; production
+/// cleanup sends once to the already-rooted reserve/terminal actor, never I/O in Drop.
 struct Terminal {
     accounting: Arc<Accounting>,
     id: [u8; 32],
@@ -35,6 +35,7 @@ struct Terminal {
     worker_handoff: bool,
     model: Option<QualifiedModel>,
     lifecycle: Option<crate::lifecycle::Lifecycle>,
+    remote: Option<oneshot::Sender<TerminalCommand>>,
 }
 
 impl Terminal {
@@ -53,7 +54,19 @@ impl Terminal {
             .or(usage);
         let cached = self.evidence.as_ref().map_or(0, |e| e.cached_tokens);
         let result = self.accounting.finish_cached(self.id, usage, cached);
-        if result.is_err() {
+        self.observe(&result, usage, true, true);
+        result
+    }
+
+    fn observe(
+        &mut self,
+        result: &Result<Outcome, AccountingError>,
+        usage: Option<FinalUsage>,
+        matches_requested: bool,
+        terminal_attempted: bool,
+    ) {
+        let accounting_failed = terminal_attempted && (result.is_err() || !matches_requested);
+        if accounting_failed {
             if let Some(lifecycle) = &self.lifecycle {
                 lifecycle.accounting_failed();
             }
@@ -65,7 +78,7 @@ impl Terminal {
             if let Some(primary) = self.primary {
                 metrics.interface_error(primary);
             }
-            if result.is_err() {
+            if accounting_failed {
                 metrics.interface_error(InterfaceError::SettlementFailed);
             }
             if let (Some(model), Some(usage)) = (self.model, usage) {
@@ -80,18 +93,101 @@ impl Terminal {
                 );
             }
         }
-        let terminal = match (&result, usage.is_some(), self.failure) {
-            (Ok(Outcome::Settled { .. }), _, Some(failure)) => failure,
-            (Ok(Outcome::Settled { .. }), true, None) => GenerationTerminal::Success,
-            (Ok(Outcome::Refunded), false, Some(failure)) => failure,
-            (Ok(Outcome::Refunded), false, None) => GenerationTerminal::Unknown,
-            _ => GenerationTerminal::Settlement,
+        let terminal = if !terminal_attempted {
+            self.failure.unwrap_or(GenerationTerminal::Admission)
+        } else {
+            match (result, usage.is_some() && matches_requested, self.failure) {
+                (Ok(Outcome::Settled { .. }), _, Some(failure)) => failure,
+                (Ok(Outcome::Settled { .. }), true, None) => GenerationTerminal::Success,
+                (Ok(Outcome::Refunded), false, Some(failure)) => failure,
+                (Ok(Outcome::Refunded), false, None) => GenerationTerminal::Unknown,
+                _ => GenerationTerminal::Settlement,
+            }
         };
         if let Some(mut observation) = self.observation.take() {
             observation.finish_generation(terminal);
         }
-        result
     }
+
+    fn usage(&self, fallback: Option<FinalUsage>) -> Option<FinalUsage> {
+        self.evidence
+            .as_ref()
+            .map(|e| FinalUsage {
+                input_tokens: e.usage.input_tokens,
+                output_tokens: e.usage.output_tokens,
+                total_tokens: e.usage.total_tokens,
+            })
+            .or(fallback)
+    }
+
+    fn send_remote(
+        &mut self,
+        usage: Option<FinalUsage>,
+        reply: Option<oneshot::Sender<TerminalResult>>,
+    ) {
+        self.armed = false;
+        let sender = self.remote.take().expect("remote terminal capability");
+        // Only the numeric evidence and closed observations cross to the actor.
+        let evidence = self.evidence.as_ref().map(|e| {
+            let mut numeric = crate::inference::forward::Evidence::sse(e.usage);
+            numeric.cached_tokens = e.cached_tokens;
+            numeric.cache_usage_available = e.cache_usage_available;
+            numeric
+        });
+        let report = Terminal {
+            accounting: self.accounting.clone(),
+            id: self.id,
+            armed: false,
+            evidence,
+            observation: self.observation.take(),
+            failure: self.failure,
+            primary: self.primary,
+            expected_interruption: self.expected_interruption,
+            worker_handoff: self.worker_handoff,
+            model: self.model,
+            lifecycle: self.lifecycle.clone(),
+            remote: None,
+        };
+        if let Err(mut command) = sender.send(TerminalCommand {
+            report,
+            usage,
+            reply,
+        }) {
+            // Actor loss is not a receipt. Preserve usage and classify locally.
+            command
+                .report
+                .observe(&Err(AccountingError::StateUnavailable), usage, false, true);
+        }
+    }
+
+    async fn finish_owned(&mut self, usage: Option<FinalUsage>) -> TerminalResult {
+        if self.remote.is_none() {
+            return TerminalResult {
+                outcome: self.finish(usage),
+                matches_requested: true,
+                diagnostic: None,
+            };
+        }
+        let usage = self.usage(usage);
+        let (reply, receipt) = oneshot::channel();
+        self.send_remote(usage, Some(reply));
+        receipt.await.unwrap_or(TerminalResult {
+            outcome: Err(AccountingError::StateUnavailable),
+            matches_requested: false,
+            diagnostic: None,
+        })
+    }
+}
+
+struct TerminalCommand {
+    report: Terminal,
+    usage: Option<FinalUsage>,
+    reply: Option<oneshot::Sender<TerminalResult>>,
+}
+struct TerminalResult {
+    outcome: Result<Outcome, AccountingError>,
+    matches_requested: bool,
+    diagnostic: Option<crate::intake::diagnostics::Diagnostic>,
 }
 
 impl Drop for Terminal {
@@ -105,12 +201,16 @@ impl Drop for Terminal {
                     InterfaceError::PreflightUnknown
                 });
             }
-            let _ = self.finish(None);
+            if self.remote.is_some() {
+                self.send_remote(self.usage(None), None);
+            } else {
+                let _ = self.finish(None);
+            }
         }
     }
 }
 
-/// Linear, synchronous access to the original reservation's terminal guard.
+/// Linear access to the original reservation's terminal guard.
 /// Dropping without `finish` settles committed usage or refunds if none exists.
 /// This owns no resource leases/lifetime markers: those stay with the worker until ALL
 /// captured input and rendering state is destroyed, even after settlement.
@@ -150,7 +250,10 @@ impl Settlement {
     /// This capability cannot establish stream authenticity itself.
     /// Accounting rechecks arithmetic and refunds invalid usage. No error text
     /// is retained or formatted. Even accounting failure is a single attempt.
-    pub(crate) fn finish(mut self, result: &Result<StreamUsage, InferenceError>) -> SettledReceipt {
+    pub(crate) async fn finish(
+        mut self,
+        result: &Result<StreamUsage, InferenceError>,
+    ) -> SettledReceipt {
         if let Err(error) = result {
             let failure = error.failure();
             self.terminal.failure.get_or_insert(failure.into());
@@ -160,15 +263,18 @@ impl Settlement {
                 self.terminal.primary.get_or_insert(failure.into());
             }
         }
+        let terminal = self
+            .terminal
+            .finish_owned(result.as_ref().ok().map(|usage| FinalUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                total_tokens: usage.total_tokens,
+            }))
+            .await;
         SettledReceipt {
-            completion: self
-                .terminal
-                .finish(result.as_ref().ok().map(|usage| FinalUsage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    total_tokens: usage.total_tokens,
-                }))
-                .map_err(OwnerError::Accounting),
+            completion: terminal.outcome.map_err(OwnerError::Accounting),
+            matches_requested: terminal.matches_requested,
+            diagnostic: terminal.diagnostic,
         }
     }
 }
@@ -181,35 +287,32 @@ impl Settlement {
 #[must_use = "return the receipt to the generation owner after inspecting its outcome"]
 pub(crate) struct SettledReceipt {
     completion: Completion,
+    matches_requested: bool,
+    diagnostic: Option<crate::intake::diagnostics::Diagnostic>,
 }
 
 impl SettledReceipt {
+    pub(crate) fn diagnostic(&self) -> Option<crate::intake::diagnostics::Diagnostic> {
+        self.diagnostic
+    }
+    pub(crate) fn matches_requested(&self) -> bool {
+        self.matches_requested
+    }
     pub(crate) fn outcome(&self) -> &Completion {
         &self.completion
     }
 }
 
-/// Construct immediately after a *new* successful `Accounting::reserve`, without
-/// an intervening await. Never construct for Duplicate or share refund ownership
-/// with another guard. No second reservation is created here.
-///
-/// Before spawn, dropping this value refunds. At successful `tokio::spawn`, this
-/// SAME guard, resource lease and generation marker belong to the worker. There is no disarm/ack gap in
-/// which cancellation can refund an already-running generation.
-///
-/// The route's first spawn is DETACHED PREFLIGHT,
-/// before tokenization, not compose. Its explicit owner envelope drops owned
-/// prompt-bearing work BEFORE this guard/leases. Preflight failure/deadline drops
-/// this sole guard (no explicit refund plus guard); success moves this same value
-/// synchronously into API streaming composition, even if observation was dropped.
-/// Observation loss cannot cancel this owner. The shared disconnect signal may
-/// close its upstream operation while the same guard still settles once.
-///
-/// Retire generation tracking after terminal cleanup but before returning memory
-/// admission, so a replacement cannot overlap the old generation observation.
+/// Construct immediately after a new local claim, never for duplicates. For
+/// intake, call `start_remote` after tracking/observation and before any await:
+/// it roots the sole reserve/terminal actor, not a second monetary reservation.
+/// Preflight only observes its readiness and transfers this capability to work.
+/// Cancellation drops prompt work but cannot discard a late hold or terminal RPC.
+/// Shared leases keep generation/memory ownership until BOTH work and actor end;
+/// generation tracking retires before the final memory lease.
 pub(crate) struct ReservedGeneration {
     terminal: Terminal,
-    _generation: Lease,
+    _generation: Arc<Lease>,
     _resources: Arc<crate::telemetry::hooks::Lease>,
     _ticket: Option<crate::lifecycle::Ticket>,
     disconnect: crate::stream_owner::Disconnect,
@@ -246,12 +349,50 @@ impl ReservedGeneration {
                 worker_handoff: false,
                 model: None,
                 lifecycle: None,
+                remote: None,
             },
             _resources: resources.into(),
-            _generation: generation.into(),
+            _generation: Arc::new(generation.into()),
             _ticket: None,
             disconnect: Default::default(),
         }
+    }
+
+    /// Root the one reserve attempt AND its terminal continuation before dispatch.
+    /// Readiness carries the confirmed expiry for the post-await admission check,
+    /// not an accepted-work cutoff. Dropping it cannot cancel either RPC.
+    pub(crate) fn start_remote(
+        &mut self,
+    ) -> Option<oneshot::Receiver<Result<std::time::SystemTime, AccountingError>>> {
+        if !self.terminal.accounting.is_remote() {
+            return None;
+        }
+        let (sender, command) = oneshot::channel();
+        let (ready, receiver) = oneshot::channel();
+        let attempt = self.terminal.accounting.take_attempt(self.terminal.id);
+        let root = ActorRoot {
+            complete: false,
+            _generation: self._generation.clone(),
+            _resources: self._resources.clone(),
+            ticket: self
+                ._ticket
+                .as_ref()
+                .expect("root before remote dispatch")
+                .clone(),
+        };
+        self.terminal.remote = Some(sender);
+        let accounting = self.terminal.accounting.clone();
+        let id = self.terminal.id;
+        tokio::spawn(async move {
+            remote_terminal(root, accounting, id, attempt, ready, command).await
+        });
+        Some(receiver)
+    }
+
+    /// Await cleanup on ordinary preflight rejection. Panic/cancellation instead
+    /// uses the same pre-existing actor through Terminal::drop.
+    pub(crate) async fn cancel(mut self) {
+        let _ = self.terminal.finish_owned(None).await;
     }
 
     pub(crate) fn disconnected(mut self, signal: crate::stream_owner::Disconnect) -> Self {
@@ -328,7 +469,7 @@ impl ReservedGeneration {
     }
 
     /// Like `spawn`, but lets the owned future settle before terminal delivery.
-    /// Call `settlement.finish(&result)` synchronously and return that same receipt,
+    /// Await `settlement.finish(&result)` and return that same receipt,
     /// not a work-supplied outcome. Settled money alone is not successful inference
     /// or tool authorization. Accounting releases its lock before `finish` returns.
     ///
@@ -357,7 +498,7 @@ impl ReservedGeneration {
     {
         self.spawn_settling_worker(delivery, move |delivery, settlement| async move {
             let result = work(delivery).await;
-            settlement.finish(&result)
+            settlement.finish(&result).await
         })
     }
 
@@ -396,7 +537,7 @@ impl ReservedGeneration {
 // Do not rely on the unspecified field order of an async block's captures.
 struct Worker<Fut> {
     work: Pin<Box<Fut>>,
-    _generation: Lease,
+    _generation: Arc<Lease>,
     _resources: Arc<crate::telemetry::hooks::Lease>,
     _ticket: Option<crate::lifecycle::Ticket>,
 }
@@ -410,6 +551,221 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let receipt = std::task::ready!(self.get_mut().work.as_mut().poll(cx));
         Poll::Ready(receipt.completion)
+    }
+}
+
+// Kept outside work's future: actor loss cannot silently prove clean drain.
+struct ActorRoot {
+    complete: bool,
+    _generation: Arc<Lease>,
+    _resources: Arc<Lease>,
+    ticket: crate::lifecycle::Ticket,
+}
+impl Drop for ActorRoot {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.ticket.lifecycle().accounting_failed();
+        }
+    }
+}
+
+fn usable_hold(reservation: &crate::intake::Reservation) -> bool {
+    // Admission needs confirmed, currently active credit, not a minimum work
+    // budget. Accepted work may continue beyond the last confirmed lease expiry.
+    reservation.is_active() && reservation.expires_at() > std::time::SystemTime::now()
+}
+
+async fn remote_terminal(
+    mut root: ActorRoot,
+    accounting: Arc<Accounting>,
+    id: [u8; 32],
+    attempt: Result<crate::accounting::Attempt, AccountingError>,
+    ready: oneshot::Sender<Result<std::time::SystemTime, AccountingError>>,
+    command: oneshot::Receiver<TerminalCommand>,
+) {
+    // This single bounded attempt is deliberately not selected against caller
+    // cancellation. A late confirmed active hold still belongs to this actor.
+    let dispatched = tokio::time::Instant::now();
+    let mut reserved = match &attempt {
+        Ok(attempt) => attempt.reserve().await,
+        Err(error) => Err(*error),
+    };
+    let admission = match &reserved {
+        Ok(reservation) if usable_hold(reservation) => Ok(reservation.expires_at()),
+        Ok(_) => Err(AccountingError::HoldUnavailable),
+        Err(error) => Err(*error),
+    };
+    if admission.is_err_and(AccountingError::reserve_uncertain) {
+        root.ticket.lifecycle().accounting_failed();
+    }
+    let _ = ready.send(admission);
+    // The capability sends once on explicit finish OR drop, including pre-poll
+    // work loss. Only numeric evidence/closed observations enter this channel.
+    let (mut command, closed, renewal_failure) = match (&attempt, &mut reserved) {
+        (Ok(attempt), Ok(reservation)) if admission.is_ok() => {
+            await_remote_terminal(attempt, reservation, dispatched, command).await
+        }
+        _ => (command.await.ok(), None, None),
+    };
+    let usage = command.as_ref().and_then(|c| c.usage);
+    let cached = command
+        .as_ref()
+        .and_then(|c| c.report.evidence.as_ref())
+        .map_or(0, |e| e.cached_tokens);
+    let mut terminal_attempted = false;
+    let mut result = match (&attempt, reserved) {
+        (Ok(attempt), Ok(reservation)) if reservation.is_active() => {
+            terminal_attempted = true;
+            // Ineligible admissions never produce billable prompt work.
+            let charge = if admission.is_ok() {
+                attempt.charge(usage, cached)
+            } else {
+                None
+            };
+            // A renewal may already have returned an authoritative absorbing
+            // terminal row. Compare it only at normal end; never bill early or
+            // issue another mutation against a known terminal reservation.
+            let receipt = match closed {
+                Some(reply) => Ok(reply
+                    .terminal_receipt(charge)
+                    .expect("validated closed row")),
+                None => attempt.finish(&reservation, charge).await,
+            };
+            match receipt {
+                Ok(receipt) => TerminalResult {
+                    outcome: Ok(receipt.outcome.into()),
+                    matches_requested: receipt.matches_requested,
+                    diagnostic: receipt.diagnostic,
+                },
+                Err(error) => TerminalResult {
+                    outcome: Err(error),
+                    matches_requested: false,
+                    diagnostic: None,
+                },
+            }
+        }
+        (_, Ok(reservation)) => TerminalResult {
+            outcome: reservation
+                .terminal_outcome()
+                .map(Outcome::from)
+                .ok_or(AccountingError::HoldUnavailable),
+            matches_requested: false,
+            diagnostic: None,
+        },
+        (_, Err(error)) => TerminalResult {
+            outcome: Err(error),
+            matches_requested: false,
+            diagnostic: None,
+        },
+    };
+    // Preserve renewal classification transiently, but terminal evidence/failure
+    // has precedence. A recovered final settlement remains successful. This adds
+    // no telemetry or wire fields; only the existing opt-in diagnostic can use it.
+    result.diagnostic = result.diagnostic.or_else(|| match result.outcome {
+        Err(AccountingError::Intake(error)) => Some(error.diagnostic()),
+        _ => renewal_failure,
+    });
+    if terminal_attempted && (result.outcome.is_err() || !result.matches_requested) {
+        root.ticket.lifecycle().accounting_failed();
+    }
+    // A bookkeeping failure must not erase an already authenticated receipt.
+    if accounting
+        .record_remote(
+            id,
+            result.outcome.as_ref().cloned().unwrap_or(Outcome::Unknown),
+        )
+        .is_err()
+    {
+        root.ticket.lifecycle().accounting_failed();
+    }
+    if let Some(command) = &mut command {
+        if let Err(error) = admission {
+            command.report.primary = Some(error.interface_error());
+            command.report.failure = Some(GenerationTerminal::Admission);
+        }
+        command.report.observe(
+            &result.outcome,
+            usage,
+            result.matches_requested,
+            terminal_attempted,
+        );
+    }
+    root.complete = true;
+    // Leases and lifecycle roots retire only after the RPC, observations and
+    // tombstone commit; work/delivery retain their independent root until done.
+    drop(root);
+    if let Some(TerminalCommand {
+        reply: Some(reply), ..
+    }) = command
+    {
+        let _ = reply.send(result);
+    }
+}
+
+/// Renew within the already-rooted monetary owner, never in prompt work or
+/// delivery. Terminal commands win a scheduling tie. An in-flight bounded RPC
+/// is not cancelled by completion: its committed evidence still belongs here.
+async fn await_remote_terminal(
+    attempt: &crate::accounting::Attempt,
+    reservation: &mut crate::intake::Reservation,
+    dispatched: tokio::time::Instant,
+    mut command: oneshot::Receiver<TerminalCommand>,
+) -> (
+    Option<TerminalCommand>,
+    Option<crate::intake::RenewalReply>,
+    Option<crate::intake::diagnostics::Diagnostic>,
+) {
+    use std::time::{Duration, SystemTime};
+    use tokio::time::{sleep_until, Instant};
+    const CADENCE: Duration = Duration::from_secs(10 * 60);
+    let remaining = reservation
+        .expires_at()
+        .duration_since(SystemTime::now())
+        .unwrap_or_default();
+    // Receipt/delivery latency must never extend the local confirmation horizon.
+    let mut confirmed_until =
+        dispatched + remaining.min(Duration::from_secs(u64::from(reservation.timeout_seconds)));
+    let mut next = dispatched + CADENCE;
+    loop {
+        tokio::select! {
+            biased;
+            terminal = &mut command => return (terminal.ok(), None, None),
+            _ = sleep_until(next) => {}
+        }
+        if Instant::now() >= confirmed_until {
+            // A delayed poll cannot resurrect an expired confirmation.
+            return (command.await.ok(), None, None);
+        }
+        let dispatched = Instant::now();
+        let reply = match attempt.renew(reservation).await {
+            Ok(reply) => reply,
+            // One unconfirmed attempt permanently ends renewal, not work.
+            // No retry, lookup, replacement hold or inference replay.
+            Err(error) => {
+                let diagnostic = match error {
+                    AccountingError::Intake(error) => error.diagnostic(),
+                    _ => crate::intake::diagnostics::Diagnostic::renewal_unknown(),
+                };
+                return (command.await.ok(), None, Some(diagnostic));
+            }
+        };
+        if !reply.reservation.is_active() {
+            return (command.await.ok(), Some(reply), None);
+        }
+        let horizon = reply
+            .reservation
+            .expires_at()
+            .duration_since(reply.observed_at)
+            .unwrap_or_default();
+        let confirmed = dispatched + horizon;
+        let failure = reply.refusal.map(|error| error.diagnostic());
+        let stop = failure.is_some() || confirmed <= Instant::now();
+        *reservation = reply.reservation;
+        if stop {
+            return (command.await.ok(), None, failure);
+        }
+        confirmed_until = confirmed;
+        next = dispatched + CADENCE;
     }
 }
 

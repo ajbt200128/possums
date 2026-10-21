@@ -412,31 +412,6 @@ pub(super) async fn run(startup: Snapshot, runtime: Snapshot) {
     drop(body);
     drop(retained);
     phase("overlapping-unleased-model-controls", baseline);
-    let balance = router(f.state.clone())
-        .oneshot(
-            Request::post("/v1/balance")
-                .header(header::AUTHORIZATION, format!("Bearer {}", f.sessions[0]))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(balance.status(), StatusCode::OK);
-    let bytes = bounded(http_body_util::BodyExt::collect(balance.into_body()))
-        .await
-        .unwrap()
-        .to_bytes();
-    let snapshot: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    drop(bytes);
-    assert_eq!(snapshot["in_flight"], 3);
-    assert!(snapshot.as_object().unwrap().keys().all(|key| [
-        "available_microunits",
-        "in_flight",
-        "completed_requests"
-    ]
-    .contains(&key.as_str())));
-    phase("prompt-free-balance-during-overlap", baseline);
     let evidence = f.control("/attestation").await;
     assert_eq!(evidence.status(), StatusCode::SERVICE_UNAVAILABLE);
     drop(evidence);

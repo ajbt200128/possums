@@ -1,6 +1,6 @@
 //! Shared admission and detached context preflight, independent of HTTP/rendering.
 //! Adapters supply bounded, decoded owned input and a synchronous response handoff.
-//! Acceptance is the locked reservation, not receipt of the handoff result.
+//! Locked admission claims an attempt. Intake must confirm a hold before prompt work.
 
 use crate::telemetry::{
     self,
@@ -131,6 +131,7 @@ pub(crate) enum Rejection {
         owned: bool,
     },
     Admission(AdmissionError),
+    OwnedAdmission(AdmissionError),
     Duplicate(Outcome),
     Cancelled,
 }
@@ -162,33 +163,36 @@ impl Rejection {
     }
 
     pub(crate) fn interface_error(&self) -> Option<InterfaceError> {
-        use crate::{accounting::AccountingError as A, auth::AuthError as H};
+        use crate::auth::AuthError as H;
         Some(match self {
             Self::Failure { failure, .. } => *failure,
-            Self::Admission(AdmissionError::Auth(error)) => match error {
+            Self::Admission(AdmissionError::Auth(error))
+            | Self::OwnedAdmission(AdmissionError::Auth(error)) => match error {
                 H::Invalid => InterfaceError::AuthenticationRefused,
                 H::Conflict => InterfaceError::ConflictRefused,
                 H::Configuration => InterfaceError::ConfigurationInvalid,
                 H::StateUnavailable => InterfaceError::AuthStateUnknown,
                 H::Capacity => InterfaceError::StateCapacityRefused,
+                H::Intake(error) => match error.kind {
+                    crate::intake::ErrorKind::Authentication
+                    | crate::intake::ErrorKind::MfaUnsupported
+                    | crate::intake::ErrorKind::BindingChanged => {
+                        InterfaceError::AuthenticationRefused
+                    }
+                    _ => InterfaceError::AuthStateUnknown,
+                },
             },
-            Self::Admission(AdmissionError::Accounting(error)) => match error {
-                A::UnknownAccount => InterfaceError::AccountUnavailable,
-                A::InsufficientCredit => InterfaceError::CreditRefused,
-                A::Concurrency => InterfaceError::AccountLimitRefused,
-                A::AlteredDuplicate => InterfaceError::ConflictRefused,
-                A::Capacity => InterfaceError::StateCapacityRefused,
-                A::InvalidTransition | A::StateUnavailable => {
-                    InterfaceError::AccountingStateUnknown
-                }
-                A::Cost => InterfaceError::QuoteOverflow,
-            },
+            Self::Admission(AdmissionError::Accounting(error))
+            | Self::OwnedAdmission(AdmissionError::Accounting(error)) => error.interface_error(),
             Self::Duplicate(_) | Self::Cancelled => return None,
         })
     }
 
     pub(crate) fn owned_failure(&self) -> bool {
-        matches!(self, Self::Failure { owned: true, .. })
+        matches!(
+            self,
+            Self::Failure { owned: true, .. } | Self::OwnedAdmission(_)
+        )
     }
 }
 
@@ -401,7 +405,7 @@ impl Generation<'_> {
             ));
         }
         // Session -> submission -> accounting locks remain inside Auth. No await
-        // or prompt-bearing operation may separate a new reserve from its guard.
+        // or prompt-bearing operation may separate a new claim from its owner.
         let admission = self
             .auth
             .admit_submission(
@@ -416,7 +420,7 @@ impl Generation<'_> {
             self.observation.disposition(Disposition::Duplicate);
             return Err(Rejection::Duplicate(outcome));
         }
-        let owner = ReservedGeneration::new(
+        let mut owner = ReservedGeneration::new(
             self.accounting.clone(),
             admission.submission.id,
             permit,
@@ -426,6 +430,12 @@ impl Generation<'_> {
         .tracked(ticket.clone())
         .observed(self.observation.generation(model), model);
         self.observation.disposition(Disposition::NewGeneration);
+        let remote_ready = owner.start_remote();
+        let remote = remote_ready.is_some();
+        let auth = self.auth.clone();
+        let session_id = submission.session_id.to_owned();
+        let admission_binding = submission.admission_binding.to_owned();
+        let token = submission.token.to_owned();
         let (sender, receiver) = oneshot::channel();
         // Construct BEFORE creating the future: even a pre-poll drop destroys
         // prompt/response captures before the sole refund owner and its leases.
@@ -447,6 +457,17 @@ impl Generation<'_> {
                     _ = disconnect.cancelled() => Err(Rejection::Cancelled),
                     _ = job.sender.as_mut().expect("preflight observer").closed() => Err(Rejection::Cancelled),
                     result = tokio::time::timeout(PREFLIGHT_DEADLINE, async {
+                    if let Some(ready) = remote_ready {
+                        let expires_at = ready.await.unwrap_or(Err(crate::accounting::AccountingError::StateUnavailable))
+                            .map_err(|error| Rejection::OwnedAdmission(AdmissionError::Accounting(error)))?;
+                        auth.validate_admission(&session_id, &admission_binding, &token, job.input.model())
+                            .await.map_err(|error| Rejection::OwnedAdmission(AdmissionError::Auth(error)))?;
+                        if expires_at <= SystemTime::now() {
+                            return Err(Rejection::OwnedAdmission(AdmissionError::Accounting(crate::accounting::AccountingError::HoldUnavailable)));
+                        }
+                    }
+                    // Accepted work starts here, before prompt-bearing tokenization.
+                    // Hold expiry is no longer a cancellation condition after this point.
                     let tokens = match &mut job.input {
                         RequestInput::Text(input) => {
                             input.history.push(Message {
@@ -473,13 +494,16 @@ impl Generation<'_> {
                             .await
                             .map_err(|error| Rejection::upstream(error.failure(), true))?,
                     };
-                    catalog
-                        .quote(job.input.model(), tokens)
-                        .map_err(|error| Rejection::Failure {
-                            failure: error.into(),
-                            projection: FailureProjection::Context,
-                            owned: true,
-                        })
+                    let quote = catalog.quote(job.input.model(), tokens).map_err(|error| Rejection::Failure {
+                        failure: error.into(), projection: FailureProjection::Context, owned: true,
+                    })?;
+                    // Tokenization may have yielded through logout/reset. Recheck
+                    // current authority before handing off prompt-bearing inference.
+                    if remote {
+                        auth.validate_admission(&session_id, &admission_binding, &token, job.input.model())
+                            .await.map_err(|error| Rejection::OwnedAdmission(AdmissionError::Auth(error)))?;
+                    }
+                    Ok(quote)
                     }) => result.unwrap_or(Err(Rejection::Failure {
                         failure: InterfaceError::PreflightDeadline,
                         projection: FailureProjection::Unavailable,
@@ -508,7 +532,10 @@ impl Generation<'_> {
                                 owner.expected_interruption();
                             }
                         }
-                        drop(job); // Refund once BEFORE reporting rejection.
+                        if let Some(owner) = job.owner.take() {
+                            owner.cancel().await; // Same actor; await its one terminal attempt.
+                        }
+                        drop(job);
                         let _ = sender.send(Err(rejection));
                         return;
                     }

@@ -14,7 +14,8 @@ fn probe() -> Command {
     command
         .arg("--healthcheck")
         .env_clear()
-        .env("POSSUMS_ACCOUNTS_JSON", "malformed synthetic config")
+        .env("POSSUMS_INTAKE_ORIGIN", "malformed synthetic origin")
+        .env("POSSUMS_INTAKE_LEDGER_KEY", "malformed synthetic key")
         .env("POSSUMS_TINFOIL_HOST", "invalid synthetic host")
         .env("POSSUMS_BIND", "127.0.0.1:1")
         .stdout(Stdio::piped())

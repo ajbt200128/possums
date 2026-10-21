@@ -18,9 +18,10 @@ use crate::{
     telemetry::{hooks::RequestContext, AdmissionModel, Rejection as MetricRejection},
 };
 use axum::{
-    body::Bytes,
-    extract::{Extension, State},
+    body::{Body, Bytes},
+    extract::{Extension, Request, State},
     http::{header, HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Router,
@@ -29,6 +30,10 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "api_intake_diagnostic_tests.rs"]
+mod intake_diagnostic_tests;
+
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/auth/challenge", get(challenge))
@@ -36,8 +41,60 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/v1/submissions", post(submission))
         .route("/v1/sessions/current", delete(logout))
         .route("/v1/models", get(models))
-        .route("/v1/balance", post(balance))
         .route("/v1/chat/completions", post(chat))
+        .route_layer(middleware::from_fn(intake_diagnostics))
+}
+
+// Only locally generated typed JSON errors are buffered, under a fixed bound.
+// All other bodies (especially SSE) and all default responses pass untouched.
+async fn intake_diagnostics(request: Request, next: Next) -> Response {
+    let opted_in = crate::intake::diagnostics::requested(request.headers());
+    let response = next.run(request).await;
+    project_intake_diagnostic(response, opted_in).await
+}
+
+async fn project_intake_diagnostic(response: Response, opted_in: bool) -> Response {
+    let Some(diagnostic) = response
+        .extensions()
+        .get::<crate::intake::diagnostics::Diagnostic>()
+        .copied()
+        .filter(|_| opted_in)
+    else {
+        return response;
+    };
+    const ERROR_BYTES: usize = 16 * 1024;
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, ERROR_BYTES).await {
+        Ok(bytes) => bytes,
+        // These bodies are local JSON, never a remote or streaming body. Keep
+        // the original failure/status/extensions if local presentation fails.
+        Err(_) => Bytes::from_static(b"{\"error\":{\"code\":\"unavailable\",\"message\":\"code=INTAKE_DIAGNOSTIC_PRESENTATION_UNKNOWN stage=response_encoding constraint=bounded_error_body. Local diagnostic delivery did not complete; cause unknown. Report only code/stage/constraint/status. Billing is unknown; no replay occurred. A new submission may incur another charge.\"}}"),
+    };
+    let projected = (|| {
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        value
+            .get_mut("error")?
+            .as_object_mut()?
+            .insert("intake".into(), serde_json::to_value(diagnostic).ok()?);
+        bounded_json::to_vec(&value, ERROR_BYTES).ok()
+    })();
+    let body = projected.map(Bytes::from).unwrap_or(bytes);
+    if parts.headers.contains_key(header::CONTENT_LENGTH) {
+        parts
+            .headers
+            .insert(header::CONTENT_LENGTH, body.len().into());
+    }
+    Response::from_parts(parts, Body::from(body))
+}
+
+fn intake_failure(
+    status: StatusCode,
+    cause: InterfaceError,
+    source: crate::intake::Error,
+) -> Response {
+    let mut response = failure_message(status, cause, source.to_string());
+    response.extensions_mut().insert(source.diagnostic());
+    response
 }
 
 pub(crate) fn is_api(path: &str) -> bool {
@@ -53,11 +110,12 @@ pub(crate) struct SafeError;
 #[derive(Clone)]
 pub(crate) struct FailureOwned;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 struct ApiFailure {
     status: StatusCode,
     rejection: MetricRejection,
     cause: InterfaceError,
+    intake: Option<crate::intake::Error>,
 }
 impl ApiFailure {
     fn input(status: StatusCode) -> Self {
@@ -65,11 +123,15 @@ impl ApiFailure {
             status,
             rejection: MetricRejection::Input,
             cause: InterfaceError::InputRefused,
+            intake: None,
         }
     }
     fn respond(self, observation: &RequestContext) -> Response {
         observation.reject(AdmissionModel::Unknown, self.rejection);
-        failure(self.status, self.cause)
+        match self.intake {
+            Some(error) => intake_failure(self.status, self.cause, error),
+            None => failure(self.status, self.cause),
+        }
     }
 }
 
@@ -77,6 +139,14 @@ impl ApiFailure {
 /// message field; older strict shipped decoders reject added metadata fields.
 /// Classification and observation remain independent of telemetry availability.
 pub(crate) fn failure(status: StatusCode, cause: InterfaceError) -> Response {
+    failure_message(status, cause, cause.message())
+}
+
+fn failure_message(
+    status: StatusCode,
+    cause: InterfaceError,
+    message: impl AsRef<str>,
+) -> Response {
     let code = match status {
         StatusCode::BAD_REQUEST => "invalid_request",
         StatusCode::UNAUTHORIZED => "unauthorized",
@@ -93,7 +163,7 @@ pub(crate) fn failure(status: StatusCode, cause: InterfaceError) -> Response {
     };
     let mut response = (
         status,
-        axum::Json(serde_json::json!({"error": {"code": code, "message": cause.message()}})),
+        axum::Json(serde_json::json!({"error": {"code": code, "message": message.as_ref()}})),
     )
         .into_response();
     response.extensions_mut().insert(SafeError);
@@ -130,6 +200,7 @@ fn reject(observation: &RequestContext, status: StatusCode, reason: MetricReject
     ApiFailure {
         status,
         rejection: reason,
+        intake: None,
         cause: match reason {
             MetricRejection::Input => InterfaceError::InputRefused,
             MetricRejection::Auth => InterfaceError::AuthenticationRefused,
@@ -278,16 +349,41 @@ fn rejection_response(rejection: Rejection) -> Response {
                 failure(StatusCode::BAD_REQUEST, cause)
             }
         },
-        Rejection::Admission(AdmissionError::Auth(auth_failure)) => failure(
+        Rejection::Admission(AdmissionError::Auth(AuthError::Intake(source)))
+        | Rejection::OwnedAdmission(AdmissionError::Auth(AuthError::Intake(source))) => {
+            let projected = auth_rejection(AuthError::Intake(source));
+            intake_failure(projected.status, projected.cause, projected.intake.expect("intake cause"))
+        }
+        Rejection::Admission(AdmissionError::Auth(auth_failure))
+        | Rejection::OwnedAdmission(AdmissionError::Auth(auth_failure)) => failure(
             match auth_failure {
                 AuthError::Invalid | AuthError::Conflict => StatusCode::BAD_REQUEST,
-                AuthError::Configuration | AuthError::StateUnavailable | AuthError::Capacity => {
+                AuthError::Configuration | AuthError::StateUnavailable | AuthError::Capacity | AuthError::Intake(_) => {
                     StatusCode::SERVICE_UNAVAILABLE
                 }
             },
             cause.expect("admission has a typed cause"),
         ),
-        Rejection::Admission(AdmissionError::Accounting(accounting_failure)) => failure(
+        Rejection::Admission(AdmissionError::Accounting(AccountingError::Intake(source)))
+        | Rejection::OwnedAdmission(AdmissionError::Accounting(AccountingError::Intake(source))) => intake_failure(
+            match source.kind {
+                crate::intake::ErrorKind::CreditInsufficient => StatusCode::PAYMENT_REQUIRED,
+                crate::intake::ErrorKind::AdmissionDisabled | crate::intake::ErrorKind::AccountUnavailable => StatusCode::FORBIDDEN,
+                crate::intake::ErrorKind::Conflict => StatusCode::CONFLICT,
+                _ => StatusCode::SERVICE_UNAVAILABLE,
+            },
+            cause.expect("accounting has a typed cause"), source,
+        ),
+        Rejection::Admission(AdmissionError::Accounting(AccountingError::HoldUnavailable))
+        | Rejection::OwnedAdmission(AdmissionError::Accounting(AccountingError::HoldUnavailable)) => {
+            let mut response = failure_message(
+                StatusCode::SERVICE_UNAVAILABLE, cause.expect("hold has a typed cause"), AccountingError::HoldUnavailable.to_string(),
+            );
+            response.extensions_mut().insert(crate::intake::diagnostics::Diagnostic::hold_unusable());
+            response
+        },
+        Rejection::Admission(AdmissionError::Accounting(accounting_failure))
+        | Rejection::OwnedAdmission(AdmissionError::Accounting(accounting_failure)) => failure(
             match accounting_failure {
                 AccountingError::InsufficientCredit => StatusCode::PAYMENT_REQUIRED,
                 AccountingError::Concurrency => StatusCode::TOO_MANY_REQUESTS,
@@ -296,18 +392,25 @@ fn rejection_response(rejection: Rejection) -> Response {
                 | AccountingError::Capacity
                 | AccountingError::InvalidTransition
                 | AccountingError::StateUnavailable
-                | AccountingError::Cost => StatusCode::SERVICE_UNAVAILABLE,
+                | AccountingError::Cost
+                | AccountingError::HoldUnavailable
+                | AccountingError::Intake(_) => StatusCode::SERVICE_UNAVAILABLE,
             },
             cause.expect("admission has a typed cause"),
         ),
         Rejection::Cancelled => {
             inference_error_with_cause(InferenceFailure::InferenceUnavailable, None)
         }
+        Rejection::Duplicate(Outcome::Unknown | Outcome::Expired) => failure_message(
+            StatusCode::CONFLICT, InterfaceError::ConflictRefused,
+            "code=INTAKE_DUPLICATE_NOT_REPLAYED stage=admission constraint=original_attempt. This submission already has an owned terminal or uncertain intake attempt. No new hold or inference was dispatched. Do not infer a charge or refund; a deliberate new submission may incur another charge.",
+        ),
         Rejection::Duplicate(outcome) => {
             let outcome = match outcome {
                 Outcome::InFlight => "in_flight",
                 Outcome::Settled { .. } => "settled",
                 Outcome::Refunded => "refunded",
+                Outcome::Expired | Outcome::Unknown => unreachable!("handled above"),
             };
             let mut response = (
                 StatusCode::CONFLICT,
@@ -390,6 +493,31 @@ fn auth_error(observation: &RequestContext, error: AuthError) -> Response {
 // never evidence of bad credentials; only a missing/expired session is Invalid.
 fn auth_rejection(error: AuthError) -> ApiFailure {
     let (status, rejection, cause) = match error {
+        AuthError::Intake(source) => {
+            use crate::intake::ErrorKind;
+            let refused = matches!(
+                source.kind,
+                ErrorKind::Authentication | ErrorKind::MfaUnsupported | ErrorKind::BindingChanged
+            );
+            return ApiFailure {
+                status: if refused {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                },
+                rejection: if refused {
+                    MetricRejection::Auth
+                } else {
+                    MetricRejection::Internal
+                },
+                cause: if refused {
+                    InterfaceError::AuthenticationRefused
+                } else {
+                    InterfaceError::AuthStateUnknown
+                },
+                intake: Some(source),
+            };
+        }
         AuthError::Invalid => (
             StatusCode::UNAUTHORIZED,
             MetricRejection::Auth,
@@ -420,6 +548,7 @@ fn auth_rejection(error: AuthError) -> ApiFailure {
         status,
         rejection,
         cause,
+        intake: None,
     }
 }
 
@@ -427,6 +556,7 @@ fn json(observation: &RequestContext, value: &impl Serialize, cap: usize) -> Res
     match bounded_json::to_vec(value, cap) {
         Ok(bytes) => ([(header::CONTENT_TYPE, "application/json")], bytes).into_response(),
         Err(error) => ApiFailure {
+            intake: None,
             status: StatusCode::SERVICE_UNAVAILABLE,
             rejection: MetricRejection::Internal,
             cause: match error {
@@ -466,7 +596,24 @@ fn anonymous(headers: &HeaderMap) -> Result<(), ApiFailure> {
 
 // Exact one-header grammar, no comma folding, alternate scheme, whitespace or
 // credential fallback. Only authenticated API sessions are usable here.
-fn authenticated(state: &AppState, headers: &HeaderMap) -> Result<(String, Session), ApiFailure> {
+async fn authenticated(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(String, Session), ApiFailure> {
+    let (id, _) = authenticated_local(state, headers)?;
+    let session = state
+        .auth
+        .current_session(&id)
+        .await
+        .map_err(auth_rejection)?;
+    Ok((id, session))
+}
+
+// Logout remains possible during an intake outage; it only removes local state.
+fn authenticated_local(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(String, Session), ApiFailure> {
     no_cookie_or_encoding(headers)?;
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let value = values.next().and_then(|value| value.to_str().ok());
@@ -552,7 +699,8 @@ async fn session(
     }
     match state
         .auth
-        .authenticate_api(&input.credential, &input.challenge)
+        .authenticate_current(&input.credential, &input.challenge)
+        .await
     {
         Ok((id, _)) => json(
             &observation,
@@ -603,7 +751,7 @@ async fn submission(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Response {
-    let (id, _) = match authenticated(&state, &headers) {
+    let (id, _) = match authenticated(&state, &headers).await {
         Ok(auth) => auth,
         Err(failure) => return failure.respond(&observation),
     };
@@ -624,6 +772,7 @@ async fn submission(
     };
     if let Err(error) = catalog.reservation_quote(&input.model) {
         return ApiFailure {
+            intake: None,
             status: StatusCode::BAD_REQUEST,
             rejection: MetricRejection::Input,
             cause: error.into(),
@@ -649,7 +798,7 @@ async fn logout(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Response {
-    let (id, _) = match authenticated(&state, &headers) {
+    let (id, _) = match authenticated_local(&state, &headers) {
         Ok(auth) => auth,
         Err(failure) => return failure.respond(&observation),
     };
@@ -660,47 +809,6 @@ async fn logout(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => auth_error(&observation, error),
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BalanceRequest {}
-
-async fn balance(
-    State(state): State<AppState>,
-    Extension(observation): Extension<RequestContext>,
-    headers: HeaderMap,
-    bytes: Bytes,
-) -> Response {
-    let (_, session) = match authenticated(&state, &headers) {
-        Ok(auth) => auth,
-        Err(failure) => return failure.respond(&observation),
-    };
-    if let Err(failure) = parse::<BalanceRequest>(&headers, &bytes) {
-        return failure.respond(&observation);
-    }
-    let snapshot = match state.accounting.snapshot(&session.account_id) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return ApiFailure {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                rejection: MetricRejection::Internal,
-                cause: match error {
-                    AccountingError::UnknownAccount => InterfaceError::AccountUnavailable,
-                    _ => InterfaceError::AccountingStateUnknown,
-                },
-            }
-            .respond(&observation)
-        }
-    };
-    // Fixed-size, account-local control response. No inference or catalog calls;
-    // failure observations contain only the closed category, never this balance.
-    axum::Json(serde_json::json!({
-        "available_microunits": snapshot.available_microunits.to_string(),
-        "in_flight": snapshot.in_flight,
-        "completed_requests": snapshot.completed_requests.to_string(),
-    }))
-    .into_response()
 }
 
 #[derive(Serialize)]
@@ -735,7 +843,7 @@ async fn models(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Response {
-    let (id, _) = match authenticated(&state, &headers) {
+    let (id, _) = match authenticated(&state, &headers).await {
         Ok(auth) => auth,
         Err(failure) => return failure.respond(&observation),
     };
@@ -791,7 +899,7 @@ async fn models(
                 .map(|rate| rate.to_string()),
         });
     }
-    if let Err(error) = state.auth.checked_api_session(&id) {
+    if let Err(error) = state.auth.current_session(&id).await {
         return auth_error(&observation, error);
     }
     #[derive(Serialize)]
@@ -846,11 +954,6 @@ fn reasoning_metadata_requested(headers: &HeaderMap) -> bool {
     values.next().is_some_and(|value| value == "true") && values.next().is_none()
 }
 
-fn usage_metrics_requested(headers: &HeaderMap) -> bool {
-    let mut values = headers.get_all("x-tinfoil-request-usage-metrics").iter();
-    values.next().is_some_and(|value| value == "true") && values.next().is_none()
-}
-
 async fn chat(
     State(state): State<AppState>,
     Extension(ticket): Extension<crate::lifecycle::Ticket>,
@@ -861,7 +964,7 @@ async fn chat(
     bytes: Bytes,
 ) -> Response {
     let reject = |status, reason| reject(&observation, status, reason);
-    let (session_id, session) = match authenticated(&state, &headers) {
+    let (session_id, session) = match authenticated(&state, &headers).await {
         Ok(auth) => auth,
         Err(failure) => return failure.respond(&observation),
     };
@@ -886,7 +989,7 @@ async fn chat(
         reasoning_effort: input.reasoning_effort.take(),
         chat_template_kwargs: input.chat_template_kwargs.take(),
     };
-    let usage_metrics = usage_metrics_requested(&headers);
+    let options = crate::api_stream::Options::parse(&headers);
     let inference = state.inference.clone();
     let delivery_heavy = heavy.clone();
     let submission = Submission {
@@ -921,7 +1024,7 @@ async fn chat(
                         delivery_heavy,
                         prepared,
                         inference,
-                        usage_metrics,
+                        options,
                     )
                 },
             )
@@ -960,13 +1063,7 @@ async fn chat(
                 },
                 heavy,
                 move |owner, prepared| {
-                    crate::api_stream::compose(
-                        owner,
-                        delivery_heavy,
-                        prepared,
-                        inference,
-                        usage_metrics,
-                    )
+                    crate::api_stream::compose(owner, delivery_heavy, prepared, inference, options)
                 },
             )
             .await
@@ -974,7 +1071,7 @@ async fn chat(
     match result {
         Ok(body) => {
             let mut response = axum::body::Body::new(body).into_response();
-            if usage_metrics {
+            if options.usage_metrics {
                 response
                     .headers_mut()
                     .insert(header::TRAILER, "X-Tinfoil-Usage-Metrics".parse().unwrap());

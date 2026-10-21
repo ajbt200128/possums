@@ -94,7 +94,6 @@ async fn chat_markers_do_not_reject_and_frames_pin_exact_lease() {
     for (method, uri) in [
         (Method::GET, "/v1/models"),
         (Method::POST, "/v1/submissions"),
-        (Method::POST, "/v1/balance"),
         (Method::GET, "/attestation"),
         (Method::POST, "/v1/chat/completions/"),
     ] {

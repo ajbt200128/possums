@@ -44,7 +44,9 @@ async fn terminal_numeric_observations_do_not_require_an_eligible_original_pool_
     let (tx, body) = f.delivery();
     let completion = owner.spawn_settling(tx, |_, mut settlement| async move {
         settlement.evidence(Evidence::sse(usage()));
-        settlement.finish(&Err(I::SdkStreamDecodeFailed.into()))
+        settlement
+            .finish(&Err(I::SdkStreamDecodeFailed.into()))
+            .await
     });
     assert_eq!(
         bounded(completion).await.unwrap(),
@@ -71,7 +73,9 @@ async fn primary_and_independent_accounting_failure_are_once_only_and_keep_usage
         evidence.cached_tokens = 0;
         settlement.evidence(evidence);
         settlement.expected_interruption();
-        settlement.finish(&Err(I::StreamTransportFailed.into()))
+        settlement
+            .finish(&Err(I::StreamTransportFailed.into()))
+            .await
     });
     assert_eq!(
         bounded(completion).await.unwrap(),
@@ -112,18 +116,22 @@ async fn terminal_uses_final_or_last_cumulative_not_sum_and_distinguishes_cache_
             }
             if complete {
                 // Stored authenticated evidence overrides a different fallback.
-                settlement.finish(&Ok(if fallback {
-                    usage()
-                } else {
-                    StreamUsage {
-                        input_tokens: 8,
-                        output_tokens: 8,
-                        total_tokens: 16,
-                    }
-                }))
+                settlement
+                    .finish(&Ok(if fallback {
+                        usage()
+                    } else {
+                        StreamUsage {
+                            input_tokens: 8,
+                            output_tokens: 8,
+                            total_tokens: 16,
+                        }
+                    }))
+                    .await
             } else {
                 settlement.expected_interruption();
-                settlement.finish(&Err(I::StreamTransportFailed.into()))
+                settlement
+                    .finish(&Err(I::StreamTransportFailed.into()))
+                    .await
             }
         });
         assert_eq!(
@@ -199,7 +207,9 @@ async fn expected_disconnect_does_not_invent_fault_or_usage() {
     let (tx, body) = f.delivery();
     let completion = owner.spawn_settling(tx, |_, mut settlement| async move {
         settlement.expected_interruption();
-        settlement.finish(&Err(I::StreamTransportFailed.into()))
+        settlement
+            .finish(&Err(I::StreamTransportFailed.into()))
+            .await
     });
     assert_eq!(bounded(completion).await.unwrap(), Ok(Outcome::Refunded));
     assert!(E::ALL
@@ -220,7 +230,9 @@ async fn panic_cleanup_observes_unknown_once_but_post_settlement_panic_never_rec
         let completion = owner.spawn_settling(tx, move |_, mut settlement| async move {
             settlement.evidence(Evidence::sse(usage()));
             if settled {
-                let receipt = settlement.finish(&Err(I::SdkStreamDecodeFailed.into()));
+                let receipt = settlement
+                    .finish(&Err(I::SdkStreamDecodeFailed.into()))
+                    .await;
                 assert_eq!(receipt.outcome(), &Ok(Outcome::Settled { charged: 29 }));
             }
             panic!("synthetic owner cleanup");
@@ -258,7 +270,7 @@ async fn output_owned_projection_does_not_recount_but_other_upstream_fault_survi
             } else {
                 I::SdkStreamDecodeFailed
             };
-            settlement.finish(&Err(failure.into()))
+            settlement.finish(&Err(failure.into())).await
         });
         assert_eq!(bounded(completion).await.unwrap(), Ok(Outcome::Refunded));
         assert_eq!(m.interface_error_count(E::StreamValidationFailed), None);

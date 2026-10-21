@@ -13,6 +13,8 @@ use tokio::sync::Semaphore;
 
 #[path = "generation_owner_observation_tests.rs"]
 mod observations;
+#[path = "generation_owner_remote_tests.rs"]
+mod remote;
 
 const ACCOUNT: &str = "a";
 const BINDING: [u8; 32] = [99; 32];
@@ -160,11 +162,13 @@ pub(crate) async fn completed_cached_usage_fixture(
         final_evidence.cache_usage_available = true;
         final_evidence.cached_tokens = 2;
         settlement.evidence(final_evidence);
-        settlement.finish(&Ok(StreamUsage {
-            input_tokens: 8,
-            output_tokens: 8,
-            total_tokens: 16,
-        }))
+        settlement
+            .finish(&Ok(StreamUsage {
+                input_tokens: 8,
+                output_tokens: 8,
+                total_tokens: 16,
+            }))
+            .await
     });
     assert_eq!(
         bounded(completion).await.unwrap(),
@@ -199,7 +203,7 @@ async fn panic_after_committed_running_usage_settles_once_instead_of_refunding()
         settlement.evidence(crate::inference::forward::Evidence::sse(usage()));
         panic!("synthetic panic after evidence");
         #[allow(unreachable_code)]
-        settlement.finish(&Err(InferenceError::Unavailable))
+        settlement.finish(&Err(InferenceError::Unavailable)).await
     });
     assert_eq!(bounded(receipt).await.unwrap(), Err(OwnerError::Panicked));
     f.outcome(1, Outcome::Settled { charged: 29 }, 971);
@@ -312,7 +316,7 @@ async fn settlement_does_not_retire_worker_cleanup_ticket() {
     let (settled_tx, settled) = oneshot::channel();
     let (release, held) = oneshot::channel();
     let completion = owner.spawn_settling((), move |(), settlement| async move {
-        let receipt = settlement.finish(&Ok(usage()));
+        let receipt = settlement.finish(&Ok(usage())).await;
         settled_tx.send(()).unwrap();
         held.await.unwrap();
         receipt
@@ -333,10 +337,12 @@ async fn successful_refund_is_not_drain_failure() {
     let owner = f.pending(1);
     f.lifecycle.quiesce();
     let completion = owner.spawn_settling((), |(), settlement| async move {
-        settlement.finish(&Ok(StreamUsage {
-            total_tokens: 0,
-            ..usage()
-        }))
+        settlement
+            .finish(&Ok(StreamUsage {
+                total_tokens: 0,
+                ..usage()
+            }))
+            .await
     });
     assert_eq!(bounded(completion).await.unwrap(), Ok(Outcome::Refunded));
     assert_eq!(bounded(f.lifecycle.wait_drained()).await, Ok(()));
@@ -351,7 +357,7 @@ async fn settling_handoff_delivers_before_terminal_settlement() {
     let completion = pending.spawn_settling(tx, move |mut tx, settlement| async move {
         tx.send(b"startup").await.unwrap();
         finish.await.unwrap();
-        settlement.finish(&Ok(usage()))
+        settlement.finish(&Ok(usage())).await
     });
     let frame = bounded(body.frame()).await.unwrap().unwrap();
     assert_eq!(frame.into_data().unwrap(), "startup");
@@ -893,7 +899,7 @@ async fn settling_callback_observes_charge_before_token_and_keeps_inputs_leased(
             history: &history,
         };
         let result = Ok(usage()); // Synthetic stand-in for verified adapter EOF.
-        let receipt = settlement.finish(&result);
+        let receipt = settlement.finish(&result).await;
         if matches!(receipt.outcome(), Ok(Outcome::Settled { .. })) {
             renderer.complete(|model, history| {
                 // Re-entering accounting here also checks that its lock has
@@ -962,7 +968,7 @@ async fn settling_failed_or_invalid_usage_refunds_without_token() {
         let tokens = Arc::new(AtomicUsize::new(0));
         let issued = tokens.clone();
         let completion = pending.spawn_settling(tx, move |_, settlement| async move {
-            let receipt = settlement.finish(&result);
+            let receipt = settlement.finish(&result).await;
             assert_eq!(receipt.outcome(), &Ok(Outcome::Refunded));
             if matches!(receipt.outcome(), Ok(Outcome::Settled { .. })) {
                 issued.fetch_add(1, Ordering::SeqCst);
@@ -994,7 +1000,7 @@ async fn settling_pre_poll_or_held_cancellation_drops_inputs_before_leases_and_r
                 let _resource = probe;
                 started_tx.send(()).unwrap();
                 let result = std::future::pending::<Result<StreamUsage, InferenceError>>().await;
-                settlement.finish(&result)
+                settlement.finish(&result).await
             }
         });
         // No await yet on this current-thread runtime: the guard must already
@@ -1067,7 +1073,7 @@ async fn settling_factory_or_future_panic_refunds_but_post_finish_panic_keeps_ch
                 let _resource = probe;
                 assert_ne!(stage, 1, "synthetic settling poll failure");
                 assert_eq!(
-                    settlement.finish(&Ok(usage())).outcome(),
+                    settlement.finish(&Ok(usage())).await.outcome(),
                     &Ok(Outcome::Settled { charged: 29 })
                 );
                 panic!("synthetic post-settlement failure");
@@ -1105,7 +1111,7 @@ async fn settling_observer_and_body_loss_while_held_never_abort_work() {
         started_tx.send(()).unwrap();
         finish.await.unwrap();
         assert_eq!(tx.send(b"tail").await, Err(DeliveryError::Closed));
-        let receipt = settlement.finish(&Ok(usage()));
+        let receipt = settlement.finish(&Ok(usage())).await;
         drop(resource);
         dropped_tx.send(()).unwrap();
         receipt

@@ -607,11 +607,13 @@ fn held_original_generation(
     let (release, held) = tokio::sync::oneshot::channel();
     let completion = owner.spawn_settling((), |(), settlement| async move {
         held.await.unwrap();
-        settlement.finish(&Ok(crate::inference::stream::StreamUsage {
-            input_tokens: 5,
-            output_tokens: 4,
-            total_tokens: 9,
-        }))
+        settlement
+            .finish(&Ok(crate::inference::stream::StreamUsage {
+                input_tokens: 5,
+                output_tokens: 4,
+                total_tokens: 9,
+            }))
+            .await
     });
     (release, completion)
 }
