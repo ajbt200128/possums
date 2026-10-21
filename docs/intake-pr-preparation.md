@@ -1,4 +1,41 @@
-# Intake gateway PR preparation — local, not deployed
+# Intake gateway PR preparation and gated rollout
+
+## Subsequent operator rollout request
+
+After the local preparation below, the operator explicitly requested deployment.
+This authorizes publishing the branch/PR and proceeding through normal reviewed
+merge, exact-source Linux CI, release provenance and protected production approval.
+It does not waive those gates, authorize client installation/activation or paid
+inference, or establish correct live reference delivery. The initial prepare-only
+restrictions below describe that earlier checkpoint, not the new rollout request.
+The separate reference transition must be completed and verified before an
+unchanged-configuration image update; no guard may be relaxed to bypass it.
+
+Main advanced to `b2cc2a90b23271969b5989b39b70898547682f57` before publication.
+Integration commit `f375d9e` preserves its public-evidence cache/availability warning
+and native charge-display fixes plus local Tor fixtures. The only textual conflict
+combined both required client test suites; the local Tor test auth constructor also
+explicitly initializes its new optional intake field to `None`.
+
+The combined source passed all-target/all-feature Rust tests (499 library passed,
+four ignored, plus integrations), Clippy and application formatting, and 119 Python
+tests plus eight planner tests using existing Python 3.13.13. An incidental run via
+Apple Python 3.9 failed two pre-existing interpreter-sensitive fixtures; no source
+or release gate was weakened for it. The earlier Pi artifact below predates this
+main integration. A fresh actual package at
+`/private/tmp/possums-pi-build-NFeOWAUU/package` passed unmodified `check.mjs`: all
+19 invoked suites plus 70 admission checks, including 72 manifest-cache checks,
+162 Pi groups, three intake diagnostic groups and 18 emitted-package host checks.
+Parent rechecked all 75 recorded source inputs after resolving/committing the merge
+and matched the extension/report hashes. The snapshot's Git metadata predates the
+merge commit; the per-file hashes bind its actual inputs, not tagged provenance.
+The current extension SHA-256 is
+`38536f556cbe27503df8b6072d62de9e51338e491bbca5157f1d50b84fc9e1c0`;
+build-report SHA-256 is
+`1c495c153a4c89901482ffefcc6ee15a076a4758fa51d03cc507cc5e77339b01`.
+Sandbox/helper coverage remains scratch-only, loopback-only and darwin/arm64.
+Required Linux CI and live deployment/provenance/reference verification remain
+outstanding.
 
 ## Draft PR
 
@@ -179,6 +216,7 @@ commit; actual HTTPS cases were added in the dedicated qualification commit.
 Complete final-source checks and artifact source hashes remain the release evidence
 above, not a claim that each intermediate commit is deployable.
 
-This is not authorization to push, open a remote PR, merge, publish, deploy,
-install clients, change runtime references or run live integration/inference.
-The draft above is a local PR description only.
+This initial preparation packet did not authorize pushing, opening a remote PR,
+merging, publishing, deployment, client installation, runtime-reference changes or
+live integration/inference. The subsequent rollout request above expands only the
+stated gateway rollout scope; historical qualification is not deployment evidence.
