@@ -37,6 +37,8 @@ jobs:
       - name: Prefer upstream before GitHub cache lookups
         run: python3 scripts/ci-cache-order.py
       - run: python3 -m unittest discover -s tests -p 'test_release*.py'
+      - name: Test opt-in intake cutover without runtime credentials or traffic
+        run: python3 -m unittest discover -s tests -p 'test_intake_cutover.py'
       - name: Check pinned Linux release-cache graph partition without building outputs
         run: RELEASE_CACHE_GRAPH_CHECK=1 python3 -m unittest discover -s tests -p 'test_release_cache.py'
       - name: Test image-health qualification guards offline

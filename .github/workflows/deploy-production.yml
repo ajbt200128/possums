@@ -1,5 +1,5 @@
 name: Deploy production
-run-name: Production ${{ inputs.tag }} from ${{ inputs.source }}
+run-name: Production ${{ inputs.tag }} from ${{ inputs.source }}${{ inputs.reference_transition == 'intake' && ' [intake cutover]' || '' }}
 on:
   workflow_dispatch:
     inputs:
@@ -23,6 +23,19 @@ on:
         description: Verified public manifest SHA256 (without prefix)
         required: true
         type: string
+      reference_transition:
+        description: Ordinary no-drift update or separately approved one-time intake reference cutover
+        required: false
+        type: choice
+        default: none
+        options:
+          - none
+          - intake
+      exclusive_configuration_custody:
+        description: Intake only — all other gateway console/API/project writers idle until outcome reconciled; operator assertion, not server lock
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
@@ -34,6 +47,8 @@ env:
   TAG: ${{ inputs.tag }}
   IMAGE: ${{ inputs.image }}
   MANIFEST: ${{ inputs.manifest }}
+  REFERENCE_TRANSITION: ${{ inputs.reference_transition || 'none' }}
+  INTAKE_CONFIGURATION_CUSTODY: ${{ inputs.exclusive_configuration_custody && 'true' || 'false' }}
   PRODUCTION_DEPLOYMENT_ENABLED: ${{ vars.PRODUCTION_DEPLOYMENT_ENABLED }}
   RELEASE_AUTOMATION_ENABLED: ${{ vars.RELEASE_AUTOMATION_ENABLED }}
 jobs:
