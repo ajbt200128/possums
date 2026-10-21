@@ -5,6 +5,10 @@ mod offline_e2e {
     include!("tor_offline_e2e_tests.rs");
 }
 
+mod local_e2e {
+    include!("tor_local_e2e_tests.rs");
+}
+
 // Public deterministic seed [7; 32], encoded as a standard v3 address.
 const SYNTHETIC_B: &str = "5jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwfmxqd.onion";
 
