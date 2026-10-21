@@ -57,8 +57,11 @@ class CiImageHandoffTests(unittest.TestCase):
         self.assertIn('python3 tests/image_health.py "$RUNNER_TEMP/ci-production/production-image.tar.gz" '
                       '"$RUNNER_TEMP/ci-fixture/fixture-image.tar.gz"', startup)
         for constraint in ("--network none", "--read-only", "--tmpfs /tmp:rw,size=64m,mode=1777",
-                           "test \"$(docker logs", "startup-canary"):
+                           "test \"$(docker logs", "POSSUMS_INTAKE_ORIGIN=https://synthetic-intake.invalid",
+                           "POSSUMS_INTAKE_LEDGER_KEY=synthetic-startup-ledger-key-00000000",
+                           "synthetic-intake|synthetic-startup-ledger-key"):
             self.assertIn(constraint, startup)
+        self.assertNotIn("POSSUMS_ACCOUNTS_JSON", startup)
         self.assertIn("linux/amd64", job("image"))
 
     def test_staging_copies_only_archives_and_public_verifiers(self):

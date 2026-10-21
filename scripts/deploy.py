@@ -25,7 +25,7 @@ CLI_SHA256 = "ef014c67a976b4b47941d084fb0a3837ba6eb59c9f4e662424c6826fb7a70f8c"
 CLI_URL = "https://github.com/tinfoilsh/tinfoil-cli/releases/download/v0.19.0/tinfoil-cli_0.19.0_linux_amd64.tar.gz"
 LIMIT = 16 << 20
 COMPLETION_TIMEOUT_SECONDS = 900
-REQUIRED_REFS = {"POSSUMS_ACCOUNTS_JSON", "TINFOIL_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
+REQUIRED_REFS = {"POSSUMS_INTAKE_ORIGIN", "POSSUMS_INTAKE_LEDGER_KEY", "TINFOIL_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
 STABLE = ("id", "name", "repo", "project_id", "cpus", "gpus", "memory_mb", "variables", "secrets",
           "ssh_keys", "debug", "disable_cc_mode", "domain", "held", "volume_slots", "volumes",
           "host_gpu_type", "host_cpu_type")
@@ -51,7 +51,7 @@ r.CODES.update({
     "credential": ("authorization", "Provision the supported admin credential only as a production environment secret."),
     "control_read": ("control-plane", "Inspect the production state privately; no update was replayed."),
     "control_shape": ("control-plane", "Resolve the unsupported control-plane response without sharing its contents."),
-    "not_stable": ("plan", "Reconcile pending, held, debug, non-confidential or non-running production state before a new request."),
+    "not_stable": ("plan", "Verify approved intake reference delivery and absence of legacy account authority, as well as stable running, confidential, non-held state, before a separately authorized deployment."),
     "plan_http": ("pre-update-plan", "Check production admin planning access and the observed HTTP status; no update was sent."),
     "plan_fetch": ("pre-update-plan", "The read-only plan could not be acquired; cause unknown. Check control-plane connectivity; no update was sent."),
     "plan_rejected": ("pre-update-plan", "The read-only plan did not match the release and approved hostname and unchanged configuration constraints; no update was sent."),
@@ -240,6 +240,7 @@ def stable_running(view, tag):
             and boolean(view.get("held"), False) and type(view.get("mark_latest_release")) is bool
             and unique_names(view.get("secrets"))
             and REQUIRED_REFS.issubset(set(view["secrets"]))
+            and "POSSUMS_ACCOUNTS_JSON" not in view["secrets"]
             and all(field in view for field in STABLE))
 
 

@@ -47,10 +47,14 @@ async fn main() {
         [mode] if mode == "--health-quiescing" => Some(true),
         _ => std::process::exit(1),
     };
-    let Ok(accounts) = env::var("POSSUMS_ACCOUNTS_JSON") else {
+    let (Ok(origin), Ok(ledger_key)) = (
+        env::var("POSSUMS_INTAKE_ORIGIN"),
+        env::var("POSSUMS_INTAKE_LEDGER_KEY"),
+    ) else {
         return;
     };
-    let Ok(auth) = Auth::from_json(&accounts) else {
+    // Construction validates configuration without making any intake request.
+    let Ok(auth) = Auth::from_intake_config(&origin, &ledger_key) else {
         return;
     };
     let provider = Arc::new(Synthetic);
