@@ -15,6 +15,9 @@ mod generation;
 mod generation_owner;
 pub mod health;
 pub mod inference;
+// Private native authority; retained protocol operations also qualify offline receipts.
+#[allow(dead_code)]
+mod intake;
 pub mod lifecycle;
 pub mod server;
 // Bounded delivery owners retain the shared heavy admission.

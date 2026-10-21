@@ -48,6 +48,8 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"
 subtle = "2.6"
 thiserror = "2"
+# Existing pinned dependency; parse intake's fixed UTC receipt timestamps.
+time = { version = "=0.3.55", features = ["parsing", "formatting"] }
 # Exact upstream revision and local patch provenance: vendor/tinfoil/POSSUMS.md.
 tinfoil = { path = "vendor/tinfoil" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
