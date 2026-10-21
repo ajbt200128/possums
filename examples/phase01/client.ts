@@ -1,4 +1,5 @@
 import { Channel, hasByteReadTimeout, type ResponseOptions } from './transport.js';
+import { intakeDiagnostic, intakeDescription, type IntakeDiagnostic } from './intake-diagnostics.js';
 import type { V3Input, TorV3Input } from '../../clients/pi/v3.js';
 import type { TorConnection } from '../../clients/pi/tor-connection.js';
 import { TorNativeTransportFailure, torNativeTransportDiagnostic, type TorNativeDiagnostic } from '../../clients/pi/tor-native-transport.mjs';
@@ -61,14 +62,6 @@ export class CompletionFailure extends DiagnosticFailure {
   }
   get settlement(): Readonly<Receipt> | undefined { return interruptedReceipts.get(this); }
   get nativeDiagnostic(): Readonly<TorNativeDiagnostic> | undefined { return nativeDiagnostics.get(this); }
-}
-export type BalanceSnapshot = Readonly<{ availableMicrounits: string; inFlight: number; completedRequests: string }>;
-export class BalanceFailure extends ChannelError {
-  constructor(readonly stage: 'request' | 'validation', code: ChannelError['code'] = 'rejected', readonly observation?: DiagnosticFailure) {
-    super(code);
-    this.message = `possums_balance_${stage}_failed`;
-    Object.freeze(this);
-  }
 }
 function usageMetadata(value: any) {
   const input = count(value?.prompt_tokens), output = count(value?.completion_tokens), sum = count(value?.total_tokens);
@@ -142,7 +135,8 @@ const gatewayReasons = new Set(['insufficient_credit', 'unauthorized', 'invalid_
 const claimedRefunds = new WeakSet<GatewayError>();
 const confirmedRefunds = new WeakSet<GatewayError>();
 const confirmedSettlements = new WeakMap<GatewayError, Readonly<Receipt>>();
-function gatewayDescription(reason: string, detail: string | undefined, refunded: boolean, receipt?: Readonly<Receipt>): string {
+const intakeDiagnostics = new WeakMap<GatewayError, IntakeDiagnostic>();
+function gatewayDescription(reason: string, detail: string | undefined, refunded: boolean, receipt?: Readonly<Receipt>, intake?: IntakeDiagnostic): string {
   const reasons: Readonly<Record<string, string>> = {
     insufficient_credit: 'Insufficient credit for this model’s maximum reservation.',
     unauthorized: 'Gateway rejected authentication; use /login to authenticate again.',
@@ -153,20 +147,23 @@ function gatewayDescription(reason: string, detail: string | undefined, refunded
   const label = gatewayDetailLabel(detail);
   const known = Object.hasOwn(reasons, reason);
   return `Possums: ${known ? `[${reason}] ${reasons[reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; cause unknown.'}` +
-    (label ? ` ${label}.` : '') + ` Stage: ${reason === 'service_quiescing' ? 'admission' : detail === 'images_unsupported' ? 'request' : 'gateway'}; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (receipt ? ` Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits. Receipt alone does not establish successful generation or authorize tool execution. Not replayed. A new request may incur another charge.` : refunded ? ' Reservation refunded. Not replayed.' :
+    (label ? ` ${label}.` : '') + (intake ? ` ${intakeDescription(intake)}` : '') + ` Stage: ${reason === 'service_quiescing' ? 'admission' : detail === 'images_unsupported' ? 'request' : 'gateway'}; constraint: ${label ? detail : known ? reason : 'unclassified'}. Share only this content-free code/stage/constraint for support.` + (receipt ? ` Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits. Receipt alone does not establish successful generation or authorize tool execution. Not replayed. A new request may incur another charge.` : refunded ? ' Reservation refunded. Not replayed.' :
       ' Charge unknown. Not replayed. A new request may incur another charge.');
 }
 export class GatewayError extends ChannelError {
   readonly status?: number;
   readonly reason: string;
   readonly detail?: string;
-  constructor(reason: string, detail?: string, _claimedBilling: 'refunded' | 'unknown' = 'unknown', status?: number) {
+  constructor(reason: string, detail?: string, _claimedBilling: 'refunded' | 'unknown' = 'unknown', status?: number, intake?: unknown) {
     super('uncertain');
     this.reason = gatewayReasons.has(reason) ? reason : 'unclassified';
     this.detail = detail === undefined ? undefined : details.has(detail) ? detail : 'unclassified';
     if (Number.isInteger(status) && status! >= 100 && status! <= 599) this.status = status;
-    this.message = gatewayDescription(this.reason, this.detail, false);
+    const diagnostic = intakeDiagnostic(intake);
+    if (diagnostic) intakeDiagnostics.set(this, diagnostic);
+    this.message = gatewayDescription(this.reason, this.detail, false, undefined, diagnostic);
   }
+  get intakeDiagnostic(): IntakeDiagnostic | undefined { return intakeDiagnostics.get(this); }
   get billing(): 'refunded' | 'settled' | 'unknown' { const receipt = confirmedSettlements.get(this); return receipt ? receipt.outcome ?? 'unknown' : confirmedRefunds.has(this) ? 'refunded' : 'unknown'; }
   get settlement(): Readonly<Receipt> | undefined { return confirmedSettlements.get(this); }
 }
@@ -182,15 +179,16 @@ export function gatewayError(value: any, status?: number): GatewayError {
     return new GatewayError('service_quiescing', undefined, 'unknown', status);
   }
   responseFields(value.error, ['code'], ['detail', 'message', 'billing', 'outcome']);
+  const intake = intakeDiagnostic(value.error.intake);
   requireThat(typeof value.error.code === 'string' &&
-    gatewayReasons.has(value.error.code) && value.error.code !== 'service_quiescing');
+    (gatewayReasons.has(value.error.code) || intake !== undefined) && value.error.code !== 'service_quiescing');
   requireThat(value.error.detail === undefined || (typeof value.error.detail === 'string' && details.has(value.error.detail)));
   requireThat(value.error.message === undefined || typeof value.error.message === 'string');
   requireThat(value.error.billing === undefined || value.error.billing === 'refunded' || value.error.billing === 'unknown');
   requireThat(value.error.outcome === undefined || (value.error.code === 'duplicate_request' &&
     typeof value.error.outcome === 'string' && ['in_flight', 'settled', 'refunded'].includes(value.error.outcome)));
-  const failure = new GatewayError(value.error.code, value.error.detail);
-  if (value.error.billing === 'refunded') claimedRefunds.add(failure);
+  const failure = new GatewayError(value.error.code, value.error.detail, 'unknown', status, intake);
+  if (gatewayReasons.has(value.error.code) && value.error.billing === 'refunded') claimedRefunds.add(failure);
   return failure;
 }
 
@@ -201,6 +199,7 @@ export class CatalogFailure extends ChannelError {
   readonly status?: number;
   readonly reason?: string;
   readonly detail?: string;
+  readonly intakeDiagnostic?: IntakeDiagnostic;
   constructor(readonly stage: CatalogFailureStage, code: ChannelError['code'] = 'rejected', status?: number, response?: unknown) {
     super(code);
     requireThat(['request', 'http', 'body', 'validation', 'conversion'].includes(stage));
@@ -211,6 +210,7 @@ export class CatalogFailure extends ChannelError {
       try {
         const failure = gatewayError(response, status);
         this.reason = failure.reason; this.detail = failure.detail;
+        this.intakeDiagnostic = failure.intakeDiagnostic;
       } catch { /* An unreadable/unknown error body does not erase the HTTP status. */ }
     }
     Object.freeze(this);
@@ -369,10 +369,10 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
           terminal = true;
           if (receipt && atEOF()) {
             confirmedSettlements.set(failure, Object.freeze({ ...receipt, deliveryComplete: true }));
-            failure.message = gatewayDescription(failure.reason, failure.detail, false, receipt);
+            failure.message = gatewayDescription(failure.reason, failure.detail, false, receipt, failure.intakeDiagnostic);
           } else if (claimedRefunds.has(failure)) {
             confirmedRefunds.add(failure);
-            failure.message = gatewayDescription(failure.reason, failure.detail, true);
+            failure.message = gatewayDescription(failure.reason, failure.detail, true, undefined, failure.intakeDiagnostic);
           }
           throw failure;
         }
@@ -399,7 +399,7 @@ export async function consumeCompletion(body: ReadableStream<Uint8Array>, model:
         error instanceof CompletionFailure ? error.nativeDiagnostic : undefined);
     }
     if (failure) {
-      const interrupted = new GatewayError(failure.reason, failure.detail, 'unknown', failure.status);
+      const interrupted = new GatewayError(failure.reason, failure.detail, 'unknown', failure.status, failure.intakeDiagnostic);
       if (receipt) confirmedSettlements.set(interrupted, Object.freeze({ ...receipt, deliveryComplete: false }));
       throw interrupted; // An error's refund claim alone still needs authenticated EOF.
     }
@@ -488,25 +488,6 @@ export class ReferenceClient {
     }
     try { return validateModels(value); }
     catch { throw new CatalogFailure('validation'); }
-  }
-  async balance(signal?: AbortSignal): Promise<BalanceSnapshot> {
-    let value: any;
-    try {
-      requireThat(this.#bearer);
-      value = await this.channel.balance(this.#bearer, signal);
-    } catch (error) {
-      if (error instanceof GatewayError) throw error;
-      if (error instanceof TorNativeTransportFailure) throw new BalanceFailure('request', 'uncertain',
-        new CompletionFailure('balance', 'fetch', undefined, undefined, safeTorNativeDiagnostic(error)));
-      throw new BalanceFailure('request', error instanceof ChannelError ? error.code : 'rejected', error instanceof DiagnosticFailure ? error : undefined);
-    }
-    try {
-      keys(value, ['available_microunits', 'in_flight', 'completed_requests']);
-      amount(value.available_microunits); amount(value.completed_requests);
-      requireThat(Number.isInteger(value.in_flight) && !Object.is(value.in_flight, -0) && value.in_flight >= 0 && value.in_flight <= 0xffffffff);
-      return Object.freeze({ availableMicrounits: value.available_microunits,
-        inFlight: value.in_flight, completedRequests: value.completed_requests });
-    } catch { throw new BalanceFailure('validation'); }
   }
   async chat(model: string, messages: Chat['messages'], onDelta: (text: string) => void, newConversation = false,
     options: ChatOptions = {}): Promise<Completion> {

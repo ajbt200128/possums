@@ -2,16 +2,17 @@ import { Identity, type RequestContext } from 'ehbp';
 import { qualifyV3, qualifyTorV3, V3_EVIDENCE_LIMIT, type V3Input, type TorV3Input, type V3Identity } from '../../clients/pi/v3.js';
 import { TorConnection, TorNativeTransportFailure, isTorConnectionFailure, collectTorBody } from '../../clients/pi/tor-connection.js';
 import { CatalogFailure, GatewayError, gatewayError } from './client.js';
+import { IntakeFailure } from './intake-diagnostics.js';
 import { PUBLISHER, qualifyApi, qualifyPublished, requireApiApproval, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';
 import { LIMITS, ChannelError, DiagnosticFailure, OperationFailure, type FailureConstraint, Operation, cleanup, collect, parseJSON, requireThat, serialize, utf8 } from './limits.js';
 import { admitInvocation, fields, type Chat } from './tools.js';
 export type { Chat, Invocation, Message, Tool, ToolChoice, ToolCall, JSONObject, JSONValue } from './tools.js';
-export type { LiveModel, Receipt, BalanceSnapshot, CompletionOptions, CompletionEvent, ChatOptions } from './client.js';
+export type { LiveModel, Receipt, CompletionOptions, CompletionEvent, ChatOptions } from './client.js';
 export type ResponseInfo = Readonly<{ status: number; contentType: 'text/event-stream' | 'application/json' | null }>;
 export type ResponseOptions = { signal?: AbortSignal; onResponse?: (response: ResponseInfo) => void | Promise<void> };
 export { API_APPROVALS, validateKeyConfig, checkApproval } from './approval.js';
 export { LIMITS, serialize, parseJSON } from './limits.js';
-export { ReferenceClient, PreparedChat, BalanceFailure, consumeCompletion, validateModels } from './client.js';
+export { ReferenceClient, PreparedChat, consumeCompletion, validateModels } from './client.js';
 declare const __PHASE01_FIXTURE__: boolean;
 
 // Fetch decodes HTTP compression. Consumers cap decoded bytes while reading;
@@ -19,6 +20,7 @@ declare const __PHASE01_FIXTURE__: boolean;
 function request(url: string, op: Operation, method = 'GET', body?: Uint8Array<ArrayBuffer>, bearer?: string): Request {
   op.check();
   const headers = new Headers();
+  headers.set('x-possums-intake-diagnostics', 'v1');
   if (body) headers.set('Content-Type', 'application/json');
   if (bearer !== undefined) {
     requireThat(typeof bearer === 'string' && /^[A-Za-z0-9_-]{43}$/.test(bearer));
@@ -207,7 +209,7 @@ export class Channel {
       if (catalog) req.headers.set('x-possums-reasoning-metadata', 'true');
       constraint = 'fetch';
       sent = true; res = await send(req, op, value => { status = value; constraint = 'http'; }, this.#send);
-      if (!res.ok && (catalog || status === 503)) {
+      if (!res.ok) {
         let value: unknown;
         try { value = parseJSON(await this.#collect(res.body, LIMITS.error, op), LIMITS.error); }
         catch { /* Keep the observed HTTP rejection even if its bounded body fails. */ }
@@ -216,7 +218,14 @@ export class Channel {
           try { failure = gatewayError(value, status); } catch { /* Reject malformed envelopes as ordinary HTTP failures. */ }
           if (failure) throw failure;
         }
-        throw new CatalogFailure('http', sent && op.controller.signal.aborted ? 'uncertain' : 'rejected', status, value);
+        const code = sent && op.controller.signal.aborted ? 'uncertain' : 'rejected';
+        if (!catalog) {
+          let failure: GatewayError | undefined;
+          try { failure = gatewayError(value, status); } catch { /* No server text fallback. */ }
+          if (failure?.intakeDiagnostic) throw new IntakeFailure('challenge', status, failure.intakeDiagnostic, code);
+          if (status !== 503) throw new DiagnosticFailure('challenge', 'http', code, status);
+        }
+        throw new CatalogFailure('http', code, status, value);
       }
       requireThat(res.ok);
       constraint = 'body';
@@ -250,39 +259,17 @@ export class Channel {
           try { failure = gatewayError(value, status); } catch { /* Malformed envelope remains an HTTP rejection. */ }
           if (failure) throw failure;
         }
+        let failure: GatewayError | undefined;
+        try { failure = gatewayError(value, status); } catch { /* No server text fallback. */ }
+        if (failure?.intakeDiagnostic) throw new IntakeFailure(path === '/v1/sessions' ? 'authentication' : 'submission', status, failure.intakeDiagnostic);
         throw new DiagnosticFailure(path === '/v1/sessions' ? 'authentication' : 'submission', 'http', 'uncertain', status);
       }
       return value;
     }
     catch (error) {
-      if (error instanceof GatewayError || isTorConnectionFailure(error)) throw error;
+      if (error instanceof GatewayError || error instanceof IntakeFailure || isTorConnectionFailure(error)) throw error;
       if (error instanceof DiagnosticFailure) throw new DiagnosticFailure(error.stage, error.constraint, error.code, error.status ?? status);
       throw new DiagnosticFailure(path === '/v1/sessions' ? 'authentication' : 'submission', error instanceof OperationFailure ? error.constraint : 'body', 'uncertain', status);
-    } finally { op.close(); }
-  }
-  async balance(bearer: string, signal?: AbortSignal): Promise<unknown> {
-    // Reject missing/invalid authority before asking EHBP to encrypt anything.
-    requireThat(typeof bearer === 'string' && /^[A-Za-z0-9_-]{43}$/.test(bearer));
-    let status: number | undefined;
-    const body = await this.#encrypted('/v1/balance', serialize({}, LIMITS.control), bearer,
-      { signal, onResponse: response => { status = response.status; } });
-    const op = new Operation(LIMITS.operationMs, signal);
-    let constraint: FailureConstraint = 'body';
-    try {
-      const bytes = await this.#collect(body, LIMITS.control, op);
-      constraint = 'json';
-      const value = parseJSON(bytes, LIMITS.control);
-      if (status === 503 && value?.error?.code === 'service_quiescing') {
-        let failure: GatewayError | undefined;
-        try { failure = gatewayError(value, status); } catch { /* Malformed envelope remains an HTTP rejection. */ }
-        if (failure) throw failure;
-      }
-      if (status !== 200) throw new DiagnosticFailure('balance', 'http', 'uncertain', status);
-      return value;
-    } catch (error) {
-      if (error instanceof GatewayError || isTorConnectionFailure(error)) throw error;
-      if (error instanceof DiagnosticFailure) throw new DiagnosticFailure(error.stage, error.constraint, error.code, error.status ?? status);
-      throw new DiagnosticFailure('balance', error instanceof OperationFailure ? error.constraint : constraint, 'uncertain', status);
     } finally { op.close(); }
   }
   async chat(chat: Chat, bearer: string, options: ResponseOptions = {}): Promise<ReadableStream<Uint8Array>> {

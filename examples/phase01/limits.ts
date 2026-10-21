@@ -11,7 +11,7 @@ export const LIMITS = Object.freeze({
 export class ChannelError extends Error {
   constructor(public readonly code: 'rejected' | 'uncertain' = 'rejected') { super(code); }
 }
-export type FailureStage = 'trust' | 'challenge' | 'authentication' | 'catalog' | 'request' | 'submission' | 'transport' | 'stream' | 'settlement' | 'provider' | 'hook' | 'balance' | 'compaction';
+export type FailureStage = 'trust' | 'challenge' | 'authentication' | 'catalog' | 'request' | 'submission' | 'transport' | 'stream' | 'settlement' | 'provider' | 'hook' | 'compaction';
 export type FailureConstraint = 'manifest' | 'attestation' | 'verification' | 'provenance' | 'publisher' | 'certificate' | 'peer_key_mismatch' | 'key_config' | 'precision' | 'expired' | 'policy' | 'encoding' | 'fetch' | 'http' | 'body' | 'schema' | 'encryption' | 'endpoint_binding' | 'frames' | 'decryption' | 'utf8' | 'json' | 'envelope' | 'choice' | 'delta' | 'tool' | 'tool_state' | 'finish' | 'usage' | 'receipt' | 'finish_missing' | 'usage_missing' | 'done_missing' | 'eof' | 'interrupted' | 'idle' | 'deadline' | 'unexpected' | 'tool_name' | 'tool_id' | 'tool_schema' | 'schema_reference' | 'tool_choice' | 'history' | 'history_order' | 'tool_arguments' | 'conversion' | 'reasoning';
 // Content-free observations only: never attach the original exception or cause.
 export class DiagnosticFailure extends ChannelError {
@@ -19,7 +19,7 @@ export class DiagnosticFailure extends ChannelError {
   constructor(readonly stage: FailureStage, readonly constraint: FailureConstraint,
     code: ChannelError['code'] = 'rejected', status?: number) {
     super(code);
-    requireThat('trust challenge authentication catalog request submission transport stream settlement provider hook balance compaction'.split(' ').includes(stage));
+    requireThat('trust challenge authentication catalog request submission transport stream settlement provider hook compaction'.split(' ').includes(stage));
     requireThat('manifest attestation verification provenance publisher certificate peer_key_mismatch key_config precision expired policy encoding fetch http body schema encryption endpoint_binding frames decryption utf8 json envelope choice delta tool tool_state finish usage receipt finish_missing usage_missing done_missing eof interrupted idle deadline unexpected tool_name tool_id tool_schema schema_reference tool_choice history history_order tool_arguments conversion reasoning'.split(' ').includes(constraint));
     requireThat(code === 'rejected' || code === 'uncertain');
     if (Number.isInteger(status) && status! >= 100 && status! <= 599) this.status = status;

@@ -1,4 +1,5 @@
 import { CatalogFailure, CompletionFailure, GatewayError, gatewayDetailLabel, safeTorNativeDiagnostic, type Receipt } from '../../examples/phase01/client.js';
+import { IntakeFailure, intakeDescription, type IntakeDiagnostic } from '../../examples/phase01/intake-diagnostics.js';
 
 export function settlementDescription(receipt: Readonly<Receipt>): string {
   return `Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits.${receipt.deliveryComplete === false ? ' Delivery incomplete; this does not establish successful completion.' : ''} Settlement is not tool-execution authorization; a new submission may incur another charge.`;
@@ -29,6 +30,9 @@ function torDescription(error: TorFailure): string {
 }
 
 export function diagnosticDescription(failure: DiagnosticFailure): string {
+  if (failure instanceof IntakeFailure && failure.intakeDiagnostic) {
+    return intakeDescription(failure.intakeDiagnostic) + ' No request was replayed; billing is unknown unless an authenticated receipt was received. A new submission may incur another charge.';
+  }
   if (failure instanceof CompletionFailure && failure.nativeDiagnostic) {
     const native = failure.nativeDiagnostic;
     const outcome = failure.settlement
@@ -49,7 +53,6 @@ export function diagnosticDescription(failure: DiagnosticFailure): string {
     settlement: 'Receipt validation or local accounting display did not complete. Share only this code/stage/constraint for support.',
     provider: 'The client encountered an unexpected local failure; its cause is unknown. Share only this code/stage/constraint for support.',
     hook: 'A client request/response hook did not complete. Check custom hooks; do not share request data.',
-    balance: 'This balance check sends no inference. Repeat it once Pi is idle; share only this code for support if it persists.',
     compaction: 'No checkpoint is authorized. Share only this code for support; a deliberate /compact may incur a new charge.',
   } as const;
   const requestConstraints: Partial<Record<DiagnosticFailure['constraint'], string>> = {
@@ -145,12 +148,14 @@ export function approvalSummary(release?: Readonly<{ tag: string; expires: numbe
 export class ConnectionFailure extends Error {
   readonly observation?: EvidenceObservation;
   readonly diagnostic?: DiagnosticFailure;
+  readonly intakeDiagnostic?: IntakeDiagnostic;
   constructor(readonly code: ConnectionFailureCode, catalog?: CatalogFailure | GatewayError | DiagnosticFailure | EvidenceObservation | VerifierFailure | TorFailure) {
     if (!Object.hasOwn(reasons, code)) throw new Error('possums_connection_diagnostic_invalid');
     // The immutable carrier validates these fields; never use its error.message.
     const observed = catalog instanceof CatalogFailure && catalog.stage === 'http'
       ? ` Observed HTTP status: ${catalog.status ?? 'unavailable'}.${catalog.reason ? ` Gateway code: ${catalog.reason}.` : ''}${catalog.detail ? ` Gateway detail: ${gatewayDetailLabel(catalog.detail)}.` : ''}` : '';
-    const evidence = catalog instanceof EvidenceObservation
+    const intake = catalog instanceof CatalogFailure || catalog instanceof GatewayError || catalog instanceof IntakeFailure ? catalog.intakeDiagnostic : undefined;
+    const evidence = intake ? ` ${intakeDescription(intake)}` : catalog instanceof EvidenceObservation
       ? ` Stage: ${catalog.stage} (${evidenceStages[catalog.stage]}); constraint: ${catalog.constraint} (${evidenceConstraints[catalog.constraint]}).${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}${catalog.constraint === 'rate_limited' ? ' Wait before starting a new Pi session; re-entering credentials will not fix this.' : ''}` :
       catalog instanceof GatewayError ? ` Stage: admission; constraint: service_quiescing.${catalog.status === undefined ? '' : ` Observed HTTP status: ${catalog.status}.`}` :
       code === 'tor_cleanup_unknown' ? ' Stage: tor_cleanup; constraint: cause_unknown.' :
@@ -163,6 +168,7 @@ export class ConnectionFailure extends Error {
     super(`${compatibilityCode}${catalog && isTorConnectionFailure(catalog) ? `[possums_${code}] ${reasons[code]} ${torDescription(catalog)}` : catalog instanceof VerifierFailure ? catalog.message : catalog instanceof DiagnosticFailure ? diagnosticDescription(catalog) : `[possums_${code}] ${reasons[code]}${observed}${evidence}`} ${outcome}`);
     if (catalog instanceof EvidenceObservation) this.observation = catalog;
     if (catalog instanceof DiagnosticFailure) this.diagnostic = catalog;
+    if (intake) this.intakeDiagnostic = intake;
     Object.freeze(this);
   }
 }
@@ -186,7 +192,7 @@ export function connectionFailure(error: unknown): ConnectionFailure {
       || error.stage === 'authorization' && error.constraint === 'interrupted';
     return new ConnectionFailure(operational ? 'tor_transport_diagnostic' : 'verification_failed', error);
   }
-  if (error instanceof GatewayError && error.reason === 'service_quiescing') return new ConnectionFailure('service_quiescing', error);
+  if (error instanceof GatewayError) return new ConnectionFailure(error.reason === 'service_quiescing' ? 'service_quiescing' : 'connection_diagnostic', error);
   if (error instanceof VerifierFailure) return new ConnectionFailure('verification_failed', error);
   if (error instanceof DiagnosticFailure) return new ConnectionFailure(error.stage === 'trust' ? error.constraint === 'expired' ? 'trust_expired' : 'verification_failed' : error.stage === 'authentication' || error.stage === 'challenge' ? 'authentication_diagnostic' : 'connection_diagnostic', error);
   return new ConnectionFailure('verification_failed', new DiagnosticFailure('trust', 'unexpected'));

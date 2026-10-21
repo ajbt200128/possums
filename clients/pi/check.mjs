@@ -37,6 +37,7 @@ function run(name, options, args = []) {
     env: { HOME: path.join(scratch, 'home'), TMPDIR: path.join(scratch, 'tmp'), PATH: '/usr/bin:/bin', ...options } }); }
   catch { throw new Error('local check failed: ' + name); }
 }
+run('intake_diagnostics.mjs', { INTAKE_DIAGNOSTIC_BUILD: path.join(output, 'pi-test.mjs') });
 run('phase01_client.mjs', { PHASE01_BUILD: output });
 run('phase02_client.mjs', { PHASE02_CLIENT_BUILD: output, PHASE02_CLIENT_INSTALL: packageSource });
 run('phase01_stream_limits.mjs', { PHASE01_BUILD: output, PHASE02_CLIENT_INSTALL: packageSource });

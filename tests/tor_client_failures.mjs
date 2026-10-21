@@ -61,8 +61,7 @@ try {
     const encrypted = new Uint8Array(await req.arrayBuffer());
     await recipient.Open(encrypted.slice(4));
     const text = route === '/v1/sessions' ? JSON.stringify({ token: 'b'.repeat(43), token_type: 'Bearer', expires_in: 43200 }) :
-      route === '/v1/submissions' ? JSON.stringify({ submission: 's'.repeat(43) }) :
-      route === '/v1/balance' ? JSON.stringify({ available_microunits: '1000', in_flight: 0, completed_requests: '0' }) : f.text;
+      route === '/v1/submissions' ? JSON.stringify({ submission: 's'.repeat(43) }) : f.text;
     const nonce = crypto.getRandomValues(new Uint8Array(32));
     const secret = new Uint8Array(await recipient.Export(enc.encode(ehbp.EXPORT_LABEL), ehbp.EXPORT_LENGTH));
     const keys = await ehbp.deriveResponseKeys(secret, encapsulated, nonce);
@@ -127,17 +126,17 @@ try {
       else if (error) c.error(error); else c.close();
     }, cancel() { if (cancelError) throw cancelError; } }, { highWaterMark: 0 });
   }
-  await check('actual ReferenceClient challenge/login/catalog/balance/submission/send preserve native categories', async () => {
+  await check('actual ReferenceClient challenge/login/catalog/submission/send preserve native categories', async () => {
     for (const [route, stage, method] of [
       ['/v1/auth/challenge', 'challenge', 'login'], ['/v1/sessions', 'authentication', 'login'],
-      ['/v1/models', 'catalog', 'models'], ['/v1/balance', 'balance', 'balance'],
+      ['/v1/models', 'catalog', 'models'],
       ['/v1/submissions', 'submission', 'chat'], ['/v1/chat/completions', 'transport', 'chat'],
     ]) {
       const f = await fixture();
       if (method !== 'login') await login(f);
       f.fault = { route, when: 'send', error: native('proxy') };
       const error = await caught(() => method === 'login' ? login(f) : method === 'chat' ? f.client.chat(entry.id, messages, () => {}) : f.client[method]());
-      projection(error instanceof m.BalanceFailure ? error.observation : error, stage, 'proxy');
+      projection(error, stage, 'proxy');
       assert.equal(f.requests.filter(item => item === route).length, 1);
       if (route === '/v1/submissions') assert(!f.requests.includes('/v1/chat/completions'));
     }
@@ -145,13 +144,13 @@ try {
   await check('control body native failures exposed by Tor collector survive reference wrappers', async () => {
     // Substitute the channel's already-classified collector result, not SDK wire
     // decoding. Genuine encrypted body/read failures are exercised below.
-    for (const target of ['challenge', 'authentication', 'catalog', 'balance', 'submission']) {
+    for (const target of ['challenge', 'authentication', 'catalog', 'submission']) {
       const f = await fixture(); if (!['challenge', 'authentication'].includes(target)) await login(f);
       if (target === 'challenge') f.channel.challenge = async () => { throw native('truncated'); };
       else if (target === 'authentication' || target === 'submission') f.channel.control = async () => { throw native('truncated'); };
-      else f.channel[target === 'catalog' ? 'models' : 'balance'] = async () => { throw native('truncated'); };
-      const error = await caught(() => ['challenge', 'authentication'].includes(target) ? login(f) : target === 'catalog' ? f.client.models() : target === 'balance' ? f.client.balance() : f.client.chat(entry.id, messages, () => {}));
-      projection(error instanceof m.BalanceFailure ? error.observation : error, target, 'truncated');
+      else f.channel.models = async () => { throw native('truncated'); };
+      const error = await caught(() => ['challenge', 'authentication'].includes(target) ? login(f) : target === 'catalog' ? f.client.models() : f.client.chat(entry.id, messages, () => {}));
+      projection(error, target, 'truncated');
     }
   });
   await check('actual encrypted chat after headers/late body/receipt plus DONE without EOF preserve closed native and money', async () => {

@@ -15,10 +15,7 @@ export async function clientCases(moduleURL) {
     messages: [{ role: 'user', content: 'x'.repeat(9 * 1024 * 1024) }] };
   check(m.encodeChat(largeChat).length > 8 * 1024 * 1024);
   check(m.encodeChat({ ...largeChat, messages: [{ role: 'user', content: 'x'.repeat(32 * 1024 * 1024) }] }).length > 32 * 1024 * 1024);
-  const requestFailure = new m.BalanceFailure('request');
-  const validationFailure = new m.BalanceFailure('validation');
-  check(requestFailure instanceof m.BalanceFailure && requestFailure.code === 'rejected' && requestFailure.message === 'possums_balance_request_failed');
-  check(validationFailure.code === 'rejected' && validationFailure.message === 'possums_balance_validation_failed');
+  check(!('BalanceFailure' in m) && !('balance' in m.ReferenceClient.prototype) && !('balance' in m.Channel.prototype));
   const model = (id, context = '20', price = '1000000', quote = '52') => ({ object: 'model', id,
     context_tokens: context, max_output_tokens: context, input_microunits_per_million_tokens: price,
     output_microunits_per_million_tokens: price, maximum_reservation_microunits: quote });
