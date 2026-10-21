@@ -54,4 +54,6 @@ impl LoginMaterial {
 }
 
 #[cfg(test)]
+mod gateway_tests;
+#[cfg(test)]
 mod tests;

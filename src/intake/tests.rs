@@ -387,6 +387,268 @@ async fn deadline_covers_body_and_retains_observed_status() {
 
 /// Launched only by the gateway-owned Go overlay, never against a live service.
 #[tokio::test]
+#[ignore = "requires disposable Go/PocketBase TLS fixture; run tests/intake_review/transport.py"]
+async fn actual_intake_http() {
+    use base64::Engine;
+    let origin = std::env::var("GATEWAY_INTAKE_FIXTURE_ORIGIN").unwrap();
+    let url = reqwest::Url::parse(&origin).unwrap();
+    assert_eq!(url.host_str(), Some("127.0.0.1"));
+    let certificate = base64::engine::general_purpose::STANDARD
+        .decode(std::env::var("GATEWAY_INTAKE_FIXTURE_CA").unwrap())
+        .unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(certificate))
+        .unwrap();
+    let client = IntakeClient::fixture(&origin, KEY, roots.clone(), Duration::from_secs(5));
+    let material = LoginMaterial::derive(&"A".repeat(43)).unwrap();
+    let methods = client.send(Request::AuthMethods).await.unwrap();
+    assert_eq!(methods.status.as_u16(), 200);
+    assert_eq!(methods.decode::<Value>().unwrap()["mfa"]["enabled"], false);
+    let login = client.send(Request::Login(&material)).await.unwrap();
+    assert_eq!(login.status.as_u16(), 200);
+    let login = login.decode::<Value>().unwrap();
+    assert_eq!(login["record"]["account_id"], "synthetic-transport");
+    let token = login["token"].as_str().unwrap();
+    let refresh = client.send(Request::Refresh(token)).await.unwrap();
+    assert_eq!(refresh.status.as_u16(), 200);
+    assert_eq!(
+        refresh.decode::<Value>().unwrap()["record"]["id"],
+        login["record"]["id"]
+    );
+    assert_eq!(
+        client
+            .send(Request::Refresh(KEY))
+            .await
+            .unwrap()
+            .status
+            .as_u16(),
+        401
+    );
+    let wrong_auth = IntakeClient::fixture(&origin, token, roots.clone(), Duration::from_secs(5));
+    assert_eq!(
+        wrong_auth
+            .send(Request::Balance("synthetic-transport"))
+            .await
+            .unwrap()
+            .status
+            .as_u16(),
+        401
+    );
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let key = |n| format!("v1.{now:013}.{n:032x}");
+    let first = key(1);
+    let reserve = || Request::Reserve {
+        account: "synthetic-transport",
+        maximum: 600,
+        timeout_seconds: 1800,
+        key: &first,
+    };
+    let held = client.send(reserve()).await.unwrap();
+    assert_eq!(held.status.as_u16(), 200);
+    let held = held.decode::<Value>().unwrap();
+    let id = held["reservation"]["reservation_id"].as_str().unwrap();
+    assert_eq!(
+        client
+            .send(reserve())
+            .await
+            .unwrap()
+            .decode::<Value>()
+            .unwrap(),
+        held
+    );
+    let conflict = client
+        .send(Request::Reserve {
+            account: "synthetic-transport",
+            maximum: 601,
+            timeout_seconds: 1800,
+            key: &first,
+        })
+        .await
+        .unwrap();
+    assert_eq!(conflict.status.as_u16(), 409);
+    assert_eq!(
+        conflict.decode::<Value>().unwrap()["code"],
+        "LEDGER_KEY_CONFLICT"
+    );
+    let snapshot = client
+        .send(Request::Balance("synthetic-transport"))
+        .await
+        .unwrap()
+        .decode::<Value>()
+        .unwrap();
+    assert_eq!(snapshot["available"], "400");
+    assert_eq!(
+        snapshot["pending_reservations"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        client
+            .send(Request::Lookup(id))
+            .await
+            .unwrap()
+            .decode::<Value>()
+            .unwrap(),
+        held
+    );
+    let settled = client
+        .send(Request::Settle {
+            reservation: id,
+            charged: 100,
+        })
+        .await
+        .unwrap();
+    assert_eq!(settled.status.as_u16(), 200);
+    let settled = settled.decode::<Value>().unwrap();
+    assert_eq!(settled["reservation"]["state"], "settled");
+    assert_eq!(settled["reservation"]["charged_amount"], "100");
+    // 200 on refund does not mean a refund won: intake returns the first terminal.
+    assert_eq!(
+        client
+            .send(Request::Refund(id))
+            .await
+            .unwrap()
+            .decode::<Value>()
+            .unwrap(),
+        settled
+    );
+    let second = key(2);
+    let refund_hold = client
+        .send(Request::Reserve {
+            account: "synthetic-transport",
+            maximum: 200,
+            timeout_seconds: 1800,
+            key: &second,
+        })
+        .await
+        .unwrap()
+        .decode::<Value>()
+        .unwrap();
+    let refund_id = refund_hold["reservation"]["reservation_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        client
+            .send(Request::Refund(refund_id))
+            .await
+            .unwrap()
+            .decode::<Value>()
+            .unwrap()["reservation"]["state"],
+        "refunded"
+    );
+    let final_balance = client
+        .send(Request::Balance("synthetic-transport"))
+        .await
+        .unwrap()
+        .decode::<Value>()
+        .unwrap();
+    assert_eq!(final_balance["available"], "900");
+    assert_eq!(final_balance["pending_reservations"], json!([]));
+
+    let left = key(3);
+    let right = key(4);
+    let (a, b) = tokio::join!(
+        client.send(Request::Reserve {
+            account: "synthetic-race",
+            maximum: 600,
+            timeout_seconds: 1800,
+            key: &left
+        }),
+        client.send(Request::Reserve {
+            account: "synthetic-race",
+            maximum: 600,
+            timeout_seconds: 1800,
+            key: &right
+        })
+    );
+    let mut statuses = [a.unwrap().status.as_u16(), b.unwrap().status.as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [200, 409]);
+
+    // Qualify the typed adapter against actual native auth and ledger receipts,
+    // rather than only hand-authored JSON. This still uses synthetic state only.
+    use super::protocol::{ErrorKind, Intake, TerminalOutcome};
+    let intake = std::sync::Arc::new(Intake::fixture(IntakeClient::fixture(
+        &origin,
+        KEY,
+        roots,
+        Duration::from_secs(5),
+    )));
+    let principal = intake.login(&"A".repeat(43)).await.unwrap();
+    assert_eq!(principal.account_id, "synthetic-transport");
+    let original_expiry = principal.expires_at;
+    intake.validate(&principal).await.unwrap();
+    assert_eq!(principal.expires_at, original_expiry);
+    assert!(
+        original_expiry
+            .duration_since(std::time::SystemTime::now())
+            .unwrap()
+            <= Duration::from_secs(43200)
+    );
+    let auth = crate::auth::Auth::from_intake(intake.clone());
+    let challenge = auth.issue_api_challenge().unwrap();
+    let (session_id, _) = auth
+        .authenticate_current(&"A".repeat(43), &challenge)
+        .await
+        .unwrap();
+    assert_eq!(
+        auth.current_session(&session_id).await.unwrap().account_id,
+        "synthetic-transport"
+    );
+    auth.logout_api(&session_id).unwrap();
+    assert!(auth.current_session(&session_id).await.is_err());
+
+    let held = intake
+        .reserve("synthetic-transport", 200, 1800, &key(5))
+        .await
+        .unwrap();
+    assert!(held.is_active());
+    assert!(held.expires_at() > std::time::SystemTime::now());
+    let settled = intake.finish(&held, Some(11)).await.unwrap();
+    assert!(settled.matches_requested);
+    assert!(matches!(
+        settled.outcome,
+        TerminalOutcome::Settled { charged: 11 }
+    ));
+    let conflicting = intake.finish(&held, None).await.unwrap();
+    assert!(!conflicting.matches_requested);
+    assert!(matches!(
+        conflicting.outcome,
+        TerminalOutcome::Settled { charged: 11 }
+    ));
+    let replay = intake
+        .reserve("synthetic-transport", 200, 1800, &key(5))
+        .await
+        .unwrap();
+    assert!(!replay.is_active());
+    assert!(matches!(
+        replay.terminal_outcome(),
+        Some(TerminalOutcome::Settled { charged: 11 })
+    ));
+    let refund = intake
+        .reserve("synthetic-transport", 200, 1800, &key(6))
+        .await
+        .unwrap();
+    let refunded = intake.finish(&refund, None).await.unwrap();
+    assert!(refunded.matches_requested);
+    assert!(matches!(refunded.outcome, TerminalOutcome::Refunded));
+    let credit = match intake
+        .reserve("synthetic-transport", 1000, 1800, &key(7))
+        .await
+    {
+        Ok(_) => panic!("typed credit refusal expected"),
+        Err(error) => error,
+    };
+    assert_eq!(credit.kind, ErrorKind::CreditInsufficient);
+    assert_eq!(credit.status, Some(409));
+    super::gateway_tests::exercise(intake, &client).await;
+}
+
+#[tokio::test]
 async fn invalid_request_never_reaches_listener() {
     let (listener, _acceptor, client) = fixture(true, "127.0.0.1", Duration::from_secs(2)).await;
     for request in [
