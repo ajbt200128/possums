@@ -28,6 +28,47 @@ export async function diagnosticChecks(m, check) {
       assert.equal(error.cause, undefined); return true;
     });
   }
+  await check('message-end UI leaves received charges native and preserves actionable warnings', async () => {
+    const handlers = new Map(), notices = [];
+    m.extension({ registerFlag() {}, getFlag: () => undefined, registerProvider() {}, registerCommand() {},
+      on: (name, handler) => handlers.set(name, handler) });
+    const end = handlers.get('message_end');
+    const ctx = { hasUI: true, ui: { notify: (text, level) => notices.push({ text, level }) } };
+    const diagnostic = (type, details = {}) => ({ type, timestamp: 1, details });
+    const charge = diagnostic('possums_settled_receipt', { chargedMicrounits: '7' });
+    const unknown = diagnostic('possums_billing_unknown');
+    const warning = diagnostic('possums_turn_warning', { message: 'Possums: [possums_stream_eof] Check connectivity. Not replayed.' });
+    const message = diagnostics => ({ role: 'assistant', provider: 'possums', diagnostics,
+      usage: { cost: { total: 7 / 1e6 } } });
+    for (const type of ['possums_settled_receipt', 'possums_gateway_charge']) {
+      const received = message([diagnostic(type, { chargedMicrounits: '7' }),
+        diagnostic('possums_accounting_metadata', { usageAvailable: false, costComponentsAvailable: false })]);
+      const before = structuredClone(received);
+      end({ message: received }, ctx);
+      assert.deepEqual(received, before); assert.deepEqual(notices, []);
+    }
+    end({ message: message(undefined) }, ctx);
+    end({ message: message([]) }, ctx); assert.deepEqual(notices, []);
+    for (const diagnostics of [[warning], [charge, warning]]) {
+      end({ message: message(diagnostics) }, ctx);
+      assert.deepEqual(notices.splice(0), [{ text: warning.details.message, level: 'warning' }]);
+    }
+    for (const diagnostics of [[unknown], [charge, unknown]]) {
+      end({ message: message(diagnostics) }, ctx);
+      assert.equal(notices.length, 1); assert.equal(notices[0].level, 'warning');
+      assert.match(notices[0].text, /\[possums_billing_unknown\].*charge unknown.*Not replayed.*new request may incur another charge/);
+      notices.length = 0;
+    }
+    end({ message: message([warning, unknown]) }, ctx);
+    assert.equal(notices.length, 2); assert.equal(notices[0].text, warning.details.message);
+    assert.match(notices[1].text, /\[possums_billing_unknown\]/); notices.length = 0;
+    end({ message: message([unknown]) }, { ...ctx, hasUI: false });
+    end({ message: { ...message([unknown]), provider: 'other' } }, ctx);
+    end({ message: { ...message([unknown]), role: 'user' } }, ctx);
+    assert.deepEqual(notices, []);
+    assert.doesNotThrow(() => end({ message: message([warning, unknown]) },
+      { hasUI: true, ui: { notify() { throw new Error(secret); } } }));
+  });
   await check('diagnostics distinguish missing authenticated stream terminals', async () => {
     await rejected([frame(role)], 'stream', 'finish_missing');
     await rejected([frame(role), frame(finish)], 'stream', 'done_missing');

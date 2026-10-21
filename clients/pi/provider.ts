@@ -133,9 +133,19 @@ const localFailures: Readonly<Record<string, string>> = Object.freeze({
   possums_custom_tools_unsupported: 'Custom tools unsupported; remove the option.',
   possums_images_unsupported: 'Selected model does not support image input; remove images or deliberately select an image-capable model. No inference request sent.',
 });
-// A failed turn is reserved for an unconfirmed backend identity/authenticity.
-// Other failures stop host control flow with a warning, never native replay.
+// Public-service availability is not an authenticity rejection. A warning
+// still stops before authentication/inference; it grants no fallback or retry.
+function evidenceAvailabilityFailure(error: ConnectionFailure): boolean {
+  const observation = error.observation;
+  return error.code === 'evidence_unavailable' && observation !== undefined
+    && ['release_discovery', 'manifest_redirect', 'manifest_download', 'release_provenance', 'amd_certificate'].includes(observation.stage)
+    && ['request', 'idle', 'deadline', 'http', 'rate_limited'].includes(observation.constraint);
+}
+
+// Authenticity failures remain fatal. Operational failures stop host control
+// flow with a warning, never native inference replay or unverified dispatch.
 function trustFailure(error: unknown): boolean {
+  if (error instanceof ConnectionFailure && evidenceAvailabilityFailure(error)) return false;
   if (error instanceof ConnectionFailure) return (error.diagnostic !== undefined && trustFailure(error.diagnostic)) ||
     ['trust_expired', 'approval_expired', 'approval_unavailable', 'manifest_unavailable', 'manifest_mismatch',
       'evidence_unavailable', 'verification_failed'].includes(error.code);
@@ -375,7 +385,9 @@ export class PossumsProvider implements Provider {
         // Intentional cancellation/replacement dominates warning conversion and
         // must not publish a marker or failure into the replacement's state.
         requireOwner();
-        if (!diagnosticAttempt || trustFailure(error)) throw error;
+        const unavailableEvidence = error instanceof ConnectionFailure && evidenceAvailabilityFailure(error);
+        if ((!diagnosticAttempt && !unavailableEvidence) || trustFailure(error)) throw error;
+        if (account !== this.accountEpoch) throw new Error('possums_login_cancelled');
         // The marker lets the adapter finish the host turn with a warning; it
         // is not gateway authority. perform() stops at the recorded failure.
         this.failure = error instanceof ConnectionFailure ? error : new ConnectionFailure('session_unavailable');

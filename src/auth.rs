@@ -150,6 +150,20 @@ pub struct Auth {
 }
 
 impl Auth {
+    #[cfg(all(test, feature = "tor"))]
+    pub(crate) fn without_accounts_for_local_tor() -> Self {
+        Self {
+            accounts: Vec::new(),
+            intake: None,
+            sessions: Mutex::new(HashMap::new()),
+            login_challenges: Mutex::new(HashMap::new()),
+            submission_tokens: Mutex::new(HashMap::new()),
+            submission_capacity: MAX_SUBMISSION_TOKENS,
+            epoch: rand::random(),
+            pause: Mutex::new(None),
+        }
+    }
+
     pub fn from_json(json: &str) -> Result<Self, AuthError> {
         let accounts: Vec<ProvisionedAccount> =
             serde_json::from_str(json).map_err(|_| AuthError::Configuration)?;

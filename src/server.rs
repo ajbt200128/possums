@@ -106,6 +106,8 @@ pub struct AppState {
     tor_signer: Option<Arc<crate::tor_endorsement::TorEndorsementSigner>>,
     #[cfg(feature = "tor")]
     pub(crate) tor_ready: Option<Arc<crate::tor_ingress::health::TorReadiness>>,
+    #[cfg(all(test, feature = "tor"))]
+    pub(crate) tor_bridge_denied: Option<Arc<AtomicUsize>>,
     #[cfg(test)]
     preflight_hooks: Arc<resource_streaming_tests::PreflightHooks>,
     #[cfg(test)]
@@ -181,6 +183,8 @@ impl AppState {
             tor_signer: None,
             #[cfg(feature = "tor")]
             tor_ready: None,
+            #[cfg(all(test, feature = "tor"))]
+            tor_bridge_denied: None,
             #[cfg(test)]
             preflight_hooks: Arc::default(),
             #[cfg(test)]

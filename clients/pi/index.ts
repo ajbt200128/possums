@@ -142,15 +142,11 @@ export default function possums(pi: ExtensionAPI): void {
     const message = event.message;
     if (!ctx.hasUI || message.role !== 'assistant' || message.provider !== PROVIDER_ID) return;
     const warning = message.diagnostics?.find(item => item.type === 'possums_turn_warning')?.details?.message;
-    const charged = message.diagnostics?.find(item => item.type === 'possums_settled_receipt' || item.type === 'possums_gateway_charge')?.details?.chargedMicrounits;
-    if (!warning && !message.diagnostics?.some(item => item.type === 'possums_billing_unknown' || item.type === 'possums_settled_receipt' || item.type === 'possums_gateway_charge')) return;
+    const billingUnknown = message.diagnostics?.some(item => item.type === 'possums_billing_unknown');
+    if (typeof warning !== 'string' && !billingUnknown) return;
     try {
       if (typeof warning === 'string') ctx.ui.notify(warning, 'warning');
-      const amount = typeof charged === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(charged) ? BigInt(charged) : undefined;
-      const tokensUnavailable = message.diagnostics?.find(item => item.type === 'possums_accounting_metadata')?.details?.usageAvailable === false;
-      ctx.ui.notify(amount === undefined
-        ? 'Possums: [possums_billing_unknown] Response accounting unavailable; charge unknown. Pi cost zeros are unavailable placeholders, not free. Not replayed; a new request may incur another charge.'
-        : `Possums: gateway-reported charge $${amount / 1_000_000n}.${(amount % 1_000_000n).toString().padStart(6, '0')}. ${tokensUnavailable ? 'Token counts unavailable; native token zeros are placeholders. ' : ''}Input/cache/output charges unavailable; Pi component zeros are placeholders, not free. Receipt alone does not establish response completion or authorize tools.`, 'warning');
+      if (billingUnknown) ctx.ui.notify('Possums: [possums_billing_unknown] Response accounting unavailable; charge unknown. Pi cost zeros are unavailable placeholders, not free. Not replayed; a new request may incur another charge.', 'warning');
     } catch { /* Transient UI only; no logging, reset, renewal or inference. */ }
   });
   pi.on('agent_end', () => { provider.endRun(); });
