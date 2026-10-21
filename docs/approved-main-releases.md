@@ -1,5 +1,17 @@
 # Automatic paid releases and approved production deployment
 
+**Explicit one-time intake overlay:** the operator selected preparation of a
+protected first intake cutover, applying the signed image with only two new intake
+selections and legacy-account selection removal. This is an explicit
+`reference_transition=intake` workflow request, never the automatic/default path.
+All review/CI/provenance/approval gates and unrelated opaque/Tor selections remain.
+The operator additionally confirms exclusive configuration custody; the run must
+explicitly assert `exclusive_configuration_custody=true`. This is not a server
+lock/CAS. Captured-ID execution and a fresh pre-admission snapshot reject already
+stale state; actual custody must cover the remaining race through reconciliation.
+See [authority, private provisioning and exact run sequence](intake-protected-cutover.md).
+No secret provisioning, configuration update or cutover is established by source.
+
 **Current Tor rollout overlay:** the operator authorizes merge and normal
 protected deployment with one stable onion identity, accepting possible
 blue/green publication overlap and temporary Tor availability/routing failures.
@@ -70,7 +82,11 @@ update are not one transaction: a main push **after admission** does not cancel
 an already-started update. GitHub's pending-job ordering/replacement does not
 promise a release or approval for every intermediate main commit.
 
-## No configuration-binding exception
+## Ordinary updates: no configuration-binding exception
+
+The default `reference_transition=none` path retains this rule. Only the explicit
+first-intake overlay above permits its exact named delta; it does not revive any
+historical Tor binding exception.
 
 Both read-only and CLI plans must reject any added, changed or removed secret,
 variable or SSH-key selection. Omit `--secret`; preserve existing opaque metadata
@@ -160,7 +176,9 @@ Before using the operator's authenticated `gh` identity:
    S equals current main. Verify the release-only parent/tree relationship.
 2. Select the exact successful production preflight/run, not the newest run by
    ordering alone. Require repository/workflow/ref identity, run attempt **1**,
-   and title `Production <tag> from <source>`. Preflight validates all dispatched
+   and title `Production <tag> from <source>` (with the exact suffix
+   ` [intake cutover]` only for the explicitly selected first-intake request).
+   Preflight validates all dispatched
    pins; protected admission repeats their verification.
 3. Require the pending environment ID matches the deliberately configured
    production environment and the account is eligible to approve. Inspect API

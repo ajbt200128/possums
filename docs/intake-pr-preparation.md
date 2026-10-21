@@ -8,8 +8,10 @@ merge, exact-source Linux CI, release provenance and protected production approv
 It does not waive those gates, authorize client installation/activation or paid
 inference, or establish correct live reference delivery. The initial prepare-only
 restrictions below describe that earlier checkpoint, not the new rollout request.
-The separate reference transition must be completed and verified before an
-unchanged-configuration image update; no guard may be relaxed to bypass it.
+The operator subsequently selected preparation of an explicit protected first
+cutover because references are not provisioned. The image and exact reference
+replacement must occur together through the [one-time cutover path](intake-protected-cutover.md),
+not an old-image configuration update. The ordinary no-drift guard is unchanged.
 
 Main advanced to `b2cc2a90b23271969b5989b39b70898547682f57` before publication.
 Integration commit `f375d9e` preserves its public-evidence cache/availability warning
@@ -40,6 +42,30 @@ README checklist inconsistency is corrected: gateway rollout does not authorize
 client installation/activation or claim full old-client compatibility.
 Required Linux CI and live deployment/provenance/reference verification remain
 outstanding.
+
+## Protected cutover review and operator confirmations
+
+Published head `9a2a898` passed all Linux flake/image/image-startup jobs in run
+`39672832320`. This includes actual archives/rootfs/packaged-health/Tor/synthetic
+startup; the additional protected-cutover source needs fresh exact-head CI.
+Cutover review R1 identified a stale full-list replacement race and name
+re-resolution exposure. The revised path requires explicit per-run exclusive
+configuration custody, refreshes the captured-ID snapshot before final admission,
+and targets that ID for execution and all later reads. A refresh/assertion is not
+a lock/CAS; actual operator single-writer custody is required for the remaining
+race window. Fresh read-only R2 found no blocking source finding under that
+explicit single-writer condition. Its nonblocking test-count documentation note
+is resolved by labeling the earlier 141/22 checkpoint and recording parent-observed
+149 total tests (three optional skips), 30 cutover tests and eight planner tests.
+The reviewer did not run those checks or approve deployment.
+
+The operator confirms control of all gateway console/API/project writers and will
+keep them idle during the protected cutover until outcome reconciliation. The
+operator also reports both private secret objects created, with running selections
+unchanged. No values were accessed, and this is not independent delivery or
+credential-correctness verification. All 30 revised offline cutover tests pass;
+the full Python suite ran 149 tests with no failures and three optional skips.
+No production mutation, client activation or paid inference has occurred.
 
 ## Draft PR
 
@@ -135,10 +161,13 @@ intentionally rejects an instance missing either required intake reference and a
 rejects a leftover legacy account reference even when both new references exist.
 It does **not** create secrets, change
 settings or allow a reference/configuration refresh in the normal update plan.
-Provisioning the exact new origin/key references and any removal of the old runtime
-reference require a separately authorized configuration transition, followed by the
-normal unchanged-configuration/provenance/protected-approval release path. No
-mutation or secret entry happened in this preparation packet.
+Provisioning the exact new origin/key secret objects is private operator setup,
+not a running selection change. The subsequently approved
+[one-time path](intake-protected-cutover.md) combines the signed image with the two
+intake additions and legacy-selection removal; unrelated selections/settings and
+all normal provenance/protected-approval gates remain. Future ordinary updates
+remain unchanged-configuration only. No mutation or secret entry happened in this
+preparation packet.
 
 The measured image digest is intentionally unchanged by PR preparation. The normal
 release algorithm alone binds a newly built candidate image to tested source;

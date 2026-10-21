@@ -1,5 +1,27 @@
 # Repository guidance
 
+## Current intake gateway cutover authority
+
+The operator requests gateway deployment after intake integration preparation and
+explicitly selects **Prepare protected cutover path** because running intake
+reference selections still need a first cutover. Prepare the reviewed one-time signed-image
+plus exact-reference transition: add `POSSUMS_INTAKE_ORIGIN` and
+`POSSUMS_INTAKE_LEDGER_KEY`, remove only the `POSSUMS_ACCOUNTS_JSON` selection,
+and preserve every other reference/settings selection, especially approved Tor
+identities. This supersedes unchanged-reference policy only for the explicit
+first intake cutover, never the ordinary default. Require fresh review, exact CI,
+release provenance, protected approval, private provisioning and no replay.
+The operator subsequently confirms both private secret objects provisioned with
+running selections unchanged, and commits to keeping every other gateway
+console/API/project writer idle from protected approval until outcome reconciliation.
+Require the explicit per-run exclusive-custody assertion and captured-ID snapshot
+refresh; neither is a server lock/CAS or proof of value delivery. No concurrent
+configuration overwrite is authorized if custody cannot be maintained.
+Do not perform an old-image configuration update, delete/rotate existing secret
+objects, alter intake disk/customer state, install/activate clients or send paid
+inference. See [protected cutover](docs/intake-protected-cutover.md); preparation
+and synthetic checks are not deployment or secret-delivery evidence.
+
 ## Current Tor source-restoration authority
 
 The operator explicitly authorizes restoring Tor support on current main in an
