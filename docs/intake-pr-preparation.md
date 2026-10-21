@@ -34,6 +34,10 @@ The current extension SHA-256 is
 build-report SHA-256 is
 `1c495c153a4c89901482ffefcc6ee15a076a4758fa51d03cc507cc5e77339b01`.
 Sandbox/helper coverage remains scratch-only, loopback-only and darwin/arm64.
+Fresh independent integration review of `c979809` found no concrete new source
+blocker, retaining the Linux/reference/provenance/compatibility gates. Its client
+README checklist inconsistency is corrected: gateway rollout does not authorize
+client installation/activation or claim full old-client compatibility.
 Required Linux CI and live deployment/provenance/reference verification remain
 outstanding.
 
