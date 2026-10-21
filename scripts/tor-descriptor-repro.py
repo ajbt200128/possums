@@ -31,7 +31,11 @@ STAGES = ['selection', 'attempt', 'image', 'network', 'publisher', 'controller',
           'allowance', 'diagnostic', 'drain', 'child_cleanup', 'attach', 'cleanup']
 CAUSES = ['malformed', 'bound', 'deadline', 'eof', 'command_failed', 'cause_unknown', 'interrupted',
           'cleanup_unknown', 'child_exit', 'consumed', 'ownership_mismatch', 'prerequisites']
-ACTION = 'On cause_unknown the underlying cause is unknown. Inspect prerequisites and exact owned resources; never replay or delete consumed markers.'
+SEAM_FAILURES = ['ARTI_BOOTSTRAP', 'ARTI_LAUNCH', 'DIAGNOSTIC_REQUEST', 'DIAGNOSTIC_RESPONSE',
+                 'DRAIN_UNCONFIRMED', 'GATEWAY_BIND', 'GATEWAY_PANIC', 'GATEWAY_STOPPED',
+                 'IPC_BOUND', 'IPC_COMMAND', 'IPC_FORMAT', 'IPC_READ', 'IPC_WRITE', 'KEY_GENERATION',
+                 'LAUNCH_DEADLINE', 'PREPARE_REFUSED', 'RUNTIME', 'SCRATCH_INVALID', 'STAGE_DEADLINE']
+ACTION = 'Known failure stages/codes do not establish root cause; cause_unknown means the underlying cause is unknown. Inspect prerequisites and exact owned resources; never replay or delete consumed markers.'
 
 
 class Stop(Exception):
@@ -137,6 +141,23 @@ def line(stream, deadline, stage):
             need(len(raw) < LIMIT, stage, 'bound')
 
 
+def gateway_line(conn, deadline, stage, terminal=False):
+    value = line(conn, deadline, stage)
+    # The seam may deliver drain evidence before its primary failure terminal.
+    if type(value) is dict and value.get('kind') == 'finished' and stage != 'drain':
+        keys(value, 'kind cleanup zeroUpstream bridgeUntouched', stage)
+        need(all(type(value[k]) is bool for k in ('cleanup', 'zeroUpstream', 'bridgeUntouched')), stage)
+        value = line(conn, deadline, stage)
+        need(type(value) is dict and value.get('kind') == 'terminal', stage)
+    if type(value) is dict and value.get('kind') == 'terminal':
+        keys(value, 'kind code', stage)
+        need(type(value['code']) is str, stage)
+        if value['code'] in SEAM_FAILURES:
+            raise Stop(stage, value['code'])
+        need(terminal and value['code'] == 'GATEWAY_CLOSED', stage)
+    return value
+
+
 def command(args, deadline, stage, capture=True, timeout=2.0, accepted=(0,)):
     remaining = min(timeout, deadline - time.monotonic())
     need(remaining > 0, stage, 'deadline')
@@ -206,7 +227,7 @@ def publisher():
         with conn:
             stage = 'initialization'
             for milestone in ('prepared', 'bootstrapped', 'ready'):
-                need(line(conn, min(deadline, time.monotonic() + 195), stage) == {'kind': milestone}, stage)
+                need(gateway_line(conn, min(deadline, time.monotonic() + 195), stage) == {'kind': milestone}, stage)
                 emit({'event': milestone})
             ready = time.monotonic()
             stage = 'allowance'
@@ -216,14 +237,16 @@ def publisher():
             time.sleep(max(0, ready + 660 - time.monotonic()))
             stage = 'diagnostic'
             conn.sendall(b'D')
-            snapshot = project(line(conn, min(deadline, time.monotonic() + 5), stage))
+            snapshot = project(gateway_line(conn, min(deadline, time.monotonic() + 5), stage))
             stage = 'drain'
             conn.sendall(b'Q')
-            finished = line(conn, min(deadline, time.monotonic() + 15), stage)
+            finished = gateway_line(conn, min(deadline, time.monotonic() + 15), stage)
             keys(finished, 'kind cleanup zeroUpstream bridgeUntouched', stage)
-            need(finished['kind'] == 'finished' and finished['cleanup'] is True
-                 and finished['zeroUpstream'] is True and finished['bridgeUntouched'] is True, stage)
-            need(line(conn, min(deadline, time.monotonic() + 2), stage) == {'kind': 'terminal', 'code': 'GATEWAY_CLOSED'}, stage)
+            need(finished['kind'] == 'finished' and all(type(finished[k]) is bool
+                 for k in ('cleanup', 'zeroUpstream', 'bridgeUntouched')), stage)
+            need(gateway_line(conn, min(deadline, time.monotonic() + 2), stage, terminal=True)
+                 == {'kind': 'terminal', 'code': 'GATEWAY_CLOSED'}, stage)
+            need(finished['cleanup'] and finished['zeroUpstream'] and finished['bridgeUntouched'], stage)
     except Stop as error:
         stage, failure = error.stage, error.constraint
     except KeyboardInterrupt:
@@ -305,7 +328,7 @@ class Docker:
 def owner_result(value):
     keys(value, 'event stage failure snapshot child_cleanup', 'attach')
     need(value['event'] == 'result' and value['stage'] in STAGES
-         and (value['failure'] is None or value['failure'] in CAUSES)
+         and (value['failure'] is None or value['failure'] in CAUSES + SEAM_FAILURES)
          and type(value['child_cleanup']) is bool, 'attach')
     if value['snapshot'] is not None:
         validate_projection(value['snapshot'])
