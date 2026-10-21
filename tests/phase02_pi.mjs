@@ -1632,6 +1632,16 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  if(tools)session.setActiveToolsByName(['echo']);assert.deepEqual(session.getActiveToolNames(),tools?['echo']:[]);
  return {session,s,runtime,provider,notices,compactions,settings,toolRuns:()=>toolRuns,textOnly:()=>textOnlyCommand.handler('',{ui:{notify:()=>{}}})};
 }
+await check('actual Pi received charges use native accounting without routine UI notifications',async()=>{
+ const f=await sdkSetup('sdk-native-charge-ui',['stop'],false);
+ try{
+  await f.session.prompt('Synthetic accounting task');
+  const result=f.session.messages.filter(message=>message.role==='assistant').at(-1);
+  assert.equal(result.stopReason,'stop');assert.equal(result.usage.cost.total,7/1e6);
+  assert.equal(result.diagnostics.find(item=>item.type==='possums_settled_receipt').details.chargedMicrounits,'7');
+  assert.equal(f.session.getSessionStats().cost,7/1e6);assert.deepEqual(f.notices,[]);assert.equal(f.s.sends(),1);
+ }finally{f.session.dispose();}
+});
 await check('actual Pi context hook tool schemas reach supported conversion without duplicate policy admission',async()=>{
  const f=await sdkSetup('sdk-admission-schema',['stop'],false,false,true,false,{baseDelayMs:1,maxAgentDelayMs:8},[pi=>{
   pi.on('context_with_system',event=>({messages:event.messages.map((message,index)=>index===0?{...message,
@@ -1665,7 +1675,9 @@ await check('warning policy: actual Pi stops gracefully, retains text/money, ski
    assert.equal(first.usage.cost.total,known?123/1e6:0);
    if(!known)assert(first.diagnostics.some(item=>item.type==='possums_billing_unknown'));
    assert(!JSON.stringify(first).includes('PRIVATE_WARNING'));assert.deepEqual(retries,[]);
-   assert(f.notices.some(text=>text.includes('placeholders, not free')));assert(!f.notices.some(text=>text.includes('PRIVATE_WARNING')));
+   assert(f.notices.includes(warning.details.message));
+   assert.equal(f.notices.some(text=>text.includes('[possums_billing_unknown]')),!known);
+   assert(!f.notices.some(text=>text.includes('gateway-reported charge')));assert(!f.notices.some(text=>text.includes('PRIVATE_WARNING')));
    await f.session.prompt('Synthetic deliberate next turn');
    assert.equal(f.s.sends(),2);assert.equal(f.session.messages.filter(message=>message.role==='assistant').at(-1).stopReason,'stop');
    assert.equal(f.provider.client,client);assert.equal(f.provider.verifiedTemplate,template);assert.equal(f.provider.accountEpoch,account);
