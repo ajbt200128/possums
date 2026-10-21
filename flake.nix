@@ -104,6 +104,38 @@
           extraPasswdLines = [ "possums:!:65532:65532:Possums gateway:/tmp:/noshell" ];
           extraGroupLines = [ "possums:!:65532:" ];
         };
+        # Operator-only libtest seam: build it, never execute ignored public tests.
+        torDescriptorRepro = craneLib.buildPackage (torCommon // {
+          pname = "possums-tor-descriptor-repro";
+          cargoArtifacts = torCargoArtifacts;
+          cargoBuildCommand = "cargoWithProfile test --lib --no-run";
+          doCheck = false;
+          doNotPostBuildInstallCargoBinaries = true;
+          nativeBuildInputs = [ pkgs.jq ];
+          installPhaseCommand = ''
+            executable=$(jq -rs '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "possums" and .profile.test == true
+              and (.target.kind | index("lib")) and .executable != null)
+              | .executable] | unique | if length == 1 then .[0] else error("expected one libtest") end' "$cargoBuildLog")
+            mkdir -p $out/bin
+            cp "$executable" $out/bin/possums-libtest
+          '';
+        });
+        torDescriptorRunner = pkgs.writeTextDir "app/tor-descriptor-repro.py"
+          (builtins.readFile ./scripts/tor-descriptor-repro.py);
+        torDescriptorReproImage = pkgs.dockerTools.buildLayeredImage {
+          name = "possums-tor-descriptor-repro";
+          tag = "local";
+          contents = [ torDescriptorRepro torDescriptorRunner pkgs.python312 pkgs.iproute2 pkgs.cacert gatewayAccounts ];
+          config = {
+            Entrypoint = [ "${pkgs.python312}/bin/python3" "/app/tor-descriptor-repro.py" ];
+            Env = [ "POSSUMS_REPRO_BINARY=${torDescriptorRepro}/bin/possums-libtest"
+              "PATH=${pkgs.python312}/bin:${pkgs.iproute2}/bin"
+              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
+            User = "65532:65532";
+            WorkingDir = "/tmp";
+          };
+        };
         gatewayImage = pkgs.dockerTools.buildLayeredImage {
           name = "possums-gateway";
           tag = "phase0";
@@ -161,6 +193,7 @@
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           gateway-image = gatewayImage;
           gateway-smoke-image = smokeImage;
+          tor-descriptor-repro-image = torDescriptorReproImage;
           release-build-deps = releaseBuildDeps;
         };
         checks = {

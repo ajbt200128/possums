@@ -178,6 +178,14 @@ impl BridgeMetadata {
         }
     }
 
+    #[cfg(test)]
+    fn for_test_state(report: ReportOwner, state: &AppState) -> Self {
+        match &state.tor_bridge_denied {
+            Some(calls) => Self::fixture(report, BridgeFixture::Fail(calls.clone())),
+            None => Self::new(report),
+        }
+    }
+
     pub(crate) fn report(&self, failure: Failure) {
         self.report.report(failure);
     }
@@ -617,9 +625,22 @@ pub async fn serve_tcp_and_onion_until_initialized<F: Future<Output = ()>>(
     });
     let onion = stream::select(onion_streams(requests, report.clone()), engine);
     let bridge_report = report.clone();
+    #[cfg(not(test))]
     let onion = onion.map(move |io| {
         io.map(|io| Incoming::OpaqueTorBridge(io, BridgeMetadata::new(bridge_report.clone())))
     });
+    #[cfg(test)]
+    let onion = {
+        let bridge_state = state.clone();
+        onion.map(move |io| {
+            io.map(|io| {
+                Incoming::OpaqueTorBridge(
+                    io,
+                    BridgeMetadata::for_test_state(bridge_report.clone(), &bridge_state),
+                )
+            })
+        })
+    };
     let tcp = tcp.map(|io| io.map(Incoming::Http));
     // The public shim's returning HTTP connection shares this same admission
     // pool; opaque onion traffic can never be parsed directly by Hyper here.
