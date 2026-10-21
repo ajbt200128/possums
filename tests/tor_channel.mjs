@@ -21,6 +21,8 @@ const helperPath = process.env.POSSUMS_TOR_NATIVE_HELPER ?? '/tmp/possums-tor-na
 const { build } = await import(pathToFileURL(path.join(source, 'node_modules/esbuild/lib/main.js')));
 const { base32 } = await import(pathToFileURL(path.join(source, 'node_modules/@scure/base/index.js')));
 const out = await mkdtemp(path.join(tmpdir(), 'possums-tor-channel-check-'));
+const previousCache = process.env.XDG_CACHE_HOME;
+process.env.XDG_CACHE_HOME = path.join(out, 'cache');
 const sha = value => createHash('sha256').update(value).digest('hex');
 const bytes = value => Buffer.from(JSON.stringify(value));
 const rawB = Buffer.alloc(32, 9), otherB = Buffer.alloc(32, 8);
@@ -54,6 +56,12 @@ globalThis.__torChannelAppraise = async (evidence, nonce, actualManifest, reposi
   if (deferAppraisal) await deferAppraisal;
   assert(!signal?.aborted);
   return { ...currentFacts };
+};
+globalThis.__directChannelAppraise = async (evidence, nonce, repository, signal, actualManifest) => {
+  assert.equal(repository, 'ajbt200128/possums'); assert.equal(actualManifest, undefined);
+  assert.deepEqual(Buffer.from(nonce), expectedNonce);
+  assert.equal(JSON.parse(Buffer.from(evidence)).nonce, Buffer.from(nonce).toString('hex'));
+  assert(!signal?.aborted); return { ...facts };
 };
 let checks = 0;
 async function rejects(action, constraint) {
@@ -110,12 +118,12 @@ function respond(req, res) {
   seen.requests.push({ host: req.headers.host, url: req.url, auth: req.headers.authorization, method: req.method,
     agent: req.headers['user-agent'] });
   req.resume(); onHTTP?.();
-  if (interruptBodyScope && (req.url.endsWith('/releases/latest') || req.url === '/v1/models')) {
+  if (interruptBodyScope && (req.url.startsWith('/attestation/tor?nonce=') || req.url === '/v1/models')) {
     const scope = interruptBodyScope;
     res.writeHead(200); res.write('{'); setTimeout(() => { void scope.close(); }, 20); return;
   }
   let body, headers = {}, status = 200;
-  if (req.url.endsWith('/releases/latest')) body = bytes({ tag_name: facts.release_tag });
+  if (req.url.endsWith('/releases/latest')) { status = 403; headers['x-ratelimit-remaining'] = '0'; }
   else if (req.url.includes('/releases/download/')) { status = 302; headers.location = 'https://release-assets.githubusercontent.com/synthetic'; }
   else if (req.url === '/synthetic') body = manifest;
   else if (req.url.startsWith('/attestation/tor?nonce=')) {
@@ -191,9 +199,10 @@ try {
   assert.deepEqual(Buffer.from(scope.onionIdentity), rawB); assert(Object.isFrozen(scope)); checks++;
   const first = await test.connectTorPublished(scope);
   assert.equal(first.channel.endpointIdentity.onionIdentity, rawB.toString('hex')); checks++;
-  assert.equal(verifyCalls, 1, 'one Tor projection, no separate normal appraisal'); checks++;
-  assert.deepEqual(seen.destinations.slice(0, 6), ['api.github.com', 'github.com', 'release-assets.githubusercontent.com', onion(rawB), onion(rawB), onion(rawB)]);
-  assert.deepEqual(seen.ports.slice(0, 6), [443, 443, 443, 80, 80, 80]); checks++;
+  assert.equal(verifyCalls, 1, 'one full Tor projection after fresh public release appraisal'); checks++;
+  assert.deepEqual(seen.destinations.slice(0, 5), [onion(rawB), 'github.com', 'release-assets.githubusercontent.com', onion(rawB), onion(rawB)]);
+  assert.deepEqual(seen.ports.slice(0, 5), [80, 443, 443, 80, 80]);
+  assert(!seen.destinations.includes('api.github.com')); checks++;
   assert(seen.sni.includes(publicHost) && !seen.sni.some(s => s.endsWith('.onion')));
   assert(seen.requests.every(r => !r.auth && r.method === 'GET' && r.agent === 'possums-pi'));
   assert(seen.requests.filter(r => r.url.startsWith('/attestation/tor')).every(r => r.host === publicHost)); checks++;
@@ -257,7 +266,7 @@ try {
       }); checks++;
       failCleanup = false; onHTTP = undefined;
       assert.equal(verifyCalls, appraisals, 'non2xx never reaches appraisal');
-      assert.equal(seen.requests.length - before, 4, 'stop at setup, before certificate/keys/private requests'); checks++;
+      assert.equal(seen.requests.length - before, 1, 'stop at setup, before cache/GitHub/certificate/keys/private requests'); checks++;
     }
     assert(cleanupFaults >= backendErrors.length, 'cleanup faults must not replace closed backend failures'); checks++;
     for (const body of [Buffer.from('HOSTILE malformed JSON'), bytes({ error: { code: 'HOSTILE unknown' } }),
@@ -272,7 +281,7 @@ try {
         assert(!error.message.includes('HOSTILE')); assert.equal(error.cause, undefined);
         return true;
       }); checks++;
-      assert.equal(verifyCalls, appraisals); assert.equal(seen.requests.length - before, 4); checks++;
+      assert.equal(verifyCalls, appraisals); assert.equal(seen.requests.length - before, 1); checks++;
     }
   } finally {
     ReadableStream.prototype.cancel = cancel; failCleanup = false; onHTTP = undefined;
@@ -386,7 +395,8 @@ try {
   observeTLS = false;
   let directNonce;
   globalThis.__directChannelAppraise = async (evidence, nonce, repository, signal, actualManifest) => {
-    assert.equal(repository, `ajbt200128/possums@${facts.release_tag}@sha256:${sha(actualManifest)}`);
+    assert.equal(repository, actualManifest === undefined ? 'ajbt200128/possums'
+      : `ajbt200128/possums@${facts.release_tag}@sha256:${sha(actualManifest)}`);
     assert.deepEqual(Buffer.from(nonce), directNonce);
     assert.equal(JSON.parse(Buffer.from(evidence)).nonce, directNonce.toString('hex'));
     assert(!signal?.aborted); return { ...facts };
@@ -422,5 +432,6 @@ try {
   for (const socket of sockets) socket.destroy();
   for (const s of [proxy, server, wrongServer]) { s.closeAllConnections?.(); await new Promise(resolve => s.close(resolve)); }
   delete globalThis.__torChannelAppraise; delete globalThis.__directChannelAppraise;
+  if (previousCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = previousCache;
   await rm(out, { recursive: true, force: true });
 }

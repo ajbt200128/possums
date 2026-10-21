@@ -1,8 +1,10 @@
-import { API_APPROVALS, PUBLISHER, requireApiApproval, requireReleaseTag, provenanceForTag } from '../../examples/phase01/approval.js';
+import { API_APPROVALS, PUBLISHER, requireApiApproval, provenanceForTag } from '../../examples/phase01/approval.js';
 import { ConnectionFailure, EvidenceObservation, connectionFailure, type EvidenceConstraint, type EvidenceStage } from './diagnostics.js';
 import { ReferenceClient } from '../../examples/phase01/client.js';
 import { randomBytes } from 'node:crypto';
 import { V3_EVIDENCE_LIMIT, sameV3Endpoint } from './v3.js';
+import { verifyV3 } from './verifier.mjs';
+import { publicManifest } from './evidence-cache.js';
 import { TorConnection, isTorConnectionFailure, collectTorBody } from './tor-connection.js';
 import { decodeTorSetupResponse, TorSetupBackendFailure } from './tor-setup.mjs';
 import { LIMITS, DiagnosticFailure, OperationFailure, Operation, base64, boundedReport, cleanup, collect, digest, hex, parseJSON, requireThat } from '../../examples/phase01/limits.js';
@@ -62,7 +64,8 @@ async function downloadManifest(tag: string, op: Operation, scope?: TorConnectio
     constraint = 'binding';
     requireThat(!response.redirected && response.url === url);
     constraint = 'redirect';
-    if (response.status !== 302) throw new ConnectionFailure('evidence_unavailable', new EvidenceObservation('manifest_redirect', rateLimited(response) ? 'rate_limited' : 'redirect', response.status));
+    if (response.status !== 302) throw new ConnectionFailure('evidence_unavailable', new EvidenceObservation('manifest_redirect',
+      rateLimited(response) ? 'rate_limited' : response.status >= 400 ? 'http' : 'redirect', response.status));
     const target = new URL(response.headers.get('location') ?? '');
     requireThat(target.protocol === 'https:' && target.hostname === 'release-assets.githubusercontent.com'
       && !target.port && !target.username && !target.password && !target.hash);
@@ -177,33 +180,32 @@ export async function recoverTorPublished(previous: ReferenceClient, sameScope: 
 }
 
 async function published(op: Operation, scope?: TorConnection): Promise<ReferenceClient> {
-  // Latest is only untrusted discovery. The exact downloaded bytes and pinned
-  // repo/tag/digest are qualified by the offline v3 core inside Channel.v3.
-  const bytes = await acquire(`https://api.github.com/repos/${PUBLISHER.repository}/releases/latest`, LIMITS.provenance, op, 'release_discovery', scope);
-  let tag: string;
-  try { const latest = parseJSON(bytes, LIMITS.provenance); requireReleaseTag(latest.tag_name); tag = latest.tag_name; }
-  catch { throw new ConnectionFailure('verification_failed', new EvidenceObservation('release_discovery', 'schema')); }
-  const manifest = await downloadManifest(tag, op, scope);
   const nonce = new Uint8Array(randomBytes(32));
   const setup = scope ? decodeTorSetupResponse(await acquire(`${PUBLISHER.origin}/attestation/tor?nonce=${hex(nonce)}`,
     V3_EVIDENCE_LIMIT + 2048, op, 'gateway_attestation', scope, true)) : undefined;
   const evidence = setup?.evidence ?? await acquire(`${PUBLISHER.origin}/.well-known/tinfoil-attestation?nonce=${hex(nonce)}`,
     V3_EVIDENCE_LIMIT, op, 'gateway_attestation');
-  const certificateBytes = await acquire(PUBLISHER.origin + '/.well-known/tinfoil-certificate', LIMITS.certificate, op, 'gateway_certificate', scope);
-  let certificate: string;
-  try {
-    const cert = parseJSON(certificateBytes, LIMITS.certificate);
-    requireThat(typeof cert?.certificate === 'string' && cert.certificate.length <= LIMITS.certificate);
-    certificate = cert.certificate;
-  } catch { throw new ConnectionFailure('verification_failed', new EvidenceObservation('gateway_certificate', 'schema')); }
-  const config = await acquire(PUBLISHER.origin + '/.well-known/hpke-keys', LIMITS.key, op, 'gateway_keys', scope);
-  op.check();
-  const client = await ReferenceClient.v3({ evidence, nonce, manifest, tag, certificate, config,
-    ...(setup ? { payload: setup.payload, signature: setup.signature } : {}) }, op.controller.signal, scope);
-  op.check();
-  if (scope) torScopes.set(client.channel, scope);
-  // No nonce-bound reports, collateral or verdicts enter the legacy cache.
-  return client;
+  // Authenticate the serving release with the supported offline verifier before
+  // selecting public bytes. These facts never authorize a channel: Channel.v3
+  // independently verifies the same fresh evidence AND exact manifest below.
+  const release = await op.wait(verifyV3(evidence, nonce, PUBLISHER.repository, op.controller.signal));
+  return await publicManifest(release.release_tag, release.release_digest, op,
+    () => downloadManifest(release.release_tag, op, scope), async manifest => {
+      const certificateBytes = await acquire(PUBLISHER.origin + '/.well-known/tinfoil-certificate', LIMITS.certificate, op, 'gateway_certificate', scope);
+      let certificate: string;
+      try {
+        const cert = parseJSON(certificateBytes, LIMITS.certificate);
+        requireThat(typeof cert?.certificate === 'string' && cert.certificate.length <= LIMITS.certificate);
+        certificate = cert.certificate;
+      } catch { throw new ConnectionFailure('verification_failed', new EvidenceObservation('gateway_certificate', 'schema')); }
+      const config = await acquire(PUBLISHER.origin + '/.well-known/hpke-keys', LIMITS.key, op, 'gateway_keys', scope);
+      op.check();
+      const client = await ReferenceClient.v3({ evidence, nonce, manifest, tag: release.release_tag, certificate, config,
+        ...(setup ? { payload: setup.payload, signature: setup.signature } : {}) }, op.controller.signal, scope);
+      op.check();
+      if (scope) torScopes.set(client.channel, scope);
+      return client;
+  });
 }
 
 async function amdCertificate(report: Uint8Array<ArrayBuffer>, op: Operation): Promise<Uint8Array<ArrayBuffer>> {

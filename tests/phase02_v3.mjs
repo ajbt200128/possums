@@ -1,6 +1,6 @@
 // Offline synthetic qualification; no inference, credentials or production sockets.
 import assert from 'node:assert/strict';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { createHash, X509Certificate } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:https';
@@ -12,6 +12,9 @@ assert(source && path.isAbsolute(source));
 const { build } = await import(pathToFileURL(path.join(source, 'node_modules/esbuild/lib/main.js')));
 const out = path.resolve(source, '../../../checks/v3');
 await mkdir(out, { recursive: true });
+const cacheRoot = await mkdtemp(path.join(out, 'cache-'));
+const previousCache = process.env.XDG_CACHE_HOME;
+process.env.XDG_CACHE_HOME = cacheRoot;
 execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(out, 'key.pem'),
   '-out', path.join(out, 'cert.pem'), '-days', '1', '-subj', '/CN=gateway.possums.dev',
   '-addext', 'subjectAltName=DNS:gateway.possums.dev,DNS:localhost'], { stdio: 'ignore' });
@@ -26,11 +29,14 @@ const facts = { tls_key_sha256: tls, hpke_key: '07'.repeat(32), release_tag: 'v0
 const input = { evidence: bytes({ nonce: 'synthetic' }), nonce: new Uint8Array(32).fill(1), manifest, tag: facts.release_tag, certificate: certPEM, config };
 let result = facts, calls = 0, passed = 0;
 const production = await readFile(path.resolve(source, '../../../package/extension.mjs'), 'utf8');
-assert(!production.includes('pi-public-evidence-v1')); passed++;
+assert(production.includes('pi-public-manifest-v3')); passed++;
 globalThis.__v3Appraise = async (evidence, nonce, repository, signal, actualManifest) => {
   calls++;
-  assert.equal(repository, `ajbt200128/possums@${input.tag}@sha256:${sha(actualManifest)}`);
-  assert(actualManifest instanceof Uint8Array && actualManifest !== manifest);
+  if (actualManifest === undefined) assert.equal(repository, 'ajbt200128/possums');
+  else {
+    assert.equal(repository, `ajbt200128/possums@${input.tag}@sha256:${sha(actualManifest)}`);
+    assert(actualManifest instanceof Uint8Array && actualManifest !== manifest);
+  }
   assert.equal(nonce.length, 32);
   if (signal?.aborted) throw new Error('HOSTILE cancelled');
   return { ...result };
@@ -76,15 +82,18 @@ assert.throws(() => same.requireRenewal(channel), error => error.constraint === 
 result = { ...facts, freshness_expires_at_unix: facts.freshness_expires_at_unix + 100 };
 const renewed = await test.Channel.v3(input); renewed.requireRenewal(channel); passed++;
 result = facts;
-// Real bootstrap routing/nonce ownership, synthetic appraisal only. No disk cache.
+// Real bootstrap/cache/nonce ownership, synthetic appraisal only. GitHub's
+// rate-limited API must never be used, on either cold or warm acquisition.
 const fetch = globalThis.fetch, urls = [];
-let certificateBody = { certificate: certPEM };
+let certificateBody = { certificate: certPEM }, manifestStatus = 302;
 globalThis.fetch = async request => {
   const url = request.url; urls.push(url);
   assert.equal(request.credentials, 'omit');
   let body, status = 200, headers = {};
-  if (url.includes('/releases/latest')) body = bytes({ tag_name: input.tag });
-  else if (url.includes('/releases/download/')) { status = 302; headers.location = 'https://release-assets.githubusercontent.com/synthetic'; }
+  if (url.startsWith('https://api.github.com/')) { status = 403; headers['x-ratelimit-remaining'] = '0'; body = bytes({ message: 'HOSTILE rate limit' }); }
+  else if (url.includes('/releases/download/')) {
+    status = manifestStatus; headers.location = 'https://release-assets.githubusercontent.com/synthetic';
+  }
   else if (url === 'https://release-assets.githubusercontent.com/synthetic') body = manifest;
   else if (url.includes('/tinfoil-attestation?nonce=')) { assert.match(url.split('nonce=')[1], /^[0-9a-f]{64}$/); body = input.evidence; }
   else if (url.endsWith('/tinfoil-certificate')) body = bytes(certificateBody);
@@ -94,9 +103,16 @@ globalThis.fetch = async request => {
 };
 try {
   const first = await test.connectPublished();
+  assert.equal(urls.filter(url => url.includes('/releases/download/')).length, 1);
+  manifestStatus = 429;
+  // A fresh trust session independently appraises fresh evidence and the cached
+  // manifest even while GitHub artifact acquisition would return HTTP 429.
+  const second = await test.connectPublished();
+  assert(test.sameV3Endpoint(first.channel.endpointIdentity, second.channel.endpointIdentity));
+  assert.equal(urls.filter(url => url.includes('/releases/download/')).length, 1); passed++;
   await rejects(() => test.recoverPublished(first));
   const nonces = urls.filter(url => url.includes('?nonce='));
-  assert.equal(new Set(nonces).size, 2); assert(!urls.some(url => /amd|attestations\/sha256/.test(url))); passed++;
+  assert.equal(new Set(nonces).size, 3); assert(!urls.some(url => /api\.github\.com|amd|attestations\/sha256/.test(url))); passed++;
   result = { ...facts, freshness_expires_at_unix: facts.freshness_expires_at_unix + 100 };
   const freshWitness = await test.recoverPublished(first);
   assert(test.sameV3Endpoint(first.channel.endpointIdentity, freshWitness.channel.endpointIdentity));
@@ -106,7 +122,23 @@ try {
   certificateBody = null;
   await assert.rejects(() => test.connectPublished(), error => error.observation?.stage === 'gateway_certificate' &&
     error.observation?.constraint === 'schema' && !error.message.includes('HOSTILE')); passed++;
-} finally { globalThis.fetch = fetch; }
+  certificateBody = { certificate: certPEM };
+  // A cold cache still needs exact public bytes; rate limiting is classified,
+  // never converted into a channel or an older-release fallback.
+  await rm(path.join(cacheRoot, 'possums', 'pi-public-manifest-v3'), { recursive: true });
+  for (const [status, constraint] of [[429, 'rate_limited'], [503, 'http'], [200, 'redirect'], [307, 'redirect']]) {
+    manifestStatus = status;
+    const before = calls;
+    await assert.rejects(() => test.connectPublished(), error => error.observation?.stage === 'manifest_redirect' &&
+      error.observation?.constraint === constraint && error.observation?.status === status);
+    assert.equal(calls, before + 1, 'failed acquisition never reaches complete channel appraisal'); passed++;
+  }
+  assert(!urls.some(url => /api\.github\.com|amd/.test(url))); passed++;
+} finally {
+  globalThis.fetch = fetch;
+  if (previousCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = previousCache;
+  await rm(cacheRoot, { recursive: true, force: true });
+}
 // Actual native TLS + HTTPS request, endorsed self-signed leaf, headers withheld
 // on a wrong SPKI. This does not simulate hardware/Sigstore acceptance.
 let requests = 0, streamClosed;
