@@ -47,7 +47,7 @@ cp "$REPO/examples/phase01"/*.ts "$S/source/examples/phase01/"
 # tests only. The authorizing extension never imports this scratch-only file.
 cp "$REPO/tests/fixtures/pi-v2-bootstrap.ts" "$S/source/clients/pi/legacy-bootstrap.ts"
 "$NODE" -e 'const fs=require("node:fs"),crypto=require("node:crypto"); if(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex")!=="74a0d6e01fdbb60b9a4d959889f6a0eae62bdfc8d5cfc28efc1b47144eae9f61") throw new Error("possums_build_legacy_fixture: retained bootstrap bytes changed; restore the pinned fixture before building")' "$S/source/clients/pi/legacy-bootstrap.ts"
-for TEST in phase01_client phase01_transport phase01_stream_limits tinfoil_forwarding_client phase02_client phase02_pi phase02_thinking phase02_diagnostics phase02_release phase02_cache phase02_discovery phase02_v3 phase02_v3_package phase02_peer_recovery tor_channel tor_selection tor_diagnostics tor_client_failures tor_identity_verifier_wasm tor_setup; do
+for TEST in phase01_client phase01_transport phase01_stream_limits tinfoil_forwarding_client phase02_client phase02_pi phase02_thinking phase02_diagnostics phase02_release phase02_cache phase02_manifest_cache phase02_discovery phase02_v3 phase02_v3_package phase02_peer_recovery tor_channel tor_selection tor_diagnostics tor_client_failures tor_identity_verifier_wasm tor_setup; do
   cp "$REPO/tests/$TEST.mjs" "$S/checks/source/"
 done
 mkdir -p "$S/checks/source/fixtures"

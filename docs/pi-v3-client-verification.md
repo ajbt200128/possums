@@ -1,5 +1,11 @@
 # Bounded Pi v3 migration — client source/scratch evidence
 
+The migration-time no-cache/latest-discovery behavior below is historical.
+The subsequent [public-manifest cache restoration](pi-v3-cache-restoration-verification.md)
+removes GitHub API discovery and restores cross-session public-byte reuse with
+fresh full verification. Its source/scratch evidence does not itself update an
+installed client or supersede the installation record at the end of this file.
+
 ## Scope and authority
 
 The operator explicitly authorized the Pi v3 client migration, scratch builds and credential-free public-evidence qualification. This packet changes the default Pi bootstrap/Channel transport and package assets, not installation, activation, gateway deployment, credentials, inference, global Pi/T3 settings or telemetry. The parent owns the three Go verifier files and integration/commit; this child did not stage or commit anything. A separate backend task owns deployment.
