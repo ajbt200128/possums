@@ -8,7 +8,8 @@ import {
   type TranscriptContext, type ToolCall,
 } from '@earendil-works/pi-ai';
 import { Channel } from '../../examples/phase01/transport.js';
-import { ReferenceClient, PreparedChat, BalanceFailure, CatalogFailure, GatewayError, CompletionFailure, gatewayDetailLabel, type BalanceSnapshot, type LiveModel, type CompletionEvent, type Receipt } from '../../examples/phase01/client.js';
+import { intakeDescription } from '../../examples/phase01/intake-diagnostics.js';
+import { ReferenceClient, PreparedChat, CatalogFailure, GatewayError, CompletionFailure, gatewayDetailLabel, type LiveModel, type CompletionEvent, type Receipt } from '../../examples/phase01/client.js';
 import { ChannelError, DiagnosticFailure, OperationFailure, LIMITS, Operation, parseJSON, serialize, requireThat, type FailureStage } from '../../examples/phase01/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure, diagnosticDescription, settlementDescription } from './diagnostics.js';
 import { invocation } from './wire.js';
@@ -114,13 +115,6 @@ function blank(selected: Model<typeof API>): AssistantMessage {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 }
 const localFailures: Readonly<Record<string, string>> = Object.freeze({
-  possums_balance_request_failed: 'Balance read failed. This command sent no inference; prior charges are unchanged or unknown.',
-  possums_balance_validation_failed: 'Balance response failed validation. This command sent no inference; prior charges are unchanged or unknown.',
-  possums_reconcile_busy: 'Wait until Pi finishes its run, retries and compaction before taking a snapshot.',
-  possums_reconcile_pending: 'Account has unfinished reservations. Wait for them to finish before taking a snapshot.',
-  possums_reconcile_started: 'Reconciliation already started. Use finish or cancel first.',
-  possums_reconcile_not_started: 'No reconciliation window. Use /possums-reconcile start first.',
-  possums_reconcile_scope_changed: 'Session or account changed. Start a fresh reconciliation window.',
   possums_compaction_failed: 'Native summary unavailable.',
   possums_summary_empty: 'Summary was empty.',
   possums_summary_tools: 'Summary attempted tool use; no tool executed.',
@@ -161,7 +155,6 @@ function trustFailure(error: unknown): boolean {
 }
 function safeFailure(error: unknown, stage: FailureStage = 'provider', beforeSubmission = false): string {
   if (error instanceof CatalogFailure) return catalogConnectionFailure(error).message;
-  if (error instanceof BalanceFailure && error.observation) return `${diagnosticDescription(error.observation)} This balance command sent no inference; prior billing is unchanged or unknown.`;
   if (error instanceof DiagnosticFailure || error instanceof OperationFailure) {
     const failure = error instanceof DiagnosticFailure ? error : new DiagnosticFailure(stage, error.constraint, 'uncertain');
     if (beforeSubmission && failure.stage === 'request' && failure.code === 'rejected') {
@@ -195,7 +188,8 @@ function safeFailure(error: unknown, stage: FailureStage = 'provider', beforeSub
       Object.hasOwn(detailStages, detail) ? detailStages[detail] :
       detail.startsWith('stream_') || detail.startsWith('tool_') ? 'gateway_stream' : 'gateway_admission';
     const action = error.reason === 'insufficient_credit' ? 'Add credit before submitting this model again.' : error.reason === 'invalid_request' ? 'Review supported request options and context limits.' : error.reason === 'account_limit' ? 'Wait for pending requests before submitting again.' : error.reason === 'unauthorized' ? 'Check authentication, not trust pins.' : 'If this persists, share only the content-free code/stage/constraint for support.';
-    const description = `${known ? `[${error.reason}] ${reason[error.reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; underlying cause unknown.'}${label ? ` ${label}.` : error.detail === 'unclassified' ? ' [possums_gateway_detail_unclassified] Gateway detail is unclassified; underlying cause unknown.' : ''} Stage: ${gatewayStage}; constraint: ${error.detail === 'unclassified' ? 'unclassified' : label ? error.detail : known ? error.reason : 'unclassified'}.${error.status === undefined ? '' : ` Observed gateway HTTP status: ${error.status}.`}${upstreamHttpFailure ? ' Upstream HTTP status: unavailable; upstream retryability unknown.' : ''} ${action}`;
+    const intake = error.intakeDiagnostic ? ` ${intakeDescription(error.intakeDiagnostic)}` : '';
+    const description = `${intake}${known ? `[${error.reason}] ${reason[error.reason]}` : '[possums_gateway_unclassified] Gateway returned an unclassified category; underlying cause unknown.'}${label ? ` ${label}.` : error.detail === 'unclassified' ? ' [possums_gateway_detail_unclassified] Gateway detail is unclassified; underlying cause unknown.' : ''} Stage: ${gatewayStage}; constraint: ${error.detail === 'unclassified' ? 'unclassified' : label ? error.detail : known ? error.reason : 'unclassified'}.${error.status === undefined ? '' : ` Observed gateway HTTP status: ${error.status}.`}${upstreamHttpFailure ? ' Upstream HTTP status: unavailable; upstream retryability unknown.' : ''} ${action}`;
     if (error.settlement) return `Possums: ${description} Billing evidence: ${settlementDescription(error.settlement)} Settlement alone does not authorize tool execution. Not replayed.`;
     // Warning-only host completion never enters Pi's error/retry classifier.
     return `Possums: ${description} Billing status: ` +
@@ -230,8 +224,6 @@ export class PossumsProvider implements Provider {
   private trustController = new AbortController();
   private trustEpoch = 0;
   private sessionClosed = true;
-  private reconciliation: { before: BalanceSnapshot; charged: bigint; completed: bigint; unknown: boolean } | undefined;
-  private reconciliationEpoch = 0;
   private renewalController: AbortController | undefined;
   private renewalRequired = false;
   private renewalFailure: ConnectionFailure | undefined;
@@ -447,7 +439,6 @@ export class PossumsProvider implements Provider {
         this.renewalRequired = false;
         this.renewalFailure = undefined;
       }
-      if (renewedTemplate) { this.reconciliationEpoch++; this.reconciliation = undefined; }
       this.client = candidate; this.catalog = entries; this.listed = listed;
       this.discovery = discoveryModels(listed);
       // Public verification alone must not reset failed-session warning deduplication.
@@ -522,8 +513,6 @@ export class PossumsProvider implements Provider {
     // Keep the last published session intact until verification, login and
     // catalog all succeed; the pre-dispatch guard blocks it meanwhile.
     this.renewalRequired = true; this.renewalFailure = undefined;
-    // A changed verified instance or bearer cannot certify the old balance window.
-    this.reconciliationEpoch++; this.reconciliation = undefined;
     try {
       let template = this.verifiedTemplate;
       if (!template || (template.release && Date.now() >= template.release.expires)) {
@@ -614,7 +603,6 @@ export class PossumsProvider implements Provider {
         if (trustFailure(scope.terminal)) {
           this.recoveryBlocked = scope.terminal;
           this.client = undefined; this.catalog = []; this.listed = []; this.restoring = undefined;
-          this.reconciliationEpoch++; this.reconciliation = undefined;
         }
         try { this.observeFailure(scope.terminal); } catch { /* Transient UI only. */ }
         throw scope.terminal;
@@ -665,78 +653,6 @@ export class PossumsProvider implements Provider {
     this.failure = undefined;
     this.recoveryKey = undefined; this.restoring = undefined;
     this.newConversation = true;
-    this.reconciliationEpoch++;
-    this.reconciliation = undefined;
-  }
-
-  private async balance(ctx: ExtensionContext): Promise<BalanceSnapshot> {
-    const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_ID);
-    const epoch = this.authEpoch;
-    if (auth?.auth.apiKey !== REQUEST_AUTH || !this.client) {
-      throw new Error('possums_reconcile_scope_changed');
-    }
-    const client = this.client;
-    try {
-      const snapshot = await client.balance(ctx.signal);
-      if (epoch !== this.authEpoch || client !== this.client || ctx.signal?.aborted) {
-        throw new Error('possums_reconcile_scope_changed');
-      }
-      return snapshot;
-    } catch (error) {
-      if (error instanceof BalanceFailure && !error.observation) throw new Error(error.message);
-      throw error;
-    }
-  }
-
-  async reconcile(action: string, ctx: ExtensionContext): Promise<string> {
-    if (action === 'cancel') {
-      this.reconciliationEpoch++;
-      this.reconciliation = undefined;
-      return 'Reconciliation window discarded. No inference or accounting change.';
-    }
-    if (action !== 'start' && action !== 'finish') return 'Use /possums-reconcile start, finish or cancel. These commands do not initiate inference.';
-    if (!ctx.isIdle()) throw new Error('possums_reconcile_busy');
-    const window = this.reconciliation;
-    const epoch = this.reconciliationEpoch;
-    if (action === 'start' && window) throw new Error('possums_reconcile_started');
-    if (action === 'finish' && !window) throw new Error('possums_reconcile_not_started');
-    const snapshot = await this.balance(ctx);
-    if (!ctx.isIdle()) throw new Error('possums_reconcile_busy');
-    if (snapshot.inFlight !== 0) throw new Error('possums_reconcile_pending');
-    if (epoch !== this.reconciliationEpoch || window !== this.reconciliation) throw new Error('possums_reconcile_scope_changed');
-    if (action === 'start') {
-      this.reconciliation = { before: snapshot, charged: 0n, completed: 0n, unknown: false };
-      return `Reconciliation started. Available demo credit: $${dollars(snapshot.availableMicrounits)}. Run your chosen Possums task, then /possums-reconcile finish. New inference, retries and compaction may charge credit.`;
-    }
-    if (!window) throw new Error('possums_reconcile_not_started');
-    this.reconciliation = undefined;
-    const completed = BigInt(snapshot.completedRequests) - BigInt(window.before.completedRequests);
-    if (window.unknown || completed !== window.completed) {
-      return 'Reconciliation unavailable: an outcome is unknown, accounting changed outside the observed window, or the ledger reset. No confirmed match or refund is inferred.';
-    }
-    const debit = BigInt(window.before.availableMicrounits) - BigInt(snapshot.availableMicrounits);
-    if (debit !== window.charged) return 'Reconciliation mismatch: balance change differs from authenticated receipt charges. No refund or upstream-invoice agreement is inferred.';
-    return `Reconciliation matched: balance debit $${dollars(window.charged.toString())} equals authenticated receipt charges across ${completed} completed requests (including confirmed refunds). Available demo credit: $${dollars(snapshot.availableMicrounits)}. This does not verify upstream invoices.`;
-  }
-
-  reconciliationFailure(error: unknown): string { return `${safeFailure(error, 'balance')} This command sent no inference; it does not establish prior accounting outcomes.`; }
-
-  private observeReconciliation(output: AssistantMessage): void {
-    const window = this.reconciliation;
-    if (!window) return;
-    const receipts = output.diagnostics?.filter((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_settled_receipt') ?? [];
-    const refunds = output.diagnostics?.filter((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => diagnostic.type === 'possums_reservation_refunded') ?? [];
-    if (receipts.length === 1 && refunds.length === 0) {
-      const charged = receipts[0].details?.chargedMicrounits;
-      if (typeof charged !== 'string' || !/^(0|[1-9][0-9]{0,19})$/.test(charged)) { window.unknown = true; return; }
-      window.charged += BigInt(charged);
-      window.completed++;
-    } else if (refunds.length === 1 && receipts.length === 0) {
-      window.completed++;
-    } else if (receipts.length || refunds.length || output.stopReason === 'error' || output.stopReason === 'aborted') {
-      window.unknown = true;
-    }
-    if (output.diagnostics?.some((diagnostic: NonNullable<AssistantMessage['diagnostics']>[number]) => (diagnostic.type === 'possums_billing_unknown' || diagnostic.type === 'possums_gateway_charge'))) window.unknown = true;
   }
 
   async refreshModels(context: Parameters<NonNullable<Provider['refreshModels']>>[0]): Promise<void> {
@@ -868,7 +784,6 @@ export class PossumsProvider implements Provider {
     const ownsRequest = () => epoch === this.epoch && account === this.accountEpoch &&
       !this.sessionClosed && !options.signal?.aborted &&
       (!scope || (scope === this.runScope && !scope.controller.signal.aborted));
-    const reconciliation = this.reconciliation;
     const args = new Map<number, { block: ToolCall; contentIndex: number; json: string }>();
     let started = false;
     let failureStage: FailureStage = 'request';
@@ -1120,7 +1035,6 @@ export class PossumsProvider implements Provider {
           events.push({ type: 'done', reason: 'stop', message: output });
         }
       } finally {
-        if (reconciliation && reconciliation === this.reconciliation) this.observeReconciliation(output);
         if (scope && --scope.owners === 0 && scope.idleCompaction && this.runScope === scope) {
           scope.controller.abort(); this.runScope = undefined;
         }

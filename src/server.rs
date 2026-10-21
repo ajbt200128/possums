@@ -164,7 +164,10 @@ impl AppState {
         evidence_path: impl Into<Arc<str>>,
         gateway_evidence_verifier: Arc<dyn EvidenceVerifier>,
     ) -> Self {
-        let accounting = Accounting::new(auth.account_budgets());
+        let accounting = match auth.intake() {
+            Some(intake) => Accounting::from_intake(intake),
+            None => Accounting::new(auth.account_budgets()),
+        };
         Self {
             lifecycle: Default::default(),
             auth: Arc::new(auth),

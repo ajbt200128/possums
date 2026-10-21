@@ -37,6 +37,13 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result["secret_references"], sorted(planner.REFERENCES))
         self.assertIn("review_verifier", result["blockers"])
 
+    def test_legacy_account_reference_cannot_replace_either_intake_reference(self):
+        for missing in ("POSSUMS_INTAKE_ORIGIN", "POSSUMS_INTAKE_LEDGER_KEY"):
+            doc = fixture()
+            doc["secret_references"].remove(missing)
+            doc["secret_references"].append("POSSUMS_ACCOUNTS_JSON")
+            self.rejects(doc)
+
     def test_wrong_tag_measurement_manifest_or_key(self):
         for field in planner.IDENTITY_FIELDS:
             with self.subTest(field=field):

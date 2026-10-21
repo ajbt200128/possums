@@ -284,16 +284,14 @@ const channel = await f.Channel.fixture('https://localhost:18443', config, await
 const client = new f.ReferenceClient(channel);
 const nativeFetch = globalThis.fetch;
 let sent = [], decoded = [], responsePulls = 0, holdPath, held, catalogModel = model, chatText = valid, corrupt = false;
-let observedAbort = false, balanceStatus = 200;
+let observedAbort = false;
 let encryptedFailureRoute, encryptedFailureStatus = 503, encryptedFailureWire, delayedClose, interruptClose;
 let fragmentMode;
 const realTimer = globalThis.setTimeout;
-let balanceText = '{"available_microunits":"18446744073709551615","in_flight":4294967295,"completed_requests":"18446744073709551615"}';
 globalThis.fetch = async req => {
   check(req instanceof Request && req.credentials === 'omit' && req.redirect === 'error' && req.cache === 'no-store');
   check(!req.signal.aborted);
   const route = new URL(req.url).pathname; sent.push(route);
-  if (route === '/v1/balance') check(req.headers.get('Authorization') === 'Bearer ' + 'b'.repeat(43));
   if (route === holdPath) {
     held?.();
     return new Promise((_, reject) => req.signal.addEventListener('abort', () => { observedAbort = true; reject(new Error('fixture abort')); }, { once: true }));
@@ -306,7 +304,7 @@ globalThis.fetch = async req => {
   const payload = JSON.parse(dec.decode(await recipient.Open(body.slice(4)))); decoded.push({ route, payload });
   const response = route === encryptedFailureRoute ? (typeof encryptedFailureWire === 'string' ? encryptedFailureWire : JSON.stringify(encryptedFailureWire)) :
     route === '/v1/sessions' ? JSON.stringify({ token: 'b'.repeat(43), token_type: 'Bearer', expires_in: 43200 }) :
-    route === '/v1/submissions' ? JSON.stringify({ submission: 's'.repeat(43) }) : route === '/v1/balance' ? balanceText : chatText;
+    route === '/v1/submissions' ? JSON.stringify({ submission: 's'.repeat(43) }) : chatText;
   const nonce = crypto.getRandomValues(new Uint8Array(32));
   const secret = new Uint8Array(await recipient.Export(enc.encode(ehbp.EXPORT_LABEL), ehbp.EXPORT_LENGTH));
   const keys = await ehbp.deriveResponseKeys(secret, encapsulated, nonce);
@@ -331,12 +329,10 @@ globalThis.fetch = async req => {
     if (!emitted) { emitted = true; c.enqueue(frame); }
     else { if (route === encryptedFailureRoute && delayedClose) await delayedClose; if (route === encryptedFailureRoute && interruptClose) c.error(new Error('PRIVATE_PROMPT_CREDENTIAL')); else c.close(); }
   } }, { highWaterMark: 0 }),
-    { status: route === encryptedFailureRoute ? encryptedFailureStatus : route === '/v1/balance' ? balanceStatus : 200, headers: { 'Ehbp-Response-Nonce': ehbp.bytesToHex(nonce), 'Content-Type': route === '/v1/chat/completions' ? 'text/event-stream; fixture=hidden' : 'application/json', 'X-Private': 'not-for-hook' } });
+    { status: route === encryptedFailureRoute ? encryptedFailureStatus : 200, headers: { 'Ehbp-Response-Nonce': ehbp.bytesToHex(nonce), 'Content-Type': route === '/v1/chat/completions' ? 'text/event-stream; fixture=hidden' : 'application/json', 'X-Private': 'not-for-hook' } });
 };
 try {
   const pre = AbortSignal.abort();
-  await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'request' && e.message === 'possums_balance_request_failed'); checks++;
-  check(sent.length === 0);
   await rejects(() => client.login('c'.repeat(43), pre), 'rejected'); check(sent.length === 0);
   const loginStarted=Date.now();
   await client.login('c'.repeat(43)); check(sent.join(',') === '/v1/auth/challenge,/v1/sessions');
@@ -346,85 +342,22 @@ try {
   check(client.authExpiresAt===undefined);
   await client.login('c'.repeat(43));
   let initial = sent.length;
-  const snapshot = await client.balance();
-  assert.deepEqual(snapshot, { availableMicrounits: '18446744073709551615', inFlight: 4294967295, completedRequests: '18446744073709551615' }); checks++;
-  check(Object.isFrozen(snapshot) && sent.slice(initial).join(',') === '/v1/balance');
-  assert.deepEqual(decoded.at(-1), { route: '/v1/balance', payload: {} }); checks++;
-  const invalidBalances = [
-    { available_microunits: '18446744073709551616', in_flight: 0, completed_requests: '0' },
-    { available_microunits: '1.5', in_flight: 0, completed_requests: '0' },
-    { available_microunits: '-1', in_flight: 0, completed_requests: '0' },
-    { available_microunits: '01', in_flight: 0, completed_requests: '0' },
-    { available_microunits: 1, in_flight: 0, completed_requests: '0' },
-    { available_microunits: '0', in_flight: 4294967296, completed_requests: '0' },
-    { available_microunits: '0', in_flight: -1, completed_requests: '0' },
-    { available_microunits: '0', in_flight: 0.5, completed_requests: '0' },
-    { available_microunits: '0', in_flight: 0, completed_requests: '01' },
-    { available_microunits: '0', in_flight: 0, completed_requests: '18446744073709551616' },
-  ];
-  balanceText=JSON.stringify({available_microunits:'0',in_flight:0,completed_requests:'0',future:'PRIVATE_EXTRA_FIELD'});
-  check((await client.balance()).availableMicrounits==='0');
-  for (const value of invalidBalances) {
-    balanceText = JSON.stringify(value); initial = sent.length;
-    await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'validation' && e.message === 'possums_balance_validation_failed'); checks++;
-    check(sent.slice(initial).join(',') === '/v1/balance');
-  }
-  for (const text of ['{"available_microunits":"0","in_flight":0,"completed_requests":"0","in_flight":1}', '{"available_microunits":"0","in_flight":-0,"completed_requests":"0"}', '{"error":{"message":"secret diagnostic"}}']) {
-    balanceText = text; initial = sent.length;
-    await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure &&
-      e.message === (text.includes('secret') || text.includes('-0') ? 'possums_balance_validation_failed' : 'possums_balance_request_failed')); checks++;
-    check(sent.slice(initial).join(',') === '/v1/balance');
-  }
-  balanceText = JSON.stringify({ available_microunits: '0', in_flight: 0, completed_requests: '0' });
-  initial = sent.length;
-  await assert.rejects(() => client.balance(pre), e => e instanceof f.BalanceFailure && e.stage === 'request'); checks++;
-  check(sent.length === initial);
-  for (const status of [401, 404, 429, 503]) {
-    balanceStatus = status; initial = sent.length;
-    await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'request' &&
-      e.observation?.constraint === 'http' && e.observation.status === status); checks++;
-    check(sent.slice(initial).join(',') === '/v1/balance');
-  }
-  balanceStatus = 200;
   const quiesce = { error: { code: 'service_quiescing', stage: 'admission', constraint: 'service_quiescing',
     billing: 'not_submitted', message: 'PRIVATE_PROMPT_CREDENTIAL' } };
   const assertQuiesce = error => error.reason === 'service_quiescing' && error.code === 'uncertain' &&
     error.status === 503 && error.billing === 'unknown' && !String(error).includes('PRIVATE_PROMPT_CREDENTIAL') &&
     !String(error).includes('Reservation refunded');
   encryptedFailureWire = quiesce;
-  for (const route of ['/v1/sessions', '/v1/submissions', '/v1/chat/completions', '/v1/balance']) {
+  for (const route of ['/v1/sessions', '/v1/submissions', '/v1/chat/completions']) {
     encryptedFailureRoute = route; initial = sent.length;
     const operation = route === '/v1/sessions' ? () => client.login('c'.repeat(43)) :
-      route === '/v1/balance' ? () => client.balance() :
       () => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] });
     await assert.rejects(operation, assertQuiesce); checks++;
     check(sent.slice(initial).join(',') === (route === '/v1/sessions' ? '/v1/auth/challenge,/v1/sessions' :
-      route === '/v1/balance' ? '/v1/balance' :
       route === '/v1/submissions' ? '/v1/models,/v1/submissions' : '/v1/models,/v1/submissions,/v1/chat/completions'));
     encryptedFailureRoute = undefined;
     if (route === '/v1/sessions') await client.login('c'.repeat(43));
   }
-  encryptedFailureRoute = '/v1/balance';
-  for (const [wire, interrupted, constraint] of [
-    ['{"error":"PRIVATE_PROMPT_CREDENTIAL"', false, 'json'],
-    [quiesce, true, 'fetch'],
-  ]) {
-    encryptedFailureWire = wire; interruptClose = interrupted; initial = sent.length;
-    await assert.rejects(() => client.balance(), error => {
-      assert(error instanceof f.BalanceFailure && error.stage === 'request' && error.code === 'uncertain');
-      assert.equal(error.observation?.message, `possums_${interrupted ? 'transport_fetch' : 'balance_json'}`);
-      assert.equal(error.observation.status, 503);
-      assert.equal(error.observation.constraint, constraint);
-      assert.equal(error.observation.billing, undefined);
-      assert.equal(error.reason, undefined);
-      assert.equal(error.cause, undefined);
-      const shown = JSON.stringify(error);
-      assert(!shown.includes('PRIVATE_PROMPT_CREDENTIAL') && !shown.includes('refunded') && !shown.includes('service_quiescing'));
-      return true;
-    }); checks++;
-    check(sent.slice(initial).join(',') === '/v1/balance');
-  }
-  interruptClose = false; encryptedFailureWire = quiesce;
   encryptedFailureRoute = '/v1/chat/completions';
   let releaseEOF;
   delayedClose = new Promise(resolve => { releaseEOF = resolve; });
@@ -462,12 +395,6 @@ try {
     error.stage === 'transport' && error.constraint === 'endpoint_binding' && error.status === 503 && !assertQuiesce(error)); checks++;
   globalThis.fetch = encryptedFetch;
   encryptedFailureRoute = undefined;
-  // An older gateway cannot silently fall back to login, catalog or inference.
-  const failedBalanceFetch = globalThis.fetch;
-  globalThis.fetch = async req => new URL(req.url).pathname === '/v1/balance' ? new Response('not found', { status: 404 }) : failedBalanceFetch(req);
-  initial = sent.length;
-  await assert.rejects(() => client.balance(), e => e instanceof f.BalanceFailure && e.stage === 'request' && !e.message.includes('not found')); checks++;
-  check(sent.length === initial); globalThis.fetch = failedBalanceFetch;
   initial = sent.length;
   await rejects(() => client.models(pre), 'rejected'); check(sent.length === initial);
   await rejects(() => client.chat('fixture', chat.messages, () => {}, false, { signal: pre }), 'rejected'); check(sent.length === initial);
@@ -566,11 +493,11 @@ try {
   };
   await assert.rejects(() => client.chat('fixture', chat.messages, () => {}, false, { tools: [tool] }), error => error.stage === 'transport' && error.constraint === 'eof' && error.status === 200); checks++;
   globalThis.fetch = validFramedFetch;
-  for (const route of ['/v1/auth/challenge', '/v1/sessions', '/v1/models', '/v1/submissions', '/v1/chat/completions', '/v1/balance']) {
+  for (const route of ['/v1/auth/challenge', '/v1/sessions', '/v1/models', '/v1/submissions', '/v1/chat/completions']) {
     const controller = new AbortController(); holdPath = route; observedAbort = false;
     const reached = new Promise(resolve => { held = resolve; });
     const operation = route === '/v1/auth/challenge' || route === '/v1/sessions' ? client.login('c'.repeat(43), controller.signal) :
-      route === '/v1/models' ? client.models(controller.signal) : route === '/v1/balance' ? client.balance(controller.signal) : client.chat('fixture', chat.messages, () => {}, false, { tools: [tool], signal: controller.signal });
+      route === '/v1/models' ? client.models(controller.signal) : client.chat('fixture', chat.messages, () => {}, false, { tools: [tool], signal: controller.signal });
     // Attach immediately so no rejected fixture promise is ever unhandled.
     const rejected = assert.rejects(operation, e => e.code === 'uncertain');
     await reached; controller.abort(); await rejected; check(observedAbort);

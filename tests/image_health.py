@@ -15,7 +15,8 @@ import time
 import uuid
 from pathlib import Path
 
-ACCOUNTS = '[{"id":"startup-canary","credential_sha256":"g80hPkaKL7rbUpYj1pvTaDr7jxOh8KvDFn00a94wNxk","demo_microunits":1000}]'
+INTAKE_ORIGIN = "https://synthetic-intake.invalid"
+INTAKE_LEDGER_KEY = "synthetic-startup-ledger-key-00000000"
 FAILURES = {
     "probe_quiescing": b"healthcheck_failed: code=not_ready stage=status constraint=non_204 action=verify_local_gateway_readiness\n",
     "probe_isolated": b"healthcheck_failed: code=connect_unknown stage=connect constraint=loopback_connect action=verify_gateway_listening\n",
@@ -88,7 +89,8 @@ def load(archive, image):
 def container(name, image, network, arguments=(), fixture=False):
     command = ["create", "--name", name, "--network", network, *OPTIONS]
     if fixture:
-        command += ["--env", "POSSUMS_ACCOUNTS_JSON=" + ACCOUNTS]
+        command += ["--env", "POSSUMS_INTAKE_ORIGIN=" + INTAKE_ORIGIN,
+                    "--env", "POSSUMS_INTAKE_LEDGER_KEY=" + INTAKE_LEDGER_KEY]
     if image == IMAGES[0]:
         command += ["--entrypoint", "/bin/possums"]
     command += [image, *arguments]

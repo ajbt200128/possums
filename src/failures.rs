@@ -187,7 +187,7 @@ impl InterfaceError {
             Self::CreditRefused => "Check available credit against the selected model's maximum reservation.",
             Self::ContextRefused | Self::ModelUnavailable => "Check the authenticated model catalog and selected model's context window.",
             Self::EvidenceUnavailable | Self::EvidenceInvalid | Self::VerificationFailed => "Do not send further prompts until backend identity and authenticity are confirmed.",
-            Self::SettlementFailed | Self::AccountingStateUnknown => "Check account reconciliation through the verified channel; do not assume settlement or refund.",
+            Self::SettlementFailed | Self::AccountingStateUnknown => "Intake is the ledger authority. Share only this content-free code/stage/constraint for support; do not assume settlement or refund without an authenticated receipt.",
             Self::TokenizerSendDeadline => "The tokenizer send deadline elapsed. Check upstream service availability; this does not establish whether the upstream received the token-count request.",
             Self::TokenizerConnectFailed => "The tokenizer transport reported a connection failure. Check upstream connectivity; this does not identify DNS, TLS or another specific connection cause.",
             _ => "Check service availability and share only this content-free code/stage/constraint for support.",

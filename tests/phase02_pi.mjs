@@ -71,7 +71,7 @@ function mockPreparation(candidate) {
 }
 function freshFixture(candidate) {
  const fresh=new m.ReferenceClient(candidate.channel);
- for(const name of ['login','models','chat','balance'])if(Object.hasOwn(candidate,name))fresh[name]=(...args)=>candidate[name](...args);
+ for(const name of ['login','models','chat'])if(Object.hasOwn(candidate,name))fresh[name]=(...args)=>candidate[name](...args);
  if(Object.hasOwn(candidate,'prepareChat'))mockPreparation(fresh);
  return fresh;
 }
@@ -82,7 +82,6 @@ async function setup(plan, tools = true) {
   const requests = [];
   let sends = 0; let failModels = false; let abortSeen = false; let release;
   client.login = async () => {};
-  client.balance = async () => ({availableMicrounits:'5000000',inFlight:0,completedRequests:'0'});
   client.models = async () => {
     if (failModels) throw new Error('private diagnostic must not escape');
     return m.validateModels({ object:'list', data:[entry(tools)] });
@@ -224,7 +223,6 @@ async function authFixture(plan = []) {
   const candidate=new m.ReferenceClient(s.client.channel);
   candidate.login=async key=>{trace.keys.push(key);};
   candidate.models=async()=>{trace.models++;return s.client.models();};
-  candidate.balance=(...args)=>s.client.balance(...args);
   candidate.chat=(model,messages,onDelta,newConversation,options)=>{
    trace.conversations.push(newConversation);return s.client.chat(model,messages,onDelta,newConversation,options);
   };
@@ -256,6 +254,8 @@ await check('native AuthStorage persists recovery key; cold extension start rest
  provider.logout();
  const extension=fixtureExtension(fixture.establish);
  assert(!extension.commands.has('possums-logout'));
+ assert(!extension.commands.has('possums-reconcile'));
+ assert(!('reconcile' in extension.provider) && !('reconciliation' in extension.provider));
  const restored=await nativeRuntime(extension.provider,NativeAuthStorage.create(authPath),modelsStore);
  const registry=new coding.ModelRegistry(restored);
  const before=structuredClone(fixture.trace);
@@ -1020,11 +1020,9 @@ await check('quiescing HTTP 503 reaches catalog and challenge presentations only
   calls=[];
   await assert.rejects(channel.control('/v1/sessions',{challenge:'c'.repeat(43),credential:'c'.repeat(43)}),error=>
    error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
-  await assert.rejects(channel.balance('b'.repeat(43)),error=>
-   error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
   await assert.rejects(channel.chat({model:'synthetic',stream:true,submission:'s'.repeat(43),messages:[{role:'user',content:'synthetic'}]},'b'.repeat(43)),error=>
    error instanceof m.DiagnosticFailure && error.constraint==='endpoint_binding' && error.status===503);
-  assert.deepEqual(calls,['/v1/sessions','/v1/balance','/v1/chat/completions']);
+  assert.deepEqual(calls,['/v1/sessions','/v1/chat/completions']);
  } finally {globalThis.fetch=originalFetch;}
 });
 await check('catalog diagnostics preserve bounded HTTP rejection details without hostile text or billing claims',async()=>{
@@ -1618,7 +1616,7 @@ async function sdkSetup(name, plan, tools, compaction=false, qualified=true, res
  const runtime=await coding.ModelRuntime.create({credentials,modelsStore:new ai.InMemoryModelsStore(),modelsPath:null,allowModelNetwork:false,refreshOnCreate:false});
  const cwd=path.join(root,name);fs.mkdirSync(cwd,{recursive:true});
  const loader=new coding.DefaultResourceLoader({cwd,agentDir:cwd,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,systemPrompt:'Synthetic test',
-  extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}if(name==='message_end')ctx={...ctx,hasUI:true,ui:{...ctx.ui,notify:text=>notices.push(text)}};return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;if(name==='possums-reconcile'){const original=command;command={...original,handler:(args,ctx)=>original.handler(args,{...ctx,hasUI:true,ui:{...ctx.ui,notify:text=>notices.push(text)}})};}pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[]),...extraExtensions]});
+  extensionFactories:[pi=>m.extension({...pi,on:(name,handler)=>pi.on(name,(event,ctx)=>{if(name==='session_before_compact'){compactions.push(event);ctx={...ctx,ui:{...ctx.ui,notify:text=>notices.push(text)}};}if(name==='message_end')ctx={...ctx,hasUI:true,ui:{...ctx.ui,notify:text=>notices.push(text)}};return handler(event,ctx);}),registerProvider:value=>{provider=value;value.establish=async()=>s.client;pi.registerProvider(value);},registerCommand:(name,command)=>{if(name==='possums-text-only')textOnlyCommand=command;pi.registerCommand(name,command);}}),...(restoreTools?[pi=>pi.on('before_agent_start',()=>pi.setActiveTools(['echo']))]:[]),...extraExtensions]});
  await loader.reload();assert.deepEqual(loader.getExtensions().errors,[]);
  runtime.registerNativeProvider(provider);
  await runtime.refresh({providers:['possums'],allowNetwork:false});
@@ -1833,13 +1831,12 @@ await check('explicit interactive/RPC expiry renewal keeps transcript and conver
   } finally {f.session.dispose();}
  }
 });
-await check('known auth-only expiry reauthenticates with the same verified trust and invalidates reconciliation',async()=>{
+await check('known auth-only expiry reauthenticates with the same verified trust',async()=>{
  const f=await renewalFixture('auth');
  try {
-  f.provider.reconciliation={before:{availableMicrounits:'1',completedRequests:'0',inFlight:0},charged:0n,completed:0n,unknown:false};
   f.authExpire();await f.session.prompt('Synthetic auth renewal');
   assert.deepEqual(f.trace.verified,['A']);assert.deepEqual(f.trace.attempts,['A']);
-  assert.equal(f.trace.credentials.length,2);assert.equal(f.provider.reconciliation,undefined);
+  assert.equal(f.trace.credentials.length,2);
   assert(f.provider.client.authExpiresAt>Date.now());
  } finally {f.session.dispose();}
 });
@@ -2151,12 +2148,6 @@ await check('renewal blocker: Pi 1.0.4 Stop does not cancel an awaited before_ag
   assert.equal(f.s.sends(),1);
  } finally {release.resolve();f.session.dispose();}
 });
-function balancePlan(client, snapshots) {
- let reads=0;client.balance=async()=>{assert(reads<snapshots.length,'unexpected balance read');return snapshots[reads++];};return ()=>reads;
-}
-const balanceSnapshot=(available='5000000',completed='0',inFlight=0)=>({availableMicrounits:available,completedRequests:completed,inFlight});
-const reconciliationContext=s=>({isIdle:()=>true,signal:new AbortController().signal,
- modelRegistry:{getProviderAuth:()=>s.provider.auth.apiKey.resolve(authInput(s.credential))}});
 await check('actual Pi SDK preserves representative closed operational stages without retry or billing claims',async()=>{
  for(const [stage,constraint] of [['request','encoding'],['submission','http'],['transport','idle'],['stream','eof']]){
   const f=await sdkSetup('sdk-component-'+stage,[],false);let calls=0;
@@ -2217,57 +2208,6 @@ await check('actual SDK retry utility never schedules a retry or aborts a warnin
  const final=await retryAssistantCall(async()=>{calls++;return result;},{enabled:true,maxRetries:1,baseDelayMs:1000},abort.signal,
   {onRetryScheduled:(_attempt,_max,_delay,message)=>{observed=message;abort.abort();}});
  assert.equal(final,result);warningText(final,/Charge unknown/);assert.equal(observed,undefined);assert.equal(calls,1);assert.equal(s.sends(),1);
-});
-await check('encrypted balance HTTP 503 body and EOF failures reach actual Pi reconciliation presentation',async()=>{
- const ehbp=await import(pathToFileURL(path.resolve(path.dirname(file),'../../source/clients/pi/node_modules/ehbp/dist/esm/index.js')).href);
- const server=await ehbp.Identity.generate(),encoder=new TextEncoder();
- const channel=await m.Channel.fixture('https://localhost:18443',await server.marshalConfig(),await server.getPublicKeyHex());
- channel.challenge=async()=>({challenge:'c'.repeat(43),expires_in:600});
- channel.control=async()=>({token:'b'.repeat(43),token_type:'Bearer',expires_in:43200});
- const client=new m.ReferenceClient(channel),provider=new m.PossumsProvider(async()=>client);
- await client.login(recoveryKey);
- const originalFetch=globalThis.fetch,paths=[];
- const wire={error:{code:'service_quiescing',stage:'admission',constraint:'service_quiescing',billing:'not_submitted',message:hostileConnection}};
- try {
-  for(const [body,interrupted,stage,constraint] of [
-   ['{"error":"'+hostileConnection+'"',false,'balance','json'],
-   [JSON.stringify(wire),true,'transport','fetch'],
-  ]) {
-   globalThis.fetch=async request=>{
-    paths.push(new URL(request.url).pathname);
-    assert.equal(request.method,'POST');assert.equal(request.headers.get('authorization'),'Bearer '+'b'.repeat(43));
-    const encapsulated=ehbp.hexToBytes(request.headers.get('Ehbp-Encapsulated-Key'));
-    const recipient=await server.suite.SetupRecipient(server.getPrivateKey(),encapsulated,{info:encoder.encode(ehbp.HPKE_REQUEST_INFO)});
-    const sent=new Uint8Array(await request.arrayBuffer());
-    assert.deepEqual(JSON.parse(new TextDecoder().decode(await recipient.Open(sent.slice(4)))),{});
-    const nonce=crypto.getRandomValues(new Uint8Array(32));
-    const secret=new Uint8Array(await recipient.Export(encoder.encode(ehbp.EXPORT_LABEL),ehbp.EXPORT_LENGTH));
-    const keys=await ehbp.deriveResponseKeys(secret,encapsulated,nonce);
-    const cipher=await ehbp.encryptChunk(keys,0,encoder.encode(body));
-    const frame=new Uint8Array(4+cipher.length);new DataView(frame.buffer).setUint32(0,cipher.length,false);frame.set(cipher,4);
-    let sentFrame=false;
-    return new Response(new ReadableStream({pull(controller){
-     if(!sentFrame){sentFrame=true;controller.enqueue(frame);}
-     else if(interrupted)controller.error(new Error(hostileConnection));else controller.close();
-    }},{highWaterMark:0}),{status:503,headers:{'Ehbp-Response-Nonce':ehbp.bytesToHex(nonce)}});
-   };
-   await assert.rejects(client.balance(),error=>{
-    assert(error instanceof m.BalanceFailure);assert.equal(error.code,'uncertain');
-    assert(error.observation instanceof m.DiagnosticFailure);
-    assert.equal(error.observation.stage,stage);assert.equal(error.observation.constraint,constraint);
-    assert.equal(error.observation.status,503);assert.equal(error.reason,undefined);
-    assert.equal(error.billing,undefined);assert.equal(error.cause,undefined);
-    const shown=provider.reconciliationFailure(error);
-    assert.match(shown,new RegExp(`possums_${stage}_${constraint}.*Stage: ${stage}; constraint: ${constraint}.*Observed HTTP status: 503`));
-    assert.match(shown,/prior billing is unchanged or unknown/);
-    assert.doesNotMatch(shown,/PRIVATE_URL_CREDENTIAL_PROMPT|synthetic_not_a_usable|service_quiescing|Reservation refunded|not_submitted|\x1b|stack/i);
-    assert(!JSON.stringify(error).includes(hostileConnection));
-    return true;
-   });
-   assert.equal(paths.length,interrupted?2:1,'presentation cannot issue additional requests');
-  }
-  assert.deepEqual(paths,['/v1/balance','/v1/balance']);
- }finally{globalThis.fetch=originalFetch;}
 });
 await check('rotated recipient rejects old EHBP request; plaintext submission 422 observes only local binding status',async()=>{
  const ehbp=await import(pathToFileURL(path.resolve(path.dirname(file),'../../source/clients/pi/node_modules/ehbp/dist/esm/index.js')).href);
@@ -2342,59 +2282,6 @@ await check('authenticated submission rejection retains its original HTTP, body 
   }
   assert.equal(calls,5);
  }finally{globalThis.fetch=originalFetch;}
-});
-await check('actual Pi reconciliation commands compare exact receipts and balance without inference or persistent reports',async()=>{
- {
-  const f=await sdkSetup('sdk-reconcile-tools',['tool_calls','stop'],true);const charged='14',completed='2';
-  const reads=balancePlan(f.s.client,[balanceSnapshot(),balanceSnapshot((5000000n-BigInt(charged)).toString(),completed)]);
-  try {
-   await f.session.prompt('/possums-reconcile start');assert.equal(f.s.sends(),0);assert.equal(f.session.messages.length,0);assert.equal(reads(),1);
-   assert.match(f.notices.at(-1),/Reconciliation started/);
-   await f.session.prompt('Synthetic accounting task');const before=f.session.messages.length;
-   await f.session.prompt('/possums-reconcile finish');assert.equal(f.s.sends(),2);assert.equal(reads(),2);assert.equal(f.session.messages.length,before);
-   assert.match(f.notices.at(-1),new RegExp('Reconciliation matched: balance debit \\$0\\.0000'+'14'));
-   assert.equal(f.session.sessionManager.getSessionFile(),undefined);
-   assert(!JSON.stringify(f.session.sessionManager.getEntries()).includes('Reconciliation matched'));
-  } finally {f.session.dispose();}
- }
-});
-await check('reconciliation keeps u64 precision, detects unrelated activity, unknown charges and mismatches',async()=>{
- const cases=[
-  {name:'wide',before:balanceSnapshot('18446744073709551615','9007199254740993'),after:balanceSnapshot('18446744073709551608','9007199254740994'),plan:['stop'],expected:/Reconciliation matched/},
-  {name:'outside',after:balanceSnapshot('4999993','2'),plan:['stop'],expected:/Reconciliation unavailable/},
-  {name:'unknown',after:balanceSnapshot('4999993','2'),plan:['unknown_bill','stop'],expected:/Reconciliation unavailable/},
-  {name:'reset',before:balanceSnapshot('5000000','10'),after:balanceSnapshot('4999993','0'),plan:['stop'],expected:/Reconciliation unavailable/},
-  {name:'mismatch',after:balanceSnapshot('4999994','1'),plan:['stop'],expected:/Reconciliation mismatch/},
- ];
- for(const c of cases) {
-  const s=await setup(c.plan);balancePlan(s.client,[c.before??balanceSnapshot(),c.after]);const ctx=reconciliationContext(s);
-  await s.provider.reconcile('start',ctx);s.provider.beginRun();for(const _ of c.plan)await drain(s.provider.streamSimple(s.selected,context(false)));
-  assert.match(await s.provider.reconcile('finish',ctx),c.expected);
- }
-});
-await check('reconciliation pending, busy, cancel, session replacement and failed reads never infer or claim a match',async()=>{
- const s=await setup(['stop']);const ctx=reconciliationContext(s);let reads=balancePlan(s.client,[balanceSnapshot('5000000','0',1)]);
- await assert.rejects(()=>s.provider.reconcile('start',{...ctx,isIdle:()=>false}),/possums_reconcile_busy/);assert.equal(reads(),0);
- await assert.rejects(()=>s.provider.reconcile('start',ctx),/possums_reconcile_pending/);assert.equal(reads(),1);assert.equal(s.sends(),0);
- reads=balancePlan(s.client,[balanceSnapshot(),balanceSnapshot('4999948','0',1),balanceSnapshot('4999993','1')]);
- await s.provider.reconcile('start',ctx);await assert.rejects(()=>s.provider.reconcile('start',ctx),/possums_reconcile_started/);assert.equal(reads(),1);
- await assert.rejects(()=>s.provider.reconcile('finish',ctx),/possums_reconcile_pending/);assert.equal(reads(),2);
- s.provider.beginRun();await drain(s.provider.streamSimple(s.selected,context(false)));assert.match(await s.provider.reconcile('finish',ctx),/Reconciliation matched/);
- balancePlan(s.client,[balanceSnapshot()]);await s.provider.reconcile('start',ctx);assert.match(await s.provider.reconcile('cancel',ctx),/discarded/);
- await assert.rejects(()=>s.provider.reconcile('finish',ctx),/possums_reconcile_not_started/);
- balancePlan(s.client,[balanceSnapshot()]);await s.provider.reconcile('start',ctx);s.provider.newSession();
- await assert.rejects(()=>s.provider.reconcile('finish',ctx),/possums_reconcile_not_started/);
- assert.equal(s.sends(),1);
- const race=await setup([]),entered=deferred(),gate=deferred(),raceCtx=reconciliationContext(race);
- race.client.balance=async()=>{entered.resolve();await gate.promise;return balanceSnapshot();};
- const pending=race.provider.reconcile('start',raceCtx);await entered.promise;
- await race.provider.reconcile('cancel',raceCtx);gate.resolve();
- await assert.rejects(()=>pending,/possums_reconcile_scope_changed/);
- await assert.rejects(()=>race.provider.reconcile('finish',raceCtx),/possums_reconcile_not_started/);assert.equal(race.sends(),0);
- const f=await sdkSetup('sdk-reconcile-hostile',[],false);
- f.s.client.balance=async()=>{throw new m.BalanceFailure('request');};
- try {await f.session.prompt('/possums-reconcile start');assert.equal(f.s.sends(),0);assert.equal(f.session.messages.length,0);assert.match(f.notices.at(-1),/possums_balance_request_failed/);}
- finally {f.session.dispose();}
 });
 await check('trust starts closed, caches failed verification and never refreshes on login/logout/catalog within a session',async()=>{
  const fixture=await authFixture([]);let fail=true,checks=0,prompts=0;
@@ -2603,11 +2490,8 @@ await check('actual Pi SDK never executes incomplete tool fragments from a trans
 await check('actual Pi SDK keeps incomplete money separate from tools, retries and unknown receipt delivery',async()=>{
  for (const mode of ['paid_partial','refunded_partial','capped_partial','paid_partial_truncated','paid_partial_transient']) {
   const f=await sdkSetup('sdk-forward-'+mode,[mode,'stop'],true);
-  const charged=mode==='refunded_partial'?0n:mode==='capped_partial'?2n:4n;
-  const reads=balancePlan(f.s.client,[balanceSnapshot(),balanceSnapshot((5000000n-charged).toString(),'1')]);
   const retry=[];const unsubscribe=f.session.subscribe(event=>{if(event.type==='auto_retry_start')retry.push(event);});
   try {
-   await f.session.prompt('/possums-reconcile start');assert.equal(reads(),1);assert.equal(f.s.sends(),0);
    await f.session.prompt('Synthetic partial receipt task'); assert.equal(f.toolRuns(),0);
    assert.equal(f.s.sends(),1);assert.equal(retry.length,0);
    const first=rawAssistants(f.session)[0];warningText(first);assert(!first.content.some(block=>block.type==='toolCall'));
@@ -2624,10 +2508,6 @@ await check('actual Pi SDK keeps incomplete money separate from tools, retries a
    if(mode==='paid_partial_transient') {
     assert.match(messageText(first), /stream transport failed.*Not replayed/);
    }
-   const messages=f.session.messages.length, sends=f.s.sends();
-   await f.session.prompt('/possums-reconcile finish');
-   assert.equal(reads(),2);assert.equal(f.s.sends(),sends);assert.equal(f.session.messages.length,messages);
-   assert.match(f.notices.at(-1),/Reconciliation matched/);
   } finally {unsubscribe();f.session.dispose();}
  }
 });
@@ -2749,12 +2629,6 @@ async function compactionFixture(plan, split = false, previous = false) {
  const event={type:'session_before_compact',preparation,branchEntries:manager.getBranch(),reason:'manual',willRetry:false,signal:controller.signal,customInstructions:'Synthetic focus'};
  return {...fixture,...extension,runtime,manager,event,ctx,controller,notices,run:()=>extension.handlers.get('session_before_compact')(event,ctx)};
 }
-await check('reconciliation includes paid native compaction summaries without reading or persisting summary content',async()=>{
- const f=await compactionFixture(['stop','stop'],true);const ctx={...f.ctx,isIdle:()=>true,signal:f.controller.signal};
- balancePlan(f.s.client,[balanceSnapshot(),balanceSnapshot('4999986','2')]);
- await f.provider.reconcile('start',ctx);const result=await f.run();assert(result.compaction);
- assert.match(await f.provider.reconcile('finish',ctx),/Reconciliation matched: balance debit \$0\.000014/);assert.equal(f.s.sends(),2);
-});
 await check('native one/two-summary prompts, previous checkpoint, files, advisory hints and combined usage',async()=>{
  for(const split of [false,true]) {
   const f=await compactionFixture(['stop','stop'],split,true),nativeRequests=[],hints=[];

@@ -51,7 +51,9 @@ class HealthRunnerTests(unittest.TestCase):
                     fixture = checked.call_args.args[0]
                     self.assertNotIn("--entrypoint", fixture)
                     self.assertEqual(fixture[-1 - len(arguments):], [health.IMAGES[1], *arguments])
-                    self.assertIn("POSSUMS_ACCOUNTS_JSON=" + health.ACCOUNTS, fixture)
+                    self.assertIn("POSSUMS_INTAKE_ORIGIN=" + health.INTAKE_ORIGIN, fixture)
+                    self.assertIn("POSSUMS_INTAKE_LEDGER_KEY=" + health.INTAKE_LEDGER_KEY, fixture)
+                    self.assertFalse(any(value.startswith("POSSUMS_ACCOUNTS_JSON=") for value in fixture))
                     self.assertNotIn("--user", fixture)
 
     def test_bad_inspection_and_negative_deadline(self):

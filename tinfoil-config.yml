@@ -36,7 +36,8 @@ containers:
     tmpfs:
       /tmp: "size=512m,mode=1777"
     secrets:
-      - POSSUMS_ACCOUNTS_JSON
+      - POSSUMS_INTAKE_ORIGIN
+      - POSSUMS_INTAKE_LEDGER_KEY
       - TINFOIL_API_KEY
       - OTEL_EXPORTER_OTLP_HEADERS
       - POSSUMS_TOR_IDENTITY_NATIVE_KEY

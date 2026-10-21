@@ -77,6 +77,28 @@ class StopTest(unittest.TestCase):
 
 
 class SafetyTest(StopTest):
+    def test_intake_references_are_required_without_mutating_configuration(self):
+        expected = {"POSSUMS_INTAKE_ORIGIN", "POSSUMS_INTAKE_LEDGER_KEY",
+                    "TINFOIL_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
+        self.assertEqual(d.REQUIRED_REFS, expected)
+        config = (ROOT / "tinfoil-config.yml").read_text()
+        secret_block = config.split("    secrets:\n", 1)[1].split("\nshim:", 1)[0]
+        refs = {line.strip().removeprefix("- ") for line in secret_block.splitlines() if line.strip()}
+        self.assertTrue(expected.issubset(refs))
+        self.assertNotIn("POSSUMS_ACCOUNTS_JSON", refs)
+        self.assertTrue({"POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"}.issubset(refs))
+        self.assertTrue(d.stable_running(view(), "v1.2.2"))
+        coexist = view()
+        coexist["secrets"].append("POSSUMS_ACCOUNTS_JSON")
+        before = copy.deepcopy(coexist)
+        self.assertFalse(d.stable_running(coexist, "v1.2.2"))
+        self.assertEqual(coexist, before)
+        for missing in ("POSSUMS_INTAKE_ORIGIN", "POSSUMS_INTAKE_LEDGER_KEY"):
+            old = view()
+            old["secrets"].remove(missing)
+            old["secrets"].append("POSSUMS_ACCOUNTS_JSON")
+            self.assertFalse(d.stable_running(old, "v1.2.2"))
+
     def test_event_uses_origin_not_workflow_run_default_sha(self):
         event = {"action": "completed", "repository": {"full_name": r.REPO}, "workflow_run": run()}
         self.assertEqual(r.source_event(event, "workflow_run", R, "refs/heads/main", 20), S)

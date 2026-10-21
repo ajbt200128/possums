@@ -25,7 +25,10 @@ CLI_SHA256 = "ef014c67a976b4b47941d084fb0a3837ba6eb59c9f4e662424c6826fb7a70f8c"
 CLI_URL = "https://github.com/tinfoilsh/tinfoil-cli/releases/download/v0.19.0/tinfoil-cli_0.19.0_linux_amd64.tar.gz"
 LIMIT = 16 << 20
 COMPLETION_TIMEOUT_SECONDS = 900
-REQUIRED_REFS = {"POSSUMS_ACCOUNTS_JSON", "TINFOIL_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
+INTAKE_REFS = {"POSSUMS_INTAKE_ORIGIN", "POSSUMS_INTAKE_LEDGER_KEY"}
+LEGACY_REF = "POSSUMS_ACCOUNTS_JSON"
+TOR_REFS = {"POSSUMS_TOR_IDENTITY_NATIVE_KEY", "POSSUMS_TOR_EXPECTED_ONION"}
+REQUIRED_REFS = INTAKE_REFS | {"TINFOIL_API_KEY", "OTEL_EXPORTER_OTLP_HEADERS"}
 STABLE = ("id", "name", "repo", "project_id", "cpus", "gpus", "memory_mb", "variables", "secrets",
           "ssh_keys", "debug", "disable_cc_mode", "domain", "held", "volume_slots", "volumes",
           "host_gpu_type", "host_cpu_type")
@@ -51,10 +54,14 @@ r.CODES.update({
     "credential": ("authorization", "Provision the supported admin credential only as a production environment secret."),
     "control_read": ("control-plane", "Inspect the production state privately; no update was replayed."),
     "control_shape": ("control-plane", "Resolve the unsupported control-plane response without sharing its contents."),
-    "not_stable": ("plan", "Reconcile pending, held, debug, non-confidential or non-running production state before a new request."),
+    "not_stable": ("plan", "Verify approved intake reference delivery and absence of legacy account authority, as well as stable running, confidential, non-held state, before a separately authorized deployment."),
     "plan_http": ("pre-update-plan", "Check production admin planning access and the observed HTTP status; no update was sent."),
     "plan_fetch": ("pre-update-plan", "The read-only plan could not be acquired; cause unknown. Check control-plane connectivity; no update was sent."),
-    "plan_rejected": ("pre-update-plan", "The read-only plan did not match the release and approved hostname and unchanged configuration constraints; no update was sent."),
+    "plan_rejected": ("pre-update-plan", "The read-only plan did not match the approved source, hostname, reference and configuration constraints; no update was sent."),
+    "intake_cutover_input": ("cutover-selection", "Select only the ordinary update or the explicitly approved intake cutover; no update was sent."),
+    "intake_cutover_config": ("cutover-config", "The signed candidate does not declare exactly the approved intake and preserved service/Tor references; no update was sent."),
+    "intake_cutover_state": ("cutover-state", "Require stable confidential legacy production with both new intake selections absent and the approved service/Tor selections retained. Do not repeat an already completed or uncertain cutover; no update was sent."),
+    "intake_cutover_custody": ("cutover-custody", "Confirm exclusive gateway configuration mutation custody from protected approval until the outcome is reconciled. Keep all other console/API/project writers idle; this assertion is not a server lock. No update was sent."),
     "plan_missing": ("post-call-plan", "The update may have happened. Privately reconcile the missing CLI plan; never replay automatically."),
     "plan_strategy": ("post-call-plan", "The update may have happened; completion is unknown. Privately reconcile the unexpected strategy, hold or downtime policy; no replay or rollback."),
     "plan_target": ("post-call-plan", "The update may have happened; completion is unknown. Privately reconcile the unexpected source or target; no replay or rollback."),
@@ -173,12 +180,38 @@ def verify_serving(tag, manifest):
     raise r.Stop(code, failure.get("status"))
 
 
+def cutover_custody():
+    r.require(os.environ.get("INTAKE_CONFIGURATION_CUSTODY") == "true", "intake_cutover_custody")
+
+
+def reference_transition():
+    value = os.environ.get("REFERENCE_TRANSITION", "none")
+    r.require(value in ("none", "intake"), "intake_cutover_input")
+    if value == "intake":
+        cutover_custody()
+    return value == "intake"
+
+
+def cutover_config(release):
+    config = r.config_at(release)
+    blocks = re.findall(rb"(?m)^    secrets:\n((?:      - [A-Z][A-Z0-9_]*\n)+)", config)
+    r.require(len(blocks) == 1, "intake_cutover_config")
+    names = [line[8:].decode("ascii") for line in blocks[0].splitlines()]
+    r.require(len(names) == len(set(names)) and set(names) == REQUIRED_REFS | TOR_REFS,
+              "intake_cutover_config")
+
+
 def preflight(source, release, tag, image, manifest):
+    intake_cutover = reference_transition()
+    if intake_cutover:
+        r.require(os.environ.get("GITHUB_SHA") == source, "stale")
     r.valid_pins(source, release, tag, image)
     r.require(re.fullmatch(r"[0-9a-f]{64}", manifest) is not None, "arguments")
     r.require(os.environ.get("GITHUB_RUN_ATTEMPT") == "1", "rerun")
     environment_id = eligibility(source)
     r.verify_public(source, release, tag, image, manifest)
+    if intake_cutover:
+        cutover_config(release)
     serving_tool()
     r.output(environment_id=environment_id)
 
@@ -210,9 +243,9 @@ def call(cli, arguments, timeout=120):
     return r.capture([cli, *arguments], env=env, timeout=timeout, limit=LIMIT, code="cli_uncertain")
 
 
-def get(cli):
+def get(cli, identifier=NAME):
     try:
-        result = call(cli, ["container", "get", NAME, "--output", "json"])
+        result = call(cli, ["container", "get", identifier, "--output", "json"])
         r.require(result.returncode == 0, "control_read")
         view = json.loads(result.stdout)
         r.require(isinstance(view, dict), "control_shape")
@@ -220,7 +253,8 @@ def get(cli):
         # Normalize only absence; preserve populated fields for comparison.
         view.setdefault("volume_slots", [])
         view.setdefault("volumes", {})
-        r.require(all(field in view for field in STABLE), "control_shape")
+        r.require(all(field in view for field in STABLE)
+                  and (identifier == NAME or view["id"] == identifier), "control_shape")
         return view
     except r.Stop:
         raise
@@ -240,16 +274,57 @@ def stable_running(view, tag):
             and boolean(view.get("held"), False) and type(view.get("mark_latest_release")) is bool
             and unique_names(view.get("secrets"))
             and REQUIRED_REFS.issubset(set(view["secrets"]))
+            and "POSSUMS_ACCOUNTS_JSON" not in view["secrets"]
             and all(field in view for field in STABLE))
 
 
-def inspect_plan(raw, previous, tag, previous_domain=DOMAIN, current_resources=None):
+def cutover_references(view):
+    names = view.get("secrets")
+    r.require(unique_names(names), "intake_cutover_state")
+    selected = set(names)
+    r.require(isinstance(view.get("id"), str)
+              and re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", view["id"]),
+              "intake_cutover_state")
+    r.require(LEGACY_REF in selected and not selected & INTAKE_REFS
+              and ((REQUIRED_REFS - INTAKE_REFS) | TOR_REFS).issubset(selected)
+              and view.get("domain") == DOMAIN and view.get("name") == NAME,
+              "intake_cutover_state")
+    target = sorted((selected - {LEGACY_REF}) | INTAKE_REFS)
+    previous = view.get("current_tag")
+    r.require(isinstance(previous, str) and re.fullmatch(r.VERSION, previous) is not None
+              and stable_running({**view, "secrets": target}, previous), "intake_cutover_state")
+    return target
+
+
+def admit_cutover_snapshot(cli, before, target_refs):
+    # The supported API has no state-bound update. Exclusive operator custody
+    # must cover the remaining race; this refresh is not a lock or CAS.
+    cutover_custody()
+    current = get(cli, before["id"])
+    r.require(cutover_references(current) == target_refs
+              and current["current_tag"] == before["current_tag"]
+              and current["mark_latest_release"] == before["mark_latest_release"]
+              and all(current[field] == before[field] for field in STABLE if field != "secrets"),
+              "intake_cutover_state")
+
+
+def inspect_plan(raw, previous, tag, previous_domain=DOMAIN, current_resources=None, *, intake_cutover=False):
     try:
+        target_refs = []
+        cutover_id = None
+        if intake_cutover:
+            if not isinstance(current_resources, dict) or current_resources.get("current_tag") != previous:
+                raise r.Stop("plan_configuration")
+            target_refs = cutover_references(current_resources)
+            cutover_id = current_resources["id"]
         text = raw.decode("utf-8").lstrip()
         plans = 0
         while text.startswith("{"):
             plan, end = json.JSONDecoder().raw_decode(text)
             plans += 1
+            if intake_cutover:
+                r.require(plan.get("instance_id") == cutover_id
+                          and plan.get("name") == NAME, "plan_target")
             r.require(boolean(plan.get("read_only"), True) and plan.get("current", {}).get("tag") == previous
                       and plan.get("target", {}).get("tag") == tag, "plan_target")
             r.require(plan.get("update_strategy") == "blue_green" and boolean(plan.get("downtime_required"), False)
@@ -274,7 +349,18 @@ def inspect_plan(raw, previous, tag, previous_domain=DOMAIN, current_resources=N
                     # Preserve zero-change semantics.
                     if names is None:
                         names = []
-                    r.require(unique_names(names) and not names, "plan_configuration")
+                    expected = set()
+                    if intake_cutover and family == "secrets":
+                        if kind == "added":
+                            expected = INTAKE_REFS
+                        elif kind == "removed":
+                            expected = {LEGACY_REF}
+                    r.require(unique_names(names) and set(names) == expected, "plan_configuration")
+            if intake_cutover:
+                refreshed = changes.get("secrets_refreshed")
+                if refreshed is not None:
+                    r.require(unique_names(refreshed) and set(refreshed).issubset(target_refs),
+                              "plan_configuration")
             for field in ("cpus", "gpus", "memory_mb"):
                 r.require(type(plan["current"].get(field)) is int and type(plan["target"].get(field)) is int
                           and plan["current"][field] == plan["target"][field], "plan_configuration")
@@ -293,13 +379,15 @@ class NoPlanRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def plan_update(before, tag):
+def plan_update(before, tag, *, intake_cutover=False):
     """The documented Admin API has a read-only plan route; the CLI has no plan-only command."""
     try:
         r.require(isinstance(before["id"], str) and re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", before["id"]), "plan_rejected")
         r.require(type(before.get("mark_latest_release")) is bool, "plan_rejected")
         fields = {"tag": tag, "custom_domain": DOMAIN,
                   "mark_latest_release": before["mark_latest_release"]}
+        if intake_cutover:
+            fields["secrets"] = cutover_references(before)
         body = json.dumps(fields).encode()
         request = urllib.request.Request("https://api.tinfoil.sh/api/containers/" + before["id"] + "/update/plan",
             data=body, headers={"Authorization": "Bearer " + os.environ["TINFOIL_ADMIN_KEY"],
@@ -314,7 +402,8 @@ def plan_update(before, tag):
         r.require(isinstance(plan, dict), "plan_rejected")
         r.require(plan.get("instance_id") == before["id"] and plan.get("name") == NAME, "plan_rejected")
         try:
-            inspect_plan(raw, before["current_tag"], tag, before["domain"], current_resources=before)
+            inspect_plan(raw, before["current_tag"], tag, before["domain"], current_resources=before,
+                         intake_cutover=intake_cutover)
         except r.Stop:
             raise r.Stop("plan_rejected") from None
     except urllib.error.HTTPError as error:
@@ -331,7 +420,7 @@ def plan_update(before, tag):
         raise r.Stop("plan_fetch") from None
 
 
-def update_once(cli, tag, final_gate):
+def update_once(cli, tag, final_gate, *, intake_cutover=False):
     """Testable mutation primitive; entry point verifies policy and public provenance.
 
     CLI's plan is reviewed POST-CALL: stable blue/green can already execute.
@@ -339,49 +428,76 @@ def update_once(cli, tag, final_gate):
     """
     r.require(os.environ.get("GITHUB_RUN_ATTEMPT") == "1", "rerun")
     r.require(bool(os.environ.get("TINFOIL_ADMIN_KEY")), "credential")
+    if intake_cutover:
+        cutover_custody()
     before = get(cli)
     r.require(type(before.get("mark_latest_release")) is bool, "control_shape")
     previous = before.get("current_tag")
     r.require(before.get("domain") in (OLD_DOMAIN, DOMAIN), "domain_source")
+    target_refs = cutover_references(before) if intake_cutover else []
     r.require(isinstance(previous, str) and re.fullmatch(r.VERSION, previous) is not None
-              and previous != tag and stable_running(before, previous), "not_stable")
-    plan_update(before, tag)
-    arguments = ["container", "update", NAME, "--tag", tag,
+              and previous != tag and (intake_cutover or stable_running(before, previous)), "not_stable")
+    if intake_cutover:
+        plan_update(before, tag, intake_cutover=True)
+    else:
+        plan_update(before, tag)
+    identifier = before["id"] if intake_cutover else NAME
+    arguments = ["container", "update", identifier, "--tag", tag,
                  "--custom-domain", DOMAIN, "--output", "json",
                  "--mark-latest=" + str(before["mark_latest_release"]).lower()]
+    if intake_cutover:
+        for name in target_refs:
+            arguments.extend(["--secret", name])
+        admit_cutover_snapshot(cli, before, target_refs)
     final_gate()  # Main/policy recheck AFTER approval and read-only planning, immediately before invocation.
     try:
         result = call(cli, arguments, timeout=1800)
     except Exception:
         raise r.Stop("cli_uncertain") from None
     r.require(result.returncode == 0, "cli_uncertain")
-    inspect_plan(result.stderr, previous, tag, before["domain"], current_resources=before)
+    inspect_plan(result.stderr, previous, tag, before["domain"], current_resources=before,
+                 intake_cutover=intake_cutover)
     deadline = time.monotonic() + COMPLETION_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        after = get(cli)
+        after = get(cli, identifier) if intake_cutover else get(cli)
         r.require(type(after.get("mark_latest_release")) is bool
                   and after["mark_latest_release"] == before["mark_latest_release"], "configuration_changed")
-        unchanged = [field for field in STABLE if field != "domain"]
+        unchanged = [field for field in STABLE
+                     if field != "domain" and not (intake_cutover and field == "secrets")]
         r.require(all(before[field] == after[field] for field in unchanged)
                   and after.get("domain") in (before["domain"], DOMAIN), "configuration_changed")
+        if intake_cutover:
+            names = after.get("secrets")
+            r.require(unique_names(names) and set(names) in (set(before["secrets"]), set(target_refs)),
+                      "configuration_changed")
         r.require(not (after.get("update_tag") == tag and after.get("update_status") == "failed"),
                   "candidate_failed")
         if stable_running(after, tag):
             r.require(after["domain"] == DOMAIN, "domain_completion")
-            result = {"cliSucceeded": True, "postCallPlanReviewed": True, "opaqueConfigurationPreserved": True,
-                      "approvedDomainConfirmed": True,
+            if intake_cutover:
+                r.require(set(after["secrets"]) == set(target_refs), "configuration_changed")
+            result = {"cliSucceeded": True, "postCallPlanReviewed": True,
+                      "opaqueConfigurationPreserved": not intake_cutover, "approvedDomainConfirmed": True,
                       "targetRunningNoPending": True, "mutationCommandCount": 1, "servingVerified": False}
+            if intake_cutover:
+                result.update(approvedIntakeReferencesConfirmed=True, unrelatedConfigurationPreserved=True,
+                              exclusiveConfigurationCustodyAsserted=True)
             return result
         time.sleep(10)
     raise r.Stop("completion_timeout")
 
 
 def protected(source, release, tag, image, manifest, environment_id):
+    intake_cutover = reference_transition()
+    if intake_cutover:
+        r.require(os.environ.get("GITHUB_SHA") == source, "stale")
     r.valid_pins(source, release, tag, image)
     r.require(os.environ.get("GITHUB_RUN_ATTEMPT") == "1", "rerun")
     eligibility(source, environment_id)
     approved(environment_id)
     r.verify_public(source, release, tag, image, manifest)
+    if intake_cutover:
+        cutover_config(release)
     serving_tool()
     cli = install_cli()
 
@@ -389,7 +505,10 @@ def protected(source, release, tag, image, manifest, environment_id):
         eligibility(source, environment_id)
         approved(environment_id)
 
-    result = update_once(cli, tag, final_gate)
+    if intake_cutover:
+        result = update_once(cli, tag, final_gate, intake_cutover=True)
+    else:
+        result = update_once(cli, tag, final_gate)
     # Preserve observed deployment success even if the later serving check fails.
     print(json.dumps(result), flush=True)
     verify_serving(tag, manifest)

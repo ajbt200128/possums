@@ -46,7 +46,8 @@ fn startup_errors_emit_no_sensitive_output_or_writable_artifacts() {
     let output = Command::new(env!("CARGO_BIN_EXE_possums"))
         .current_dir(&directory)
         .env_clear()
-        .env("POSSUMS_ACCOUNTS_JSON", canary)
+        .env("POSSUMS_INTAKE_ORIGIN", canary)
+        .env("POSSUMS_INTAKE_LEDGER_KEY", canary)
         .output()
         .unwrap();
 

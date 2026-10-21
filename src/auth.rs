@@ -8,8 +8,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    sync::Mutex,
-    time::{Duration, Instant},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime},
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -75,6 +75,8 @@ pub struct Session {
     pub conversation: ConversationId,
     pub(crate) cache_scope: CacheScope,
     expires_at: Instant,
+    // Original intake authority; refresh never replaces this absolute expiry.
+    principal: Option<Arc<crate::intake::Principal>>,
 }
 
 // Neither credentials, admission binding nor account/conversation identifiers are diagnostic data.
@@ -129,10 +131,13 @@ pub enum AuthError {
     StateUnavailable,
     #[error("authentication state capacity reached")]
     Capacity,
+    #[error("{0}")]
+    Intake(#[from] crate::intake::Error),
 }
 
 pub struct Auth {
     accounts: Vec<ProvisionedAccount>,
+    intake: Option<Arc<crate::intake::Intake>>,
     // Nested lock order: sessions -> submission_tokens -> Accounting::state.
     // Never await while held or call auth from an accounting-held callback.
     sessions: Mutex<HashMap<String, Session>>,
@@ -149,6 +154,7 @@ impl Auth {
     pub(crate) fn without_accounts_for_local_tor() -> Self {
         Self {
             accounts: Vec::new(),
+            intake: None,
             sessions: Mutex::new(HashMap::new()),
             login_challenges: Mutex::new(HashMap::new()),
             submission_tokens: Mutex::new(HashMap::new()),
@@ -175,6 +181,7 @@ impl Auth {
         rand::rng().fill_bytes(&mut epoch);
         Ok(Self {
             accounts,
+            intake: None,
             sessions: Mutex::new(HashMap::new()),
             login_challenges: Mutex::new(HashMap::new()),
             submission_tokens: Mutex::new(HashMap::new()),
@@ -183,6 +190,112 @@ impl Auth {
             #[cfg(test)]
             pause: Mutex::new(None),
         })
+    }
+
+    /// Production auth has no provisioned credential/credit fallback.
+    pub fn from_intake_config(origin: &str, ledger_key: &str) -> Result<Self, AuthError> {
+        let intake = crate::intake::Intake::new(origin, ledger_key).map_err(|error| {
+            if error.configuration_invalid() {
+                AuthError::Configuration
+            } else {
+                AuthError::Intake(error)
+            }
+        })?;
+        Ok(Self::from_intake(Arc::new(intake)))
+    }
+
+    pub(crate) fn intake(&self) -> Option<Arc<crate::intake::Intake>> {
+        self.intake.clone()
+    }
+
+    pub(crate) fn from_intake(intake: Arc<crate::intake::Intake>) -> Self {
+        let mut epoch = [0; 32];
+        rand::rng().fill_bytes(&mut epoch);
+        Self {
+            accounts: Vec::new(),
+            intake: Some(intake),
+            sessions: Mutex::new(HashMap::new()),
+            login_challenges: Mutex::new(HashMap::new()),
+            submission_tokens: Mutex::new(HashMap::new()),
+            submission_capacity: MAX_SUBMISSION_TOKENS,
+            epoch,
+            #[cfg(test)]
+            pause: Mutex::new(None),
+        }
+    }
+
+    pub(crate) async fn authenticate_current(
+        &self,
+        credential: &str,
+        login_challenge: &str,
+    ) -> Result<(String, Session), AuthError> {
+        let Some(intake) = &self.intake else {
+            return self.authenticate_api(credential, login_challenge);
+        };
+        let started = Instant::now();
+        let challenge = self
+            .login_challenges
+            .lock()
+            .map_err(|_| AuthError::StateUnavailable)?
+            .remove(login_challenge)
+            .ok_or(AuthError::Invalid)?;
+        if challenge.expires_at <= started {
+            return Err(AuthError::Invalid);
+        }
+        // The challenge is consumed before network dispatch. No lock or raw key
+        // survives into session state, and a failed login is not replayed.
+        let principal = Arc::new(intake.login(credential).await?);
+        let expires_at = session_deadline(principal.expires_at, started)?;
+        let session = Session {
+            account_id: principal.account_id.clone(),
+            admission_binding: random_token(),
+            selected_model: None,
+            conversation: ConversationId::new(),
+            cache_scope: CacheScope::default(),
+            expires_at,
+            principal: Some(principal),
+        };
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::StateUnavailable)?;
+        let now = Instant::now();
+        sessions.retain(|_, session| session.expires_at > now);
+        if expires_at <= now {
+            return Err(AuthError::Invalid);
+        }
+        if sessions.len() >= MAX_SESSIONS {
+            return Err(AuthError::Capacity);
+        }
+        let id = random_token();
+        sessions.insert(id.clone(), session.clone());
+        Ok((id, session))
+    }
+
+    /// Resolve current native authority, then recheck local logout/expiry/reset
+    /// state. No std mutex spans I/O; the cached binding is never an authority.
+    pub(crate) async fn current_session(&self, id: &str) -> Result<Session, AuthError> {
+        let session = self.checked_api_session(id)?;
+        if let Some(intake) = &self.intake {
+            let principal = session
+                .principal
+                .as_ref()
+                .ok_or(AuthError::StateUnavailable)?;
+            if let Err(error) = intake.validate(principal).await {
+                use crate::intake::ErrorKind;
+                if matches!(
+                    error.kind,
+                    ErrorKind::Authentication
+                        | ErrorKind::MfaUnsupported
+                        | ErrorKind::BindingChanged
+                ) {
+                    // Local cleanup cannot replace the already observed primary.
+                    let _ = self.logout_api(id);
+                }
+                return Err(AuthError::Intake(error));
+            }
+        }
+        self.checked_api_session(id)
     }
 
     #[doc(hidden)]
@@ -252,6 +365,7 @@ impl Auth {
             conversation: ConversationId::new(),
             cache_scope: CacheScope::default(),
             expires_at: now + SESSION_LIFETIME,
+            principal: None,
         };
         let mut sessions = self
             .sessions
@@ -471,6 +585,44 @@ impl Auth {
         })
     }
 
+    /// Revalidate after remote admission, before any prompt-bearing work. An
+    /// accepted hold is still terminally owned if local authority changed.
+    pub(crate) async fn validate_admission(
+        &self,
+        session_id: &str,
+        admission_binding: &str,
+        token: &str,
+        model: &str,
+    ) -> Result<(), AuthError> {
+        self.current_session(session_id).await?;
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::StateUnavailable)?;
+        let tokens = self
+            .submission_tokens
+            .lock()
+            .map_err(|_| AuthError::StateUnavailable)?;
+        let session = sessions.get(session_id).ok_or(AuthError::Invalid)?;
+        let issued = tokens.get(token).ok_or(AuthError::Invalid)?;
+        let now = Instant::now();
+        if session.expires_at <= now
+            || !Self::verify_admission_binding(session, admission_binding)
+            || issued.expires_at <= now
+            || issued.session_id != session_id
+            || issued.account_id != session.account_id
+            || issued.conversation != session.conversation
+            || issued.model.as_ref().is_some_and(|bound| bound != model)
+            || session
+                .selected_model
+                .as_ref()
+                .is_some_and(|bound| bound != model)
+        {
+            return Err(AuthError::Invalid);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn pause_at(&self, point: tests::PausePoint) {
         let pause = {
@@ -489,6 +641,15 @@ impl Auth {
             pause.release.wait();
         }
     }
+}
+
+fn session_deadline(original_expiry: SystemTime, started: Instant) -> Result<Instant, AuthError> {
+    // Sample the monotonic clock first so conversion latency cannot extend authority.
+    let now = Instant::now();
+    let remaining = original_expiry
+        .duration_since(SystemTime::now())
+        .map_err(|_| AuthError::Invalid)?;
+    Ok((started + SESSION_LIFETIME).min(now.checked_add(remaining).ok_or(AuthError::Invalid)?))
 }
 
 fn decode_hash(encoded: &str) -> Result<[u8; 32], AuthError> {
@@ -511,6 +672,23 @@ pub fn random_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_intake_authority_caps_the_non_sliding_session() {
+        let started = Instant::now();
+        let short =
+            session_deadline(SystemTime::now() + Duration::from_secs(3600), started).unwrap();
+        assert!(short > started + Duration::from_secs(3599));
+        assert!(short < started + Duration::from_secs(3601));
+        let long =
+            session_deadline(SystemTime::now() + Duration::from_secs(13 * 3600), started).unwrap();
+        assert_eq!(long, started + SESSION_LIFETIME);
+        assert!(matches!(
+            session_deadline(SystemTime::UNIX_EPOCH, started),
+            Err(AuthError::Invalid)
+        ));
+    }
+
     use crate::{accounting::Outcome, catalog::Model};
     use std::{
         sync::{Arc, Barrier, TryLockError},

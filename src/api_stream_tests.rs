@@ -101,6 +101,7 @@ fn output(
         disconnect,
         encoding_failure: None,
         delivery_failed: false,
+        intake: None,
     }
 }
 fn channel() -> (DeliveryTx, DeliveryBody) {
@@ -120,6 +121,55 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 fn oversized() -> Value {
     json!({"choices":[{"delta":{"content":"SYNTHETIC_PRIVATE_CONTENT".repeat(CHUNK_BYTES)}}]})
+}
+
+#[test]
+fn intake_capability_does_not_change_usage_metrics_negotiation() {
+    let mut headers = axum::http::HeaderMap::new();
+    let options = Options::parse(&headers);
+    assert!(!options.intake_diagnostics && !options.usage_metrics);
+    headers.insert(crate::intake::diagnostics::HEADER, "v1".parse().unwrap());
+    assert!(Options::parse(&headers).intake_diagnostics);
+    assert!(!Options::parse(&headers).usage_metrics);
+    headers.insert("x-tinfoil-request-usage-metrics", "true".parse().unwrap());
+    assert!(Options::parse(&headers).usage_metrics);
+    headers.append(crate::intake::diagnostics::HEADER, "v1".parse().unwrap());
+    assert!(!Options::parse(&headers).intake_diagnostics);
+    assert!(Options::parse(&headers).usage_metrics);
+}
+
+#[tokio::test]
+async fn intake_error_projection_is_optional_and_does_not_claim_billing() {
+    use http_body_util::BodyExt as _;
+    for diagnostic in [
+        None,
+        Some(crate::intake::diagnostics::Diagnostic::hold_unusable()),
+    ] {
+        let (tx, body) = channel();
+        let mut output = output(tx, None, Disconnect::default());
+        output.intake = diagnostic;
+        output
+            .failure(InferenceFailure::SettlementFailed, "unknown", None)
+            .await
+            .unwrap();
+        output.tx.finish_with_metrics(None);
+        drop(output);
+        let bytes = body.collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let value: Value =
+            serde_json::from_str(text.strip_prefix("data: ").unwrap().trim()).unwrap();
+        let error = value["error"].as_object().unwrap();
+        assert_eq!(error.len(), if diagnostic.is_some() { 5 } else { 4 });
+        assert_eq!(error["billing"], "unknown");
+        assert_eq!(error["code"], "generation_failed");
+        assert!(value.get("possums").is_none());
+        if diagnostic.is_some() {
+            assert_eq!(
+                error["intake"],
+                json!({"code":"INTAKE_HOLD_UNUSABLE", "operation":"intake_reserve", "stage":"admission", "constraint":"usable_hold", "status":null})
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -143,7 +193,7 @@ async fn local_encoding_then_settlement_failure_is_counted_by_each_owner_once() 
         };
         // Subsequent encoding failure is the same component, not another event.
         assert!(output.event(oversized()).await.is_err());
-        let receipt = settlement.finish(&result);
+        let receipt = settlement.finish(&result).await;
         assert_eq!(
             output.encoding_failure,
             Some(InterfaceError::ResponseEncodingLimit)
@@ -183,14 +233,14 @@ async fn terminal_receipt_error_and_done_delivery_after_settlement_count_once() 
     let global = owner.metrics();
     let completion = owner.spawn_settling(tx, move |tx, settlement| async move {
         let mut output = output(tx, global, Disconnect::default());
-        let receipt = settlement.finish(&Ok(usage()));
+        let receipt = settlement.finish(&Ok(usage())).await;
         assert_eq!(receipt.outcome(), &Ok(Outcome::Settled { charged: 29 }));
         assert!(output
             .event(json!({"choices":[],"possums":{"outcome":"settled"}}))
             .await
             .is_err());
         assert!(output
-            .failure(InferenceFailure::SettlementFailed, "unknown")
+            .failure(InferenceFailure::SettlementFailed, "unknown", None)
             .await
             .is_err());
         assert!(output.send(b"data: [DONE]\n\n").await.is_err());
@@ -233,10 +283,12 @@ async fn primary_upstream_survives_independent_late_encoding_and_delivery_failur
     let completion = owner.spawn_settling(tx, move |tx, mut settlement| async move {
         let mut output = output(tx, global, Disconnect::default());
         settlement.evidence(Evidence::sse(usage()));
-        let receipt = settlement.finish(&Err(InferenceFailure::SdkStreamDecodeFailed.into()));
+        let receipt = settlement
+            .finish(&Err(InferenceFailure::SdkStreamDecodeFailed.into()))
+            .await;
         assert!(output.event(oversized()).await.is_err());
         assert!(output
-            .failure(InferenceFailure::SdkStreamDecodeFailed, "unknown")
+            .failure(InferenceFailure::SdkStreamDecodeFailed, "unknown", None)
             .await
             .is_err());
         assert!(output.send(b"data: [DONE]\n\n").await.is_err());
@@ -279,9 +331,9 @@ async fn observed_disconnect_sink_failure_is_expected_and_keeps_partial_usage() 
             sink.evidence(Evidence::sse(usage()));
             Err(sink.event(json!({"choices":[]})).await.unwrap_err())
         };
-        let receipt = settlement.finish(&result);
+        let receipt = settlement.finish(&result).await;
         assert!(output
-            .failure(InferenceFailure::StreamTransportFailed, "unknown")
+            .failure(InferenceFailure::StreamTransportFailed, "unknown", None)
             .await
             .is_err());
         assert!(output.send(b"data: [DONE]\n\n").await.is_err());
@@ -299,6 +351,29 @@ async fn observed_disconnect_sink_failure_is_expected_and_keeps_partial_usage() 
         m.usage_counts(QualifiedModel::from_authenticated_quote(&quote())),
         [Some(5), Some(4), None]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn connected_terminal_backpressure_waits_for_capacity_not_accounting_age() {
+    use futures_util::poll;
+    use http_body_util::BodyExt as _;
+    let (tx, mut body) = channel();
+    let mut output = output(tx, None, Disconnect::default());
+    for _ in 0..8 {
+        output.send(b"x").await.unwrap();
+    }
+    {
+        let blocked = output.send(b"blocked");
+        tokio::pin!(blocked);
+        assert!(poll!(&mut blocked).is_pending());
+        tokio::time::advance(Duration::from_secs(31 * 60)).await;
+        assert!(poll!(&mut blocked).is_pending());
+        drop(body.frame().await.unwrap().unwrap());
+        bounded(blocked).await.unwrap();
+    }
+    assert!(!output.delivery_failed);
+    assert_eq!(body.usage().frames, 8);
+    drop(body);
 }
 
 #[tokio::test]

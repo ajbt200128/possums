@@ -56,6 +56,7 @@ enum StartupFailure {
     ConfigurationMissing,
     ConfigurationEncodingInvalid,
     AccountsInvalid,
+    AccountsUnknown,
     Connect(InferenceFailure),
     BindUnknown,
     SignalUnknown,
@@ -72,7 +73,7 @@ impl StartupFailure {
     fn exit_code(self) -> u8 {
         match self {
             Self::ConfigurationMissing => 2,
-            Self::AccountsInvalid => 3,
+            Self::AccountsInvalid | Self::AccountsUnknown => 3,
             Self::Connect(_) => 4,
             Self::BindUnknown => 5,
             Self::SignalUnknown => 6,
@@ -90,6 +91,7 @@ impl StartupFailure {
             Self::ConfigurationMissing => DiagnosticFailure::ConfigurationMissing,
             Self::ConfigurationEncodingInvalid => DiagnosticFailure::ConfigurationEncodingInvalid,
             Self::AccountsInvalid => DiagnosticFailure::AccountsInvalid,
+            Self::AccountsUnknown => DiagnosticFailure::AccountsUnknown,
             Self::Connect(failure) => DiagnosticFailure::Connect(failure),
             Self::BindUnknown => DiagnosticFailure::BindUnknown,
             Self::SignalUnknown => DiagnosticFailure::SignalUnknown,
@@ -107,6 +109,7 @@ impl StartupFailure {
             Self::ConfigurationMissing => "configuration_missing",
             Self::ConfigurationEncodingInvalid => "configuration_encoding_invalid",
             Self::AccountsInvalid => "accounts_invalid",
+            Self::AccountsUnknown => "accounts_unknown",
             Self::Connect(_) => "connect_unknown",
             Self::BindUnknown => "bind_unknown",
             Self::SignalUnknown => "signal_unknown",
@@ -125,7 +128,7 @@ impl StartupFailure {
     fn stage(self) -> &'static str {
         match self {
             Self::ConfigurationMissing | Self::ConfigurationEncodingInvalid => "configuration",
-            Self::AccountsInvalid => "accounts",
+            Self::AccountsInvalid | Self::AccountsUnknown => "accounts",
             Self::Connect(_) => "connect",
             Self::BindUnknown => "bind",
             Self::SignalUnknown => "signal",
@@ -134,6 +137,15 @@ impl StartupFailure {
             Self::TorStartup(_) => "tor_startup",
             #[cfg(feature = "tor")]
             Self::TorServe(_) => "tor_serve",
+        }
+    }
+}
+
+impl From<possums::auth::AuthError> for StartupFailure {
+    fn from(error: possums::auth::AuthError) -> Self {
+        match error {
+            possums::auth::AuthError::Configuration => Self::AccountsInvalid,
+            _ => Self::AccountsUnknown,
         }
     }
 }
@@ -167,7 +179,8 @@ impl From<InferenceError> for StartupFailure {
 async fn run(startup: &mut Startup) -> Result<(), StartupFailure> {
     startup.enter(Stage::Configuration);
     let tor_config = TorRuntimeConfig::from_env().map_err(StartupFailure::TorStartup)?;
-    let accounts = env::var("POSSUMS_ACCOUNTS_JSON")?;
+    let intake_origin = env::var("POSSUMS_INTAKE_ORIGIN")?;
+    let intake_key = env::var("POSSUMS_INTAKE_LEDGER_KEY")?;
     let host = env::var("POSSUMS_TINFOIL_HOST")?;
     let repository = env::var("POSSUMS_TINFOIL_REPOSITORY")?;
     let api_key = env::var("TINFOIL_API_KEY")?;
@@ -180,7 +193,11 @@ async fn run(startup: &mut Startup) -> Result<(), StartupFailure> {
     };
 
     startup.enter(Stage::Accounts);
-    let auth = Auth::from_json(&accounts).map_err(|_| StartupFailure::AccountsInvalid)?;
+    // Preserve the closed startup category while replacing its authority.
+    // Production never accepts local/demo credentials or startup credits.
+    let auth =
+        Auth::from_intake_config(&intake_origin, &intake_key).map_err(StartupFailure::from)?;
+    drop(intake_key);
 
     startup.enter(Stage::Signal);
     // Signals precede any optional Tor construction/bootstrap/publication.
@@ -416,6 +433,22 @@ mod tests {
         let unknown = StartupFailure::from(std::io::Error::other("HOSTILE_IO_CANARY"));
         assert_eq!(unknown, StartupFailure::ServeUnknown);
         assert!(!format!("{unknown:?}").contains("HOSTILE_IO_CANARY"));
+    }
+
+    #[test]
+    fn intake_setup_distinguishes_invalid_configuration_from_unknown_fault() {
+        assert_eq!(
+            StartupFailure::from(possums::auth::AuthError::Configuration),
+            StartupFailure::AccountsInvalid
+        );
+        let unknown = StartupFailure::from(possums::auth::AuthError::StateUnavailable);
+        assert_eq!(unknown, StartupFailure::AccountsUnknown);
+        assert_eq!(unknown.stage(), "accounts");
+        assert_eq!(unknown.exit_code(), 3);
+        assert_eq!(
+            unknown.initialization_diagnostic(),
+            Some(DiagnosticFailure::AccountsUnknown)
+        );
     }
 
     #[test]

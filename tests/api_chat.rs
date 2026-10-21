@@ -750,28 +750,14 @@ async fn final_metrics_without_finish_settle_but_never_emit_downstream_trailer()
 
 #[tokio::test]
 async fn progressive_stream_preserves_finish_and_settles_before_success_markers_without_replay() {
-    async fn balance(state: &AppState, bearer: &str) -> Value {
-        let response = router(state.clone())
-            .oneshot(
-                Request::post("/v1/balance")
-                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        serde_json::from_slice(&bytes).unwrap()
-    }
     let (state, provider, bearer, submission) = fixture(5_000_000);
     assert_eq!(
-        balance(&state, &bearer).await,
-        json!({
-            "available_microunits": "5000000", "in_flight": 0, "completed_requests": "0"
-        })
+        state.accounting.snapshot("demo").unwrap(),
+        possums::accounting::BalanceSnapshot {
+            available_microunits: 5_000_000,
+            in_flight: 0,
+            completed_requests: 0,
+        }
     );
     let response = send(&state, &bearer, &submission).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -790,10 +776,12 @@ async fn progressive_stream_preserves_finish_and_settles_before_success_markers_
     assert_eq!(state.accounting.available("demo"), Some(5_000_000 - 52));
     duplicate(&state, &bearer, &submission, "in_flight").await;
     assert_eq!(
-        balance(&state, &bearer).await,
-        json!({
-            "available_microunits": "4999948", "in_flight": 1, "completed_requests": "0"
-        })
+        state.accounting.snapshot("demo").unwrap(),
+        possums::accounting::BalanceSnapshot {
+            available_microunits: 4_999_948,
+            in_flight: 1,
+            completed_requests: 0,
+        }
     );
     provider.price.store(100, Ordering::SeqCst); // Settlement must use the original rate.
     provider.finish.notify_one();
@@ -808,10 +796,12 @@ async fn progressive_stream_preserves_finish_and_settles_before_success_markers_
     assert!(text.ends_with("data: [DONE]\n\n"));
     duplicate(&state, &bearer, &submission, "settled").await;
     assert_eq!(
-        balance(&state, &bearer).await,
-        json!({
-            "available_microunits": "4999993", "in_flight": 0, "completed_requests": "1"
-        })
+        state.accounting.snapshot("demo").unwrap(),
+        possums::accounting::BalanceSnapshot {
+            available_microunits: 4_999_993,
+            in_flight: 0,
+            completed_requests: 1,
+        }
     );
     assert_eq!(provider.tokenizer_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.generation_calls.load(Ordering::SeqCst), 1);
