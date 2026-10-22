@@ -267,6 +267,26 @@ where
     S: AsyncRead + AsyncWrite + Send + Unpin,
     SP: SleepProvider,
 {
+    send_request_with_response_timeout(runtime, req, stream, source, Some(Duration::from_secs(10)))
+        .await
+}
+
+/// Send a directory request with optional nested response-phase clocks.
+///
+/// `None` disables only the header/body clocks; the caller must provide a finite
+/// operation deadline and cancellation. All parsing and response limits remain.
+pub async fn send_request_with_response_timeout<R, S, SP>(
+    runtime: &SP,
+    req: &R,
+    stream: &mut S,
+    source: Option<SourceInfo>,
+    response_timeout: Option<Duration>,
+) -> Result<DirResponse>
+where
+    R: request::Requestable + ?Sized,
+    S: AsyncRead + AsyncWrite + Send + Unpin,
+    SP: SleepProvider,
+{
     let wrap_err = |error| {
         Error::RequestFailed(RequestFailedError {
             source: source.clone(),
@@ -298,7 +318,7 @@ where
     let mut buffered = BufReader::new(stream);
 
     // Handle the response
-    let header = read_headers(runtime, &mut buffered)
+    let header = read_headers(runtime, &mut buffered, response_timeout)
         .await
         .map_err(wrap_err)?;
     if header.status != Some(200) {
@@ -316,7 +336,8 @@ where
         get_decoder(buffered, header.encoding.as_deref(), anonymized).map_err(wrap_err)?;
 
     let mut result = Vec::new();
-    let ok = read_and_decompress(runtime, &mut decoder, maxlen, &mut result).await;
+    let ok =
+        read_and_decompress(runtime, &mut decoder, maxlen, &mut result, response_timeout).await;
 
     let ok = match (partial_ok, ok, result.len()) {
         (true, Err(e), n) if n > 0 => {
@@ -346,20 +367,24 @@ const MAX_HEADERS_LEN: usize = 16384;
 
 /// Read and parse HTTP/1 headers from `stream`.
 ///
-/// Wraps around [`read_headers_internal()`] with a timeout.
-async fn read_headers<S, SP>(runtime: &SP, stream: &mut S) -> RequestResult<HeaderStatus>
+/// Wraps the shared header parser with the selected response timeout.
+async fn read_headers<S, SP>(
+    runtime: &SP,
+    stream: &mut S,
+    response_timeout: Option<Duration>,
+) -> RequestResult<HeaderStatus>
 where
     S: AsyncBufRead + Unpin,
     SP: SleepProvider,
 {
-    // Just like with the other timeouts in this code, this should probably be
-    // configurable and may even be too much.
-    let read_timeout = Duration::from_secs(10);
-    runtime
-        .timeout(read_timeout, read_headers_internal(stream))
-        .await
-        .map_err(|_| RequestError::DirTimeout)
-        .flatten()
+    match response_timeout {
+        Some(timeout) => runtime
+            .timeout(timeout, read_headers_internal(stream))
+            .await
+            .map_err(|_| RequestError::DirTimeout)
+            .flatten(),
+        None => read_headers_internal(stream).await,
+    }
 }
 
 /// Internal version of [`read_headers()`] without a timeout.
@@ -457,6 +482,7 @@ async fn read_and_decompress<S, SP>(
     mut stream: S,
     maxlen: usize,
     result: &mut Vec<u8>,
+    response_timeout: Option<Duration>,
 ) -> RequestResult<()>
 where
     S: AsyncRead + Unpin,
@@ -464,10 +490,11 @@ where
 {
     let buffer_window_size = 1024;
     let mut written_total: usize = 0;
-    // TODO(nickm): This should be an option, and is maybe too long.
-    // Though for some users it may be too short?
-    let read_timeout = Duration::from_secs(10);
-    let timer = runtime.sleep(read_timeout).fuse();
+    let timer = match response_timeout {
+        Some(timeout) => futures::future::Either::Left(runtime.sleep(timeout)),
+        None => futures::future::Either::Right(futures::future::pending::<()>()),
+    }
+    .fuse();
     futures::pin_mut!(timer);
 
     loop {
@@ -631,7 +658,14 @@ mod test {
             Err(e) => return (Err(e), output),
         };
 
-        let r = read_and_decompress(&mock_time, &mut stream, maxlen, &mut output).await;
+        let r = read_and_decompress(
+            &mock_time,
+            &mut stream,
+            maxlen,
+            &mut output,
+            Some(Duration::from_secs(10)),
+        )
+        .await;
 
         (r, output)
     }
@@ -735,20 +769,35 @@ mod test {
         let text = b"HTTP/1.0 200 OK\r\nDate: ignored\r\nContent-Encoding: Waffles\r\n\r\n";
 
         let mut s = &text[..];
-        let h = tor_rtcompat::test_with_one_runtime!(async |rt| read_headers(&rt, &mut s).await)?;
+        let h = tor_rtcompat::test_with_one_runtime!(async |rt| read_headers(
+            &rt,
+            &mut s,
+            Some(Duration::from_secs(10))
+        )
+        .await)?;
 
         assert_eq!(h.status, Some(200));
         assert_eq!(h.encoding.as_deref(), Some("Waffles"));
 
         // now try truncated
         let mut s = &text[..15];
-        let h = tor_rtcompat::test_with_one_runtime!(async |rt| read_headers(&rt, &mut s).await);
+        let h = tor_rtcompat::test_with_one_runtime!(async |rt| read_headers(
+            &rt,
+            &mut s,
+            Some(Duration::from_secs(10))
+        )
+        .await);
         assert!(matches!(h, Err(RequestError::TruncatedHeaders)));
 
         // now try with no encoding.
         let text = b"HTTP/1.0 404 Not found\r\n\r\n";
         let mut s = &text[..];
-        let h = tor_rtcompat::test_with_one_runtime!(async |rt| read_headers(&rt, &mut s).await)?;
+        let h = tor_rtcompat::test_with_one_runtime!(async |rt| read_headers(
+            &rt,
+            &mut s,
+            Some(Duration::from_secs(10))
+        )
+        .await)?;
 
         assert_eq!(h.status, Some(404));
         assert!(h.encoding.is_none());
@@ -760,7 +809,12 @@ mod test {
     fn headers_bogus() {
         let text = b"HTTP/999.0 WHAT EVEN\r\n\r\n";
         let mut s = &text[..];
-        let h = tor_rtcompat::test_with_one_runtime!(async |rt| read_headers(&rt, &mut s).await);
+        let h = tor_rtcompat::test_with_one_runtime!(async |rt| read_headers(
+            &rt,
+            &mut s,
+            Some(Duration::from_secs(10))
+        )
+        .await);
 
         assert!(h.is_err());
         assert!(matches!(h, Err(RequestError::HttparseError(_))));

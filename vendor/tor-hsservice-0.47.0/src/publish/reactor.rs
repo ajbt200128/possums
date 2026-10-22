@@ -1749,19 +1749,26 @@ impl<R: Runtime, M: Mockable> Reactor<R, M> {
             .await
             .map_err(UploadError::Stream)?;
 
-        let _response: String = send_request(&imm.runtime, &request, &mut stream, source)
-            .await
-            .map_err(|dir_error| -> UploadError {
-                match dir_error {
-                    DirClientError::RequestFailed(e) => e.into(),
-                    DirClientError::CircMgr(e) => into_internal!(
-                        "tor-dirclient complains about circmgr going wrong but we gave it a stream"
-                    )(e)
-                    .into(),
-                    e => into_internal!("unexpected error")(e).into(),
-                }
-            })?
-            .into_output_string()?; // This returns an error if we received an error response
+        // Runner retains finite attempt/overall deadlines and the caller's shutdown race.
+        let _response: String = tor_dirclient::send_request_with_response_timeout(
+            &imm.runtime,
+            &request,
+            &mut stream,
+            source,
+            None,
+        )
+        .await
+        .map_err(|dir_error| -> UploadError {
+            match dir_error {
+                DirClientError::RequestFailed(e) => e.into(),
+                DirClientError::CircMgr(e) => into_internal!(
+                    "tor-dirclient complains about circmgr going wrong but we gave it a stream"
+                )(e)
+                .into(),
+                e => into_internal!("unexpected error")(e).into(),
+            }
+        })?
+        .into_output_string()?; // This returns an error if we received an error response
 
         Ok(())
     }

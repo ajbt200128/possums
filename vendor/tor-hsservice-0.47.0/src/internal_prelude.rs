@@ -77,7 +77,7 @@ pub(crate) use {
     tor_circmgr::hspool::HsCircPool,
     tor_config::{ConfigBuildError, Reconfigure, ReconfigureError},
     tor_dirclient::request::HsDescUploadRequest,
-    tor_dirclient::{Error as DirClientError, RequestFailedError, send_request},
+    tor_dirclient::{Error as DirClientError, RequestFailedError},
     tor_error::define_asref_dyn_std_error,
     tor_error::{Bug, ErrorKind, ErrorReport as _, HasKind},
     tor_error::{bad_api_usage, internal, into_bad_api_usage, into_internal},
