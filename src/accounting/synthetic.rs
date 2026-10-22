@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn full_terminal_capacity_reclaims_only_expired_tokens() {
-        let future = Instant::now() + Duration::from_secs(60);
+        let fixture_time = Instant::now();
         let quote = quote();
         let submissions = (0..MAX_SUBMISSIONS)
             .map(|number| {
@@ -533,7 +533,7 @@ mod tests {
                         request_digest: [1; 32],
                         quote: quote.clone(),
                         outcome: Outcome::Refunded,
-                        token_expires_at: future,
+                        token_expires_at: fixture_time,
                     },
                 )
             })
@@ -553,6 +553,11 @@ mod tests {
                 submissions,
             }),
         };
+        // Start token lifetimes after the expensive fixture construction.
+        let future = Instant::now() + Duration::from_secs(60);
+        for submission in ledger.state.lock().unwrap().submissions.values_mut() {
+            submission.token_expires_at = future;
+        }
         assert_eq!(
             ledger
                 .reserve("a", [255; 32], [2; 32], quote.clone(), future)
@@ -564,7 +569,13 @@ mod tests {
         }
         assert_eq!(
             ledger
-                .reserve("a", [255; 32], [2; 32], quote, future)
+                .reserve(
+                    "a",
+                    [255; 32],
+                    [2; 32],
+                    quote,
+                    Instant::now() + Duration::from_secs(60),
+                )
                 .unwrap(),
             ReserveResult::Reserved
         );
