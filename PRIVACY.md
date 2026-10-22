@@ -18,6 +18,52 @@ The operator also chose a continuously enabled MVP, rejecting bespoke DNS cancel
 
 These decisions change deployment authorization, transport topology, enablement, shutdown expectations and metric retention only. They do not authorize content, identifiers, request logs/traces, bypassing the release algorithm, marking real/mixed traffic as isolated synthetic, or claiming that unverified processor properties passed. Production deployment may keep telemetry disabled while the remaining privacy/runtime gates are completed. Record the effective default retention when available; do not claim an exact duration or immediate backup deletion without evidence. Request shorter retention after the MVP; do not create a secondary archive.
 
+## Exact CVM 0.14.16 upstream observability exception
+
+After review of the behaviors below, the operator explicitly accepted them to
+try the released CVM **v0.14.16**, source commit
+[`4774a5dcfa2e9d4b95d6614c1d2d8125b58562e5`](https://github.com/tinfoilsh/cvmimage/tree/4774a5dcfa2e9d4b95d6614c1d2d8125b58562e5).
+This narrowly supersedes the request-label, cumulative-counter and closed raw-error
+restrictions only for these exact upstream behaviors, not for Possums application
+code or other SDKs. It is operator risk acceptance, not evidence of deployment or
+privacy-test-proven absence of sensitive data.
+
+- The shim unconditionally counts attestation requests by endpoint, attestation
+  version, self-reported SDK/version, coarse client family and result.
+  [`ObserveAttestation` and `sdkLabels`](https://github.com/tinfoilsh/cvmimage/blob/4774a5dcfa2e9d4b95d6614c1d2d8125b58562e5/tinfoil/internal/metrics/attestation.go#L72-L162)
+  retain syntactically valid client-controlled SDK versions, subject to upstream
+  length/cardinality limits. These are not a closed version allowlist: label
+  values can encode identifying information, and cumulative counts and repeated
+  observations can reveal activity and aid correlation. This exception accepts
+  those risks; these counters do **not** satisfy the application's complete
+  five-minute release contract.
+- [`HandlePrometheusMetrics`](https://github.com/tinfoilsh/cvmimage/blob/4774a5dcfa2e9d4b95d6614c1d2d8125b58562e5/tinfoil/internal/metrics/prometheus.go#L108-L145)
+  registers those counters with upstream infrastructure `id`, `domain` and `image`
+  labels for authenticated `/.well-known/metrics` scrape responses. Source review
+  found scrape exposure, not a new automatic outbound exporter. Actual platform
+  scraping, downstream collection, access, retention and backups remain unknown;
+  authentication and bounded labels do not establish anonymity or data minimization.
+- PID1's [`reportFailure`](https://github.com/tinfoilsh/cvmimage/blob/4774a5dcfa2e9d4b95d6614c1d2d8125b58562e5/tinfoil/cmd/pid1/main.go#L181-L190)
+  formats the raw boot failure through
+  [`initLogf`](https://github.com/tinfoilsh/cvmimage/blob/4774a5dcfa2e9d4b95d6614c1d2d8125b58562e5/tinfoil/cmd/pid1/main.go#L967-L977),
+  which writes to the upstream logger and `/dev/kmsg`. Raw boot errors can contain
+  private configuration, identifiers or secrets; this exception accepts the
+  identified upstream exposure risk, not a guarantee that such details are absent.
+  Platform capture, processor access and persistence/retention remain unknown;
+  no whole-process transience claim is made.
+
+This does not authorize application prompt/response/history/credential collection,
+identifying application request logs, general raw application errors, new
+exporters, platform scrapers, support bundles or debug activation. The application
+closed-error and telemetry allowlists, startup-only limits, trust/accounting,
+retry and readiness rules remain mandatory. `OTEL_SDK_DISABLED=true` remains the
+application export switch, not a switch for this upstream CVM behavior. Future
+runtime versions or additional collection require fresh review and authorization.
+Normal exact CI, signed provenance and protected approval still precede any
+separately authorized rollout; this exception does not authorize merge/deployment
+or concurrent updates. Source/check evidence is recorded in
+[the CVM upgrade verification](docs/cvm-0.14.16-upgrade.md).
+
 ## What we are protecting
 
 Our goal is to operate a reliable private inference gateway without building a history of people's activity. Collect the minimum operational information, keep it briefly, and explain the limitations. Do not sell request data, use it for advertising/profiling, or repurpose observability data to train models.
