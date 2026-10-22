@@ -394,7 +394,7 @@ mod test {
     }
 
     /// Create a new `KeyMgr`, provisioning its keystore with the necessary keys.
-    fn init_keymgr(
+    pub(super) fn init_keymgr(
         keystore_dir: &TempDir,
         nickname: &HsNickname,
         netdir: &NetDir,
@@ -455,7 +455,7 @@ mod test {
         (hs_id, hs_blind_id_key.into(), keymgr.into())
     }
 
-    fn build_test_config(nickname: HsNickname) -> OnionServiceConfig {
+    pub(super) fn build_test_config(nickname: HsNickname) -> OnionServiceConfig {
         OnionServiceConfigBuilder::default()
             .nickname(nickname)
             .rate_limit_at_intro(None)

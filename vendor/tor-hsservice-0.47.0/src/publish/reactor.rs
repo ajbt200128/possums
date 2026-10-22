@@ -1390,7 +1390,7 @@ impl<R: Runtime, M: Mockable> Reactor<R, M> {
 
             if hs_dirs.is_empty() {
                 trace!("the descriptor is clean for all HSDirs. Nothing to do");
-                return Ok(());
+                continue;
             }
 
             let time_period = period_ctx.params.time_period();
@@ -2376,4 +2376,7 @@ mod test {
         assert_eq!(status, State::DegradedUnreachable);
         assert!(matches!(err, Some(Problem::DescriptorUpload(_))));
     }
+
+    include!("directory_rejection_fixture.rs");
+    include!("selective_period_fixture.rs");
 }
