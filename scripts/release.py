@@ -412,7 +412,7 @@ def verify_manifest(raw, hash_bytes, config, image):
         raise Stop("manifest") from None
     require(decoded_config == config and transform(config, image) == config, "manifest")
     config_hash = hashlib.sha256(config).hexdigest()
-    require(manifest["hashes"]["version"] == "v0.14.12"
+    require(manifest["hashes"]["version"] == "v0.14.16"
             and f"tinfoil-config-hash={config_hash}" in manifest["cmdline"].split(), "manifest")
     # The canonical SDK shape includes root, config and external-config disks.
     shape = manifest["vm_shape"]

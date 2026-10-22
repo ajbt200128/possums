@@ -455,7 +455,7 @@ class TreeTest(StopTest):
 class ProvenanceTest(StopTest):
     def fixture(self):
         config = r.transform(CONFIG, D)
-        manifest = {"config": base64.b64encode(config).decode(), "hashes": {"version": "v0.14.12"},
+        manifest = {"config": base64.b64encode(config).decode(), "hashes": {"version": "v0.14.16"},
                     "cmdline": "tinfoil-config-hash=" + hashlib.sha256(config).hexdigest(),
                     "vm_shape": {"cpus": 2, "memory_mb": 8192, "gpus": 0, "disks": 3}}
         raw = json.dumps(manifest).encode()
@@ -475,6 +475,21 @@ class ProvenanceTest(StopTest):
         self.stop("manifest", r.verify_manifest, raw, digest.encode(), config + b"\n", D)
         self.stop("manifest", r.verify_manifest, raw, digest.encode(), config, "sha256:" + "e" * 64)
         self.stop("manifest", r.verify_manifest, b"SYNTHETIC-SECRET", hashlib.sha256(b"SYNTHETIC-SECRET").hexdigest().encode(), config, D)
+
+    def test_manifest_runtime_matches_reviewed_pin_and_rejects_other_versions(self):
+        self.assertEqual((ROOT / r.CONFIG).read_bytes().splitlines()[0], b"cvm-version: 0.14.16")
+        config, manifest, raw, digest, _ = self.fixture()
+        self.assertEqual(r.verify_manifest(raw, digest.encode(), config, D), (manifest, digest))
+        for version in ("v0.14.12", "v0.14.15", "v0.14.17", "0.14.16", "v0.14.160", "SYNTHETIC-SECRET"):
+            changed = copy.deepcopy(manifest)
+            changed["hashes"]["version"] = version
+            raw = json.dumps(changed).encode()
+            self.stop("manifest", r.verify_manifest, raw,
+                      hashlib.sha256(raw).hexdigest().encode(), config, D)
+        manifest["cmdline"] = "tinfoil-config-hash=" + "0" * 64
+        raw = json.dumps(manifest).encode()
+        self.stop("manifest", r.verify_manifest, raw,
+                  hashlib.sha256(raw).hexdigest().encode(), config, D)
 
     def test_manifest_canonical_shape_rejects_missing_changed_and_untyped_dimensions(self):
         config, manifest, _, _, _ = self.fixture()

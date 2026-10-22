@@ -17,6 +17,15 @@
 
 Status values are **VERIFIED**, **FAILED**, and **UNKNOWN**. An UNKNOWN or FAILED mandatory gate blocks production prompt transmission and release. The results below describe the deployed `v0.0.5` **previous buffered regime**; its completion-boundary/refund tests do **not** verify the [planned Phase 0 streaming-only replacement](phase0.md#planned-streaming-only-replacement). Do not update old results to claim that streaming is live.
 
+## CVM 0.14.16 upgrade candidate — source only
+
+The [runtime upgrade record](cvm-0.14.16-upgrade.md) records exact upstream identity,
+source compatibility limits, offline guard/negative checks and the operator's
+[exact-version observability risk acceptance](../PRIVACY.md#exact-cvm-01416-upstream-observability-exception).
+No new deployed runtime, availability fix, platform privacy guarantee or completed
+console update is established. The instance is operator-reported stopped, not
+independently verified; start authority does not waive rollout gates.
+
 ## Request-only Tor diagnostics — typed evidence candidate
 
 The [request-only contract and scoped evidence](tor-request-readiness-diagnostics.md)
