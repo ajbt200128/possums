@@ -78,3 +78,7 @@ opentelemetry-http = { version = "=0.29.0", default-features = false, features =
 opentelemetry-otlp = { version = "=0.29.0", default-features = false, features = ["http-proto", "hyper-client"] }
 tokio = { version = "1", features = ["test-util"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring", "crypto"] }
+
+[patch.crates-io]
+tor-dirclient = { path = "vendor/tor-dirclient-0.47.0" }
+tor-hsservice = { path = "vendor/tor-hsservice-0.47.0" }
