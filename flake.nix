@@ -34,6 +34,8 @@
             let
               base = baseNameOf path;
               sdkAssets = map toString [
+                ./vendor/tor-dirclient-0.47.0/README.md
+                ./vendor/tor-hsservice-0.47.0/README.md
                 ./vendor/tinfoil/assets
                 ./vendor/tinfoil/assets/genoa_cert_chain.pem
                 ./vendor/tinfoil/assets/trusted_root.json
@@ -58,7 +60,7 @@
         };
         cargoArtifacts = craneLib.buildDepsOnly common;
         torCommon = common // { cargoExtraArgs = "--locked --features tor"; };
-        torCargoArtifacts = craneLib.buildDepsOnly torCommon;
+        torCargoArtifacts = craneLib.buildDepsOnly (torCommon // { dummySrc = src; });
         # The shipping binary supports Tor; runtime activation remains explicit.
         # Tests have their own checks, not an image-build side effect.
         gateway = craneLib.buildPackage (torCommon // {

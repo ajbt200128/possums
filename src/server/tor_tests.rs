@@ -263,7 +263,7 @@ fn node_decode_failures(values: &[serde_json::Value], expected: &[serde_json::Va
             });
             process.stdout.write(JSON.stringify(results));
         "#])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/clients/pi/tor-setup.mjs"))
+        .arg("clients/pi/tor-setup.mjs")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

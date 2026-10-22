@@ -5274,8 +5274,6 @@ dependencies = [
 [[package]]
 name = "tor-dirclient"
 version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f942f4ebaf2ac5275e48d02d77abe1616ce2e8854f032a1b0698ede0566dddfc"
 dependencies = [
  "async-compression",
  "base64ct",
@@ -5532,8 +5530,6 @@ dependencies = [
 [[package]]
 name = "tor-hsservice"
 version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55809560d9295dcc2ee77002c5a4275d1f5f5a54203de7cd6acb52215f5344bd"
 dependencies = [
  "amplify",
  "async-trait",
