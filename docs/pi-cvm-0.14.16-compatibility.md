@@ -108,3 +108,41 @@ is unchanged, not proof of deployed privacy properties.
 
 Any later installation/activation needs separate operator approval and matching
 artifact/source qualification. This record is not deployment or release evidence.
+
+## Subsequent operator-authorized local installation
+
+The operator then explicitly requested installation for their own testing. The
+source/scratch-only and unchanged-installation statements above describe the
+preceding qualification phase, not the installation state after this section.
+
+Before changing the stable link, all **8 artifacts**, **165 bundled input hashes**
+and **22 bundled project-source hashes** matched the qualified report/current
+source at commit `088ab8c7`. The candidate was copied into a new local package;
+only its three external Pi peer links were aligned to the already-installed
+**Pi 1.3.0** runtime. No Pi runtime or dependency version was installed/updated.
+The package's original build report still accurately describes its **Pi 1.0.4
+build qualification**; it does not claim the installation peer links are 1.0.4.
+
+The staged actual package then passed all **18** `phase02_v3_package.mjs`
+checks on **Pi 1.3.0**, using an isolated temporary home, in-memory native session
+and synthetic public acquisition. This exercises extension registration,
+session-start failure handling, offline status and packaged real Worker/WASM
+rejection; it is **not** positive live startup/authentication or full Pi 1.3.0
+qualification. No credentials or inference were used by these checks.
+
+The existing `~/.local/share/possums/pi/installed` symlink was atomically replaced:
+
+- New target: `pi-cvm01416-d16b1eaf3af5-pi130`.
+- Extension SHA-256:
+  `d16b1eaf3af596bfc126088a75d832ce824b338f9f4202b67d48a2d2bb2c48ab`.
+- Previous target retained unchanged: `pi-intake-v66-38536f556cbe-pi130`.
+- All 8 installed artifact hashes and all three unchanged Pi 1.3.0 peer targets
+  were verified through the stable link after replacement; the previous
+  extension's hash also remained unchanged.
+
+No registration, provider/model selection, settings, credentials, caches,
+history, T3 host, gateway or running process was changed/restarted. The verified
+artifact is installed, but **activation in existing Pi/T3 processes and positive
+live behavior remain unverified**. The user controls a fresh provider process
+or full application restart and their deliberate test; this installation sends
+no inference, resumes no failed conversation and establishes no billing outcome.
