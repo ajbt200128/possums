@@ -55,8 +55,8 @@ const origin = `https://${host}`;
 const tag = 'v0.0.99';
 const workflow = `https://github.com/${repo}/.github/workflows/tinfoil-release-publish.yml@refs/tags/${tag}`;
 const key = new Uint8Array([0, 0, 32, ...Array(32).fill(7), 0, 4, 0, 1, 0, 2]);
-const config = Buffer.from(`cvm-version: 0.14.12\ncontainers:\n  - name: gateway\n    image: ghcr.io/${repo}-gateway@sha256:${'a'.repeat(64)}\n`);
-const manifest = { hashes: { version: 'v0.14.12' }, config: b64(config),
+const config = Buffer.from(`cvm-version: 0.14.16\ncontainers:\n  - name: gateway\n    image: ghcr.io/${repo}-gateway@sha256:${'a'.repeat(64)}\n`);
+const manifest = { hashes: { version: 'v0.14.16' }, config: b64(config),
   cmdline: `readonly=on tinfoil-config-hash=${sha(config)}`, snp_measurement: 'a'.repeat(96) };
 const doc = { format: 'https://tinfoil.sh/predicate/sev-snp-guest/v2', body: b64(gzipSync(Buffer.alloc(1184))) };
 const base = {
@@ -231,6 +231,13 @@ try {
   let channel = await qualify();
   assert.equal(network, calls); assert(hardwareCalls > 0 && dsseCalls > 0);
   assert.deepEqual(channel.release, { tag, expires: now + 43200000 });
+  // Exercise the old runtime through the same signed-subject/config checks.
+  const priorConfig = Buffer.from(config.toString().replace('0.14.16', '0.14.12'));
+  const priorManifest = { ...manifest, hashes: { version: 'v0.14.12' }, config: b64(priorConfig),
+    cmdline: `readonly=on tinfoil-config-hash=${sha(priorConfig)}` };
+  const priorBundle = structuredClone(base); priorBundle.digest = sha(bytes(priorManifest));
+  statement(priorBundle, s => { s.predicate = priorManifest; s.subject[0].digest.sha256 = priorBundle.digest; });
+  assert.equal((await qualify(priorBundle, bytes(priorManifest))).release.tag, tag); passed++;
   assert(Object.isFrozen(channel.release));
   assert.throws(() => { channel.release.expires = Infinity; });
   assert.throws(() => { channel.release = { tag, expires: Infinity }; });
@@ -264,7 +271,9 @@ try {
   for (const [name, change] of [
     ['config hash binding', m => { m.cmdline = 'tinfoil-config-hash=' + '0'.repeat(64); }],
     ['duplicate config hash', m => { m.cmdline += ' tinfoil-config-hash=' + sha(config); }],
-    ['CVM version', m => { m.hashes.version = 'v0.99.0'; }],
+    ...['v0.14.11', 'v0.14.13', 'v0.14.15', 'v0.14.17', 'v0.99.0', '0.14.16', 'v0.14.160',
+      'v0.14.16-rc.1', 'v0.14.16\n', 'HOSTILE credential history URL', null, 16, {}, ['v0.14.16'], undefined]
+      .map(version => ['CVM version', m => { m.hashes.version = version; }]),
   ]) {
     const m = structuredClone(manifest); change(m); const b = structuredClone(base); b.digest = sha(bytes(m));
     statement(b, s => { s.predicate = m; s.subject[0].digest.sha256 = b.digest; });

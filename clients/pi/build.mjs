@@ -10,6 +10,7 @@ const root = await realpath('.');
 const source = path.resolve(root, '../..');
 const out = process.env.PHASE02_OUT;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+const piVersion = '1.3.0';
 const runtimePins = {};
 const runtimeRoots = {};
 try {
@@ -17,7 +18,7 @@ try {
     const entry = fileURLToPath(import.meta.resolve(`@earendil-works/${name}`));
     const bytes = await readFile(path.join(path.dirname(entry), '..', 'package.json'));
     const metadata = JSON.parse(bytes);
-    if (metadata.version !== '1.0.4') throw new Error();
+    if (metadata.version !== piVersion) throw new Error();
     runtimePins[name] = { version: metadata.version, manifestSha256: sha(bytes) };
     runtimeRoots[name] = path.join(path.dirname(entry), '..');
   }
@@ -90,7 +91,7 @@ verifierArtifacts['possums-tor-native'] = { sha256: sha(nativeBytes) };
 const peers = path.join(out, 'node_modules', '@earendil-works');
 await mkdir(peers, { recursive: true });
 for (const [name, directory] of Object.entries(runtimeRoots)) await symlink(directory, path.join(peers, name));
-const buildReport = { node: process.version, pi: '1.0.4', runtimePins, typescript: ts.version, esbuild: esbuildVersion,
+const buildReport = { node: process.version, pi: piVersion, runtimePins, typescript: ts.version, esbuild: esbuildVersion,
   lock: sha(await readFile('package-lock.json')), verifier: verifierReport, torNative: nativeReport,
   legacyBootstrapFixture: { revision: '1b909881b468a2d5035ff2180ed5027fd2d8b9f6', sha256: sha(await readFile('legacy-bootstrap.ts')) },
   artifacts: { ...verifierArtifacts } };
@@ -111,4 +112,4 @@ await writeFile(path.join(out, 'package.json'), JSON.stringify({
   peerDependencies: { '@earendil-works/pi-ai': '*', '@earendil-works/pi-coding-agent': '*' },
 }, null, 2) + '\n');
 await writeFile(path.join(out, 'build-report.json'), JSON.stringify(buildReport, null, 2) + '\n');
-console.log(JSON.stringify({ output: out, pi: '1.0.4', artifacts: Object.keys(buildReport.artifacts) }));
+console.log(JSON.stringify({ output: out, pi: piVersion, artifacts: Object.keys(buildReport.artifacts) }));

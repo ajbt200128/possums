@@ -112,4 +112,4 @@ for(const change of ['hook','catalog']){
  const request=m.invocation(selected,ai.normalizeContext({messages:[user,assistant,{role:'toolResult',toolCallId:'call_one',toolName:'echo',content:[{type:'text',text:'ok'}],isError:false,timestamp:2}]}));
  assert(!JSON.stringify(request).includes('PRIVATE_REASONING_REPLAY'));assert.equal(request.messages.find(message=>message.role==='assistant').content,'');
 }
-console.log('PASS catalog-driven thinking: closed metadata/options; raw omission/native off; mapped/toggle/unavailable levels; balanced display/tools/interruption; hooks/fresh catalog admission; no reasoning replay (Pi 1.0.4, offline)');
+console.log('PASS catalog-driven thinking: closed metadata/options; raw omission/native off; mapped/toggle/unavailable levels; balanced display/tools/interruption; hooks/fresh catalog admission; no reasoning replay (pinned Pi, offline)');

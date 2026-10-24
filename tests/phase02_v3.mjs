@@ -23,8 +23,8 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 const tls = sha(new X509Certificate(certPEM).publicKey.export({ type: 'spki', format: 'der' }));
 const bytes = value => new TextEncoder().encode(JSON.stringify(value));
 const config = new Uint8Array([0, 0, 32, ...Array(32).fill(7), 0, 4, 0, 1, 0, 2]);
-const yaml = Buffer.from('cvm-version: 0.14.12\ncontainers: []\n');
-const manifest = bytes({ hashes: { version: 'v0.14.12' }, config: yaml.toString('base64'), cmdline: `tinfoil-config-hash=${sha(yaml)}` });
+const yaml = Buffer.from('cvm-version: 0.14.16\ncontainers: []\n');
+const manifest = bytes({ hashes: { version: 'v0.14.16' }, config: yaml.toString('base64'), cmdline: `tinfoil-config-hash=${sha(yaml)}` });
 const facts = { tls_key_sha256: tls, hpke_key: '07'.repeat(32), release_tag: 'v0.0.99', release_digest: sha(manifest), freshness_expires_at_unix: Math.floor(Date.now() / 1000) + 3600 };
 const input = { evidence: bytes({ nonce: 'synthetic' }), nonce: new Uint8Array(32).fill(1), manifest, tag: facts.release_tag, certificate: certPEM, config };
 let result = facts, calls = 0, passed = 0;
@@ -59,6 +59,19 @@ async function rejects(fn, constraint) {
 }
 const channel = await test.Channel.v3(input);
 assert.equal(channel.release.expires, facts.freshness_expires_at_unix * 1000); passed++;
+// The reviewed upgrade must not remove compatibility with the prior runtime.
+const priorYaml = Buffer.from('cvm-version: 0.14.12\ncontainers: []\n');
+const priorManifest = bytes({ hashes: { version: 'v0.14.12' }, config: priorYaml.toString('base64'),
+  cmdline: `tinfoil-config-hash=${sha(priorYaml)}` });
+result = { ...facts, release_digest: sha(priorManifest) };
+assert.equal((await test.Channel.v3({ ...input, manifest: priorManifest })).release.tag, facts.release_tag); passed++;
+result = facts;
+for (const version of ['v0.14.11', 'v0.14.13', 'v0.14.15', 'v0.14.17', 'v0.99.0', '0.14.16',
+  'v0.14.160', 'v0.14.16-rc.1', 'v0.14.16\n', 'HOSTILE credential history URL', null, 16, {}, ['v0.14.16'], undefined]) {
+  const before = calls;
+  await rejects(() => test.Channel.v3({ ...input, manifest: bytes({ ...JSON.parse(Buffer.from(manifest)), hashes: { version } }) }), 'manifest');
+  assert.equal(calls, before, 'unsupported CVM versions fail before SDK appraisal');
+}
 await rejects(() => test.Channel.v3({ ...input, config: config.slice(0, 40) }), 'key_config');
 const wrongConfig = new Uint8Array(config); wrongConfig[3]++;
 await rejects(() => test.Channel.v3({ ...input, config: wrongConfig }), 'key_config');

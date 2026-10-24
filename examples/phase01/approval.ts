@@ -33,6 +33,10 @@ export const PUBLISHER = Object.freeze({
   workflow: 'https://github.com/ajbt200128/possums/.github/workflows/tinfoil-release-publish.yml',
 });
 export type PublishedRelease = Readonly<{ tag: string; expires: number }>;
+export function requireSupportedCvmVersion(version: unknown): void {
+  // Retain the prior runtime while admitting only the explicitly reviewed upgrade.
+  requireThat(version === 'v0.14.12' || version === 'v0.14.16');
+}
 export function requireReleaseTag(value: unknown): asserts value is string {
   // Stable semantic releases only; discovery never supplies a URL or policy.
   requireThat(typeof value === 'string' && value.length <= 64 && /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value));
@@ -121,7 +125,7 @@ async function qualifyApproved(bundleBytes: Uint8Array, manifestBytes: Uint8Arra
       const hashes = manifest.cmdline.split(/\s+/).filter((part: string) => part.startsWith('tinfoil-config-hash='));
       requireThat(hashes.length === 1 && hashes[0] === `tinfoil-config-hash=${await digest(config)}`);
     }
-    requireThat(manifest.hashes.version === 'v0.14.12');
+    requireSupportedCvmVersion(manifest.hashes.version);
     constraint = 'attestation';
     const doc = bundle.enclaveAttestationReport;
     requireThat(doc.format === 'https://tinfoil.sh/predicate/sev-snp-guest/v2');

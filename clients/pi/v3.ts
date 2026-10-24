@@ -8,7 +8,7 @@ import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 import { verifyV3, verifyTorV3, VerifierFailure } from './verifier.mjs';
 import { TorConnection, isTorConnectionFailure, TorNativeTransportFailure } from './tor-connection.js';
 import { checkTorEndorsementSignature } from './tor-endorsement.mjs';
-import { PUBLISHER, checkApproval, validateKeyConfig, requireReleaseTag, requirePublishedKeys } from '../../examples/phase01/approval.js';
+import { PUBLISHER, checkApproval, validateKeyConfig, requireReleaseTag, requirePublishedKeys, requireSupportedCvmVersion } from '../../examples/phase01/approval.js';
 import { LIMITS, DiagnosticFailure, Operation, OperationFailure, base64, digest, parseJSON, requireThat } from '../../examples/phase01/limits.js';
 
 export const V3_EVIDENCE_LIMIT = 16 * 1024 * 1024;
@@ -53,7 +53,8 @@ async function qualify(input: V3Input, signal?: AbortSignal,
     const hash = await digest(input.manifest);
     const manifest = parseJSON(input.manifest, LIMITS.provenance);
     const config = base64(manifest.config, LIMITS.certificate);
-    requireThat(config.length > 0 && manifest.hashes.version === 'v0.14.12' && typeof manifest.cmdline === 'string');
+    requireSupportedCvmVersion(manifest.hashes.version);
+    requireThat(config.length > 0 && typeof manifest.cmdline === 'string');
     const hashes = manifest.cmdline.split(/\s+/).filter((part: string) => part.startsWith('tinfoil-config-hash='));
     requireThat(hashes.length === 1 && hashes[0] === `tinfoil-config-hash=${await digest(config)}`);
     constraint = 'verification';
