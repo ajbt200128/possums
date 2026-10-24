@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url';
 const source = process.env.PHASE02_RELEASE_SOURCE;
 assert(source && path.isAbsolute(source), 'select a matching scratch source with pinned dependencies');
 assert.equal(process.version, 'v24.13.0');
-for (const [name, version] of [['esbuild', '0.25.10'], ['typescript', '5.9.3'], ['@earendil-works/pi-ai', '1.0.4'], ['@earendil-works/pi-coding-agent', '1.0.4']]) {
+for (const [name, version] of [['esbuild', '0.25.10'], ['typescript', '5.9.3'], ['@earendil-works/pi-ai', '1.3.0'], ['@earendil-works/pi-coding-agent', '1.3.0']]) {
   assert.equal(JSON.parse(await readFile(path.join(source, 'node_modules', name, 'package.json'))).version, version);
 }
 const { build } = await import(pathToFileURL(path.join(source, 'node_modules/esbuild/lib/main.js')));

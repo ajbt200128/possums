@@ -1960,16 +1960,27 @@ await check('background refresh cannot renew; authorized manual and threshold co
   assert.deepEqual(f.trace.verified,['A','B']);assert(f.s.sends()>=4);
  } finally {f.session.dispose();}
 });
-await check('trusted nested extension run may renew known expiry without borrowing native-only permission',async()=>{
- let f,injected=false;
- f=await renewalFixture('nested-custom',['stop'],[pi=>pi.on('before_agent_start',async()=>{
+await check('startup custom messages share one renewed invocation; idle custom work starts one new run',async()=>{
+ let f,injected=false;const starts=[];
+ f=await renewalFixture('nested-custom',['stop','stop'],[pi=>pi.on('before_agent_start',async event=>{
+  starts.push(event.messageType);
   if(!f||injected)return;injected=true;
   await f.session.sendCustomMessage({customType:'synthetic',content:'Synthetic extension work',display:false},{triggerTurn:true});
  })]);
  f.expire();
  try {
   await f.session.prompt('Synthetic explicit pending input');
-  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),2);
+  // Pi 1.3.0 queues startup messages into the starting run, not a nested run.
+  assert.deepEqual(starts,['user']);
+  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.s.sends(),1);
+  assert.equal(f.trace.credentials.length,2);
+  for(const text of ['Synthetic explicit pending input','Synthetic extension work']) {
+   assert(f.s.requests[0].messages.some(message=>message.content===text));
+  }
+  await f.session.sendCustomMessage({customType:'synthetic',content:'Synthetic idle extension work',display:false},{triggerTurn:true});
+  assert.deepEqual(starts,['user','custom']);assert.equal(f.s.sends(),2);
+  assert.deepEqual(f.trace.verified,['A','B']);assert.equal(f.trace.credentials.length,2);
+  assert.equal(f.session.messages.at(-1).stopReason,'stop');
  } finally {f.session.dispose();}
 });
 await check('overlapping authorized origins may renew known expiry without minting extra scope',async()=>{
@@ -2133,7 +2144,7 @@ await check('auth resolution retains its renewal epoch across the completion han
   assert.equal(f.provider.getModels().length,1);
  } finally {release.resolve();f.session.dispose();}
 });
-await check('renewal blocker: Pi 1.0.4 Stop does not cancel an awaited before_agent_start hook',async()=>{
+await check('Pi 1.3.0 Stop during before_agent_start prevents dispatch until a deliberate new prompt',async()=>{
  const entered=deferred(),release=deferred();let signal,idle;
  const f=await sdkSetup('sdk-renewal-boundary-probe',['stop'],false,false,true,false,
   {enabled:false},[pi=>pi.on('before_agent_start',async(_event,ctx)=>{
@@ -2141,10 +2152,13 @@ await check('renewal blocker: Pi 1.0.4 Stop does not cancel an awaited before_ag
   })]);
  try {
   const pending=f.session.prompt('Synthetic boundary probe');await entered.promise;
-  assert.equal(signal,undefined);assert.equal(idle,true);assert.equal(f.s.sends(),0);
-  await f.session.abort();assert.equal(f.s.sends(),0);
-  release.resolve();await pending;
-  // This is pinned runtime behavior, NOT permission for renewal to revive work.
+  assert.equal(signal,undefined);assert.equal(idle,false);assert.equal(f.s.sends(),0);
+  const stopped=f.session.abort();assert.equal(f.s.sends(),0);
+  // abort() now waits for the starting run; release the held hook before waiting.
+  release.resolve();await stopped;await pending;
+  // Pi 1.3.0 remembers startup cancellation before the active signal exists.
+  assert.equal(f.s.sends(),0);assert.equal(f.session.isIdle,true);
+  await f.session.prompt('Synthetic deliberate new prompt after startup cancellation');
   assert.equal(f.s.sends(),1);
  } finally {release.resolve();f.session.dispose();}
 });

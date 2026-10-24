@@ -11,7 +11,7 @@ import { torDiagnosticChecks } from './tor_diagnostics.mjs';
 const source = process.env.PHASE02_RELEASE_SOURCE;
 assert(source && path.isAbsolute(source), 'select a scratch copy with pinned dependencies');
 assert.equal(process.version, 'v24.13.0');
-for (const [name, version] of [['esbuild', '0.25.10'], ['typescript', '5.9.3'], ['@earendil-works/pi-ai', '1.0.4'], ['@earendil-works/pi-coding-agent', '1.0.4']]) {
+for (const [name, version] of [['esbuild', '0.25.10'], ['typescript', '5.9.3'], ['@earendil-works/pi-ai', '1.3.0'], ['@earendil-works/pi-coding-agent', '1.3.0']]) {
   assert.equal(JSON.parse(await readFile(path.join(source, 'node_modules', name, 'package.json'))).version, version);
 }
 const { build } = await import(pathToFileURL(path.join(source, 'node_modules/esbuild/lib/main.js')));
@@ -84,7 +84,7 @@ try {
     m.extension({ registerFlag(name) { flags.set(name, undefined); }, getFlag: name => flags.get(name),
       registerProvider(value) { provider = value; }, on(name, handler) { handlers.set(name, handler); },
       registerCommand(name, command) { commands.set(name, command); }, setActiveTools() {} });
-    // Pi 1.0.4 assigns CLI flags only AFTER the extension factory returns.
+    // Pi assigns CLI flags only AFTER the extension factory returns.
     for (const [name, value] of Object.entries(initial)) flags.set(name, value);
     const ctx = { hasUI: true, ui: { notify: text => warnings.push(text) }, modelRegistry: { refresh: async () => { refreshes++; } } };
     return { flags, provider, warnings, start: () => handlers.get('session_start')({}, ctx),
