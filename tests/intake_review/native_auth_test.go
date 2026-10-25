@@ -19,14 +19,17 @@ import (
 
 // Exercise the real native router over verified loopback TLS, not a mock auth
 // implementation. All credentials, records and databases are disposable fixtures.
-func TestGatewayReviewNativeAuthorityGap(t *testing.T) {
+func TestGatewayReviewNativeAccountAuthority(t *testing.T) {
 	f := newKeyFixture(t)
 	key := strings.Repeat("A", 43)
-	created := f.request(t, "POST", "/api/collections/customer_keys/records", map[string]any{
-		"password": key, "passwordConfirm": key, "account_id": "synthetic-account-a",
+	created := f.request(t, "POST", "/api/collections/accounts/records", map[string]any{
+		"password": key, "passwordConfirm": key,
 	})
-	if created.Code != 200 {
-		t.Fatal("REVIEW_FIXTURE_PROVISION_UNAVAILABLE")
+	var saved struct {
+		ID string `json:"id"`
+	}
+	if created.Code != 200 || json.Unmarshal(created.Body.Bytes(), &saved) != nil || len(saved.ID) != 15 {
+		t.Fatal("REVIEW_FIXTURE_NATIVE_ACCOUNT_UNAVAILABLE")
 	}
 	adapter, err := siteauth.NewCustomer(f.app)
 	if err != nil {
@@ -67,27 +70,34 @@ func TestGatewayReviewNativeAuthorityGap(t *testing.T) {
 		return response.StatusCode, value
 	}
 	lookup, password := syntheticMaterial(key)
-	status, login := request("/api/collections/customer_keys/auth-with-password", "", map[string]string{"identity": lookup, "password": password})
+	status, login := request("/api/collections/accounts/auth-with-password", "", map[string]string{"identity": lookup, "password": password})
 	token, _ := login["token"].(string)
 	if status != 200 || token == "" {
 		t.Fatal("REVIEW_NATIVE_LOGIN_UNAVAILABLE")
 	}
 	principal, err := adapter.Validate(context.Background(), token)
-	if err != nil || principal.AccountID != "synthetic-account-a" {
+	if err != nil || principal.AccountID != saved.ID || principal.RecordID != saved.ID || principal.CollectionID != "ledgeraccounts2" {
 		t.Fatal("REVIEW_INITIAL_BINDING_UNAVAILABLE")
 	}
 	record, err := f.app.FindRecordById(siteauth.CustomerCollection, principal.RecordID)
 	if err != nil {
 		t.Fatal("REVIEW_FIXTURE_RECORD_UNAVAILABLE")
 	}
-	record.Set("account_id", "synthetic-account-b")
-	if f.app.Save(record) != nil {
-		t.Fatal("REVIEW_FIXTURE_REBIND_UNAVAILABLE")
+	if record.Collection().Fields.GetByName("account_id") != nil || record.GetString("balance") != "0" || !record.GetBool("enabled") {
+		t.Fatal("REVIEW_MERGED_ACCOUNT_SCHEMA_CHANGED")
 	}
-	status, refreshed := request("/api/collections/customer_keys/auth-refresh", token, map[string]string{})
+	// Supported native financial edits keep the sole SDK identity unchanged.
+	record.Set("balance", "17")
+	if f.app.Save(record) != nil {
+		t.Fatal("REVIEW_FIXTURE_BALANCE_UPDATE_UNAVAILABLE")
+	}
+	status, refreshed := request("/api/collections/accounts/auth-refresh", token, map[string]string{})
 	bound, _ := refreshed["record"].(map[string]any)
-	if status != 200 || bound["account_id"] != "synthetic-account-b" {
-		t.Fatal("REVIEW_CURRENT_BINDING_NOT_RETURNED")
+	if status != 200 || bound["id"] != saved.ID || bound["collectionId"] != "ledgeraccounts2" || bound["balance"] != "17" || bound["enabled"] != true {
+		t.Fatal("REVIEW_CURRENT_ACCOUNT_NOT_RETURNED")
+	}
+	if _, exists := bound["account_id"]; exists {
+		t.Fatal("REVIEW_SECOND_ACCOUNT_IDENTITY_RETURNED")
 	}
 	collection, err := f.app.FindCollectionByNameOrId(siteauth.CustomerCollection)
 	if err != nil {
@@ -97,7 +107,7 @@ func TestGatewayReviewNativeAuthorityGap(t *testing.T) {
 	if f.app.Save(collection) != nil {
 		t.Fatal("REVIEW_FIXTURE_RULE_UNAVAILABLE")
 	}
-	status, denied := request("/api/collections/customer_keys/auth-refresh", token, map[string]string{})
+	status, denied := request("/api/collections/accounts/auth-refresh", token, map[string]string{})
 	// The pinned SDK rotates its signing secret on an AuthRule change.
 	if status != 401 {
 		t.Fatal("REVIEW_NATIVE_RULE_STATUS_CHANGED")
@@ -115,7 +125,7 @@ func TestGatewayReviewNativeAuthorityGap(t *testing.T) {
 	if f.app.Save(collection) != nil {
 		t.Fatal("REVIEW_FIXTURE_RULE_RESET_UNAVAILABLE")
 	}
-	status, login = request("/api/collections/customer_keys/auth-with-password", "", map[string]string{"identity": lookup, "password": password})
+	status, login = request("/api/collections/accounts/auth-with-password", "", map[string]string{"identity": lookup, "password": password})
 	token, _ = login["token"].(string)
 	if status != 200 || token == "" {
 		t.Fatal("REVIEW_NATIVE_FRESH_LOGIN_UNAVAILABLE")
@@ -131,7 +141,7 @@ func TestGatewayReviewNativeAuthorityGap(t *testing.T) {
 	if _, err := adapter.Validate(context.Background(), token); err == nil {
 		t.Fatal("REVIEW_PRIVATE_MFA_GUARD_MISSING")
 	}
-	status, refreshed = request("/api/collections/customer_keys/auth-refresh", token, map[string]string{})
+	status, refreshed = request("/api/collections/accounts/auth-refresh", token, map[string]string{})
 	newToken, _ := refreshed["token"].(string)
 	if status != 200 || newToken == "" {
 		t.Fatal("REVIEW_NATIVE_REFRESH_MFA_BEHAVIOR_CHANGED")
@@ -150,7 +160,7 @@ func TestGatewayReviewNativeAuthorityGap(t *testing.T) {
 	if retainedErr != nil || retainedClaims["exp"] != originalExpiry {
 		t.Fatal("REVIEW_CAPTURED_TOKEN_EXPIRY_CHANGED")
 	}
-	status, challenge := request("/api/collections/customer_keys/auth-with-password", "", map[string]string{"identity": lookup, "password": password})
+	status, challenge := request("/api/collections/accounts/auth-with-password", "", map[string]string{"identity": lookup, "password": password})
 	if status != 401 || challenge["mfaId"] == nil {
 		t.Fatal("REVIEW_NATIVE_MFA_CHALLENGE_CHANGED")
 	}
@@ -158,15 +168,19 @@ func TestGatewayReviewNativeAuthorityGap(t *testing.T) {
 	if f.app.DB().NewQuery("SELECT count(*) FROM _mfas").Row(&challenges) != nil || challenges != 1 {
 		t.Fatal("REVIEW_NATIVE_MFA_PERSISTENCE_CHANGED")
 	}
-	// Password change through the existing stock provisioning recipe revokes tokens.
+	// The supported native password update revokes tokens, not the account ID.
 	other := strings.Repeat("B", 42) + "A"
-	changed := f.request(t, "PATCH", "/api/collections/customer_keys/records/"+record.Id, map[string]any{"password": other, "passwordConfirm": other})
+	changed := f.request(t, "PATCH", "/api/collections/accounts/records/"+record.Id, map[string]any{"password": other, "passwordConfirm": other})
 	if changed.Code != 200 {
 		t.Fatal("REVIEW_FIXTURE_PASSWORD_CHANGE_UNAVAILABLE")
 	}
-	status, _ = request("/api/collections/customer_keys/auth-refresh", token, map[string]string{})
+	status, _ = request("/api/collections/accounts/auth-refresh", token, map[string]string{})
 	if status != 401 {
 		t.Fatal("REVIEW_NATIVE_REVOCATION_NOT_ENFORCED")
+	}
+	retained, err := f.app.FindRecordById(siteauth.CustomerCollection, saved.ID)
+	if err != nil || retained.Id != saved.ID || retained.GetString("balance") != "17" || !retained.GetBool("enabled") {
+		t.Fatal("REVIEW_PASSWORD_CHANGE_ALTERED_ACCOUNT")
 	}
 	var logs, origins int
 	if f.app.AuxDB().NewQuery("SELECT count(*) FROM _logs").Row(&logs) != nil || f.app.DB().NewQuery("SELECT count(*) FROM _authOrigins").Row(&origins) != nil || logs != 0 || origins != 0 {

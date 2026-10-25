@@ -40,7 +40,17 @@ use tower::ServiceExt;
 #[path = "renewal_gateway_tests.rs"]
 mod renewal_gateway_tests;
 
-const ACCOUNT: &str = "synthetic-transport";
+// The Go fixture creates actual native records and passes only their synthetic
+// IDs. No production alias mapping or alternate account identity is introduced.
+pub(super) fn fixture_account(name: &str) -> String {
+    let id = std::env::var(format!("GATEWAY_INTAKE_FIXTURE_{name}")).unwrap();
+    assert_eq!(id.len(), 15);
+    assert!(id
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()));
+    id
+}
+
 const BODY_BYTES: usize = 16 * 1024;
 // Reservation covers both operational input and output maxima, not their
 // post-tokenization context allowance (20 + 20 tokens, then 30% markup).
@@ -54,8 +64,8 @@ enum Case {
     BodyDrop,
     Logout,
     Reset,
-    RebindBeforeTokens,
-    RebindAfterTokens,
+    RevokeBeforeTokens,
+    RevokeAfterTokens,
     PreflightLogout,
     PreflightReset,
 }
@@ -273,7 +283,7 @@ async fn duplicate(app: &Router, bearer: &str, submission: &str, outcome: &str) 
 async fn balance(client: &IntakeClient, available: u64, pending: usize) -> Value {
     // Only the TEST's private intake client reads accounting. No gateway balance
     // API is added or used, and native login material/tokens stay internal.
-    account_balance(client, ACCOUNT, available, pending).await
+    account_balance(client, &fixture_account("ACCOUNT"), available, pending).await
 }
 async fn account_balance(
     client: &IntakeClient,
@@ -286,6 +296,7 @@ async fn account_balance(
         .unwrap();
     assert_eq!(response.status.as_u16(), 200);
     let snapshot = response.decode::<Value>().unwrap();
+    assert_eq!(snapshot["account_balance"][0]["account_id"], account);
     assert_eq!(snapshot["available"], available.to_string());
     assert_eq!(
         snapshot["pending_reservations"].as_array().unwrap().len(),
@@ -358,18 +369,19 @@ fn receipt(bytes: &[u8], case: Case) {
 }
 
 async fn preflight_authority_changes(intake: Arc<Intake>, client: &IntakeClient, available: u64) {
+    let primary = fixture_account("ACCOUNT");
     for case in [
-        Case::RebindBeforeTokens,
-        Case::RebindAfterTokens,
+        Case::RevokeBeforeTokens,
+        Case::RevokeAfterTokens,
         Case::PreflightLogout,
         Case::PreflightReset,
     ] {
         let (account, prefix, expected_tokens) = match case {
-            Case::RebindBeforeTokens => ("synthetic-rebind-reserve", "B", 0),
-            Case::RebindAfterTokens => ("synthetic-rebind-tokenizer", "C", 1),
-            _ => (ACCOUNT, "A", 1),
+            Case::RevokeBeforeTokens => (fixture_account("RESERVE_ACCOUNT"), "B", 0),
+            Case::RevokeAfterTokens => (fixture_account("TOKENIZER_ACCOUNT"), "C", 1),
+            _ => (primary.clone(), "A", 1),
         };
-        let account_available = if account == ACCOUNT { available } else { 1000 };
+        let account_available = if account == primary { available } else { 1000 };
         let credential = format!("{}A", prefix.repeat(42));
         let provider = Arc::new(Synthetic {
             case,
@@ -412,7 +424,7 @@ async fn preflight_authority_changes(intake: Arc<Intake>, client: &IntakeClient,
             provider.release.notify_one();
         }
         let response = bounded(pending).await.unwrap();
-        // Native binding failure keeps its 401 projection; local post-await
+        // Native password revocation keeps its 401 projection; local post-await
         // session/submission loss uses the existing admission-invalid 400.
         let (status, code) = if matches!(case, Case::PreflightLogout | Case::PreflightReset) {
             (StatusCode::BAD_REQUEST, "invalid_request")
@@ -427,7 +439,7 @@ async fn preflight_authority_changes(intake: Arc<Intake>, client: &IntakeClient,
         drop(body); // The retained DATA bytes still own their response lease.
         state.lifecycle.quiesce();
         assert_eq!(bounded(state.lifecycle.wait_drained()).await, Ok(()));
-        account_balance(client, account, account_available, 0).await;
+        account_balance(client, &account, account_available, 0).await;
         balance(client, available, 0).await;
         if let Some(held) = held {
             let id = held["pending_reservations"][0]["reservation_id"]

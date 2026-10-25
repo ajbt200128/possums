@@ -12,17 +12,17 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[2]
 ORIGINAL = Path('/Users/mb5/projects/possums-intake')
-CANDIDATE = Path('/Users/mb5/.t3/worktrees/possums-intake/feat-gateway-session-renewal')
-SOURCE_COMMIT = '9a8b6bac3b2407419a8637bb90b0db4f3528b3e2'
+CANDIDATE = Path('/Users/mb5/.t3/worktrees/possums-intake/t3-a8787a0b')
+SOURCE_COMMIT = '1946aa43f21f3ccd6ceaee7819aa53a5f8221f6f'
 WORK = ROOT / 'target/intake-review'
-INTAKE = WORK / 'source'
+INTAKE = WORK / ('source-' + SOURCE_COMMIT[:7])
 GO = ORIGINAL / '.devenv/profile/bin/go'
 MODULE_CACHE = ORIGINAL / '.devenv/state/go/pkg/mod'
 
 
 def materialize_source():
-    # Exact deployed source, never the dirty worktree or later docs HEAD. Capture
-    # git output privately; only the fixed pin is reported to the operator.
+    # Exact reviewed committed source, never worktree files or stale root main.
+    # Capture git output privately; only the fixed pin is reported.
     subprocess.run(readonly_command(['git', 'merge-base', '--is-ancestor', SOURCE_COMMIT, 'HEAD']),
                    cwd=CANDIDATE, check=True, capture_output=True)
     archive = subprocess.run(readonly_command(['git', 'archive', '--format=tar', SOURCE_COMMIT]),
@@ -108,26 +108,69 @@ def readonly_command(command):
     return ['/usr/bin/sandbox-exec', '-p', policy, *command]
 
 
+def passed_tests(output, expected):
+    # go test exits zero even when a regex selects nothing. Require an actual
+    # terminal pass event for every named top-level test, never a skip/no-match.
+    passed = set()
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if event.get('Action') == 'pass' and event.get('Test') in expected:
+            passed.add(event['Test'])
+    return passed == set(expected)
+
+
 def main():
     overlay, env = prepare()
     print('intake_source_pin: ' + SOURCE_COMMIT, flush=True)
     cases = [
-        ('native_auth_gap', './internal/siteauth', '^Test(GatewayReviewNativeAuthorityGap|GatewayReviewRenewalHTTP|CustomerTokenLifetimeNativeUpdate|CustomerInitializerPreservesStoredDuration|CustomerStoredDurationRestart)$'),
-        ('private_auth_authority', './internal/siteauth', '^TestCustomerAdapterCurrentBindingAndSDKAuthority$'),
-        ('ledger_contract', './internal/ledger', '^Test(MoneyAndKeyBoundaries|FullUint64OverflowAndRollback|IdempotencyOriginalResultsAndInputConflict|LastCreditAndDuplicateRaces|TerminalRacesDisabledAndExactExpiry|SnapshotCompleteSortedScopedAndExpiry|KeyPruningRetentionRollbackClockAndRestart|SnapshotRacingSettlementNeverReturnsMixedState|Renewal.*)$'),
-        ('http_contract', './internal/httpapi', '^Test(ProvisionCreditBalanceAndAccountScoping|ExpiredSettlementPreservesAuthoritativeRow|MoneyAndTimeoutWireValidation|DeliveryLossAndUnknownCommitNeverInventReceipt|SingletonHeadersOnActualHTTP|RenewalHTTP.*)$'),
+        ('native_auth_contract', './internal/siteauth', [
+            'GatewayReviewNativeAccountAuthority', 'GatewayReviewRenewalHTTP',
+            'NativeCustomerKeyPreFormQualification', 'NativeCustomerKeyUpdateAndSoleRecordIdentity',
+            'CustomerTokenLifetimeNativeUpdate', 'CustomerInitializerPreservesStoredDuration',
+            'CustomerStoredDurationRestart',
+        ]),
+        ('private_auth_authority', './internal/siteauth', [
+            'CustomerAdapterCurrentBindingAndSDKAuthority',
+        ]),
+        ('ledger_contract', './internal/ledger', [
+            'MoneyAndKeyBoundaries', 'FullUint64OverflowAndRollback',
+            'IdempotencyOriginalResultsAndInputConflict', 'LastCreditAndDuplicateRaces',
+            'TerminalRacesDisabledAndExactExpiry', 'SnapshotCompleteSortedScopedAndExpiry',
+            'KeyPruningRetentionRollbackClockAndRestart', 'SnapshotRacingSettlementNeverReturnsMixedState',
+            'RenewalCompareExtendAndRefusals', 'RenewalDisabledIncludingDuplicateCommitsOtherExpiry',
+            'RenewalConcurrentDuplicateAndTerminalRaces', 'RenewalLostCompletionAndLostResponse',
+            'RenewalSettlementAfterInitialDeadlineAndClassification',
+            'RenewalBeyondKeyWindowRestartExpiryAndPruning',
+        ]),
+        ('http_contract', './internal/httpapi', [
+            'ProvisionCreditBalanceAndAccountScoping', 'ReserveLookupSettleRefundAndPendingRows',
+            'ExpiredSettlementPreservesAuthoritativeRow', 'MoneyAndTimeoutWireValidation',
+            'DeliveryLossAndUnknownCommitNeverInventReceipt', 'SingletonHeadersOnActualHTTP',
+            'RenewalHTTPConditionalCurrentSnapshotAndTerminals',
+            'RenewalHTTPExactExpiryCommitsAndCannotCollectLate', 'RenewalHTTPStrictTimestampAndPrivacy',
+            'RenewalHTTPUnknownDeliveryNeverRetriesOrExports', 'RenewalHTTPNoProgressCarriesCurrentRow',
+            'RenewalHTTPExtraFieldsIgnored',
+        ]),
     ]
     # Never persist or forward arbitrary compiler/SDK/test output. Named cases
     # contain fixed synthetic assertions; this runner reports only stage/result.
-    for label, package, pattern in cases:
+    for label, package, names in cases:
+        expected = ['Test' + name for name in names]
+        pattern = '^(' + '|'.join(expected) + ')$'
         result = subprocess.run(
             readonly_command([str(GO), 'test', '-json', '-race', '-tags', 'elpscheck', '-mod=readonly',
                               '-overlay=' + str(overlay), '-p', '1', package, '-run', pattern,
                               '-count=1', '-timeout=180s']), cwd=INTAKE, env=env,
             capture_output=True, timeout=600,
         )
-        print(label + ': ' + ('pass' if result.returncode == 0 else 'unavailable'), flush=True)
-        if result.returncode:
+        accepted = result.returncode == 0 and passed_tests(result.stdout, expected)
+        print(label + ': ' + ('pass' if accepted else 'unavailable'), flush=True)
+        if not accepted:
+            if result.returncode == 0:
+                print('INTAKE_REVIEW_TEST_SELECTION_INCOMPLETE')
             # Only locally authored test markers may leave this process.
             source = '\n'.join((ROOT / 'tests/intake_review' / name).read_text()
                                for name in ('native_auth_test.go', 'transport_test.go'))

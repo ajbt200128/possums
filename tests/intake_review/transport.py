@@ -6,7 +6,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from run import GO, INTAKE, ROOT, SOURCE_COMMIT, WORK, prepare, readonly_command
+from run import (
+    GO,
+    INTAKE,
+    ROOT,
+    SOURCE_COMMIT,
+    WORK,
+    passed_tests,
+    prepare,
+    readonly_command,
+)
 
 RUST = Path('/Users/mb5/projects/possums/.devenv/profile/bin')
 
@@ -48,8 +57,11 @@ def main():
                           '-run', '^TestGatewayTransport(ExistingHTTP|RenewalHTTP)$', '-count=1', '-timeout=90s']),
         cwd=INTAKE, env=env, capture_output=True, timeout=180,
     )
-    if result.returncode:
+    expected = ['TestGatewayTransportExistingHTTP', 'TestGatewayTransportRenewalHTTP']
+    if result.returncode or not passed_tests(result.stdout, expected):
         print('INTAKE_TRANSPORT_ACCEPTANCE_UNAVAILABLE: disposable HTTP fixture did not pass')
+        if result.returncode == 0:
+            print('INTAKE_TRANSPORT_TEST_SELECTION_INCOMPLETE')
         source = (ROOT / 'tests/intake_review/transport_test.go').read_text()
         markers = {part.split('"', 1)[0] for part in source.split('t.Fatal("')[1:]}
         for line in result.stdout.splitlines():
