@@ -36,6 +36,27 @@ import (
 	"possums-intake/internal/siteauth"
 )
 
+// Use the stock native route and the generated SDK ID, never a ledger alias or
+// the retired provisioning method. Creation, authentication and spending share
+// this exact row; only disposable fixture credentials reach the native form.
+func transportAccount(t *testing.T, f *keyFixture, credential string) string {
+	t.Helper()
+	created := f.request(t, "POST", "/api/collections/accounts/records", map[string]any{
+		"password": credential, "passwordConfirm": credential,
+	})
+	var saved struct {
+		ID string `json:"id"`
+	}
+	if created.Code != 200 || json.Unmarshal(created.Body.Bytes(), &saved) != nil || len(saved.ID) != 15 {
+		t.Fatal("TRANSPORT_FIXTURE_NATIVE_ACCOUNT_UNAVAILABLE")
+	}
+	record, err := f.app.FindRecordById(siteauth.CustomerCollection, saved.ID)
+	if err != nil || record.Collection().Id != "ledgeraccounts2" || record.Collection().Fields.GetByName("account_id") != nil || record.GetString("balance") != "0" || !record.GetBool("enabled") {
+		t.Fatal("TRANSPORT_FIXTURE_MERGED_ACCOUNT_UNAVAILABLE")
+	}
+	return saved.ID
+}
+
 func TestGatewayTransportExistingHTTP(t *testing.T) {
 	binary := os.Getenv("GATEWAY_TRANSPORT_TEST_BINARY")
 	if binary == "" {
@@ -77,27 +98,11 @@ func TestGatewayTransportExistingHTTP(t *testing.T) {
 		t.Fatal("TRANSPORT_FIXTURE_ADMIN_UNAVAILABLE")
 	}
 	f.admin = auth.Token
-	created := f.request(t, "POST", "/api/collections/customer_keys/records", map[string]any{
-		"password": strings.Repeat("A", 43), "passwordConfirm": strings.Repeat("A", 43), "account_id": "synthetic-transport",
-	})
-	if created.Code != 200 {
-		t.Fatal("TRANSPORT_FIXTURE_CUSTOMER_UNAVAILABLE")
-	}
-	for _, customer := range []struct{ account, prefix string }{
-		{"synthetic-rebind-reserve", "B"}, {"synthetic-rebind-tokenizer", "C"},
-	} {
-		credential := strings.Repeat(customer.prefix, 42) + "A"
-		created := f.request(t, "POST", "/api/collections/customer_keys/records", map[string]any{
-			"password": credential, "passwordConfirm": credential, "account_id": customer.account,
-		})
-		if created.Code != 200 {
-			t.Fatal("TRANSPORT_FIXTURE_CUSTOMER_UNAVAILABLE")
-		}
-	}
-	for i, account := range []string{"synthetic-transport", "synthetic-race", "synthetic-rebind-reserve", "synthetic-rebind-tokenizer"} {
-		if _, err := service.Provision(ctx, account); err != nil {
-			t.Fatal("TRANSPORT_FIXTURE_ACCOUNT_UNAVAILABLE")
-		}
+	account := transportAccount(t, f, strings.Repeat("A", 43))
+	raceAccount := transportAccount(t, f, strings.Repeat("D", 42)+"A")
+	reserveAccount := transportAccount(t, f, strings.Repeat("B", 42)+"A")
+	tokenizerAccount := transportAccount(t, f, strings.Repeat("C", 42)+"A")
+	for i, account := range []string{account, raceAccount, reserveAccount, tokenizerAccount} {
 		key := "v1." + strconv.FormatInt(time.Now().UnixMilli(), 10) + "." + strings.Repeat(strconv.FormatInt(int64(i+8), 16), 32)
 		if _, err := service.Credit(ctx, ledger.CreditInput{AccountID: account, Amount: "1000", IdempotencyKey: key}); err != nil {
 			t.Fatal("TRANSPORT_FIXTURE_CREDIT_UNAVAILABLE")
@@ -119,28 +124,50 @@ func TestGatewayTransportExistingHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal("TRANSPORT_FIXTURE_CERTIFICATE_UNAVAILABLE")
 	}
-	// Actual native binding mutation at the next auth-refresh, after the ledger
-	// reserve or tokenizer boundary. Only disposable synthetic customers match;
-	// no extra HTTP control route, credential export or production hook is added.
+	// Revoke through the supported native password route at the next refresh,
+	// after reserve or tokenizer. Merged accounts cannot be rebound via a second
+	// account_id field. Capture the actual hold to prove same-ID refund afterward.
 	var refreshMu sync.Mutex
 	refreshes := map[string]int{}
-	rebindAt := map[string]int{"synthetic-rebind-reserve": 3, "synthetic-rebind-tokenizer": 4}
+	revokeAt := map[string]int{reserveAccount: 3, tokenizerAccount: 4}
+	revokedHolds := map[string]string{}
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/api/collections/customer_keys/auth-refresh" {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/collections/accounts/auth-refresh" {
 			record, err := app.FindAuthRecordByToken(r.Header.Get("Authorization"), core.TokenTypeAuth)
 			if err == nil {
-				account := record.GetString("account_id")
-				if boundary, ok := rebindAt[account]; ok {
+				if boundary, ok := revokeAt[record.Id]; ok {
 					refreshMu.Lock()
-					refreshes[account]++
-					mutate := refreshes[account] == boundary
+					refreshes[record.Id]++
+					mutate := refreshes[record.Id] == boundary
 					refreshMu.Unlock()
 					if mutate {
-						record.Set("account_id", "synthetic-transport")
-						if app.Save(record) != nil {
-							http.Error(w, "SYNTHETIC_BINDING_MUTATION_UNAVAILABLE", http.StatusInternalServerError)
+						var hold string
+						if app.DB().NewQuery("SELECT reservation_id FROM ledger_reservations WHERE account_id={:id} AND state='active'").Bind(dbx.Params{"id": record.Id}).Row(&hold) != nil {
+							http.Error(w, "SYNTHETIC_REVOCATION_HOLD_UNAVAILABLE", http.StatusInternalServerError)
 							return
 						}
+						prefix := "E"
+						if record.Id == tokenizerAccount {
+							prefix = "F"
+						}
+						credential := strings.Repeat(prefix, 42) + "A"
+						body, err := json.Marshal(map[string]string{"password": credential, "passwordConfirm": credential})
+						if err != nil {
+							http.Error(w, "SYNTHETIC_REVOCATION_ENCODING_UNAVAILABLE", http.StatusInternalServerError)
+							return
+						}
+						patch := httptest.NewRequest(http.MethodPatch, "/api/collections/accounts/records/"+record.Id, bytes.NewReader(body))
+						patch.Header.Set("Authorization", f.admin)
+						patch.Header.Set("Content-Type", "application/json")
+						reply := httptest.NewRecorder()
+						handler.ServeHTTP(reply, patch)
+						if reply.Code != http.StatusOK {
+							http.Error(w, "SYNTHETIC_PASSWORD_REVOCATION_UNAVAILABLE", http.StatusInternalServerError)
+							return
+						}
+						refreshMu.Lock()
+						revokedHolds[record.Id] = hold
+						refreshMu.Unlock()
 					}
 				}
 			}
@@ -158,6 +185,10 @@ func TestGatewayTransportExistingHTTP(t *testing.T) {
 		"OTEL_SDK_DISABLED=true",
 		"GATEWAY_INTAKE_FIXTURE_ORIGIN=" + server.URL,
 		"GATEWAY_INTAKE_FIXTURE_CA=" + base64.StdEncoding.EncodeToString(server.Certificate().Raw),
+		"GATEWAY_INTAKE_FIXTURE_ACCOUNT=" + account,
+		"GATEWAY_INTAKE_FIXTURE_RACE_ACCOUNT=" + raceAccount,
+		"GATEWAY_INTAKE_FIXTURE_RESERVE_ACCOUNT=" + reserveAccount,
+		"GATEWAY_INTAKE_FIXTURE_TOKENIZER_ACCOUNT=" + tokenizerAccount,
 	}
 	if output, err := command.CombinedOutput(); err != nil {
 		// Emit only a source location, never assertion values or process output.
@@ -171,11 +202,17 @@ func TestGatewayTransportExistingHTTP(t *testing.T) {
 			}
 		}
 		t.Fatal("TRANSPORT_RUST_HTTP_ACCEPTANCE_UNAVAILABLE")
+	} else if !bytes.Contains(output, []byte("test intake::tests::actual_intake_http ... ok")) {
+		t.Fatal("TRANSPORT_RUST_HTTP_TEST_NOT_EXERCISED")
 	}
 	refreshMu.Lock()
-	for account, count := range rebindAt {
-		if refreshes[account] != count {
-			t.Error("TRANSPORT_BINDING_BOUNDARY_NOT_EXERCISED")
+	for account, count := range revokeAt {
+		if refreshes[account] != count || revokedHolds[account] == "" {
+			t.Error("TRANSPORT_REVOCATION_BOUNDARY_NOT_EXERCISED")
+		}
+		r, err := service.Lookup(ctx, revokedHolds[account])
+		if err != nil || r.AccountID != account || r.State != ledger.Refunded || r.ChargedAmount == nil || *r.ChargedAmount != "0" {
+			t.Error("TRANSPORT_REVOCATION_REFUND_UNCONFIRMED")
 		}
 	}
 	refreshMu.Unlock()
@@ -193,6 +230,7 @@ type renewalReviewLedger struct {
 	app           core.App
 	mu            sync.Mutex
 	calls         map[string]int
+	accounts      map[string]string // Test-only roles select actual native record IDs.
 	lostCommitted bool
 }
 
@@ -209,17 +247,17 @@ func (a *renewalReviewLedger) Renew(ctx context.Context, input ledger.RenewInput
 	n := a.calls[row.AccountID]
 	var high ledger.Millis
 	switch row.AccountID {
-	case "synthetic-renewal-success":
+	case a.accounts["success"]:
 		if n == 1 || n == 3 {
 			high = row.ExpiresAt - 1_200_000
 		}
-	case "synthetic-renewal-disabled":
-		if _, err := a.app.DB().NewQuery("UPDATE ledger_accounts SET enabled=0 WHERE account_id={:account}").Bind(dbx.Params{"account": row.AccountID}).Execute(); err != nil {
+	case a.accounts["disabled"]:
+		if _, err := a.app.DB().NewQuery("UPDATE accounts SET enabled=0 WHERE id={:account}").Bind(dbx.Params{"account": row.AccountID}).Execute(); err != nil {
 			return ledger.Renewal{}, errors.New("SYNTHETIC_RENEWAL_DISABLE_UNAVAILABLE")
 		}
-	case "synthetic-renewal-expired":
+	case a.accounts["expired"]:
 		high = row.ExpiresAt
-	case "synthetic-renewal-lost":
+	case a.accounts["lost"]:
 		high = row.ExpiresAt - 1_200_000
 	}
 	if high != 0 {
@@ -228,7 +266,7 @@ func (a *renewalReviewLedger) Renew(ctx context.Context, input ledger.RenewInput
 		}
 	}
 	reply, err := a.Accounting.Renew(ctx, input)
-	if err == nil && row.AccountID == "synthetic-renewal-lost" {
+	if err == nil && row.AccountID == a.accounts["lost"] {
 		// Real committed extension, then loss before the public handler receives
 		// it. Neither Rust nor the handler may invent confirmation from this.
 		a.lostCommitted = reply.Reservation.ExpiresAt == row.ExpiresAt+600_000
@@ -257,17 +295,30 @@ func renewalReviewFixture(t *testing.T) (*ledger.Service, *renewalReviewLedger, 
 	if err != nil {
 		t.Fatal("TRANSPORT_RENEWAL_APP_UNAVAILABLE")
 	}
+	native, err := operator.NewHandler(http.NotFoundHandler(), app, s)
+	if err != nil {
+		t.Fatal("TRANSPORT_RENEWAL_NATIVE_UNAVAILABLE")
+	}
+	f := &keyFixture{app: app, handler: native, dir: dir}
+	response := f.request(t, "POST", "/api/collections/_superusers/auth-with-password", map[string]any{"identity": "renewal@example.invalid", "password": "synthetic-renewal-password"})
+	var auth struct {
+		Token string `json:"token"`
+	}
+	if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &auth) != nil || auth.Token == "" {
+		t.Fatal("TRANSPORT_RENEWAL_ADMIN_UNAVAILABLE")
+	}
+	f.admin = auth.Token
+	accounts := map[string]string{}
 	for i, suffix := range []string{"success", "disabled", "refund", "lost", "expired"} {
-		account := "synthetic-renewal-" + suffix
-		if _, err := s.Provision(ctx, account); err != nil {
-			t.Fatal("TRANSPORT_RENEWAL_ACCOUNT_UNAVAILABLE")
-		}
+		credential := strings.Repeat(string(rune('F'+i)), 42) + "A"
+		account := transportAccount(t, f, credential)
+		accounts[suffix] = account
 		key := "v1." + strconv.FormatInt(time.Now().UnixMilli(), 10) + "." + strings.Repeat(strconv.Itoa(i+1), 32)
 		if _, err := s.Credit(ctx, ledger.CreditInput{AccountID: account, Amount: "100", IdempotencyKey: key}); err != nil {
 			t.Fatal("TRANSPORT_RENEWAL_CREDIT_UNAVAILABLE")
 		}
 	}
-	a := &renewalReviewLedger{Accounting: s, app: app, calls: map[string]int{}}
+	a := &renewalReviewLedger{Accounting: s, app: app, calls: map[string]int{}, accounts: accounts}
 	h, err := httpapi.NewHandler(a, s.Ready, "synthetic-ledger-key-0000000000000000", nil)
 	if err != nil {
 		t.Fatal("TRANSPORT_RENEWAL_HANDLER_UNAVAILABLE")
@@ -349,7 +400,7 @@ func TestGatewayReviewRenewalHTTP(t *testing.T) {
 	reserve := func(suffix string, n int) ledger.Reservation {
 		t.Helper()
 		key := "v1." + strconv.FormatInt(time.Now().UnixMilli(), 10) + "." + strings.Repeat(strconv.Itoa(n), 32)
-		r, err := s.Reserve(context.Background(), ledger.ReserveInput{AccountID: "synthetic-renewal-" + suffix, Maximum: "40", TimeoutSeconds: 1800, IdempotencyKey: key})
+		r, err := s.Reserve(context.Background(), ledger.ReserveInput{AccountID: a.accounts[suffix], Maximum: "40", TimeoutSeconds: 1800, IdempotencyKey: key})
 		if err != nil {
 			t.Fatal("TRANSPORT_RENEWAL_RESERVE_UNAVAILABLE")
 		}
@@ -468,12 +519,17 @@ func TestGatewayTransportRenewalHTTP(t *testing.T) {
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, "intake::gateway_tests::renewal_gateway_tests::actual_intake_renewal_http", "--exact", "--ignored")
 	command.Env = []string{"OTEL_SDK_DISABLED=true", "GATEWAY_INTAKE_FIXTURE_ORIGIN=" + server.URL, "GATEWAY_INTAKE_FIXTURE_CA=" + base64.StdEncoding.EncodeToString(server.Certificate().Raw)}
+	for _, suffix := range []string{"success", "disabled", "refund", "lost", "expired"} {
+		command.Env = append(command.Env, "GATEWAY_INTAKE_FIXTURE_RENEWAL_"+strings.ToUpper(suffix)+"="+a.accounts[suffix])
+	}
 	if output, err := command.CombinedOutput(); err != nil {
 		location := regexp.MustCompile(`panicked at src/intake/(renewal_gateway_tests)\.rs:([0-9]+):[0-9]+:`).FindSubmatch(output)
 		if len(location) == 3 {
 			t.Log("TRANSPORT_ASSERTION_" + string(location[1]) + "_LINE_" + string(location[2]))
 		}
 		t.Fatal("TRANSPORT_RUST_RENEWAL_ACCEPTANCE_UNAVAILABLE")
+	} else if !bytes.Contains(output, []byte("test intake::gateway_tests::renewal_gateway_tests::actual_intake_renewal_http ... ok")) {
+		t.Fatal("TRANSPORT_RUST_RENEWAL_TEST_NOT_EXERCISED")
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -481,7 +537,7 @@ func TestGatewayTransportRenewalHTTP(t *testing.T) {
 		t.Fatal("TRANSPORT_RENEWAL_LOSS_COMMIT_CHANGED")
 	}
 	for _, suffix := range []string{"success", "disabled", "refund", "lost", "expired"} {
-		account := "synthetic-renewal-" + suffix
+		account := a.accounts[suffix]
 		wantCalls := 1
 		if suffix == "success" {
 			wantCalls = 6

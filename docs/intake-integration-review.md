@@ -1,5 +1,10 @@
 # Astra review: intake authentication and durable accounting
 
+**Merged-account follow-up:** the split `customer_keys` schema and old intake pin
+below are historical. See [the current gateway adaptation and protected rollout
+gates](intake-merged-account-gateway.md) for `accounts` / `ledgeraccounts2` and
+sole SDK record-ID authority.
+
 **Status: serving source has scoped local evidence; release remains gated.** This is the requested Astra
 lead's own source review, not delegated architectural approval. The operator
 subsequently clarified: **defer to intake's existing implementation**. Its current

@@ -1,4 +1,4 @@
-//! Paired public adapter calls against exact deployed Go/PocketBase source.
+//! Paired public adapter calls against exact committed Go/PocketBase source.
 //! Only disposable loopback TLS; PRIVACY.md data boundaries/synthetic exception.
 use crate::intake::{
     protocol::{Constraint, ErrorKind, Intake, Reservation, Stage, TerminalOutcome},
@@ -64,7 +64,12 @@ async fn actual_intake_renewal_http() {
     let key = |n| format!("v1.{issued:013}.{n:032x}");
 
     let original = intake
-        .reserve("synthetic-renewal-success", 40, 1800, &key(1))
+        .reserve(
+            &super::fixture_account("RENEWAL_SUCCESS"),
+            40,
+            1800,
+            &key(1),
+        )
         .await
         .unwrap();
     let original_wire = wire(&client, &original).await;
@@ -147,7 +152,12 @@ async fn actual_intake_renewal_http() {
     immutable(&original_wire, &wire(&client, &closed.reservation).await);
 
     let disabled = intake
-        .reserve("synthetic-renewal-disabled", 40, 1800, &key(2))
+        .reserve(
+            &super::fixture_account("RENEWAL_DISABLED"),
+            40,
+            1800,
+            &key(2),
+        )
         .await
         .unwrap();
     let refused = intake.renew(&disabled).await.unwrap();
@@ -166,7 +176,7 @@ async fn actual_intake_renewal_http() {
     ));
 
     let refund = intake
-        .reserve("synthetic-renewal-refund", 40, 1800, &key(3))
+        .reserve(&super::fixture_account("RENEWAL_REFUND"), 40, 1800, &key(3))
         .await
         .unwrap();
     assert!(
@@ -184,7 +194,7 @@ async fn actual_intake_renewal_http() {
     assert!(closed.terminal_receipt(None).unwrap().matches_requested);
 
     let lost = intake
-        .reserve("synthetic-renewal-lost", 40, 1800, &key(4))
+        .reserve(&super::fixture_account("RENEWAL_LOST"), 40, 1800, &key(4))
         .await
         .unwrap();
     let error = match intake.renew(&lost).await {
@@ -202,7 +212,12 @@ async fn actual_intake_renewal_http() {
 
     // Last: the controlled forward jump expires the current lease exactly.
     let expired = intake
-        .reserve("synthetic-renewal-expired", 40, 1800, &key(5))
+        .reserve(
+            &super::fixture_account("RENEWAL_EXPIRED"),
+            40,
+            1800,
+            &key(5),
+        )
         .await
         .unwrap();
     let closed = intake.renew(&expired).await.unwrap();

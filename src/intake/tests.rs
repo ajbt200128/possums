@@ -144,19 +144,19 @@ async fn request_routes_separate_credentials_and_encode_only_contract_fields() {
     let cases = [
         (
             Request::Login(&login),
-            "/api/collections/customer_keys/auth-with-password",
+            "/api/collections/accounts/auth-with-password",
             serde_json::to_value(&login).unwrap(),
             None,
         ),
         (
             Request::Refresh("synthetic-native-token"),
-            "/api/collections/customer_keys/auth-refresh",
+            "/api/collections/accounts/auth-refresh",
             json!({}),
             Some("synthetic-native-token".to_owned()),
         ),
         (
             Request::AuthMethods,
-            "/api/collections/customer_keys/auth-methods",
+            "/api/collections/accounts/auth-methods",
             Value::Null,
             None,
         ),
@@ -390,6 +390,9 @@ async fn deadline_covers_body_and_retains_observed_status() {
 #[ignore = "requires disposable Go/PocketBase TLS fixture; run tests/intake_review/transport.py"]
 async fn actual_intake_http() {
     use base64::Engine;
+    let account = super::gateway_tests::fixture_account("ACCOUNT");
+    let account = account.as_str();
+    let race_account = super::gateway_tests::fixture_account("RACE_ACCOUNT");
     let origin = std::env::var("GATEWAY_INTAKE_FIXTURE_ORIGIN").unwrap();
     let url = reqwest::Url::parse(&origin).unwrap();
     assert_eq!(url.host_str(), Some("127.0.0.1"));
@@ -408,7 +411,12 @@ async fn actual_intake_http() {
     let login = client.send(Request::Login(&material)).await.unwrap();
     assert_eq!(login.status.as_u16(), 200);
     let login = login.decode::<Value>().unwrap();
-    assert_eq!(login["record"]["account_id"], "synthetic-transport");
+    assert_eq!(login["record"]["id"], account);
+    assert_eq!(login["record"]["collectionName"], "accounts");
+    assert_eq!(login["record"]["collectionId"], "ledgeraccounts2");
+    assert!(login["record"].get("account_id").is_none());
+    assert_eq!(login["record"]["balance"], "1000");
+    assert_eq!(login["record"]["enabled"], true);
     let token = login["token"].as_str().unwrap();
     let refresh = client.send(Request::Refresh(token)).await.unwrap();
     assert_eq!(refresh.status.as_u16(), 200);
@@ -428,7 +436,7 @@ async fn actual_intake_http() {
     let wrong_auth = IntakeClient::fixture(&origin, token, roots.clone(), Duration::from_secs(5));
     assert_eq!(
         wrong_auth
-            .send(Request::Balance("synthetic-transport"))
+            .send(Request::Balance(account))
             .await
             .unwrap()
             .status
@@ -443,7 +451,7 @@ async fn actual_intake_http() {
     let key = |n| format!("v1.{now:013}.{n:032x}");
     let first = key(1);
     let reserve = || Request::Reserve {
-        account: "synthetic-transport",
+        account,
         maximum: 600,
         timeout_seconds: 1800,
         key: &first,
@@ -463,7 +471,7 @@ async fn actual_intake_http() {
     );
     let conflict = client
         .send(Request::Reserve {
-            account: "synthetic-transport",
+            account,
             maximum: 601,
             timeout_seconds: 1800,
             key: &first,
@@ -476,7 +484,7 @@ async fn actual_intake_http() {
         "LEDGER_KEY_CONFLICT"
     );
     let snapshot = client
-        .send(Request::Balance("synthetic-transport"))
+        .send(Request::Balance(account))
         .await
         .unwrap()
         .decode::<Value>()
@@ -519,7 +527,7 @@ async fn actual_intake_http() {
     let second = key(2);
     let refund_hold = client
         .send(Request::Reserve {
-            account: "synthetic-transport",
+            account,
             maximum: 200,
             timeout_seconds: 1800,
             key: &second,
@@ -541,7 +549,7 @@ async fn actual_intake_http() {
         "refunded"
     );
     let final_balance = client
-        .send(Request::Balance("synthetic-transport"))
+        .send(Request::Balance(account))
         .await
         .unwrap()
         .decode::<Value>()
@@ -553,13 +561,13 @@ async fn actual_intake_http() {
     let right = key(4);
     let (a, b) = tokio::join!(
         client.send(Request::Reserve {
-            account: "synthetic-race",
+            account: &race_account,
             maximum: 600,
             timeout_seconds: 1800,
             key: &left
         }),
         client.send(Request::Reserve {
-            account: "synthetic-race",
+            account: &race_account,
             maximum: 600,
             timeout_seconds: 1800,
             key: &right
@@ -579,7 +587,7 @@ async fn actual_intake_http() {
         Duration::from_secs(5),
     )));
     let principal = intake.login(&"A".repeat(43)).await.unwrap();
-    assert_eq!(principal.account_id, "synthetic-transport");
+    assert_eq!(principal.account_id, account);
     let original_expiry = principal.expires_at;
     intake.validate(&principal).await.unwrap();
     assert_eq!(principal.expires_at, original_expiry);
@@ -597,15 +605,12 @@ async fn actual_intake_http() {
         .unwrap();
     assert_eq!(
         auth.current_session(&session_id).await.unwrap().account_id,
-        "synthetic-transport"
+        account
     );
     auth.logout_api(&session_id).unwrap();
     assert!(auth.current_session(&session_id).await.is_err());
 
-    let held = intake
-        .reserve("synthetic-transport", 200, 1800, &key(5))
-        .await
-        .unwrap();
+    let held = intake.reserve(account, 200, 1800, &key(5)).await.unwrap();
     assert!(held.is_active());
     assert!(held.expires_at() > std::time::SystemTime::now());
     let settled = intake.finish(&held, Some(11)).await.unwrap();
@@ -620,26 +625,17 @@ async fn actual_intake_http() {
         conflicting.outcome,
         TerminalOutcome::Settled { charged: 11 }
     ));
-    let replay = intake
-        .reserve("synthetic-transport", 200, 1800, &key(5))
-        .await
-        .unwrap();
+    let replay = intake.reserve(account, 200, 1800, &key(5)).await.unwrap();
     assert!(!replay.is_active());
     assert!(matches!(
         replay.terminal_outcome(),
         Some(TerminalOutcome::Settled { charged: 11 })
     ));
-    let refund = intake
-        .reserve("synthetic-transport", 200, 1800, &key(6))
-        .await
-        .unwrap();
+    let refund = intake.reserve(account, 200, 1800, &key(6)).await.unwrap();
     let refunded = intake.finish(&refund, None).await.unwrap();
     assert!(refunded.matches_requested);
     assert!(matches!(refunded.outcome, TerminalOutcome::Refunded));
-    let credit = match intake
-        .reserve("synthetic-transport", 1000, 1800, &key(7))
-        .await
-    {
+    let credit = match intake.reserve(account, 1000, 1800, &key(7)).await {
         Ok(_) => panic!("typed credit refusal expected"),
         Err(error) => error,
     };

@@ -30,9 +30,9 @@ impl Operation {
     fn path(self) -> &'static str {
         match self {
             Self::Configure => unreachable!("configuration is not an HTTP operation"),
-            Self::Login => "/api/collections/customer_keys/auth-with-password",
-            Self::Refresh => "/api/collections/customer_keys/auth-refresh",
-            Self::AuthMethods => "/api/collections/customer_keys/auth-methods",
+            Self::Login => "/api/collections/accounts/auth-with-password",
+            Self::Refresh => "/api/collections/accounts/auth-refresh",
+            Self::AuthMethods => "/api/collections/accounts/auth-methods",
             Self::Reserve => "/reservations",
             Self::Renew => "/reservations/renew",
             Self::Settle => "/reservations/settle",

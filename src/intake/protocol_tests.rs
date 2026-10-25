@@ -22,7 +22,7 @@ fn token(payload: &Value) -> String {
 }
 fn auth() -> Value {
     json!({"token": token(&claims()), "record": {
-        "id": RECORD, "collectionId": COLLECTION_ID, "collectionName": COLLECTION, "account_id": ACCOUNT
+        "id": RECORD, "collectionId": COLLECTION_ID, "collectionName": COLLECTION
     }})
 }
 fn read_auth(value: Value) -> AuthResponse {
@@ -125,8 +125,7 @@ fn native_methods_are_required_typed_and_fail_closed() {
 #[test]
 fn native_principal_metadata_is_bound_without_local_signature_authority() {
     let captured = principal(read_auth(auth()), Operation::Login, now()).unwrap();
-    assert_eq!(captured.account_id, ACCOUNT);
-    assert_eq!(captured.record_id, RECORD);
+    assert_eq!(captured.account_id, RECORD);
     assert_eq!(captured.expires_at, now() + Duration::from_secs(3600));
     let original_token = captured.token.clone();
     let mut renewed = auth();
@@ -150,19 +149,15 @@ fn native_principal_metadata_is_bound_without_local_signature_authority() {
         value["token"] = json!(token(&payload));
         assert!(principal(read_auth(value), Operation::Login, now()).is_err());
     }
-    for field in ["account_id", "id"] {
-        let mut value = auth();
-        value["record"][field] = json!("other");
-        if field == "id" {
-            let mut payload = claims();
-            payload["id"] = json!("other");
-            value["token"] = json!(token(&payload));
-        }
-        let current = principal(read_auth(value), Operation::Refresh, now()).unwrap();
-        let error = failure(check_binding(&captured, &current, 200));
-        assert_eq!(error.kind, ErrorKind::BindingChanged);
-        assert_eq!(error.status, Some(200));
-    }
+    let mut value = auth();
+    value["record"]["id"] = json!("other");
+    let mut payload = claims();
+    payload["id"] = json!("other");
+    value["token"] = json!(token(&payload));
+    let current = principal(read_auth(value), Operation::Refresh, now()).unwrap();
+    let error = failure(check_binding(&captured, &current, 200));
+    assert_eq!(error.kind, ErrorKind::BindingChanged);
+    assert_eq!(error.status, Some(200));
     for field in ["collectionId", "collectionName"] {
         let mut value = auth();
         value["record"][field] = json!("other");
@@ -174,22 +169,62 @@ fn native_principal_metadata_is_bound_without_local_signature_authority() {
 }
 
 #[test]
-fn account_identity_is_exact_nonempty_and_byte_bounded() {
+fn account_identity_is_the_exact_nonempty_byte_bounded_sdk_record_id() {
     for account in [" \u{0}é ".to_owned(), "é".repeat(64), "e\u{301}".to_owned()] {
         let mut value = auth();
-        value["record"]["account_id"] = json!(account);
+        value["record"]["id"] = json!(account);
+        let mut payload = claims();
+        payload["id"] = json!(account);
+        value["token"] = json!(token(&payload));
         let principal = principal(read_auth(value), Operation::Login, now()).unwrap();
         assert_eq!(principal.account_id, account);
     }
     for account in [String::new(), "é".repeat(65)] {
         let mut value = auth();
-        value["record"]["account_id"] = json!(account);
+        value["record"]["id"] = json!(account);
         assert!(principal(read_auth(value), Operation::Login, now()).is_err());
     }
     let mut value = auth();
     value["record"]["extra"] = json!(HOSTILE);
+    value["record"]["account_id"] = json!(HOSTILE);
     value["extra"] = json!(HOSTILE);
-    assert!(principal(read_auth(value), Operation::Login, now()).is_ok());
+    let captured = principal(read_auth(value), Operation::Login, now()).unwrap();
+    // Unknown native fields cannot select or alias a different ledger account.
+    assert_eq!(captured.account_id, RECORD);
+}
+
+#[test]
+fn retired_split_collection_cannot_supply_account_authority() {
+    for operation in [Operation::Login, Operation::Refresh] {
+        for (name, id) in [
+            ("customer_keys", "customerkeys001"),
+            (COLLECTION, "customerkeys001"),
+            ("customer_keys", COLLECTION_ID),
+        ] {
+            let mut value = auth();
+            value["record"]["collectionName"] = json!(name);
+            value["record"]["collectionId"] = json!(id);
+            value["record"]["account_id"] = json!(ACCOUNT);
+            let mut payload = claims();
+            payload["collectionId"] = json!(id);
+            value["token"] = json!(token(&payload));
+            let error = failure(principal(read_auth(value), operation, now()));
+            assert_eq!(error.constraint, Constraint::PrincipalBinding);
+            assert_eq!(error.stage, Stage::Binding);
+            assert_eq!(
+                error.kind,
+                if operation == Operation::Refresh {
+                    ErrorKind::BindingChanged
+                } else {
+                    ErrorKind::Protocol
+                }
+            );
+        }
+    }
+    let mut value = auth();
+    value["record"].as_object_mut().unwrap().remove("id");
+    value["record"]["account_id"] = json!(RECORD);
+    assert!(serde_json::from_value::<AuthResponse>(value).is_err());
 }
 
 #[test]
@@ -200,7 +235,7 @@ fn auth_required_fields_and_bounded_claims_reject_hostile_or_ambiguous_evidence(
         value.as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<AuthResponse>(value).is_err());
     }
-    for field in ["id", "collectionId", "collectionName", "account_id"] {
+    for field in ["id", "collectionId", "collectionName"] {
         let mut value = auth();
         value["record"].as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<AuthResponse>(value).is_err());
