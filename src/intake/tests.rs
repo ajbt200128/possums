@@ -144,19 +144,19 @@ async fn request_routes_separate_credentials_and_encode_only_contract_fields() {
     let cases = [
         (
             Request::Login(&login),
-            "/api/collections/customer_keys/auth-with-password",
+            "/api/collections/accounts/auth-with-password",
             serde_json::to_value(&login).unwrap(),
             None,
         ),
         (
             Request::Refresh("synthetic-native-token"),
-            "/api/collections/customer_keys/auth-refresh",
+            "/api/collections/accounts/auth-refresh",
             json!({}),
             Some("synthetic-native-token".to_owned()),
         ),
         (
             Request::AuthMethods,
-            "/api/collections/customer_keys/auth-methods",
+            "/api/collections/accounts/auth-methods",
             Value::Null,
             None,
         ),

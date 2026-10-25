@@ -15,8 +15,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const COLLECTION: &str = "customer_keys";
-const COLLECTION_ID: &str = "customerkeys001";
+const COLLECTION: &str = "accounts";
+const COLLECTION_ID: &str = "ledgeraccounts2";
 const TOKEN_LIMIT: usize = 64 * 1024;
 const CLAIMS_LIMIT: usize = 16 * 1024;
 const DAY_MS: i64 = 86_400_000;
@@ -269,7 +269,6 @@ impl std::error::Error for Error {}
 
 pub(crate) struct Principal {
     pub(crate) account_id: String,
-    pub(crate) record_id: String,
     pub(crate) expires_at: SystemTime,
     token: String,
 }
@@ -478,7 +477,6 @@ struct AuthRecord {
     collection_id: String,
     #[serde(rename = "collectionName")]
     collection_name: String,
-    account_id: String,
 }
 #[derive(Deserialize)]
 struct Claims {
@@ -506,7 +504,7 @@ fn principal(
         )
     };
     let record = auth.record;
-    if !valid_account(&record.account_id) || record.id.is_empty() || record.id.len() > 128 {
+    if !valid_account(&record.id) {
         return Err(invalid(Constraint::PrincipalBinding));
     }
     if record.collection_id != COLLECTION_ID || record.collection_name != COLLECTION {
@@ -535,8 +533,8 @@ fn principal(
         .filter(|expiry| *expiry > now)
         .ok_or_else(|| invalid(Constraint::TokenMetadata))?;
     Ok(Principal {
-        account_id: record.account_id,
-        record_id: record.id,
+        // The merged native auth record is the ledger account; no second binding.
+        account_id: record.id,
         token: auth.token,
         expires_at,
     })
@@ -569,7 +567,7 @@ fn token_claims(token: &str) -> Option<Claims> {
 }
 
 fn check_binding(captured: &Principal, current: &Principal, status: u16) -> Result<(), Error> {
-    if current.account_id != captured.account_id || current.record_id != captured.record_id {
+    if current.account_id != captured.account_id {
         return Err(Error::response(
             Operation::Refresh,
             status,
