@@ -87,6 +87,15 @@ async fn fixture(
     hostname: &str,
     timeout: Duration,
 ) -> (TcpListener, tokio_rustls::TlsAcceptor, IntakeClient) {
+    fixture_with_alpn(trusted, hostname, timeout, &[]).await
+}
+
+async fn fixture_with_alpn(
+    trusted: bool,
+    hostname: &str,
+    timeout: Duration,
+    protocols: &[&[u8]],
+) -> (TcpListener, tokio_rustls::TlsAcceptor, IntakeClient) {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
@@ -96,7 +105,7 @@ async fn fixture(
     if trusted {
         roots.add(cert.der().clone()).unwrap();
     }
-    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
@@ -107,6 +116,7 @@ async fn fixture(
         rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into(),
     )
     .unwrap();
+    tls.alpn_protocols = protocols.iter().map(|protocol| protocol.to_vec()).collect();
     let origin = format!("https://{}", listener.local_addr().unwrap());
     (
         listener,
@@ -308,6 +318,101 @@ async fn response_limits_encoding_and_json_keep_observed_status_without_payload(
             assert!(!diagnostic.contains(forbidden));
         }
         task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn complete_json_without_chunk_terminator_is_not_a_response() {
+    let (listener, acceptor, client) = fixture(true, "127.0.0.1", Duration::from_secs(2)).await;
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = acceptor.accept(stream).await.unwrap();
+        capture(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n")
+            .await
+            .unwrap();
+        // Match the live boundary: valid JSON, but no final chunk or TLS close.
+        drop(stream);
+    });
+    let error = failure(client.send(Request::Refresh("synthetic-token")).await);
+    assert_eq!(error.constraint, Constraint::ResponseReadUnknown);
+    assert_eq!(error.status, Some(200));
+    assert!(error.dispatch_attempted);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn http2_negotiates_and_requires_stream_completion() {
+    use futures_util::StreamExt;
+    use hyper::{service::service_fn, Response};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use std::{
+        convert::Infallible,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    for interrupted in [false, true] {
+        let (listener, acceptor, client) = fixture_with_alpn(
+            true,
+            "127.0.0.1",
+            Duration::from_secs(2),
+            &[b"h2", b"http/1.1"],
+        )
+        .await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            assert_eq!(stream.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+            hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                        assert_eq!(request.version(), http::Version::HTTP_2);
+                        assert_eq!(
+                            request.uri().path(),
+                            "/api/collections/accounts/auth-refresh"
+                        );
+                        assert_eq!(request.headers()["authorization"], "synthetic-token");
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        async move {
+                            let body = if interrupted {
+                                let data = futures_util::stream::once(async {
+                                    Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"{}"))
+                                });
+                                let reset = futures_util::stream::once(async {
+                                    tokio::time::sleep(Duration::from_millis(50)).await;
+                                    Err::<axum::body::Bytes, _>(std::io::Error::from(
+                                        std::io::ErrorKind::ConnectionReset,
+                                    ))
+                                });
+                                axum::body::Body::from_stream(data.chain(reset))
+                            } else {
+                                axum::body::Body::from("{}")
+                            };
+                            Ok::<_, Infallible>(Response::new(body))
+                        }
+                    }),
+                )
+                .await
+                .unwrap();
+        });
+        let response = client.send(Request::Refresh("synthetic-token")).await;
+        if interrupted {
+            let error = failure(response);
+            assert_eq!(error.constraint, Constraint::ResponseReadUnknown);
+            assert_eq!(error.status, Some(200));
+        } else {
+            assert_eq!(response.unwrap().decode::<Value>().unwrap(), json!({}));
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
 
