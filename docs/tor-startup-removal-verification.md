@@ -4,10 +4,13 @@
 > The startup-removal trust decision below is retained; historical tests are not
 > new verification or activation permission.
 >
-> Historical evidence only in this inactive HTTPS-only backup. All Tor support,
-> not just startup self-appraisal, is removed. Commands and authorizations below
-> do not apply here; unresolved evidence remains historical. See
-> [backup verification](without-tor-backup-verification.md).
+> Historical evidence for the startup-removal trust decision, which is retained.
+> The removal itself was undone: main restored Tor startup, and a later
+> refinement dropped startup self-appraisal/freshness as a launch gate, so the
+> authority this document defines still holds even though the absence it was
+> measured against does not. Historical tests are not new verification or
+> activation permission. Current scope:
+> [Tor main restoration](tor-main-restoration.md).
 
 ## Explicit operator decision and changed trust boundary
 

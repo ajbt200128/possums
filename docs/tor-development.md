@@ -1,13 +1,16 @@
 # Local Tor developer tooling
 
-> Archived tooling record, not current setup instructions. This inactive
-> HTTPS-only backup removes Tor from Nix/devenv and removes `possums-tor`.
-> Do not run the commands below from this branch. Private configuration and
-> existing runtime state are untouched. See [backup verification](without-tor-backup-verification.md).
+> Partly historical tooling record. This inactive HTTPS-only backup removed Tor
+> from Nix/devenv and removed `possums-tor`; main restored Tor to both
+> environments, but the `possums-tor` convenience helper itself was **not**
+> restored — `devenv shell possums-tor` does not exist in the current
+> `devenv.nix`. Use an existing Tor/Browser SOCKS listener instead, and see
+> [client setup](tor-client-setup.md) for the flags. Current scope:
+> [Tor main restoration](tor-main-restoration.md).
 
 Development convenience only: not installed-client, deployed-backend or transport
-qualification. The pinned Nix/devenv environments include Tor; neither starts it
-automatically. No flake input or lock update is required.
+qualification. The pinned Nix/devenv environments include a Tor package on main,
+but neither starts it automatically. No flake input or lock update is required.
 
 The gateway's separately opted-in Tor startup now checks local A-grant consistency
 and approved B custody without self-appraisal or cached freshness gates. It may
@@ -23,9 +26,14 @@ numeric-loopback endpoint in the client. Port 9150 is common for Tor Browser, bu
 has not been confirmed on this host; do not treat an open browser as proof that
 its proxy is ready. No private browser profiles or browsing history are inspected.
 
-## Optional foreground client
+## Optional foreground client (not available on main)
 
 `devenv shell possums-tor`
+
+**This helper does not exist in the current `devenv.nix`.** The text below is
+kept as the design record for it. To get a SOCKS listener today, run Tor yourself
+or use Tor Browser, then point the client at its numeric loopback port as
+described in [client setup](tor-client-setup.md).
 
 The explicit helper runs the pinned Tor executable in the foreground on
 `127.0.0.1:19050`, with `ClientOnly` and `SafeSocks`. It bypasses system torrc
@@ -66,11 +74,14 @@ Policy: [data boundaries](../PRIVACY.md#data-handling-boundaries),
 [forbidden telemetry](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data),
 [typed failures](../PRIVACY.md#mandatory-typed-interface-failures).
 
-## Scoped checks
+## Scoped checks (historical)
 
 `nix-instantiate --parse devenv.nix`
 
 `devenv eval scripts.possums-tor.exec`
+
+**The `scripts.possums-tor` attribute no longer evaluates**, because the helper
+was removed. The remainder records the original packet.
 
 Parent Nix parsing/evaluation and **seven offline stub tests passed**:
 quoted/space-containing state paths, private directory modes, persistent guard
@@ -81,3 +92,6 @@ the superseded generated-torrc helper remain historical. No helper Tor bootstrap
 real keys, client inference or deployment has been performed.
 
 `python3 -m unittest discover -s tests -p 'test_tor_development.py'`
+
+**That test module was deleted with the helper and was not restored**, so this
+command now selects no tests.

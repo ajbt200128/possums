@@ -1,10 +1,12 @@
 # Tor v0: two stable endpoints, shared source prerequisite
 
-> Historical plan/evidence only in this inactive HTTPS-only backup. All Tor
-> runtime, client and release hooks are removed, not merely disabled. Commands,
-> continuation instructions and authorizations below do not apply here; prior
-> results and unresolved failures remain historical. See
-> [backup verification](without-tor-backup-verification.md).
+> Historical plan/evidence from a pre-restoration checkpoint. The two-endpoint
+> design here was **not** adopted: current source deliberately uses one stable
+> onion address and accepts possible overlap/availability failures during
+> blue/green. Alternating identities and seamless handoff are deferred. Commands,
+> continuation instructions and authorizations below do not apply; prior results
+> and unresolved failures remain historical. Current scope:
+> [Tor main restoration](tor-main-restoration.md).
 
 **Current continuation:** backend source integration and the opaque shim bridge
 below supersede the historical unwired/raw-HTTP plan. The operator now permits

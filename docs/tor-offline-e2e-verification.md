@@ -1,9 +1,11 @@
 # Independent offline Tor preparation and ingress integration
 
-> Historical evidence only in this inactive HTTPS-only backup. Tor code/assets
-> are removed; commands and authorizations below do not apply to this branch.
-> Results and unresolved failures retain their original scope. See
-> [backup verification](without-tor-backup-verification.md).
+> Historical evidence from a pre-restoration checkpoint, before the operator
+> removed Tor from this branch and later restored it on main. Kept because the
+> integration/real-network checks it describes are not superseded by the
+> restoration record. Commands and authorizations below are scoped to their
+> original packet. Current scope:
+> [Tor main restoration](tor-main-restoration.md).
 
 Source-only independent tester, based on `dbc623391940131229b90c32df6cc6eb4e8af679`.
 No rollout, provisioning, approval, inference, public network probe, service

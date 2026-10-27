@@ -1,9 +1,10 @@
 # Bounded client Tor spike
 
-> Historical research only in this inactive HTTPS-only backup. Tor code/spikes
-> are removed; commands and authorizations below do not apply to this branch.
-> Results and limitations remain historical. See
-> [backup verification](without-tor-backup-verification.md).
+> Historical research only. The `spikes/` tree this document describes is
+> absent; the client path that shipped instead is the native SOCKS helper
+> documented in [client setup](tor-client-setup.md). Commands and authorizations
+> below do not apply. Results and limitations remain historical. Current scope:
+> [Tor main restoration](tor-main-restoration.md).
 
 Status: **offline spike only**, updated 2026-10-14. No production client/reference/root dependency/config/privacy changes, v3 changes, Tor installation/start, real control cookies/bridges/user configuration, public connectivity tests, gateway calls, credentials/inference, telemetry, deployment or commits. The parent owns integration on the exact qualified v3 client base. Backend PR76's merge does not qualify this transport. Independent Arti work is untouched.
 
