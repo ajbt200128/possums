@@ -477,6 +477,12 @@ fn sensitive_header(value: &str) -> Result<header::HeaderValue, header::InvalidH
 fn tls_config(roots: rustls::RootCertStore) -> Result<rustls::ClientConfig, Failure> {
     rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
-        .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
+        .map(|builder| {
+            let mut config = builder.with_root_certificates(roots).with_no_client_auth();
+            // Reqwest leaves ALPN to preconfigured TLS. Prefer HTTP/2's framed
+            // completion; the live intake HTTP/1 chunked path can end early.
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            config
+        })
         .map_err(|_| Failure::new(Operation::Configure, Constraint::ClientUnknown))
 }
