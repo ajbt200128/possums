@@ -29,9 +29,11 @@ To try it without installing:
 
 `pi --no-session --no-extensions -e /absolute/path/to/possums-pi-build-XXXXXX/package/extension.mjs`
 
-`build.sh` refuses to run unless `POSSUMS_PI_ROOT` is absolute, Node reports exactly
-`v24.13.0`, and all three `@earendil-works/pi-*` packages are present under that
-root. Those pins are load-bearing; do not relax them to get past an error.
+Set `POSSUMS_PI_ROOT` to an absolute path. `build.sh` requires it to be nonempty,
+checks that Node reports exactly `v24.13.0`, and checks that all three
+`@earendil-works/pi-*` packages are present under that root; it does not explicitly
+check that the path is absolute. The separate `check.mjs` runner does enforce an
+absolute path. Those pins are load-bearing; do not relax them to get past an error.
 
 ## Use
 
