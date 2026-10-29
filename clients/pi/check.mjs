@@ -17,7 +17,7 @@ for (const name of ['verifier.wasm', 'wasm_exec.cjs', 'verifier-worker.mjs'])
   await copyFile(path.join(scratch, 'package', name), path.join(output, name));
 const common = { bundle: true, platform: 'node', format: 'esm', target: 'node24' };
 for (const [name, fixture] of [['channel-node', false], ['fixture-node', true]]) {
-  await build({ ...common, entryPoints: [path.resolve(packageSource, '../../examples/phase01/transport.ts')],
+  await build({ ...common, entryPoints: [path.resolve(packageSource, './transport.ts')],
     outfile: path.join(output, name + '.mjs'), define: { __PHASE01_FIXTURE__: String(fixture) } });
 }
 await build({ ...common, entryPoints: [path.join(packageSource, 'test-entry.ts')], outfile: path.join(output, 'pi-test.mjs'),

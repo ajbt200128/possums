@@ -2,7 +2,7 @@ import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { open, type FileHandle } from 'node:fs/promises';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { LIMITS } from '../../examples/phase01/limits.js';
+import { LIMITS } from './core/limits.js';
 import { connect, connectPublished, recoverCompiled, recoverPublished, connectTorPublished, recoverTorPublished } from './bootstrap.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
 import { prepareTorConnection, type TorConnection } from './tor-connection.js';

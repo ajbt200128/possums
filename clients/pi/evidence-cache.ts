@@ -5,8 +5,8 @@ import { mkdir, open, readdir, rename, rmdir, stat, unlink } from 'node:fs/promi
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { PUBLISHER, requireReleaseTag } from '../../examples/phase01/approval.js';
-import { LIMITS, DiagnosticFailure, Operation, OperationFailure, base64, digest, parseJSON, requireThat } from '../../examples/phase01/limits.js';
+import { PUBLISHER, requireReleaseTag } from './core/approval.js';
+import { LIMITS, DiagnosticFailure, Operation, OperationFailure, base64, digest, parseJSON, requireThat } from './core/limits.js';
 import { VerifierFailure } from './verifier.mjs';
 import { isTorConnectionFailure } from './tor-connection.js';
 import { ConnectionFailure, EvidenceObservation } from './diagnostics.js';

@@ -11,7 +11,7 @@ for PACKAGE in pi-ai pi-coding-agent pi-agent-core; do
 done
 # nix develop removes its own TMPDIR on exit; keep reviewable artifacts.
 S=$(mktemp -d /tmp/possums-pi-build-XXXXXX)
-mkdir -p "$S/source/clients/pi" "$S/source/examples/phase01" "$S/home" "$S/tmp" "$S/cache" "$S/checks/source"
+mkdir -p "$S/source/clients/pi" "$S/source/clients/pi/core" "$S/home" "$S/tmp" "$S/cache" "$S/checks/source"
 cp "$SOURCE"/*.ts "$SOURCE"/*.mts "$SOURCE"/*.mjs "$SOURCE"/*.json "$S/source/clients/pi/"
 # Build the same pinned offline core, unless the parent supplied a scratch build.
 V3=${POSSUMS_VERIFIER_BUILD:-}
@@ -42,11 +42,16 @@ cp "$REPO/clients/pi/tor-native/src/main.rs" "$S/source/clients/pi/tor-native/sr
 cp "$NATIVE/possums-tor-native" "$NATIVE/tor-native-build-report.json" "$S/tor-native/"
 mkdir "$S/verifier"
 cp "$V3/verifier.wasm" "$V3/wasm_exec.cjs" "$V3/GO-LICENSE" "$V3/verifier-build-report.json" "$S/verifier/"
-cp "$REPO/examples/phase01"/*.ts "$S/source/examples/phase01/"
+cp "$REPO/clients/pi/core"/*.ts "$S/source/clients/pi/core/"
+cp "$REPO/clients/pi/core"/*.json "$S/source/clients/pi/core/"
 # Retain the exact pre-migration acquisition fixture for legacy-v2 regression
 # tests only. The authorizing extension never imports this scratch-only file.
 cp "$REPO/tests/fixtures/pi-v2-bootstrap.ts" "$S/source/clients/pi/legacy-bootstrap.ts"
 "$NODE" -e 'const fs=require("node:fs"),crypto=require("node:crypto"); if(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex")!=="74a0d6e01fdbb60b9a4d959889f6a0eae62bdfc8d5cfc28efc1b47144eae9f61") throw new Error("possums_build_legacy_fixture: retained bootstrap bytes changed; restore the pinned fixture before building")' "$S/source/clients/pi/legacy-bootstrap.ts"
+# The pinned fixture's bytes are fixed by the hash above, so its historical
+# `../../examples/phase01/` imports cannot be edited. The client core moved to
+# clients/pi/core; provide only the old directory shape the fixture expects.
+ln -s ../clients/pi/core "$S/source/examples/phase01"
 for TEST in intake_diagnostics phase01_client phase01_transport phase01_stream_limits tinfoil_forwarding_client phase02_client phase02_pi phase02_thinking phase02_diagnostics phase02_release phase02_cache phase02_manifest_cache phase02_discovery phase02_v3 phase02_v3_package phase02_peer_recovery tor_channel tor_selection tor_diagnostics tor_client_failures tor_identity_verifier_wasm tor_setup; do
   cp "$REPO/tests/$TEST.mjs" "$S/checks/source/"
 done
@@ -62,7 +67,7 @@ mkdir -p node_modules/@earendil-works
 for PACKAGE in pi-ai pi-coding-agent pi-agent-core; do
   ln -s "$PI_ROOT/node_modules/@earendil-works/$PACKAGE" "node_modules/@earendil-works/$PACKAGE"
 done
-ln -s ../../clients/pi/node_modules "$S/source/examples/phase01/node_modules"
+ln -s ../node_modules "$S/source/clients/pi/core/node_modules"
 env -i HOME="$S/home" TMPDIR="$S/tmp" PATH="$(dirname "$NODE"):/usr/bin:/bin" PHASE02_OUT="$S/package" POSSUMS_VERIFIER_BUILD="$S/verifier" POSSUMS_TOR_NATIVE_BUILD="$S/tor-native" \
   "$NODE" build.mjs
 # build.mjs already links the runtime peers into the scratch package.

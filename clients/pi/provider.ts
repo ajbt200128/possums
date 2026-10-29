@@ -7,15 +7,15 @@ import {
   type AssistantMessage, type Model, type Provider, type SimpleStreamOptions,
   type TranscriptContext, type ToolCall,
 } from '@earendil-works/pi-ai';
-import { Channel } from '../../examples/phase01/transport.js';
-import { intakeDescription } from '../../examples/phase01/intake-diagnostics.js';
-import { ReferenceClient, PreparedChat, CatalogFailure, GatewayError, CompletionFailure, gatewayDetailLabel, type LiveModel, type CompletionEvent, type Receipt } from '../../examples/phase01/client.js';
-import { ChannelError, DiagnosticFailure, OperationFailure, LIMITS, Operation, parseJSON, serialize, requireThat, type FailureStage } from '../../examples/phase01/limits.js';
+import { Channel } from './core/transport.js';
+import { intakeDescription } from './core/intake-diagnostics.js';
+import { ReferenceClient, PreparedChat, CatalogFailure, GatewayError, CompletionFailure, gatewayDetailLabel, type LiveModel, type CompletionEvent, type Receipt } from './core/client.js';
+import { ChannelError, DiagnosticFailure, OperationFailure, LIMITS, Operation, parseJSON, serialize, requireThat, type FailureStage } from './core/limits.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure, diagnosticDescription, settlementDescription } from './diagnostics.js';
 import { invocation } from './wire.js';
-import { supportsImageInput } from '../../examples/phase01/tools.js';
+import { supportsImageInput } from './core/tools.js';
 import { simpleThinking, thinkingMetadata } from './thinking.js';
-import { reasoningOptions, type ReasoningOptions } from '../../examples/phase01/reasoning.js';
+import { reasoningOptions, type ReasoningOptions } from './core/reasoning.js';
 
 export const PROVIDER_ID = 'possums';
 const API = 'openai-completions';

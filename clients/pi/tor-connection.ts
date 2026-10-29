@@ -4,8 +4,8 @@ import { parseTorOnionAddress, TorOnionFailure } from './tor-onion.mjs';
 import { TorSetupFailure, TorSetupBackendFailure } from './tor-setup.mjs';
 import { TorEndorsementFailure } from './tor-endorsement.mjs';
 import { publicTorRequest } from './v3.js';
-import { PUBLISHER } from '../../examples/phase01/approval.js';
-import { collect, DiagnosticFailure, type Operation } from '../../examples/phase01/limits.js';
+import { PUBLISHER } from './core/approval.js';
+import { collect, DiagnosticFailure, type Operation } from './core/limits.js';
 
 // PRIVACY.md data-handling/typed-interface boundaries: memory-only selection,
 // no identifiers, proxy credentials, raw causes or socket facts in diagnostics.

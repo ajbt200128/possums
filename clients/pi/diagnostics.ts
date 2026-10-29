@@ -1,10 +1,10 @@
-import { CatalogFailure, CompletionFailure, GatewayError, gatewayDetailLabel, safeTorNativeDiagnostic, type Receipt } from '../../examples/phase01/client.js';
-import { IntakeFailure, intakeDescription, type IntakeDiagnostic } from '../../examples/phase01/intake-diagnostics.js';
+import { CatalogFailure, CompletionFailure, GatewayError, gatewayDetailLabel, safeTorNativeDiagnostic, type Receipt } from './core/client.js';
+import { IntakeFailure, intakeDescription, type IntakeDiagnostic } from './core/intake-diagnostics.js';
 
 export function settlementDescription(receipt: Readonly<Receipt>): string {
   return `Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits.${receipt.deliveryComplete === false ? ' Delivery incomplete; this does not establish successful completion.' : ''} Settlement is not tool-execution authorization; a new submission may incur another charge.`;
 }
-import { DiagnosticFailure } from '../../examples/phase01/limits.js';
+import { DiagnosticFailure } from './core/limits.js';
 import { VerifierFailure } from './verifier.mjs';
 import { TorNativeTransportFailure, TorOnionFailure,
   TorSetupFailure, TorSetupBackendFailure, TorEndorsementFailure, isTorConnectionFailure } from './tor-connection.js';

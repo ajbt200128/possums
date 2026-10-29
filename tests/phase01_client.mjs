@@ -118,7 +118,7 @@ console.log(JSON.stringify({ runtime: 'node', checks: await clientCases(moduleUR
 if (process.env.PHASE01_BROWSER) {
   const { createServer } = await import('node:http');
   const { readFile } = await import('node:fs/promises');
-  const { chromium } = await import('../examples/phase01/node_modules/playwright/index.mjs');
+  const { chromium } = await import('../clients/pi/core/node_modules/playwright/index.mjs');
   const source = await readFile(path.join(build, 'channel-browser.mjs'));
   const server = createServer((req, res) => { res.setHeader('Cache-Control', 'no-store'); res.setHeader('Content-Type', req.url === '/bundle.mjs' ? 'text/javascript' : 'text/html'); res.end(req.url === '/bundle.mjs' ? source : '<!doctype html><title>Transport spike</title>'); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

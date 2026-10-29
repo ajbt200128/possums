@@ -21,8 +21,8 @@ const entry = `
 // Exact retained pre-v3 bootstrap fixture, copied only into build scratch.
 export { connect, connectPublished, recoverPublished, recoverCompiled } from './legacy-bootstrap.ts';
 export { evidenceDirectory } from './evidence-cache.ts';
-export { Channel, ReferenceClient, API_APPROVALS } from '../../examples/phase01/transport.ts';
-export { PUBLISHER, qualifyPublished, requireReleaseTag } from '../../examples/phase01/approval.ts';
+export { Channel, ReferenceClient, API_APPROVALS } from '../../clients/pi/core/transport.ts';
+export { PUBLISHER, qualifyPublished, requireReleaseTag } from '../../clients/pi/core/approval.ts';
 export { X509Certificate, SigstoreVerifier } from '@freedomofpress/sigstore-browser';
 export { CertificateChain } from './node_modules/@tinfoilsh/verifier/dist/sev/cert-chain.js';
 export { ReportSigner } from './node_modules/@tinfoilsh/verifier/dist/sev/constants.js';

@@ -1,6 +1,6 @@
 import { Identity, type RequestContext } from 'ehbp';
-import { qualifyV3, qualifyTorV3, V3_EVIDENCE_LIMIT, type V3Input, type TorV3Input, type V3Identity } from '../../clients/pi/v3.js';
-import { TorConnection, TorNativeTransportFailure, isTorConnectionFailure, collectTorBody } from '../../clients/pi/tor-connection.js';
+import { qualifyV3, qualifyTorV3, V3_EVIDENCE_LIMIT, type V3Input, type TorV3Input, type V3Identity } from '../v3.js';
+import { TorConnection, TorNativeTransportFailure, isTorConnectionFailure, collectTorBody } from '../tor-connection.js';
 import { CatalogFailure, GatewayError, gatewayError } from './client.js';
 import { IntakeFailure } from './intake-diagnostics.js';
 import { PUBLISHER, qualifyApi, qualifyPublished, requireApiApproval, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';

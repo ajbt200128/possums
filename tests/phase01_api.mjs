@@ -57,7 +57,7 @@ assert.equal(observed.completed, 1);
 assert.equal(observed.balance, '4999989'); // First completion 7 + last cumulative snapshot 4.
 if (process.env.PHASE01_BROWSER) {
   const { createHash, X509Certificate } = await import('node:crypto');
-  const { chromium } = await import('../examples/phase01/node_modules/playwright/index.mjs');
+  const { chromium } = await import('../clients/pi/core/node_modules/playwright/index.mjs');
   const certificate = new X509Certificate(await readFile(path.join(dir, 'ca.pem')));
   const pin = createHash('sha256').update(certificate.publicKey.export({ type: 'spki', format: 'der' })).digest('base64');
   const browser = await chromium.launch({ executablePath: process.env.PHASE01_BROWSER, headless: true, args: ['--ignore-certificate-errors-spki-list=' + pin] });

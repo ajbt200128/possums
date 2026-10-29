@@ -1,13 +1,13 @@
-import { API_APPROVALS, PUBLISHER, requireApiApproval, provenanceForTag } from '../../examples/phase01/approval.js';
+import { API_APPROVALS, PUBLISHER, requireApiApproval, provenanceForTag } from './core/approval.js';
 import { ConnectionFailure, EvidenceObservation, connectionFailure, type EvidenceConstraint, type EvidenceStage } from './diagnostics.js';
-import { ReferenceClient } from '../../examples/phase01/client.js';
+import { ReferenceClient } from './core/client.js';
 import { randomBytes } from 'node:crypto';
 import { V3_EVIDENCE_LIMIT, sameV3Endpoint } from './v3.js';
 import { verifyV3 } from './verifier.mjs';
 import { publicManifest } from './evidence-cache.js';
 import { TorConnection, isTorConnectionFailure, collectTorBody } from './tor-connection.js';
 import { decodeTorSetupResponse, TorSetupBackendFailure } from './tor-setup.mjs';
-import { LIMITS, DiagnosticFailure, OperationFailure, Operation, base64, boundedReport, cleanup, collect, digest, hex, parseJSON, requireThat } from '../../examples/phase01/limits.js';
+import { LIMITS, DiagnosticFailure, OperationFailure, Operation, base64, boundedReport, cleanup, collect, digest, hex, parseJSON, requireThat } from './core/limits.js';
 
 // Public acquisition only: callers below construct every destination locally.
 // No SDK acquisition retries, credentials, HTTP cache or metadata URLs. Only the

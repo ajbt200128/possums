@@ -37,8 +37,8 @@ const fixtures = new Map();
 let nextPort = 18443;
 try {
   await symlink(path.join(source, 'node_modules'), path.join(out, 'node_modules'));
-  await build({ stdin: { contents: `export { Channel } from '../../examples/phase01/transport.ts';
-    export * from '../../examples/phase01/client.ts'; export { DiagnosticFailure } from '../../examples/phase01/limits.ts';
+  await build({ stdin: { contents: `export { Channel } from '../../clients/pi/core/transport.ts';
+    export * from '../../clients/pi/core/client.ts'; export { DiagnosticFailure } from '../../clients/pi/core/limits.ts';
     export { PossumsProvider } from './provider.ts'; export * from './diagnostics.ts';
     export { TorNativeTransportFailure } from './tor-native-transport.mjs';`, resolveDir: source, loader: 'ts' },
     outfile: path.join(out, 'check.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node24',

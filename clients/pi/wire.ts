@@ -1,8 +1,8 @@
 import { getCurrentTools, type Model, type TranscriptContext, type Tool } from '@earendil-works/pi-ai';
 import { convertMessages } from '@earendil-works/pi-ai/api/openai-completions';
-import type { Chat } from '../../examples/phase01/transport.js';
-import { DiagnosticFailure, requireThat } from '../../examples/phase01/limits.js';
-import { supportsImageInput } from '../../examples/phase01/tools.js';
+import type { Chat } from './core/transport.js';
+import { DiagnosticFailure, requireThat } from './core/limits.js';
+import { supportsImageInput } from './core/tools.js';
 
 // Reuse Pi's supported conversion, but not its weaker completion/usage parser.
 // No inferred finish, cache markers, reasoning replay or synthetic image fallback.

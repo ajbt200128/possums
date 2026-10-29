@@ -33,7 +33,7 @@ try {
   await mkdir(home);
 
   stage = 'source_typecheck';
-  for (const project of ['clients/pi', 'examples/phase01']) {
+  for (const project of ['clients/pi', 'clients/pi/core']) {
     const config = ts.readConfigFile(join(root, project, 'tsconfig.json'), ts.sys.readFile);
     if (config.error) throw new Error('configuration unavailable');
     const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, join(root, project));
@@ -58,7 +58,7 @@ try {
   });
   for (const [name, fixture] of [['channel-node', false], ['fixture-node', true]]) {
     await esbuild.build({
-      entryPoints: [join(root, 'examples/phase01/transport.ts')], outfile: join(output, name + '.mjs'),
+      entryPoints: [join(root, 'clients/pi/core/transport.ts')], outfile: join(output, name + '.mjs'),
       bundle: true, platform: 'node', format: 'esm', target: 'node24', nodePaths: [deps],
       define: { __PHASE01_FIXTURE__: String(fixture) }, logLevel: 'silent',
     });

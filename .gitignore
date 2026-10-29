@@ -9,6 +9,6 @@
 .direnv/
 __pycache__/
 devenv.local.nix
-/examples/phase01/node_modules/
+/clients/pi/core/node_modules/
 /node_modules/
 /vendor/tinfoil/target/

@@ -8,8 +8,8 @@ import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 import { verifyV3, verifyTorV3, VerifierFailure } from './verifier.mjs';
 import { TorConnection, isTorConnectionFailure, TorNativeTransportFailure } from './tor-connection.js';
 import { checkTorEndorsementSignature } from './tor-endorsement.mjs';
-import { PUBLISHER, checkApproval, validateKeyConfig, requireReleaseTag, requirePublishedKeys, requireSupportedCvmVersion } from '../../examples/phase01/approval.js';
-import { LIMITS, DiagnosticFailure, Operation, OperationFailure, base64, digest, parseJSON, requireThat } from '../../examples/phase01/limits.js';
+import { PUBLISHER, checkApproval, validateKeyConfig, requireReleaseTag, requirePublishedKeys, requireSupportedCvmVersion } from './core/approval.js';
+import { LIMITS, DiagnosticFailure, Operation, OperationFailure, base64, digest, parseJSON, requireThat } from './core/limits.js';
 
 export const V3_EVIDENCE_LIMIT = 16 * 1024 * 1024;
 export type V3Input = { evidence: Uint8Array; nonce: Uint8Array; manifest: Uint8Array<ArrayBuffer>;

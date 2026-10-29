@@ -56,8 +56,8 @@ try {
     export * from './tor-connection.ts'; export { VerifierFailure } from './verifier.mjs';
     export { checkTorEndorsementSignature } from './tor-endorsement.mjs';
     export { PossumsProvider } from './provider.ts';
-    export { Channel, ReferenceClient } from '../../examples/phase01/transport.ts';
-    export { DiagnosticFailure } from '../../examples/phase01/limits.ts';`, resolveDir: source, loader: 'ts' },
+    export { Channel, ReferenceClient } from '../../clients/pi/core/transport.ts';
+    export { DiagnosticFailure } from '../../clients/pi/core/limits.ts';`, resolveDir: source, loader: 'ts' },
     outfile: path.join(out, 'check.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node24',
     external: ['@earendil-works/*'], define: { __PHASE01_FIXTURE__: 'true' }, plugins: [{ name: 'offline-selection-only', setup(b) {
       b.onResolve({ filter: /^\.\/bootstrap\.js$/ }, args => args.importer.endsWith('/index.ts') ? { path: 'bootstrap', namespace: 'synthetic' } : undefined);

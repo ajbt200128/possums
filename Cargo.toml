@@ -82,3 +82,18 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "crypt
 [patch.crates-io]
 tor-dirclient = { path = "vendor/tor-dirclient-0.47.0" }
 tor-hsservice = { path = "vendor/tor-hsservice-0.47.0" }
+
+# Runnable fixtures live with the other test support so they are not mistaken for
+# examples of library use. Cargo only auto-discovers `examples/`, hence the
+# explicit paths.
+[[example]]
+name = "api_smoke_fixture"
+path = "tests/support/api_smoke_fixture.rs"
+
+[[example]]
+name = "phase01_fixture"
+path = "tests/support/phase01_fixture.rs"
+
+[[example]]
+name = "tor_address_fixture"
+path = "tests/support/tor_address_fixture.rs"
