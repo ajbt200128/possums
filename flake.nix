@@ -239,7 +239,7 @@
           packages = [ pkgs.tor ];
         };
         # Compiler/inspection tools are opt-in. Select exact Node/npm separately
-        # (CI uses pinned setup-node); the producer checks both before building.
+        # (CI uses pinned setup-node); source CI checks both before acquisition.
         devShells.pi-client = pkgs.mkShellNoCC {
           packages = [ piNativeToolchain attestationGo
             pkgs.python312 (pkgs.lib.getBin pkgs.git)
