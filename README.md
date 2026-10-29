@@ -1,98 +1,67 @@
 # Possums
 
-> **Draft skeleton.** Section structure and factual anchors only; the prose is
-> yours to write. See [`docs/readme-rewrite-notes.md`](docs/readme-rewrite-notes.md)
-> for what each section must contain, plus the setup commands.
+[Possums.dev](https://possums.dev) is a cryptographically verifiable no log inference provider. Currently we proxy requests to [Tinfoil](https://tinfoil.sh). We also host our payment processing and inference gateway there.
 
-A gateway that proxies inference requests to attested [Tinfoil](https://tinfoil.sh)
-enclaves and bills them per request, plus a Pi client that verifies the gateway
-before it sends anything.
+The gateway and payment processing do not keep any per user data and logs, beyond an account number and balance. This means no prompts, nor metadata are recorded. We record aggregate metrics at a 5 minute cadence. We use Tinfoil's Trusted Execution Environment (TEE) so folks can cryptographically verify that the code built in this repo is what's running on the gateway, and that this gateway does not log. We will open source the payments gateway soon so folks can also verify that.
 
-**Status:** source, not audited, no public signup or payment path. Scope authority
-is [`SPEC.md`](SPEC.md); long-term plans are historical
-([`OVERALL_PLAN.md`](OVERALL_PLAN.md)). Release status is genuinely tangled —
-several dated records report different outcomes — so state it carefully rather
-than picking one version: see [`docs/verification.md`](docs/verification.md),
-[`docs/tor-main-restoration.md`](docs/tor-main-restoration.md) and
-[`docs/readme-rewrite-notes.md`](docs/readme-rewrite-notes.md).
-
-## What this is
-
-<!-- Two or three sentences. API-only: JSON /attestation and the authenticated /v1
-API. No gateway Web UI, no /app, no browser cookies. Pi is the supported client;
-an Obsidian plugin is an independent proposed client, not a gateway route. -->
-
-## Security guarantees
-
-<!-- One guarantee per bullet, each with the mechanism named in the same sentence.
-Anchor statements:
-  - measured backend identity: signed release manifest + enclave measurement
-  - endpoint-key binding: peer must prove the endorsed SPKI before headers/body
-  - EHBP-encrypted request bodies over that bound channel
-  - nonce-bound freshness on /attestation/tor
-  - max-cost reservation before prompt bytes leave the gateway
-  - prompts are never persisted or exported; aggregate metrics only -->
-
-## Trust boundaries
-
-<!-- This list is a feature. Do not soften it. Anchor statements:
-  - attestation proves measured identity, not impossibility of retention
-  - the intake/ledger store is outside the attested boundary
-  - gateway and Tinfoil see plaintext in memory
-  - Pi, its extensions and the host OS are outside the measurement
-  - Honeycomb is a third party outside the attested boundary
-  - residual: open egress, payment metadata, timing correlation, backups/WAL,
-    upstream caches, dependency compromise -->
+Currently Possums provides an API, along with a [Pi](https://pi.dev/) client that checks attestation of the gateway before sending any prompts.
 
 ## Quickstart: the verified Pi client
 
-<!-- Link clients/pi/README.md once it is rewritten. Anchor commands:
+You need Pi 1.3.0, Node 24.13.0, and Go 1.27.2 for the verifier. The pinned devenv shell has Node and Go:
 
-     POSSUMS_PI_ROOT="$HOME/.pi/agent/install/releases/1.3.0" sh clients/pi/build.sh
-     pi install /absolute/path/to/<scratch>/package
+`devenv shell`
 
-   Then /login, choose Possums, paste the recovery credential. Note that the
-   credential is requested only after public evidence and key binding verify. -->
+Build and install the extension:
+
+`POSSUMS_PI_ROOT="$HOME/.pi/agent/install/releases/1.3.0" sh clients/pi/build.sh`
+`pi install /absolute/path/to/possums-pi-build-XXXXXX/package`
+
+`build.sh` prints the scratch directory it used. Restart Pi fully; `/reload` is not enough. Then `/login`, choose Possums, and paste your recovery credential. The gateway is verified before the credential prompt appears.
+
+See [`clients/pi/README.md`](clients/pi/README.md) for the failure codes, tool and compaction behaviour, and the full list of verification steps.
 
 ## Using the API directly (degraded)
 
-<!-- Give this its own heading so it is never mistaken for the recommended path. -->
+You get catalog discovery, reservations, receipts, streaming and billing. You do not get enclave measurement, release provenance, endpoint-key binding or EHBP body encryption. Use this only if you accept trusting the operator's TLS alone.
 
-You get catalog discovery, reservations, receipts, streaming and billing. You do
-**not** get enclave measurement, release provenance, endpoint-key binding or EHBP
-body encryption. Use this only if you accept trusting the operator's TLS alone.
+The flow is six calls: `GET /v1/auth/challenge`, `POST /v1/sessions` with the challenge and your credential, `GET /v1/models`, `POST /v1/submissions` for a model-bound submission token, then `POST /v1/chat/completions` with that token. `DELETE /v1/sessions/current` logs out. All authenticated calls use `Authorization: Bearer`.
 
-<!-- Six calls: /v1/auth/challenge, /v1/sessions, /v1/models, /v1/submissions,
-   /v1/chat/completions, plus DELETE /v1/sessions/current. The request schema is
-   deny_unknown_fields and `submission` is required, so generic OpenAI SDKs will
-   not work unmodified. Billing is unknown without an authenticated receipt. -->
+Two things catch out OpenAI SDK users: the request schema rejects unknown fields, and `submission` is required with no OpenAI equivalent. Generic SDKs will not work unmodified.
+
+Billing comes from an authenticated receipt at the end of the stream. Without one, the charge is unknown — not zero, and not refunded.
 
 ## Tor mode
 
-<!-- User guide: provide an existing SOCKS listener (the client never starts Tor),
-   then --possums-tor-onion and --possums-tor-proxy (default 127.0.0.1:19050).
-   Proxy auth via POSSUMS_TOR_PROXY_USERNAME/PASSWORD, both or neither. Not
-   combinable with --possums-manifest. Detail: docs/tor-client-setup.md. -->
+You need a running SOCKS listener; the client never starts Tor. Then:
+
+`pi --possums-tor-onion <v3-onion> --possums-tor-proxy 127.0.0.1:19050`
+
+Everything still verifies: the onion identity is bound into a nonce-signed endorsement, and TLS peer keys are checked before headers or body. There is no clearnet fallback. Full guide: [`docs/tor-guide.md`](docs/tor-guide.md).
 
 ## Development
 
-<!-- Link docs/development.md. Anchor commands:
+The gateway and payment processing are not expected to run standalone yet — the gateway authenticates and bills through the paired intake service.
 
-     devenv shell
-     devenv shell possums-check
-     devenv shell possums-test
-     nix flake check --print-build-logs
+`devenv shell`
+`possums-check`
+`possums-test`
 
-   Note: the gateway needs a paired intake service for authentication and
-   billing, so it does not run standalone from a clean clone. -->
+Run reproducible checks and images at checkpoints rather than after every edit:
+
+`nix flake check --print-build-logs`
+`nix build .#gateway-image --print-build-logs`
+
+See [`docs/development.md`](docs/development.md) for incremental builds, the shared Cargo cache, and the client build scripts.
 
 ## Privacy
 
-<!-- Link PRIVACY.md. Aggregate-only observability: no prompts, responses,
-   history, credentials, account identifiers, IPs, user agents or request-level
-   events. Do not claim "no telemetry" or "no logs whatsoever". -->
+No prompts, responses, conversation history, request bodies, URLs, headers, IPs, user agents, credentials or account identifiers leave the gateway as telemetry. What we do export is aggregate only: request counts, status classes, latency buckets, typed failure counts and token sums, at a five minute cadence.
 
-## License
+The intake store is outside the attested boundary and sees payment-to-account association and reservation/settlement events. It is not anonymous and not hardware-verifiable.
 
-<!-- Not established in the repository yet. Add only if a licence decision is
-   made; several vendored trees carry their own licences (see vendor/). -->
+Full policy, including exactly which fields are forbidden and how the policy is tested: [`PRIVACY.md`](PRIVACY.md).
+
+## Licence
+
+The repository is not yet licensed. Vendored trees under `vendor/` carry their own licences; `clients/pi/GO-LICENSE` covers the Go runtime.
