@@ -149,17 +149,17 @@ class NativeCITests(unittest.TestCase):
               self.assertRaisesRegex(ci.native.BuildFailure, "ci_prefetch.*possums_build_tor_tool_exit")):
             ci.stage_run("prefetch", ["synthetic"])
 
-    def test_workflow_is_manual_read_only_closed_four_runner_matrix_without_distribution(self):
+    def test_workflow_is_read_only_closed_four_runner_matrix_without_distribution(self):
         text = (ROOT / ".github/workflows/check-pi-native.yml").read_text()
         self.assertEqual(set(re.findall(r"^\s+- target: (\S+)$", text, re.M)), set(ci.native.TARGETS))
         self.assertEqual(set(re.findall(r"^\s+runner: (\S+)$", text, re.M)),
                          {"macos-14", "macos-15-intel", "ubuntu-24.04-arm", "ubuntu-24.04"})
-        self.assertIn("on:\n  workflow_dispatch:", text)
+        self.assertIn("on:\n  pull_request:\n  workflow_dispatch:", text)
         self.assertIn("permissions:\n  contents: read", text)
         self.assertIn("persist-credentials: false", text)
         self.assertIn("package-manager-cache: false", text)
         self.assertIn('diagnostic-endpoint: ""', text)
-        for forbidden in ["pull_request", "push:", "secrets.", "id-token:", "npm publish", "upload-artifact", "continue-on-error"]:
+        for forbidden in ["push:", "pull_request_target", "secrets.", "id-token:", "npm publish", "upload-artifact", "continue-on-error"]:
             self.assertNotIn(forbidden, text)
         for action in re.findall(r"uses: (\S+)", text):
             self.assertRegex(action, r"^[\w/-]+@[0-9a-f]{40}$")

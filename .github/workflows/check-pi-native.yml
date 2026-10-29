@@ -1,8 +1,9 @@
 name: check-pi-native
 run-name: check-pi-native.yml:${{ github.sha }}
-# Preparation only: no automatic execution, redistribution or publisher.
-# Authorized dispatch tests four targets; it is not release approval.
+# Read-only source qualification; no redistribution or publisher.
+# PR checks and manual native runs are not client release approval.
 on:
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: read

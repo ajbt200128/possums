@@ -95,8 +95,9 @@ was selected explicitly. No dependency pins or lockfiles were relaxed.
 
 ## Prepared native runner matrix — not yet executed
 
-`.github/workflows/check-pi-native.yml` is **manual-only**, with read-only
-repository permission, immutable action references, no persisted checkout
+`.github/workflows/check-pi-native.yml` initially supported manual runs only.
+It now also runs on source pull requests under the operator's instruction to
+continue qualification without per-commit pauses, with read-only repository permission, immutable action references, no persisted checkout
 credential, no npm cache/auth setup, no binary upload and no publisher. It has
 not been dispatched. All four `pi-native` shell definitions evaluated offline
 with the locked Rust **1.92.0**, Python **3.12.12** and Linux binutils **2.44**;
@@ -152,8 +153,9 @@ Node 24.13.0 selected and a new scratch output directory (not executed here):
 
 This can acquire public build dependencies. It does not install/activate a Pi
 client or authorize npm publication, redistribution or any live inference.
-A separate reviewed/authorized native-CI dispatch is still needed; it is not a
-release dispatch. Licensing continues to block public client binary uploads.
+Actual native-CI success is still needed; a source PR run or manual native check
+is not a release dispatch. Licensing continues to block public client binary
+uploads.
 
 ## Remaining gates and privacy scope
 
