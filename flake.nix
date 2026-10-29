@@ -17,6 +17,17 @@
           overlays = [ rust-overlay.overlays.default ];
         };
         unstablePkgs = import nixpkgs-unstable { inherit system; };
+        # Opt-in client builds provision only this runner's distribution target;
+        # do not change the gateway/default development toolchain.
+        piNativeTarget = {
+          aarch64-darwin = "aarch64-apple-darwin";
+          x86_64-darwin = "x86_64-apple-darwin";
+          aarch64-linux = "aarch64-unknown-linux-musl";
+          x86_64-linux = "x86_64-unknown-linux-musl";
+        }.${system};
+        piNativeToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
+          targets = [ piNativeTarget ];
+        };
         # The pinned attestation SDK requires 1.27.2; retain the locked package sets.
         attestationGo = unstablePkgs.go_1_27.overrideAttrs (finalAttrs: _: {
           version = "1.27.2";
@@ -226,6 +237,12 @@
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};
           packages = [ pkgs.tor ];
+        };
+        devShells.pi-native = pkgs.mkShellNoCC {
+          packages = [ piNativeToolchain pkgs.python312 pkgs.cacert ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.binutils ];
+          POSSUMS_PI_NATIVE_TARGET = piNativeTarget;
+          SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         };
       });
 }
