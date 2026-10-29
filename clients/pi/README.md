@@ -9,10 +9,20 @@ It verifies the backend. It does not protect your machine — see [Limits](#limi
 
 ## Install
 
-You need a Pi **1.3.0** installation, Node **24.13.0**, and Go **1.27.2** for the
-verifier. Everything runs inside the pinned devenv shell:
+This is the maintainer source procedure, not npm onboarding. The authored
+`@possums/pi@0.3.0-rc.1` candidate is still private and not approved for
+redistribution; see [private assembly and packing](../../docs/pi-private-distribution.md).
 
-`devenv shell`
+You need Pi **1.3.0**, exact Node **24.13.0 / npm 11.6.2**, and the pinned
+compiler tools. The opt-in shell supplies Go **1.27.2**, Rust **1.92.0** and
+inspection tools; select Node/npm separately rather than assuming the shell's
+ambient runtime matches:
+
+`nix develop --no-write-lock-file .#pi-client`
+
+`node --version`
+
+`npm --version`
 
 `POSSUMS_PI_ROOT="$HOME/.pi/agent/install/releases/1.3.0" sh clients/pi/build.sh`
 

@@ -208,9 +208,24 @@ Scoped local evidence on macOS arm64, Node **24.13.0**, Pi **1.3.0**:
   Independent read-only review found no actionable defect in this scoped packet,
   while explicitly retaining the separate full-linkage/public-assembly gate.
 
-## Remaining gates and privacy scope
+## Current-source refresh and remaining gates
 
-All three absent target libraries require separately provisioned build runners.
+The separate [private distribution gates](pi-private-distribution.md) now implement
+all-four-source/report/byte correspondence, independent original/copied inspection
+and strict tarball validation; synthetic assembly is not real universal acceptance.
+The inspector's typed JSON CLI supports expected public artifact SHA-256 binding,
+nonblocking owned descriptors, inherited-FD SDK tool paths and bounded timeouts.
+A refreshed actual Darwin arm64 build and static Node-to-Python inspection passed;
+**67** pinned Python native tests and **35** resolver tests passed. These do not
+establish current Linux inherited-FD/tool behavior or older-OS execution.
+
+Read-only native workflow run **40925858145** succeeded for all four jobs at
+`9ac39772724b95e741ec53885f0ef4e469f1c9b8`, after the earlier CA preparation
+failure/fix. This is queried older-head CI status, not a current-source artifact
+receipt/handoff or a real universal package. Fresh exact-source CI and matching
+artifacts remain required after inspector changes; do not reuse old source receipts.
+
+All three absent local target libraries require separately provisioned build runners.
 Both Linux architectures still need execution in clean glibc and musl userspaces
 without Nix/build closures. Intel macOS and the proposed minimum macOS systems
 still need real execution; signing/quarantine behavior remains unqualified.

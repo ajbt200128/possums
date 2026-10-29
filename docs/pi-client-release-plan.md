@@ -1,6 +1,6 @@
 # Pi client release plan
 
-**Status: native-build preparation, reviewed lazy resolver/private source layout and scoped macOS arm64 offline checks; no installation, publication, activation or deployment.** Four-platform qualification, universal distribution packaging and publishing remain incomplete. Originally inspected at `f608e8b9a09c66f7f0405443fb5357ff05dde8b2`; factual corrections were checked against post-retirement baseline `0b3551f6` (PR #114). Subsequent native implementation, evidence and unresolved packaging integration are recorded in [native portability](pi-native-portability.md). Commands below remain future procedures except where that record explicitly establishes execution. Paths are repository-relative unless stated otherwise.
+**Status: private candidate metadata, lazy resolver, clean assembly/packing source gates and scoped offline checks; no installation, publication, activation or deployment.** Current-source four-platform handoff, a real universal archive, installed loader qualification and publishing remain incomplete. See the [private distribution implementation/evidence record](pi-private-distribution.md). Originally inspected at `f608e8b9a09c66f7f0405443fb5357ff05dde8b2`; factual corrections were checked against post-retirement baseline `0b3551f6` (PR #114). Subsequent native implementation, evidence and unresolved packaging integration are recorded in [native portability](pi-native-portability.md). Commands below remain future procedures except where that record explicitly establishes execution. Paths are repository-relative unless stated otherwise.
 
 **Reconciled after retirement landed.** While this plan was drafted, the operator separately authorised and landed the retirement of the compiled approval path: `refactor(client): remove the compiled approval and --possums-manifest` (commits `e40382e7`, `04c45517`). That removes `API_APPROVALS`, `requireApiApproval`, `qualifyApi`, `Channel.api`, `ReferenceClient.verified`, `connect`, `recoverCompiled`, the `--possums-manifest` flag, and the frozen `pi-v2-bootstrap` fixture together with `tests/phase02_release.mjs`. The post-retirement baseline still exported `provenanceForTag` with zero callers. It was subsequently deleted independently in `8b7f6f4c`, including only its now-unused candidate limit and comments; all shared verification stayed intact. The fresh pinned scratch build, separate core typecheck and full offline client suites passed. Never reintroduce this retirement residue.
 
@@ -43,7 +43,7 @@ Reference: Pi 1.3.0's installed `docs/packages.md` and `docs/cli.md`, under `/Us
 
 ## 2. Verified baseline and corrections to the brief
 
-The following observations describe `0b3551f6`, not subsequent native preparation. The new builder accepts explicit targets and the private JS packager uses the closed manifest/resolver with one host helper under `native/<key>/`. Target labels and executable headers are checked, but the public four-target/full-linkage acceptance gate remains pending. See [the scoped implementation record](pi-native-portability.md); no four-platform release acceptance is claimed.
+The following observations describe `0b3551f6`, not subsequent native preparation. The new builder accepts explicit targets and the private JS packager uses the closed manifest/resolver with one host helper under `native/<key>/`. The separate assembler now requires all four matching-source targets and independently inspects originals and copies. Its synthetic/offline checks are not a real universal artifact acceptance. See [the scoped implementation record](pi-native-portability.md); no four-platform release acceptance is claimed.
 
 | Observation | Source and implication |
 | --- | --- |
@@ -57,11 +57,11 @@ The following observations describe `0b3551f6`, not subsequent native preparatio
 | No npm publisher or downloadable **Pi client** release exists in the workflows inspected. | All five files in `.github/workflows/` were read. `check.yml` has image/test artifact uploads, `publish-image.yml` uploads gateway image/digest artifacts, and `tinfoil-release-publish.yml` delegates public gateway manifest publication to the pinned measurement action. Thus “nothing uploads build artifacts to GitHub releases” is too broad: gateway release assets exist in the release design (`scripts/release.py`, `verify_public`); the missing channel is client artifacts. |
 | Default npm use is not blocked by any administrative expiry; that mechanism no longer exists. | `index.ts` always chooses `connectPublished` (cleartext) or `connectTorPublished`. `bootstrap.ts` uses fresh v3 evidence and its authenticated serving-release tag/digest against `PUBLISHER`. See §6. |
 
-`.github/workflows/check.yml` plus the default flake checks cover gateway/Rust/Go/image work, not the complete Pi scratch build and `clients/pi/check.mjs`. A green existing check is therefore necessary but insufficient for publishing this client. The subsequently prepared read-only PR/manual `check-pi-native.yml` and opt-in `pi-native` shell cover the native packet only; the first PR run stopped on all targets at certificate-bundle preparation, uploads no client binaries, and does not establish full Pi CI or a releasable package. The setup fix is recorded without claiming native success. See [native runner scope and remaining gates](pi-native-portability.md#native-runner-matrix--source-checks-in-progress).
+`.github/workflows/check.yml` plus the default flake checks cover gateway/Rust/Go/image work, not the complete Pi scratch build and `clients/pi/check.mjs`. A green existing check is therefore necessary but insufficient for publishing this client. The read-only PR/manual `check-pi-native.yml` and opt-in `pi-native` shell cover the native packet only and upload no client binaries. The first PR run stopped on all targets at CA preparation; after the setup fix, all four jobs succeeded at `9ac39772` (run `40925858145`). That older workflow status is not a current-source artifact receipt/handoff, full Pi CI or a releasable universal package. See [native runner scope and remaining gates](pi-native-portability.md#native-runner-matrix--source-checks-in-progress).
 
 ## 3. Published artifact contract
 
-Build a clean distribution directory, then `npm pack` **that directory**, never the repository or whole scratch tree. Keep the source workspace private if useful; generate a public distribution manifest from one reviewed name/version definition, avoiding today's two independently hardcoded metadata copies.
+Build a clean distribution directory, then validate and pack **that directory**, never the repository or whole scratch tree. `release.json` now authors candidate metadata once; `assemble.mjs` and `pack.mjs` implement the private gates. The candidate remains `private:true`, `license:null`, `redistributionApproved:false`; these helpers reject fabricated public/rights approval. The public manifest below remains a future separately reviewed change.
 
 ### Required manifest metadata
 
@@ -73,9 +73,9 @@ Build a clean distribution directory, then `npm pack` **that directory**, never 
 - No `preinstall`, `install`, `postinstall`, or `prepare` downloader/compiler. Packing/publishing must not implicitly rebuild reviewed bytes through lifecycle hooks.
 - Declare a Node runtime target separately from the build pin. Proposed initial `engines.node` is `>=24.13.0 <25`; qualify the minimum and the chosen current Node 24 patch before advertising that supported range. Only Node 24.13.0 is established by the existing client qualification record. If the matrix cannot establish the proposed range, narrow the initial documented support instead of pretending the build pin proves it.
 
-### Proposed exact allowlist to implement
+### Implemented private inventory and future public additions
 
-**The complete universal distribution remains future work.** `build.mjs` now emits a private manifest, one helper/report under `native/<key>/`, a closed `native-manifest.json`, and three Pi peer symlinks under `node_modules`. It does not assemble all four targets or generate approved project license/notices and a strict public-report projection. Assemble a separate clean distribution and inspect its actual tarball; do not publish the scratch package as-is.
+**A real universal candidate remains unestablished.** The one-host scratch builder retains Pi peer links and is not a distribution. The separate assembler implements the exact **21-file** clean private inventory, all-four-target/report/linkage checks and bounded public projections. Its tests use synthetic headers and mocked inspections, not four real accepted inputs. The table's approved project `LICENSE` is a **future addition**, not a current file or grant; notices are explicitly incomplete. Any legally required additions need reviewed allowlist changes. Never publish the scratch package or the current private candidate.
 
 | Ship | Reason |
 | --- | --- |
@@ -261,7 +261,7 @@ For the client, require immutable protected `pi-v*` tags plus **OIDC-signed pack
 
 ## 8. Independent client versioning
 
-Keep client versions independent of gateway `v0.0.*`. Current private `possums-pi@0.2.0` is the source/build label in two files; it does not mean “compatible with gateway 0.2.0,” a published package, or a stable public API promise.
+Keep client versions independent of gateway `v0.0.*`. Private `possums-pi@0.2.0` remains the source workspace label; generated candidate metadata now comes from `release.json` as `@possums/pi@0.3.0-rc.1`. Neither label establishes publication, gateway-version compatibility or a stable public API promise.
 
 Propose first public candidate **`@possums/pi@0.3.0-rc.1`**, tagged `next`, then **`0.3.0`** after acceptance. “Tor in v1” means the first public distribution wave, not a forced SemVer `1.0.0` maturity claim. If the operator wants `1.0.0`, decide its stability/support promise explicitly before tagging.
 
@@ -298,13 +298,13 @@ Use the exact scratch directory printed by that invocation, not a prior convenie
 
 `POSSUMS_PI_ROOT="$HOME/.pi/agent/install/releases/1.3.0" node /absolute/printed/scratch/source/clients/pi/check.mjs`
 
-For the proposed clean assembled distribution, with `DIST` and `ARTIFACTS` set to approved absolute scratch paths:
+For the implemented private gates, provide matching current inputs at absolute `SOURCE_PACKAGE`/`NATIVE_ROOT` paths and fresh absolute `DIST`/`ARTIFACTS` output paths. No complete real all-four-target invocation is claimed. See [inputs and limits](pi-private-distribution.md#build-only-commands):
 
-`npm pack "$DIST" --dry-run --json --ignore-scripts`
+`node clients/pi/assemble.mjs "$SOURCE_PACKAGE" "$NATIVE_ROOT" "$DIST"`
 
-`npm pack "$DIST" --pack-destination "$ARTIFACTS" --ignore-scripts`
+`node clients/pi/pack.mjs "$DIST" "$ARTIFACTS"`
 
-`tar -tzf "$PACKAGE_TARBALL"`
+A raw npm/TAR listing is not a substitute for source/report correspondence, eight linkage inspections, or exact compressed/expanded byte validation. These commands neither install nor publish.
 
 Also run existing repository gates, not only packaging tests:
 
