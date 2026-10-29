@@ -33,7 +33,14 @@ for (const [name, expected] of Object.entries(report.sources)) {
 JS
 NATIVE=${POSSUMS_TOR_NATIVE_BUILD:-}
 if [ -z "$NATIVE" ]; then
-  sh "$REPO/scripts/build-tor-native.sh" > "$S/tor-native-build-output"
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) NATIVE_TARGET=aarch64-apple-darwin ;;
+    Darwin:x86_64) NATIVE_TARGET=x86_64-apple-darwin ;;
+    Linux:aarch64|Linux:arm64) NATIVE_TARGET=aarch64-unknown-linux-musl ;;
+    Linux:x86_64) NATIVE_TARGET=x86_64-unknown-linux-musl ;;
+    *) printf '%s\n' 'possums_build_tor_platform: no approved native helper target exists for this source-build host. Use a supported macOS/Linux arm64/x64 build runner.' >&2; exit 1 ;;
+  esac
+  sh "$REPO/scripts/build-tor-native.sh" --target "$NATIVE_TARGET" > "$S/tor-native-build-output"
   NATIVE=$("$NODE" -e 'const fs=require("node:fs"); const lines=fs.readFileSync(process.argv[1],"utf8").trim().split("\n"); process.stdout.write(JSON.parse(lines.at(-1)).torNativeBuild)' "$S/tor-native-build-output")
 fi
 mkdir -p "$S/source/clients/pi/tor-native/src" "$S/tor-native"
@@ -44,7 +51,7 @@ mkdir "$S/verifier"
 cp "$V3/verifier.wasm" "$V3/wasm_exec.cjs" "$V3/GO-LICENSE" "$V3/verifier-build-report.json" "$S/verifier/"
 cp "$REPO/clients/pi/core"/*.ts "$S/source/clients/pi/core/"
 cp "$REPO/clients/pi/core"/*.json "$S/source/clients/pi/core/"
-for TEST in intake_diagnostics phase01_client phase01_transport phase01_stream_limits tinfoil_forwarding_client phase02_client phase02_pi phase02_thinking phase02_diagnostics phase02_cache phase02_manifest_cache phase02_discovery phase02_v3 phase02_v3_package phase02_peer_recovery tor_channel tor_selection tor_diagnostics tor_client_failures tor_identity_verifier_wasm tor_setup; do
+for TEST in intake_diagnostics phase01_client phase01_transport phase01_stream_limits tinfoil_forwarding_client phase02_client phase02_pi phase02_thinking phase02_diagnostics phase02_cache phase02_manifest_cache phase02_discovery phase02_v3 phase02_v3_package phase02_peer_recovery pi_native_artifacts tor_channel tor_selection tor_diagnostics tor_client_failures tor_identity_verifier_wasm tor_setup; do
   cp "$REPO/tests/$TEST.mjs" "$S/checks/source/"
 done
 mkdir -p "$S/checks/source/fixtures"

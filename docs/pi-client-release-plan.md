@@ -1,6 +1,6 @@
 # Pi client release plan
 
-**Status: native-build source preparation and scoped macOS arm64 offline checks; no installation, publication, activation or deployment.** Four-platform qualification, distribution packaging and publishing remain incomplete. Originally inspected at `f608e8b9a09c66f7f0405443fb5357ff05dde8b2`; factual corrections were checked against post-retirement baseline `0b3551f6` (PR #114). Subsequent native implementation, evidence and unresolved packaging integration are recorded in [native portability](pi-native-portability.md). Commands below remain future procedures except where that record explicitly establishes execution. Paths are repository-relative unless stated otherwise.
+**Status: native-build preparation, reviewed lazy resolver/private source layout and scoped macOS arm64 offline checks; no installation, publication, activation or deployment.** Four-platform qualification, universal distribution packaging and publishing remain incomplete. Originally inspected at `f608e8b9a09c66f7f0405443fb5357ff05dde8b2`; factual corrections were checked against post-retirement baseline `0b3551f6` (PR #114). Subsequent native implementation, evidence and unresolved packaging integration are recorded in [native portability](pi-native-portability.md). Commands below remain future procedures except where that record explicitly establishes execution. Paths are repository-relative unless stated otherwise.
 
 **Reconciled after retirement landed.** While this plan was drafted, the operator separately authorised and landed the retirement of the compiled approval path: `refactor(client): remove the compiled approval and --possums-manifest` (commits `e40382e7`, `04c45517`). That removes `API_APPROVALS`, `requireApiApproval`, `qualifyApi`, `Channel.api`, `ReferenceClient.verified`, `connect`, `recoverCompiled`, the `--possums-manifest` flag, and the frozen `pi-v2-bootstrap` fixture together with `tests/phase02_release.mjs`. The post-retirement baseline still exported `provenanceForTag` with zero callers. It was subsequently deleted independently in `8b7f6f4c`, including only its now-unused candidate limit and comments; all shared verification stayed intact. The fresh pinned scratch build, separate core typecheck and full offline client suites passed. Never reintroduce this retirement residue.
 
@@ -43,7 +43,7 @@ Reference: Pi 1.3.0's installed `docs/packages.md` and `docs/cli.md`, under `/Us
 
 ## 2. Verified baseline and corrections to the brief
 
-The following observations describe `0b3551f6`, not subsequent native preparation. The new builder accepts explicit targets, but the JS packager still assembles one host helper and does not enforce distribution-target/portability evidence. See [the scoped implementation record](pi-native-portability.md); no four-platform release acceptance is claimed.
+The following observations describe `0b3551f6`, not subsequent native preparation. The new builder accepts explicit targets and the private JS packager uses the closed manifest/resolver with one host helper under `native/<key>/`. Target labels and executable headers are checked, but the public four-target/full-linkage acceptance gate remains pending. See [the scoped implementation record](pi-native-portability.md); no four-platform release acceptance is claimed.
 
 | Observation | Source and implication |
 | --- | --- |
@@ -57,7 +57,7 @@ The following observations describe `0b3551f6`, not subsequent native preparatio
 | No npm publisher or downloadable **Pi client** release exists in the workflows inspected. | All five files in `.github/workflows/` were read. `check.yml` has image/test artifact uploads, `publish-image.yml` uploads gateway image/digest artifacts, and `tinfoil-release-publish.yml` delegates public gateway manifest publication to the pinned measurement action. Thus “nothing uploads build artifacts to GitHub releases” is too broad: gateway release assets exist in the release design (`scripts/release.py`, `verify_public`); the missing channel is client artifacts. |
 | Default npm use is not blocked by any administrative expiry; that mechanism no longer exists. | `index.ts` always chooses `connectPublished` (cleartext) or `connectTorPublished`. `bootstrap.ts` uses fresh v3 evidence and its authenticated serving-release tag/digest against `PUBLISHER`. See §6. |
 
-`.github/workflows/check.yml` plus the default flake checks cover gateway/Rust/Go/image work, not the complete Pi scratch build and `clients/pi/check.mjs`. A green existing check is therefore necessary but insufficient for publishing this client. The subsequently prepared read-only PR/manual `check-pi-native.yml` and opt-in `pi-native` shell cover the native packet only; they have not run on all targets, upload no client binaries, and do not establish full Pi CI or a releasable package. See [native runner scope and remaining gates](pi-native-portability.md#prepared-native-runner-matrix--not-yet-executed).
+`.github/workflows/check.yml` plus the default flake checks cover gateway/Rust/Go/image work, not the complete Pi scratch build and `clients/pi/check.mjs`. A green existing check is therefore necessary but insufficient for publishing this client. The subsequently prepared read-only PR/manual `check-pi-native.yml` and opt-in `pi-native` shell cover the native packet only; the first PR run stopped on all targets at certificate-bundle preparation, uploads no client binaries, and does not establish full Pi CI or a releasable package. The setup fix is recorded without claiming native success. See [native runner scope and remaining gates](pi-native-portability.md#native-runner-matrix--source-checks-in-progress).
 
 ## 3. Published artifact contract
 
@@ -75,7 +75,7 @@ Build a clean distribution directory, then `npm pack` **that directory**, never 
 
 ### Proposed exact allowlist to implement
 
-**This is a future distribution contract, not today's build inventory.** `build.mjs` currently emits a private manifest, one top-level host helper and three Pi peer symlinks under `node_modules`. It does not generate the four-target layout, native manifest, project license/notices or strict public-report projection. Assemble a separate clean distribution and inspect its actual tarball; do not publish the scratch package as-is.
+**The complete universal distribution remains future work.** `build.mjs` now emits a private manifest, one helper/report under `native/<key>/`, a closed `native-manifest.json`, and three Pi peer symlinks under `node_modules`. It does not assemble all four targets or generate approved project license/notices and a strict public-report projection. Assemble a separate clean distribution and inspect its actual tarball; do not publish the scratch package as-is.
 
 | Ship | Reason |
 | --- | --- |
@@ -133,7 +133,7 @@ Build the portable JS/WASM payload with exact pinned tools once per candidate (p
 
 ### Selection and validation
 
-Replace the hardcoded `new URL('./possums-tor-native', import.meta.url)` in `clients/pi/index.ts` with a small closed resolver for the above layout, called only after valid explicit Tor selection. It should:
+The source candidate now replaces the hardcoded top-level helper URL with `native-artifacts.mjs`, called only after valid explicit Tor selection. Private source builds use the same subdirectory/manifest/resolver contract. The implemented local-integrity boundary follows these rules (full public linkage/package acceptance remains separate):
 
 1. Map `process.platform` and `process.arch` to one of the four literal keys; never use user strings as a path or executable override.
 2. Resolve only the expected package-relative binary and reviewed manifest entry. Require a regular executable file, matching declared size/hash and target identity. Avoid a PATH search, arbitrary URL, install-time fetch, fallback executable or shell invocation.
@@ -142,14 +142,14 @@ Replace the hardcoded `new URL('./possums-tor-native', import.meta.url)` in `cli
 
 The existing `possums_tor_native_helper`, stage `helper_start`, constraint `artifact_unavailable`, is a useful safe fallback for spawn failures (`clients/pi/tor-native-transport.mjs`), but **not sufficient as the only multi-platform diagnostic**: it tells npm users to build a helper and does not distinguish unsupported platform from a damaged installation.
 
-Add only the needed closed distinctions, preserving the existing fallback:
+The source candidate adds only the needed closed distinctions, preserving the existing spawn fallback:
 
 - Unsupported platform/architecture: proposed `possums_tor_native_platform_unsupported`, `helper_start` / `unsupported_platform`; explain Tor is unavailable on this platform, no direct fallback occurred, and name the supported platform families. Do not suggest a source build on Windows, where the Unix implementation is unsupported.
 - Supported target but missing file: proposed `possums_tor_native_artifact_missing`, `helper_start` / `artifact_missing`; instruct the user to reinstall the matching approved package and fully restart, not compile Rust.
 - Digest/declared-target/executable-format mismatch detected from local evidence: proposed `possums_tor_native_artifact_mismatch`, `helper_start` / `artifact_mismatch`; refuse execution and request an approved replacement.
 - A validated helper still cannot start: retain `possums_tor_native_helper`, `helper_start` / `artifact_unavailable`; cause unknown, inspect local execution permissions/platform requirements. Do not infer an ABI cause from raw exception text.
 
-Codes above are proposed, not existing API claims. Reuse the current transport diagnostic owner and closed message path; do not create a diagnostic framework. Include no local paths, onion, proxy credentials, raw OS errors or process output. Keep known primary failure/cleanup precedence and no-replay semantics intact. Offline tests must cover each category, wrong architecture, missing mode, corrupt bytes, arbitrary manifest paths, and no native access in HTTPS mode.
+The unsupported/missing/mismatch distinctions are implemented in the source candidate, with bounded unreadable-file and unknown-inspection fallbacks; they are not claims about a shipped public package. They reuse the current transport diagnostic owner and closed message path, not a diagnostic framework. Include no local paths, onion, proxy credentials, raw OS errors or process output. Keep known primary failure/cleanup precedence and no-replay semantics intact. Offline tests must cover each category, wrong architecture, missing mode, corrupt bytes, arbitrary manifest paths, and no native access in HTTPS mode.
 
 ## 5. Build pins versus host compatibility
 

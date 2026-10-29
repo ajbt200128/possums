@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { resolveNativeHelper } from './native-artifacts.mjs';
 const packageSource = path.dirname(fileURLToPath(import.meta.url));
 const scratch = path.resolve(packageSource, '../../..');
 const testSource = path.join(scratch, 'checks/source');
@@ -45,8 +46,9 @@ run('tinfoil_forwarding_client.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi
 run('phase02_v3.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
 run('tor_identity_verifier_wasm.mjs', {}, [path.join(scratch, 'package')]);
 run('tor_setup.mjs', { PHASE02_RELEASE_SOURCE: packageSource }, [path.join(scratch, 'package')]);
+run('pi_native_artifacts.mjs', {}, [packageSource]);
 run('tor_channel.mjs', { PHASE02_RELEASE_SOURCE: packageSource,
-  POSSUMS_TOR_NATIVE_HELPER: path.join(scratch, 'package', 'possums-tor-native') });
+  POSSUMS_TOR_NATIVE_HELPER: resolveNativeHelper(pathToFileURL(path.join(scratch, 'package') + '/')) });
 run('tor_selection.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
 run('tor_client_failures.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
 run('phase02_v3_package.mjs', { PHASE02_PACKAGE: path.join(scratch, 'package'), POSSUMS_PI_ROOT: piRoot });

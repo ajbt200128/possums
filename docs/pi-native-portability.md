@@ -50,17 +50,19 @@ inspection evidence always says `execution: not_tested`. Platform-only library
 paths do not prove availability or successful execution on an older OS.
 Native reports contain public source/toolchain/target/artifact facts, not raw
 command output, environment values or absolute builder/home/cache paths. The
-existing JS packager still accepts **one host helper**; four-target assembly,
-report-schema enforcement and the runtime resolver are separate pending work.
+private JS packager still assembles **one host helper**, now under the same
+`native/<platform>-<arch>/` layout and closed manifest/resolver intended for the
+universal package. Four-target assembly and strict public-report/linkage
+acceptance remain separate pending work.
 
-**Known packaging integration gap (independent review, medium):** `build.mjs`
-currently accepts a matching-host GNU helper even when the new report says
-`distributionTarget: false` / `unchecked_local_host`, and supplied helper bytes
-can reach the private scratch package without the new inspector. This is not an
-accepted public distribution path. The packaging phase must require the four
-approved target records and independently inspect their bytes at assembly; a
-self-reported boolean or hash match alone is insufficient. Keep local developer
-builds available, but never publish them as the universal package.
+**Packaging integration gap (independent review, medium):** the earlier private
+`build.mjs` accepted matching-host GNU helpers and trusted supplied helper hashes
+without independent portability inspection. The new private layout rejects a
+GNU target label and checks actual executable headers, but those checks do not
+prove static musl linkage. The public assembly phase must still require all four
+approved target records and independently inspect their bytes/linkage; a
+self-reported boolean, target label or hash match alone is insufficient.
+Standalone GNU host builds remain available, not public client artifacts.
 
 ## Observed local evidence
 
@@ -93,13 +95,20 @@ before client compilation. The pinned `devenv` shell worked; its default Node is
 not the client build pin, so the already-available exact Node 24.13.0 executable
 was selected explicitly. No dependency pins or lockfiles were relaxed.
 
-## Prepared native runner matrix — not yet executed
+## Native runner matrix — source checks in progress
 
 `.github/workflows/check-pi-native.yml` initially supported manual runs only.
 It now also runs on source pull requests under the operator's instruction to
 continue qualification without per-commit pauses, with read-only repository permission, immutable action references, no persisted checkout
-credential, no npm cache/auth setup, no binary upload and no publisher. It has
-not been dispatched. All four `pi-native` shell definitions evaluated offline
+credential, no npm cache/auth setup, no binary upload and no publisher. Draft
+[PR #115](https://github.com/ajbt200128/possums/pull/115) started the first source
+checks. All four jobs in run `40920924978` stopped at preparation with
+`possums_pi_native_ci_unknown`, before native compilation. A local probe of the
+pinned shell confirmed `SSL_CERT_FILE` is absent and `NIX_SSL_CERT_FILE` is
+exported. Commit `ea9d6327` accepts that exported public CA bundle, passes it to
+Cargo, and classifies a missing bundle without disabling TLS; **42** Python
+native tests passed, including both regressions. No successful four-target
+result is established by this setup fix. All four `pi-native` shell definitions evaluated offline
 with the locked Rust **1.92.0**, Python **3.12.12** and Linux binutils **2.44**;
 evaluation does not provision targets or establish successful compilation.
 The existing gateway checks/default shell and lockfiles remain unchanged.
@@ -137,7 +146,7 @@ emulation fallback are excluded. Both authoritative exit status and owned
 cleanup must pass; a cleanup fault cannot erase an earlier primary failure.
 Process/runner loss can still prevent cleanup or reporting.
 
-Additional local evidence for this preparation: **40** Python native policy/
+Earlier local evidence for the initial preparation: **40** Python native policy/
 control-flow tests passed (including **18** new mocked runner/CI tests),
 **101** release tests passed with **3** skips, YAML parsed with the expected
 manual-only four-runner structure, and the new compiler-free smoke fixture
@@ -156,6 +165,48 @@ client or authorize npm publication, redistribution or any live inference.
 Actual native-CI success is still needed; a source PR run or manual native check
 is not a release dispatch. Licensing continues to block public client binary
 uploads.
+
+## Lazy native selection and private source layout
+
+`native-artifacts.mjs` is import-safe and is called only after valid explicit Tor
+selection. It maps only Darwin/Linux arm64/x64 to fixed package-relative paths;
+Linux labels are musl only. It bounds manifest/helper reads, rejects symlinked
+assets, checks executable mode, size, SHA-256 and actual architecture/format,
+and preserves a primary read failure across a later descriptor-close failure.
+These are local integrity checks, not package authentication or linkage proof.
+The existing transport warning owner carries closed `helper_start` diagnostics
+for unsupported platform, missing/unreadable assets, integrity mismatch and an
+unknown inspection cause. No raw OS exception, path or proxy secret is displayed.
+
+The private source builder creates one host entry in `native-manifest.json` and
+puts its helper/report under `native/<key>/`; it remains a private source package,
+not the complete universal distribution. It now requests the explicit approved
+native ABI. Linux source-client builds therefore require the separately
+provisioned musl target (or an existing matching helper); the standalone native
+builder's no-argument GNU host mode remains available for direct development.
+There is no second weaker runtime resolver or automatic target installation.
+
+Scoped local evidence on macOS arm64, Node **24.13.0**, Pi **1.3.0**:
+
+- **33** synthetic resolver checks passed: all four header/path fixtures,
+  corrupt/missing/oversized/redirected/unknown metadata, wrong architecture,
+  symlinks/modes/hashes, content-free typed/unknown filesystem faults, forged
+  diagnostics, no import I/O and primary-failure cleanup precedence.
+- A fresh private scratch build and complete `check.mjs` passed, including **14**
+  selection/diagnostic groups, **84** actual-helper/local-TLS channel checks,
+  **160** pinned Pi host groups and all existing trust/stream/accounting/cache/
+  discovery/recovery suites. A corrupt native manifest did not affect default
+  HTTPS start/status/shutdown; missing selected assets warned without proxy
+  secret reads, helper execution, direct fallback or traffic. Header-only
+  selection fixtures never execute and are not hardware/trust evidence.
+- Reused source/hash-matching Go/WASM and previously built Darwin arm64 helper
+  bytes; this is not fresh native compilation, npm-managed loading, installation,
+  activation, live Tor/inference, or absent-platform qualification.
+- Client `tsc --noEmit`, proactive LSP probes and `git diff --check` reported no
+  errors. Several push-only LSP checks could not affirmatively confirm clean;
+  the exact compiler and complete scratch suites supplied the positive checks.
+  Independent read-only review found no actionable defect in this scoped packet,
+  while explicitly retaining the separate full-linkage/public-assembly gate.
 
 ## Remaining gates and privacy scope
 
