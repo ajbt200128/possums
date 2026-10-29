@@ -1,4 +1,4 @@
-import { constants, lstatSync, realpathSync, existsSync, readdirSync, opendirSync, openSync, closeSync, fstatSync, fchmodSync, readSync, writeSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, createReadStream } from 'node:fs';
+import { constants, lstatSync, realpathSync, existsSync, readdirSync, opendirSync, openSync, closeSync, fstatSync, fchmodSync, read, readSync, writeSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, createReadStream } from 'node:fs';
 import { join, resolve, dirname, basename, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -30,8 +30,9 @@ const MESSAGES = Object.freeze({
   tool: 'Packing-tool validation or execution failed; any underlying execution cause is unknown. Require Node 24.13.0, npm 11.6.2, tar 7.5.22 and a valid offline pack result. Check the pinned tools; no installation or publication was attempted.',
   io: 'Local packing I/O failed; cause unknown. Check local permissions and storage, then remove any incomplete output before rebuilding.',
 });
-class PackError extends Error {
+export class PackError extends Error {
   constructor(stage) {
+    stage = typeof stage === 'string' && Object.hasOwn(MESSAGES, stage) ? stage : 'io';
     const code = `possums_pi_pack_${stage}`;
     super(`${code}: ${MESSAGES[stage]}`);
     delete this.stack;
@@ -161,13 +162,23 @@ function checkedInventory(inventory) {
   return new Map(inventory.map((item) => [`package/${item.path}`, item]));
 }
 
-/** Independently list with pinned tar's supported API; never extract an archive. */
-export async function validateTarball(file, inventory) {
+function sameFile(before, after) {
+  return after.isFile() && ['dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].every((key) => before[key] === after[key]);
+}
+
+// Own one nonblocking descriptor for validation AND the compressed-byte receipt.
+async function readTarball(file, inventory) {
+  let fd;
+  let result;
+  let primary;
   try {
     file = localPath(file);
     const expected = checkedInventory(inventory);
-    const stat = lstatSync(file);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_ARCHIVE) reject('archive');
+    const before = lstatSync(file, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size > MAX_ARCHIVE) reject('archive');
+    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    const stat = fstatSync(fd, { bigint: true });
+    if (!sameFile(before, stat)) reject('archive');
     let tar;
     try {
       const require = createRequire(import.meta.url);
@@ -180,6 +191,15 @@ export async function validateTarball(file, inventory) {
     const canonicalSize = inventory.reduce((size, item) => size + (1 + Math.ceil(item.size / TAR_BLOCK_BYTES)) * TAR_BLOCK_BYTES, 2 * TAR_BLOCK_BYTES);
     let problem = false;
     let expanded = 0;
+    let size = 0;
+    const sha256 = createHash('sha256');
+    const sha512 = createHash('sha512');
+    const compressed = new Transform({ transform(chunk, _encoding, callback) {
+      size += chunk.length;
+      if (size > MAX_ARCHIVE || BigInt(size) > stat.size) { callback(new PackError('archive')); return; }
+      sha256.update(chunk); sha512.update(chunk);
+      callback(null, chunk);
+    } });
     const bounds = new Transform({ transform(chunk, _encoding, callback) {
       expanded += chunk.length;
       callback(expanded > MAX_ARCHIVE ? new PackError('archive') : null, expanded > MAX_ARCHIVE ? undefined : chunk);
@@ -209,11 +229,28 @@ export async function validateTarball(file, inventory) {
     listing.on('ignoredEntry', () => { problem = true; listing.abort(new PackError('archive')); });
     listing.on('meta', () => { problem = true; listing.abort(new PackError('archive')); });
     try {
-      await pipeline(createReadStream(file, { flags: constants.O_RDONLY | constants.O_NOFOLLOW }), createGunzip(), bounds, listing);
+      // pipeline destroys streams on failure even with autoClose:false. Let the
+      // ReadStream drain pending reads, but leave the actual close to finally.
+      const stream = createReadStream(null, { fd, autoClose: false, start: 0,
+        fs: { read, close(_fd, callback) { callback(null); } } });
+      await pipeline(stream, compressed, createGunzip(), bounds, listing);
     } catch { reject('archive'); }
-    if (problem || seen.size !== FILES.size || expanded !== canonicalSize) reject('archive');
-    return inventory.map((item) => ({ ...item }));
-  } catch (error) { fail(error, 'archive'); }
+    if (problem || seen.size !== FILES.size || expanded !== canonicalSize || BigInt(size) !== stat.size) reject('archive');
+    if (!sameFile(stat, fstatSync(fd, { bigint: true })) || !sameFile(stat, lstatSync(file, { bigint: true }))) reject('archive');
+    result = { size, sha256: sha256.digest('hex'), integrity: `sha512-${sha512.digest('base64')}`,
+      files: inventory.map((item) => ({ ...item })) };
+  } catch (error) { primary = error instanceof PackError ? error : new PackError('archive'); }
+  finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { primary ??= new PackError('io'); } }
+  }
+  if (primary) throw primary;
+  return result;
+}
+
+/** Independently list with pinned tar's supported API; never extract an archive. */
+export async function validateTarball(file, inventory) {
+  const { files } = await readTarball(file, inventory);
+  return files;
 }
 
 function runNpm(npm, args, cwd, env) {
@@ -275,17 +312,8 @@ export async function packDistribution(directory, outputDirectory) {
         report[0]?.version !== metadata.version || report[0]?.filename !== filename) reject('tool');
     if (!isDeepStrictEqual(readdirSync(output), [filename])) reject('archive');
     const archive = join(output, filename);
-    await validateTarball(archive, inventory);
-    const sha256 = createHash('sha256');
-    const sha512 = createHash('sha512');
-    let size = 0;
-    for await (const chunk of createReadStream(archive, { flags: constants.O_RDONLY | constants.O_NOFOLLOW })) {
-      size += chunk.length;
-      if (size > MAX_ARCHIVE) reject('archive');
-      sha256.update(chunk); sha512.update(chunk);
-    }
-    result = { filename, size, sha256: sha256.digest('hex'), integrity: `sha512-${sha512.digest('base64')}`,
-      unpackedSize: inventory.reduce((sum, item) => sum + item.size, 0), files: inventory };
+    const validated = await readTarball(archive, inventory);
+    result = { filename, ...validated, unpackedSize: inventory.reduce((sum, item) => sum + item.size, 0) };
   } catch (error) { primary = error instanceof PackError ? error : new PackError('io'); }
   finally {
     if (scratch) { try { rmSync(scratch, { recursive: true, force: true }); } catch { primary ??= new PackError('io'); } }
@@ -293,4 +321,14 @@ export async function packDistribution(directory, outputDirectory) {
   }
   if (primary) throw primary;
   return result;
+}
+
+if (import.meta.main) {
+  try {
+    if (process.argv.length !== 4) reject('input');
+    console.log(JSON.stringify(await packDistribution(process.argv[2], process.argv[3])));
+  } catch (error) {
+    console.error(error instanceof PackError ? error.message : new PackError('io').message);
+    process.exitCode = 1;
+  }
 }

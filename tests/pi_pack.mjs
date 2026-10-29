@@ -11,7 +11,7 @@ import childProcess from 'node:child_process';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
 const source = resolve(process.argv[2] ?? fileURLToPath(new URL('../clients/pi/pack.mjs', import.meta.url)));
-const { inspectDistribution, packDistribution, validateTarball } = await import(pathToFileURL(source));
+const { PackError, inspectDistribution, packDistribution, validateTarball } = await import(pathToFileURL(source));
 const { DISTRIBUTION_FILES, candidateManifest, readReleaseMetadata } = await import(pathToFileURL(join(dirname(source), 'release-metadata.mjs')));
 const require = createRequire(pathToFileURL(source));
 const tar = require('tar');
@@ -107,6 +107,102 @@ try {
   const goodTar = await archive('good');
   assert.deepEqual(await validateTarball(goodTar, inventory), inventory);
   count++;
+  // Substitute a real FIFO immediately before open. A blocking-open regression
+  // must time out in a child rather than hang this test process.
+  for (const kind of ['distribution', 'archive']) {
+    const dir = fixture(`fifo-${kind}`);
+    const target = kind === 'distribution' ? join(dir, 'README.md') : join(root, 'fifo.tgz');
+    if (kind === 'archive') fs.copyFileSync(goodTar, target);
+    childProcess.execFileSync(process.execPath, ['--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import { execFileSync } from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { pathToFileURL } from 'node:url';
+      const [source, kind, target, dir, inventoryText] = process.argv.slice(1);
+      const pack = await import(pathToFileURL(source));
+      const open = fs.openSync, close = fs.closeSync, stat = fs.fstatSync;
+      let swapped = false, descriptor, closed = 0;
+      fs.openSync = (path, flags, ...args) => {
+        if (path !== target) return open(path, flags, ...args);
+        assert.equal(swapped, false);
+        swapped = true;
+        fs.unlinkSync(target);
+        execFileSync('mkfifo', [target], { stdio: 'ignore', timeout: 2000 });
+        descriptor = open(path, flags, ...args);
+        assert(flags & fs.constants.O_NONBLOCK);
+        assert(flags & fs.constants.O_NOFOLLOW);
+        return descriptor;
+      };
+      fs.closeSync = (fd) => { close(fd); if (fd === descriptor) closed++; };
+      syncBuiltinESMExports();
+      const check = (error) => error.code === 'possums_pi_pack_' + (kind === 'distribution' ? 'files' : 'archive');
+      if (kind === 'distribution') assert.throws(() => pack.inspectDistribution(dir), check);
+      else await assert.rejects(pack.validateTarball(target, JSON.parse(inventoryText)), check);
+      assert.equal(swapped, true);
+      assert.equal(closed, 1);
+      assert.throws(() => stat(descriptor), (error) => error.code === 'EBADF');
+    `, source, kind, target, dir, JSON.stringify(inventory)], { timeout: 10_000, stdio: 'pipe' });
+    count++;
+  }
+
+  // Observe the owned FD directly: the stream must not reopen a checked path,
+  // and success, validation failure and close failure must all release it.
+  async function descriptorCase(name, mutate, stage, closeFault = false, valid = true) {
+    const file = join(root, `descriptor-${name}.tgz`);
+    fs.writeFileSync(file, valid ? fs.readFileSync(goodTar) : Buffer.from('PRIVATE_CANARY invalid archive'));
+    const originalOpen = fs.openSync, originalClose = fs.closeSync, originalStream = fs.createReadStream;
+    let descriptor, opens = 0, closes = 0, streams = 0;
+    fs.openSync = (path, flags, ...args) => {
+      const fd = originalOpen(path, flags, ...args);
+      if (path === file && typeof flags === 'number' && !(flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR))) { descriptor = fd; opens++; }
+      return fd;
+    };
+    fs.closeSync = (fd) => {
+      originalClose(fd);
+      if (fd === descriptor) {
+        closes++;
+        if (closeFault) throw new Error('PRIVATE_CANARY close password Bearer');
+      }
+    };
+    fs.createReadStream = (path, options) => {
+      assert.equal(path, null);
+      assert.equal(options.fd, descriptor);
+      assert.equal(options.autoClose, false);
+      streams++;
+      const stream = originalStream(path, options);
+      if (mutate) stream.once('end', () => mutate(file));
+      return stream;
+    };
+    syncBuiltinESMExports();
+    try {
+      if (stage) await assert.rejects(validateTarball(file, inventory), (error) => diagnostic(error, stage));
+      else assert.deepEqual(await validateTarball(file, inventory), inventory);
+      assert.equal(opens, 1);
+      assert.equal(streams, 1);
+      assert.equal(closes, 1);
+      assert.throws(() => fs.fstatSync(descriptor), (error) => error.code === 'EBADF');
+      count++;
+    } finally {
+      fs.openSync = originalOpen; fs.closeSync = originalClose; fs.createReadStream = originalStream;
+      syncBuiltinESMExports();
+    }
+  }
+  await descriptorCase('success');
+  await descriptorCase('replacement', (file) => {
+    const replacement = `${file}.replacement`;
+    fs.copyFileSync(goodTar, replacement);
+    fs.renameSync(replacement, file);
+  }, 'archive');
+  await descriptorCase('in-place', (file) => {
+    // Even identical bytes are not a stable snapshot after an observed write.
+    fs.writeFileSync(file, fs.readFileSync(goodTar));
+    fs.utimesSync(file, 1, 1);
+  }, 'archive');
+  await descriptorCase('invalid', undefined, 'archive', false, false);
+  await descriptorCase('primary-before-close', undefined, 'archive', true, false);
+  await descriptorCase('close-only', undefined, 'io', true);
+
   const cases = [
     ['content', (cwd) => fs.writeFileSync(join(cwd, 'package/extension.mjs'), 'different bytes')],
     ['same-size-content', (cwd) => { const file = join(cwd, 'package/extension.mjs'); const bytes = fs.readFileSync(file); bytes[0] ^= 1; fs.writeFileSync(file, bytes); }],
@@ -148,6 +244,18 @@ try {
   await assert.rejects(validateTarball(goodTar, []), (error) => diagnostic(error, 'schema'));
   count += 2;
 
+  // Real entry-point failures are bounded and print only the authored diagnostic.
+  for (const args of [[], ['PRIVATE_CANARY /private/path password Bearer'], ['PRIVATE_CANARY', 'PRIVATE_CANARY', 'PRIVATE_CANARY']]) {
+    const cli = childProcess.spawnSync(process.execPath, [source, ...args], { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(cli.error, undefined);
+    assert.equal(cli.signal, null);
+    assert.equal(cli.status, 1);
+    assert.equal(cli.stdout, '');
+    assert.equal(cli.stderr, `${new PackError('input').message}\n`);
+    assert.doesNotMatch(cli.stderr, /PRIVATE_CANARY|\/private\/|password|Bearer|\bat file:/);
+    count++;
+  }
+
   // The only tool operation is real offline npm pack of private synthetic files.
   // Hostile inherited configuration must not reach npm, and lifecycle scripts are absent.
   const keys = ['npm_config_registry', 'npm_config_userconfig', 'NODE_OPTIONS', 'HTTPS_PROXY'];
@@ -165,6 +273,30 @@ try {
   assert.equal(packed.integrity, `sha512-${createHash('sha512').update(bytes).digest('base64')}`);
   assert.doesNotMatch(JSON.stringify(packed), /\/private\/|\/tmp\/|PRIVATE_CANARY/);
   count++;
+  // Replace the path after validated bytes have flowed but before acceptance.
+  // Packing must reject, not return a receipt obtained by hashing a reopened path.
+  const originalPackStream = fs.createReadStream;
+  const racedOutput = join(root, 'replaced-output');
+  let archiveStreams = 0;
+  fs.createReadStream = (path, options) => {
+    archiveStreams++;
+    const stream = originalPackStream(path, options);
+    stream.once('end', () => {
+      const archivePath = join(racedOutput, packed.filename);
+      const replacement = `${archivePath}.replacement`;
+      fs.writeFileSync(replacement, 'PRIVATE_CANARY replacement bytes');
+      fs.renameSync(replacement, archivePath);
+    });
+    return stream;
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(packDistribution(clean, racedOutput), (error) => diagnostic(error, 'archive'));
+    assert.equal(archiveStreams, 1);
+    assert.equal(fs.existsSync(racedOutput), false);
+    count++;
+  } finally { fs.createReadStream = originalPackStream; syncBuiltinESMExports(); }
+
   await assert.rejects(packDistribution(clean, join(root, 'output')), (error) => diagnostic(error, 'io'));
   assert.deepEqual(fs.readFileSync(join(root, 'output', packed.filename)), bytes);
   count++;
