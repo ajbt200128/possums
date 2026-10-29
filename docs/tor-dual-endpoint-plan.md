@@ -1,10 +1,12 @@
 # Tor v0: two stable endpoints, shared source prerequisite
 
-> Historical plan/evidence only in this inactive HTTPS-only backup. All Tor
-> runtime, client and release hooks are removed, not merely disabled. Commands,
-> continuation instructions and authorizations below do not apply here; prior
-> results and unresolved failures remain historical. See
-> [backup verification](without-tor-backup-verification.md).
+> Historical plan/evidence from a pre-restoration checkpoint. The two-endpoint
+> design here was **not** adopted: current source deliberately uses one stable
+> onion address and accepts possible overlap/availability failures during
+> blue/green. Alternating identities and seamless handoff are deferred. Commands,
+> continuation instructions and authorizations below do not apply; prior results
+> and unresolved failures remain historical. Current scope:
+> [Tor main restoration](tor-main-restoration.md).
 
 **Current continuation:** backend source integration and the opaque shim bridge
 below supersede the historical unwired/raw-HTTP plan. The operator now permits
@@ -41,8 +43,11 @@ successful early Tor binaries; the separate full rerun passed. Cause remains
 unknown, and no test was changed to hide it. The reviewer also reported its
 broader filtered command timeout; its eleven focused tests passed.
 
-The revised optional [developer helper](tor-development.md) passed seven offline
-stub checks. Nix now compiles the shipping gateway with Tor support, while runtime
+The optional foreground developer helper this plan anticipated was implemented,
+then removed and deliberately not restored: it only launched a Tor process the
+developer can start themselves, and the client's supported path is an existing
+SOCKS listener. Its design record is deleted rather than kept as dead
+instructions. Nix compiles the shipping gateway with Tor support, while runtime
 activation remains explicit/default-off. Nix parsing/evaluation and local checks
 are not measured Linux artifact qualification or deployment.
 

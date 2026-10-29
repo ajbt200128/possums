@@ -93,7 +93,6 @@ await mkdir(peers, { recursive: true });
 for (const [name, directory] of Object.entries(runtimeRoots)) await symlink(directory, path.join(peers, name));
 const buildReport = { node: process.version, pi: piVersion, runtimePins, typescript: ts.version, esbuild: esbuildVersion,
   lock: sha(await readFile('package-lock.json')), verifier: verifierReport, torNative: nativeReport,
-  legacyBootstrapFixture: { revision: '1b909881b468a2d5035ff2180ed5027fd2d8b9f6', sha256: sha(await readFile('legacy-bootstrap.ts')) },
   artifacts: { ...verifierArtifacts } };
 const file = path.join(out, 'extension.mjs');
 const result = await build({ entryPoints: ['index.ts'], outfile: file, bundle: true, platform: 'node',

@@ -71,10 +71,10 @@ async function rejects(action, constraint) {
     return true;
   }); checks++;
 }
-await build({ stdin: { contents: `export { Channel, ReferenceClient } from '../../examples/phase01/transport.ts';
+await build({ stdin: { contents: `export { Channel, ReferenceClient } from '../../clients/pi/core/transport.ts';
 export { connectTorPublished, recoverTorPublished, connectPublished, recoverPublished } from './bootstrap.ts';
 export { TorConnection, prepareTorConnection, TorNativeTransportFailure, TorSetupBackendFailure } from './tor-connection.ts';
-export { Operation, DiagnosticFailure } from '../../examples/phase01/limits.ts';
+export { Operation, DiagnosticFailure } from '../../clients/pi/core/limits.ts';
 export { pinnedRequest, sameV3Endpoint } from './v3.ts';`, resolveDir: source, loader: 'ts' },
   outfile: path.join(out, 'check.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node24',
   define: { __PHASE01_FIXTURE__: 'false' }, plugins: [{ name: 'synthetic-appraisal-only', setup(b) {

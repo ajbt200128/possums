@@ -68,7 +68,7 @@ in
       rust_host=$(rustc -vV | awk '/^host:/ { print $2 }')
       export CARGO_TARGET_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/possums/target/$rust_host/$rust_version"
     fi
-    echo "Possums: Rust 1.88 / Go 1.27 / Node 24"
+    echo "Possums: Rust 1.92 / Go 1.27 / Node 24"
     echo "  possums-check          formatting + Clippy"
     echo "  possums-test           local Rust + Go tests"
   '';

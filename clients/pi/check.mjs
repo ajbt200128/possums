@@ -17,7 +17,7 @@ for (const name of ['verifier.wasm', 'wasm_exec.cjs', 'verifier-worker.mjs'])
   await copyFile(path.join(scratch, 'package', name), path.join(output, name));
 const common = { bundle: true, platform: 'node', format: 'esm', target: 'node24' };
 for (const [name, fixture] of [['channel-node', false], ['fixture-node', true]]) {
-  await build({ ...common, entryPoints: [path.resolve(packageSource, '../../examples/phase01/transport.ts')],
+  await build({ ...common, entryPoints: [path.resolve(packageSource, './core/transport.ts')],
     outfile: path.join(output, name + '.mjs'), define: { __PHASE01_FIXTURE__: String(fixture) } });
 }
 await build({ ...common, entryPoints: [path.join(packageSource, 'test-entry.ts')], outfile: path.join(output, 'pi-test.mjs'),
@@ -42,7 +42,6 @@ run('phase01_client.mjs', { PHASE01_BUILD: output });
 run('phase02_client.mjs', { PHASE02_CLIENT_BUILD: output, PHASE02_CLIENT_INSTALL: packageSource });
 run('phase01_stream_limits.mjs', { PHASE01_BUILD: output, PHASE02_CLIENT_INSTALL: packageSource });
 run('tinfoil_forwarding_client.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi-test.mjs') });
-run('phase02_release.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
 run('phase02_v3.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
 run('tor_identity_verifier_wasm.mjs', {}, [path.join(scratch, 'package')]);
 run('tor_setup.mjs', { PHASE02_RELEASE_SOURCE: packageSource }, [path.join(scratch, 'package')]);

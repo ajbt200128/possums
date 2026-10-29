@@ -4,9 +4,11 @@
 > The integrated native-helper path below is restored, not the alternative
 > transport spikes; historical test counts are not new qualification.
 >
-> Historical evidence only in this inactive HTTPS-only backup. Tor code/assets
-> are removed; setup commands and authorizations below do not apply here.
-> No installed package was changed. See [backup verification](without-tor-backup-verification.md).
+> Historical adapter packet, now partly current: this document describes the
+> public Tor setup/endorsement seam that the restored client actually uses. The
+> transport and product integration it lists as deferred are still deferred.
+> Setup commands and authorizations are scoped to their original packet. Current
+> scope: [Tor main restoration](tor-main-restoration.md).
 
 ## Current client integration — offline only
 
@@ -23,8 +25,7 @@ failure is not permission to bypass it.
 
 Source setup accepts `--possums-tor-onion` and optional
 `--possums-tor-proxy` (default `127.0.0.1:19050`, numeric loopback only). Selection
-is locked at first trust establishment, after Pi applies flags. Tor cannot be
-combined with the legacy `--possums-manifest` mode. Optional proxy-only
+is locked at first trust establishment, after Pi applies flags. Optional proxy-only
 `POSSUMS_TOR_PROXY_USERNAME` / `POSSUMS_TOR_PROXY_PASSWORD` are read only after
 valid explicit Tor selection, both present or both absent; do not pass them in
 flags or use Possums credentials. No daemon is launched by selection or status.

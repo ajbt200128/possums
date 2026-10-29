@@ -1,8 +1,11 @@
 # SOCKS connector research — source review, 2026-10-14
 
-> Historical research only in this inactive HTTPS-only backup. Tor/SOCKS support
-> is removed; commands and authorizations below do not apply to this branch.
-> See [backup verification](without-tor-backup-verification.md).
+> Historical research only. This is the offline study of using the `socks`
+> package over a TLS socket, which was **not** adopted: the client path that
+> shipped is the native SOCKS byte connector in
+> [`clients/pi/tor-native`](../clients/pi/tor-native), reviewed separately.
+> Commands and authorizations below do not apply. Current scope:
+> [Tor main restoration](tor-main-restoration.md).
 
 **Current operator decision:** use the user's existing Tor proxy with Monero-style
 SOCKS negotiation: optional credentials and no-auth selection are permitted; no

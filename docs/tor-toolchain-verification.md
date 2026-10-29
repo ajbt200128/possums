@@ -1,8 +1,9 @@
 # Tor prerequisite: pinned Rust upgrade
 
-> Historical evidence only in this inactive HTTPS-only backup. Tor code/assets
-> are removed; commands and authorizations below do not apply to this branch.
-> Rust 1.92 remains pinned. See [backup verification](without-tor-backup-verification.md).
+> Historical evidence for the pinned-toolchain decision. The upgrade it recorded
+> is still in force: `rust-toolchain.toml` pins **1.92.0** and the optional `tor`
+> feature needs it. Commands and authorizations below are scoped to their original
+> packet. Current scope: [Tor main restoration](tor-main-restoration.md).
 
 Source-only on `feat/tor-v0`. The operator approved upgrading the pinned Rust compiler to support released Arti 0.47.0, whose declared minimum is 1.92. Arti remains unpatched; unsupported required Tor protocols may terminate the whole gateway under the accepted fail-fast policy. This is not an installation, deployment or live Tor qualification.
 

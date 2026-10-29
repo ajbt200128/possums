@@ -1,6 +1,6 @@
 import type { Model, ThinkingLevelMap } from '@earendil-works/pi-ai';
-import type { LiveModel } from '../../examples/phase01/client.js';
-import { resolveReasoning, type ReasoningOptions } from '../../examples/phase01/reasoning.js';
+import type { LiveModel } from './core/client.js';
+import { resolveReasoning, type ReasoningOptions } from './core/reasoning.js';
 
 const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export function thinkingMetadata(entry: LiveModel): Pick<Model<'openai-completions'>, 'reasoning' | 'thinkingLevelMap'> {

@@ -26,7 +26,7 @@ Applicable policy: [data handling](../PRIVACY.md#data-handling-boundaries), [man
 
 No eligibility markers, hooks, automatic continuations, background renewals or replay policy were added. The only provider edit requires advancing authenticated freshness before publishing a replacement public trust context.
 
-**The actual branch baseline already implements caller-wide E recovery/renewal eligibility**, including admitted model/compaction requests; its [README](../clients/pi/README.md#bounded-deployment-recovery-local-source-candidate-not-installed) explicitly marks the older [idle-user/native-auth policy](pi-expiry-renewal-verification.md) historical. The task wording asked to preserve idle-user-only eligibility. That discrepancy was reported to the parent; this packet preserves the actual baseline rather than silently restoring or broadening lifecycle authority. An idle-only restoration requires a separate decision. Existing offline native lifecycle suites exercise the actual E baseline, not an invented idle-only guarantee.
+**The actual branch baseline already implements caller-wide E recovery/renewal eligibility**, including admitted model/compaction requests; its [README](../clients/pi/README.md) and [failure policy](pi-client-failure-policy.md) supersede the older [idle-user/native-auth policy](pi-expiry-renewal-verification.md). The task wording asked to preserve idle-user-only eligibility. That discrepancy was reported to the parent; this packet preserves the actual baseline rather than silently restoring or broadening lifecycle authority. An idle-only restoration requires a separate decision. Existing offline native lifecycle suites exercise the actual E baseline, not an invented idle-only guarantee.
 
 ## Build and package evidence
 

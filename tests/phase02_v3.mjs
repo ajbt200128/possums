@@ -41,10 +41,10 @@ globalThis.__v3Appraise = async (evidence, nonce, repository, signal, actualMani
   if (signal?.aborted) throw new Error('HOSTILE cancelled');
   return { ...result };
 };
-await build({ stdin: { contents: `export { Channel, ReferenceClient } from '../../examples/phase01/transport.ts';
+await build({ stdin: { contents: `export { Channel, ReferenceClient } from '../../clients/pi/core/transport.ts';
 export { connectPublished, recoverPublished } from './bootstrap.ts';
 export { pinnedRequest, sameV3Endpoint } from './v3.ts';
-export { Operation, DiagnosticFailure } from '../../examples/phase01/limits.ts';`, resolveDir: source, loader: 'ts' },
+export { Operation, DiagnosticFailure } from '../../clients/pi/core/limits.ts';`, resolveDir: source, loader: 'ts' },
   outfile: path.join(out, 'synthetic.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node24',
   define: { __PHASE01_FIXTURE__: 'false' }, plugins: [{ name: 'synthetic-v3-appraisal-only', setup(build) {
     build.onResolve({ filter: /^\.\/verifier\.mjs$/ }, () => ({ path: 'bridge', namespace: 'synthetic' }));

@@ -303,61 +303,23 @@ await check('pinned SDK checks stay offline; saved key wins over env; legacy mar
  assert.deepEqual(await credentials.read('possums'),{type:'api_key',key:recoveryKey});
  assert.equal((await models.getAuth('possums')).auth.apiKey,requestMarker);assert.equal(fixture.s.sends(),0);
 });
-await check('local approval expiry and mismatched manifest fail before any evidence fetch',async()=>{
- const now=Date.now,fetch=globalThis.fetch;let calls=0;
- globalThis.fetch=async()=>{calls++;throw new Error('PRIVATE_URL_CREDENTIAL');};
- try {
-  Date.now=()=>m.API_APPROVALS[0].expires-1000;
-  await assert.rejects(m.connect(new Uint8Array()),error=>error instanceof m.ConnectionFailure && error.code==='manifest_mismatch');
-  Date.now=()=>m.API_APPROVALS[0].expires;
-  await assert.rejects(m.connect(new Uint8Array()),error=>error instanceof m.ConnectionFailure && error.code==='approval_expired');
-  assert.equal(calls,0);
- } finally {Date.now=now;globalThis.fetch=fetch;}
+await check('compiled-approval and manifest entry points are removed, not merely disabled',async()=>{
+ assert.equal(m.connect,undefined,'compiled connect removed');
+ assert.equal(m.recoverCompiled,undefined,'compiled recovery removed');
+ assert.equal(m.API_APPROVALS,undefined,'compiled approval record removed');
 });
-await check('custom-domain migration keeps compiled approval fail-closed and provider bound to the new hostname',async()=>{
- const now=Date.now,fetch=globalThis.fetch;let calls=0;
+await check('provider is bound to the published custom-domain origin',async()=>{
+ const fetch=globalThis.fetch;let calls=0;
  globalThis.fetch=async()=>{calls++;throw new Error('PRIVATE_URL_CREDENTIAL');};
  try {
-  // Published/verified origin is the custom domain; the compiled approval is a
-  // historical pin for the previous endpoint and is NOT rebound to the new one.
   assert.equal(m.PUBLISHER.origin,'https://gateway.possums.dev');
-  assert.equal(m.API_APPROVALS[0].origin,'https://possum-phase0.possums.containers.tinfoil.dev');
   const provider=new m.PossumsProvider(async()=>{throw new Error('PRIVATE_URL_CREDENTIAL');});
   assert.equal(provider.baseUrl,'https://gateway.possums.dev');
-  // The old compiled approval has elapsed and fails closed before any evidence
-  // fetch; no manifest is silently accepted against a different hostname.
-  Date.now=()=>m.API_APPROVALS[0].expires;
-  await assert.rejects(m.connect(new Uint8Array()),error=>error instanceof m.ConnectionFailure && error.code==='approval_expired');
-  await assert.rejects(m.recoverCompiled({channel:{}},new Uint8Array()),error=>error instanceof m.ConnectionFailure && error.code==='approval_expired');
   assert.equal(calls,0);
- } finally {Date.now=now;globalThis.fetch=fetch;}
-});
-await check('manifest authority is selected after Pi loads flags, never silently converted to public latest',async()=>{
- let flag,provider,prompts=0,requests=0;
- const fetch=globalThis.fetch;
- globalThis.fetch=async()=>{requests++;throw Error(hostileConnection);};
- try{
-  m.extension({registerFlag:()=>{},getFlag:name=>name==='possums-manifest'?flag:undefined,registerProvider:value=>{provider=value;},on:()=>{},registerCommand:()=>{}});
-  flag=path.join(root,'PRIVATE_LATE_FLAG_missing.json');provider.newSession();
-  await assert.rejects(provider.auth.apiKey.login({...interaction(),prompt:async()=>{prompts++;return recoveryKey;}}),
-   error=>error.code==='manifest_unavailable'&&!error.message.includes('PRIVATE_LATE_FLAG'));
-  flag=undefined;provider.newSession();
-  await assert.rejects(provider.auth.apiKey.login(interaction()),error=>error.code==='manifest_mismatch');
-  assert.equal(prompts,0);assert.equal(requests,0);
- }finally{globalThis.fetch=fetch;}
-});
-await check('extension reports missing or invalid manifest paths without revealing them or prompting',async()=>{
- for(const manifest of ['PRIVATE_PATH',path.join(root,'PRIVATE_PATH_missing.json')]) {
-  let provider,prompts=0;
-  m.extension({registerFlag:()=>{},getFlag:name=>name==='possums-manifest'?manifest:undefined,registerProvider:value=>{provider=value;},on:()=>{},registerCommand:()=>{}});
-  provider.newSession();
-  await assert.rejects(provider.auth.apiKey.login({...interaction(),prompt:async()=>{prompts++;return recoveryKey;}}),
-   error=>error.code==='manifest_unavailable' && !error.message.includes('PRIVATE_PATH'));
-  assert.equal(prompts,0);
- }
+ } finally {globalThis.fetch=fetch;}
 });
 await check('connection categories survive restoration and login without exposing hostile errors or prompting',async()=>{
- for(const code of ['approval_expired','approval_unavailable','manifest_unavailable','manifest_mismatch','evidence_unavailable','verification_failed']) {
+ for(const code of ['evidence_unavailable','verification_failed']) {
   let prompts=0;const notices=[];
   const provider=new m.PossumsProvider(async()=>{throw new m.ConnectionFailure(code);},failure=>notices.push(failure));
   for(const operation of [()=>provider.auth.apiKey.resolve(authInput({type:'api_key',key:recoveryKey})),

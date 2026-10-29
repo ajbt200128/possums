@@ -1,10 +1,10 @@
-import { CatalogFailure, CompletionFailure, GatewayError, gatewayDetailLabel, safeTorNativeDiagnostic, type Receipt } from '../../examples/phase01/client.js';
-import { IntakeFailure, intakeDescription, type IntakeDiagnostic } from '../../examples/phase01/intake-diagnostics.js';
+import { CatalogFailure, CompletionFailure, GatewayError, gatewayDetailLabel, safeTorNativeDiagnostic, type Receipt } from './core/client.js';
+import { IntakeFailure, intakeDescription, type IntakeDiagnostic } from './core/intake-diagnostics.js';
 
 export function settlementDescription(receipt: Readonly<Receipt>): string {
   return `Authenticated gateway receipt (${receipt.complete === false ? 'incomplete' : 'complete'}): outcome ${receipt.outcome ?? 'unavailable'}; charged ${receipt.chargedMicrounits} microunits; refunded ${receipt.refundedMicrounits ?? 'unavailable'} microunits.${receipt.deliveryComplete === false ? ' Delivery incomplete; this does not establish successful completion.' : ''} Settlement is not tool-execution authorization; a new submission may incur another charge.`;
 }
-import { DiagnosticFailure } from '../../examples/phase01/limits.js';
+import { DiagnosticFailure } from './core/limits.js';
 import { VerifierFailure } from './verifier.mjs';
 import { TorNativeTransportFailure, TorOnionFailure,
   TorSetupFailure, TorSetupBackendFailure, TorEndorsementFailure, isTorConnectionFailure } from './tor-connection.js';
@@ -87,7 +87,7 @@ const reasons = Object.freeze({
   authentication_diagnostic: 'Gateway authentication did not complete.',
   connection_diagnostic: 'The verified connection did not complete.',
   tor_transport_diagnostic: 'The selected Tor transport did not complete. No direct fallback was attempted.',
-  tor_selection_invalid: 'Local Tor selection is invalid. Select a canonical v3 host with --possums-tor-onion and a numeric loopback host:port with --possums-tor-proxy (default 127.0.0.1:19050). Do not combine Tor with --possums-manifest or select a proxy alone. Proxy-only username/password must both be absent or locally configured together, each nonempty and at most 255 UTF-8 bytes; do not share them.',
+  tor_selection_invalid: 'Local Tor selection is invalid. Select a canonical v3 host with --possums-tor-onion and a numeric loopback host:port with --possums-tor-proxy (default 127.0.0.1:19050). Do not select a proxy without an onion. Proxy-only username/password must both be absent or locally configured together, each nonempty and at most 255 UTF-8 bytes; do not share them.',
   route_selection_changed: 'Route or manifest flags changed after trust selection. Restore the original flags or restart Pi with the intended setup; no route was switched.',
   tor_cleanup_unknown: 'Native child exit could not be confirmed during Tor scope cleanup; cause unknown. Restart Pi before another setup attempt. Remote completion and prior billing are unknown.',
   approval_expired: 'The installed client approval has expired. ' + update,

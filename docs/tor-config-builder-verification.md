@@ -1,9 +1,11 @@
 # Tor client configuration: offline NSS failure candidate
 
-> Historical evidence only in this inactive HTTPS-only backup. Tor code/assets
-> are removed; commands and authorizations below do not apply to this branch.
-> NSS image accounts remain, but no Tor SDK qualification is claimed. See
-> [backup verification](without-tor-backup-verification.md).
+> Historical evidence from a pre-restoration checkpoint. The NSS account records
+> this document added (`dockerTools.fakeNss`, UID/GID 65532) are still in the
+> measured image and are still checked by `checks.gateway-accounts`; the Tor SDK
+> construction it was investigating only became relevant again with restored Tor.
+> Commands and authorizations below are scoped to their original packet. Current
+> scope: [Tor main restoration](tor-main-restoration.md).
 
 **Shipping acceptance remains on hold.** The factory-only fix is insufficient
 for actual SDK construction under missing NSS; see the follow-up below.

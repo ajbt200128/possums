@@ -1,9 +1,11 @@
 # Bounded Arti embedding spike
 
-> Historical research only in this inactive HTTPS-only backup. Tor code/spikes
-> are removed; commands and authorizations below do not apply to this branch.
-> Results and limitations remain historical. See
-> [backup verification](without-tor-backup-verification.md).
+> Historical research only. The standalone `spikes/` tree this document
+> describes is still absent from the current source; current Tor support lives
+> in [`src/tor_ingress`](../src/tor_ingress) and the restored client helper, not
+> here. Commands and authorizations below do not apply. Results and limitations
+> remain historical. Current scope:
+> [Tor main restoration](tor-main-restoration.md).
 
 **Local source/compile and offline synthetic evidence only, 2026-10-13.**
 Feasibility exploration, not a shipping Tor implementation, measured image,

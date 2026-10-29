@@ -1,39 +1,19 @@
-import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { open, type FileHandle } from 'node:fs/promises';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { LIMITS } from '../../examples/phase01/limits.js';
-import { connect, connectPublished, recoverCompiled, recoverPublished, connectTorPublished, recoverTorPublished } from './bootstrap.js';
+import { connectPublished, recoverPublished, connectTorPublished, recoverTorPublished } from './bootstrap.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
 import { prepareTorConnection, type TorConnection } from './tor-connection.js';
 import { createTorSelection, type RouteSelection } from './tor-selection.js';
 import { PossumsProvider, PROVIDER_ID } from './provider.js';
 
-async function manifest(file: unknown): Promise<Uint8Array<ArrayBuffer>> {
-  try {
-    if (typeof file !== 'string' || !isAbsolute(file)) throw new Error();
-    let handle: FileHandle | undefined;
-    try {
-      handle = await open(file, 'r');
-      const info = await handle.stat();
-      if (!info.isFile() || info.size > LIMITS.provenance) throw new Error();
-      const buffer = new Uint8Array(LIMITS.provenance + 1);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      if (bytesRead !== info.size || bytesRead > LIMITS.provenance) throw new Error();
-      return buffer.slice(0, bytesRead);
-    } finally { await handle?.close(); }
-  } catch { throw new ConnectionFailure('manifest_unavailable'); }
-}
 
 export default function possums(pi: ExtensionAPI): void {
-  pi.registerFlag('possums-manifest', { type: 'string', description: 'Independently hash-approved Possums release manifest (public file, never a credential)' });
   pi.registerFlag('possums-tor-onion', { type: 'string', description: 'Explicit canonical v3 onion host; latest published Tor verification only (no Tor launch)' });
   pi.registerFlag('possums-tor-proxy', { type: 'string', description: 'Existing numeric loopback SOCKS listener, host:port (default 127.0.0.1:19050; IPv6 brackets allowed)' });
   let ui: ExtensionContext['ui'] | undefined;
   let sessionEpoch = 0;
   const notifiedCodes = new Set<ConnectionFailure['code']>();
-  const authority = createTorSelection(() => ({ manifest: pi.getFlag('possums-manifest'),
-    onion: pi.getFlag('possums-tor-onion'), proxy: pi.getFlag('possums-tor-proxy') }));
+  const authority = createTorSelection(() => ({ onion: pi.getFlag('possums-tor-onion'), proxy: pi.getFlag('possums-tor-proxy') }));
   let locked: RouteSelection | undefined, scope: TorConnection | undefined;
   let closing: Promise<void> | undefined, lifecycleFailure: ConnectionFailure | undefined;
   const torScope = (selection: Extract<RouteSelection, { route: 'tor' }>): TorConnection => {
@@ -64,7 +44,7 @@ export default function possums(pi: ExtensionAPI): void {
     if (lifecycleFailure) throw lifecycleFailure;
     const selection = locked = authority();
     if (selection.route === 'tor') return connectTorPublished(torScope(selection), signal);
-    return selection.manifest === undefined ? connectPublished(signal) : connect(await manifest(selection.manifest), signal);
+    return connectPublished(signal);
   }, failure => {
     if (!failure) { notifiedCodes.clear(); return; }
     if (!ui || notifiedCodes.has(failure.code)) return;
@@ -79,8 +59,7 @@ export default function possums(pi: ExtensionAPI): void {
       if (!scope) throw new ConnectionFailure('tor_transport_diagnostic');
       return recoverTorPublished(previous, scope, signal);
     }
-    return selection.manifest === undefined ? recoverPublished(previous, signal)
-      : manifest(selection.manifest).then(bytes => recoverCompiled(previous, bytes, signal));
+    return recoverPublished(previous, signal);
   });
   pi.registerProvider(provider);
   pi.on('session_start', async (_event, ctx) => {

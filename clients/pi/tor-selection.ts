@@ -2,17 +2,16 @@ import { isIP } from 'node:net';
 import { parseTorOnionAddress } from './tor-onion.mjs';
 import { ConnectionFailure } from './diagnostics.js';
 
-export type RouteInputs = Readonly<{ manifest: unknown; onion: unknown; proxy: unknown }>;
-export type RouteSelection = Readonly<{ route: 'clearnet'; manifest: unknown }> |
+export type RouteInputs = Readonly<{ onion: unknown; proxy: unknown }>;
+export type RouteSelection = Readonly<{ route: 'clearnet' }> |
   Readonly<{ route: 'tor'; onion: string; host: string; port: number }>;
 
 // Pure local selection: no environment, helper, sockets or public acquisition.
 export function parseTorSelection(input: RouteInputs): RouteSelection {
   if (input.onion === undefined) {
     if (input.proxy !== undefined) throw new ConnectionFailure('tor_selection_invalid');
-    return Object.freeze({ route: 'clearnet', manifest: input.manifest });
+    return Object.freeze({ route: 'clearnet' });
   }
-  if (input.manifest !== undefined) throw new ConnectionFailure('tor_selection_invalid');
   try {
     const onion = parseTorOnionAddress(input.onion).host;
     const authority = input.proxy === undefined ? '127.0.0.1:19050' : input.proxy;
@@ -32,10 +31,8 @@ export function createTorSelection(read: () => RouteInputs): () => RouteSelectio
   let locked: RouteInputs | undefined, selection: RouteSelection | undefined, failure: ConnectionFailure | undefined;
   return () => {
     const current = read();
-    if (locked && (current.manifest !== locked.manifest || current.onion !== locked.onion || current.proxy !== locked.proxy)) {
-      const manifestOnly = locked.onion === undefined && locked.proxy === undefined
-        && current.onion === undefined && current.proxy === undefined;
-      throw new ConnectionFailure(manifestOnly ? 'manifest_mismatch' : 'route_selection_changed');
+    if (locked && (current.onion !== locked.onion || current.proxy !== locked.proxy)) {
+      throw new ConnectionFailure('route_selection_changed');
     }
     if (!locked) {
       locked = Object.freeze({ ...current });

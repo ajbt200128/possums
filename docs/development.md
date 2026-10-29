@@ -17,7 +17,7 @@ and approve it:
 
 No global shell configuration is changed by this repository.
 
-The shell includes Rust from `rust-toolchain.toml` (currently 1.88.0, including
+The shell includes Rust from `rust-toolchain.toml` (currently 1.92.0, including
 Clippy and rustfmt), Go 1.27.2, Node 24/npm for independent clients, Git and ripgrep. Go cannot silently
 download a different compiler (`GOTOOLCHAIN=local`). `devenv.lock` pins the shell
 inputs; `devenv.yaml` uses the existing `flake.lock` revisions for `nixpkgs`,

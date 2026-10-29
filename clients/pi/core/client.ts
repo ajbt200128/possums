@@ -1,8 +1,8 @@
 import { Channel, hasByteReadTimeout, type ResponseOptions } from './transport.js';
 import { intakeDiagnostic, intakeDescription, type IntakeDiagnostic } from './intake-diagnostics.js';
-import type { V3Input, TorV3Input } from '../../clients/pi/v3.js';
-import type { TorConnection } from '../../clients/pi/tor-connection.js';
-import { TorNativeTransportFailure, torNativeTransportDiagnostic, type TorNativeDiagnostic } from '../../clients/pi/tor-native-transport.mjs';
+import type { V3Input, TorV3Input } from '../v3.js';
+import type { TorConnection } from '../tor-connection.js';
+import { TorNativeTransportFailure, torNativeTransportDiagnostic, type TorNativeDiagnostic } from '../tor-native-transport.mjs';
 import { ChannelError, DiagnosticFailure, LIMITS, Operation, OperationFailure, cleanup, parseJSON, requireThat, serialize,
   type FailureConstraint, type FailureStage } from './limits.js';
 import { admitReasoning, reasoningParams, type ReasoningParams, type ReasoningOptions } from './reasoning.js';
@@ -436,9 +436,6 @@ export class ReferenceClient {
   #bearer: string | undefined;
   #authExpiresAt: number | undefined;
   constructor(readonly channel: Channel) { Channel.requireVerified(channel); }
-  static async verified(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array): Promise<ReferenceClient> {
-    return new ReferenceClient(await Channel.api(bundle, manifest, keyConfig));
-  }
   static async published(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal): Promise<ReferenceClient> {
     return new ReferenceClient(await Channel.published(bundle, manifest, keyConfig, signal));
   }

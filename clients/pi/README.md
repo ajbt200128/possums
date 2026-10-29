@@ -1,297 +1,132 @@
-# Possums provider for Pi 1.3.0
+# Possums for Pi
 
-The current source/build qualification pins all three Pi peers to **1.3.0**; see
-[offline qualification and remaining limits](../../docs/pi-1.3.0-qualification.md).
-The already-installed CVM-compatible artifact was built under the earlier
-**1.0.4** qualification and subsequently linked to Pi **1.3.0** peers; this pin
-bump does not replace that artifact, change its report or activate any process.
-See [the separate installation record](../../docs/pi-cvm-0.14.16-compatibility.md#subsequent-operator-authorized-local-installation).
-Historical runtime-specific evidence below remains dated, not new live evidence.
+A Pi extension that connects to the Possums gateway and verifies it before sending
+anything: the signed release manifest, the enclave measurement and the serving key
+are all checked, and the peer has to prove it holds the endorsed key before a
+single byte of credential or prompt goes out.
 
-## Tor restoration candidate — source/offline only
+It verifies the backend. It does not protect your machine — see [Limits](#limits).
 
-Optional Tor selection, the native SOCKS helper, nonce-bound onion setup and
-endorsement verification are restored on current main. Explicit
-`--possums-tor-onion` locks the route; optional `--possums-tor-proxy` selects a
-numeric-loopback SOCKS listener (default `127.0.0.1:19050`). Selection does not
-start a daemon. Native remote destination resolution, independent fresh trust,
-TLS peer binding before headers/body and HPKE remain required. Renewal retains
-the route; there is no HTTPS downgrade or inference replay. See
-[setup/trust details](../../docs/tor-client-setup.md) and the
-[current restoration record](../../docs/tor-main-restoration.md).
+## Install
 
-Previously installed packages/settings are untouched. Do not install or activate
-this scratch candidate without separate authorization. The PR now enables Tor in
-the gateway's measured source configuration, with its attested A grant/mount and
-B secret references. No live deployment or binding was changed. Historical release/install and
-[backup evidence](../../docs/without-tor-backup-verification.md) below are not
-new qualification; shipped-client, Linux, freshness and live gaps remain.
+You need a Pi **1.3.0** installation, Node **24.13.0**, and Go **1.27.2** for the
+verifier. Everything runs inside the pinned devenv shell:
 
-The catalog-wide gateway tool profile is deployed as **v0.0.15** (the official gateway v3 helper compatibility fix is included; the separate 16-KiB tool-description cap remains removed, while other limits and the shared tool profile are unchanged). All authenticated catalog models advertise the assumed shared OpenAI-functions wire profile; this is not per-model compatibility qualification. A real Kimi Pi round with local `ls`/`read` execution and a correct final continuation was observed on v0.0.10; exact live billing/balance reconciliation remains unverified. See [release scope](../../docs/phase02-pi-release.md).
-
-## Nonce-bound v3 client (source/scratch qualified; not installed)
-
-The explicitly authorized default bootstrap now acquires credential-free v3 evidence with a new 32-byte nonce and no v2 fallback. Fresh evidence is first appraised by the supported offline verifier to identify the serving release; no GitHub `/releases/latest` API call is needed. The Go/WASM verifier authenticates its exact `repository@tag@sha256:digest` reference and the immutable downloaded manifest: exact subject SHA-256 and complete signed-predicate JSON equality. The exact reviewed CVM versions `v0.14.12` and `v0.14.16` are accepted; config-command-line hash, publisher, denylist and 41-byte EHBP configuration checks remain. The `v0.14.16` compatibility fix was subsequently **locally installed** after operator approval, preserving existing Pi 1.3.0 peer links; activation in running Pi/T3 processes and positive live startup remain unverified. The previous artifact is retained for rollback and still rejects that runtime. See [the compatibility regression, offline checks and installation evidence](../../docs/pi-cvm-0.14.16-compatibility.md). The private-authority `Channel.v3` factory verifies raw evidence itself; standalone facts cannot authorize a channel.
-
-Every v3 Channel GET/POST uses a fresh native TLS socket. The peer must prove possession of the exact endorsed SPKI, with native hostname/date validation, **before any HTTP headers/body**. Endorsed self-signed certificates are accepted through that positive binding, not an unrelated Web-PKI requirement. No redirects, proxies, socket pool, session resumption or global dispatcher settings are used. EHBP encryption/stream decoding remains the supported library. Trust expires at the minimum of 12 hours, certificate expiry and authenticated witness expiry, checked again at handoff.
-
-This path now reuses one public manifest across sessions/processes in `$XDG_CACHE_HOME/possums/pi-public-manifest-v3` (absolute XDG root only), otherwise `~/.cache/possums/pi-public-manifest-v3`. It does not read, migrate or overwrite the independent legacy cache. Fresh nonce-bound evidence is appraised before selecting the exact tag/digest-bound entry; a cold/mismatched entry downloads that specific release asset without GitHub API discovery. Every hit still passes the complete channel verifier, including exact manifest bytes, fresh evidence, certificate and endpoint keys. The entry is published atomically only after full qualification, with the existing bounded owner lock coordinating cold acquisition. No evidence TTL, trust verdict, report, nonce, v3 collateral, credential or diagnostic is persisted. Invalid/mismatched entries are misses; failed verification never falls back to older evidence. A warm setup needs zero GitHub or separate AMD downloads. See [cache restoration and regression evidence](../../docs/pi-v3-cache-restoration-verification.md). Recovery compares verified release digest/tag, TLS key and exact EHBP configuration, not nonce-dependent report hashes. Nonce changes cannot grant recovery eligibility. Advancing authenticated witness freshness can qualify a replacement setup context, including at the same stable endpoint, only within existing lifecycle permission; unchanged/nonadvancing freshness cannot renew authorization. Existing lifecycle eligibility and no inference replay are unchanged. This checkout already carries caller-wide E eligibility; the older idle-user-only policy below is historical, not restored by this migration.
-
-The scratch build packages `verifier.wasm`, matching `wasm_exec.cjs`, unbundled `verifier-worker.mjs`, bridge/declaration, Go license and source/artifact hashes next to `extension.mjs`; bundled `import.meta.url` resolves the Worker from that package root. Go **1.27.2**, Node **24.13.0**, Pi **1.3.0**, TypeScript **5.9.3** and esbuild **0.25.10** remain pinned. An optional `POSSUMS_VERIFIER_BUILD` accepts only a matching scratch build; changed Go source/artifact hashes fail packaging. Legacy-v2 acquisition tests use the exact historical bootstrap at `1b909881b468a2d5035ff2180ed5027fd2d8b9f6`, copied into scratch only, never into the extension.
-
-The actual emitted package passed native Pi 1.0.4 public-only startup with real v0.0.41 evidence and no credentials/inference. Real WASM wrong nonce/repository/tag/digest/manifest checks and an endorsed-TLS public-key/config GET also passed. Offline host/SDK/transport suites remain separate from cryptographic acceptance and T3 UI qualification. Nothing was installed/activated or deployed by this client packet. Historical native CLI v3 signer and legacy-v2 freshness limitations are not retrospectively resolved. See [exact evidence and remaining limits](../../docs/pi-v3-client-verification.md), [verifier MVP history](../../docs/v3-verifier-mvp.md) and the [deferred connection engine](../../docs/backlog.md#shared-verified-connection--possums-client-engine-after-the-v3-verifier-mvp). Distribution/dependency-license review remains a release gate.
-
-## Renewed gateway.possums.dev cutover (source only; not installed)
-
-The paired source candidate restores PR #67's published/verified origin change
-to `https://gateway.possums.dev`, on top of the current thinking-capable client.
-`PUBLISHER.origin`, provider origin and model `baseUrl` agree; exact serving
-hostname/key checks are unchanged. Old-host evidence is rejected, old-origin
-public cache entries are re-acquired, and old-origin discovery models are
-excluded. No fallback, redirect, inference replay or trust relaxation is added.
-
-The historical compiled `v0.0.15` approval keeps its original old hostname,
-release pins and elapsed `2026-10-11` expiry; it is neither rebound nor refreshed.
-The explicit compiled-manifest path still fails closed before evidence fetch.
-Legacy-v2 freshness limits and native CLI v3 signer mismatch remain unresolved.
-
-Fresh DNS is configured/verified, but production readback still showed the old
-hostname running `v0.0.37`. This source and scratch build are **not installed or
-activated**, and new-host TLS/attestation/serving is not established. Existing
-shipped old-host clients may fail closed after the operator-accepted breaking
-cutover; simultaneous old-host serving is unconfirmed. Matching client
-qualification, separately authorized installation and user-controlled activation
-must precede switching the gateway contract. Preparation authorizes neither
-production deployment nor paid inference. See [fresh evidence, protected rollout
-and rollback requirements](../../docs/gateway-custom-domain.md#renewed-operator-authorized-cutover-source-candidate-not-deployed).
-
-## Current client source policy (not installed)
-
-The operator-approved [client failure policy](../../docs/pi-client-failure-policy.md) supersedes the historical retry/terminal-error, duplicate admission, parser-quota and price-recomputation descriptions below. Backend authenticity rejection remains fatal and blocks later dispatch. Classified GitHub/AMD public-service acquisition failures now stop the host turn with a warning rather than a fatal auth/turn error; credentials/inference remain blocked until full verification succeeds. Cached startup failures remain cached until a new trust session; no retry or stale-trust fallback is added. Other operational failures produce transient warnings and a graceful Pi host `done/stop`, retain text/authenticated money, suppress provisional tools, and initiate no inference retry. Host stop does not prove backend success or billing. A deliberate next turn can proceed on the same verified session. See [offline scoped verification](../../docs/pi-client-simplification-verification.md).
-
-Current tools/history use supported Pi conversion and native execution validation. Shared reference-client inference also has no duplicate semantic admissions or custom inference byte/depth/node/SSE/tool-state ceilings. Public-evidence/catalog/control limits and SDK-native crypto/decoder limits remain. Authenticated gateway totals/reservations are authoritative; model input/output prices are indicative upstream-rate estimates with 30% markup, never charge recomputation. Absent component charges are unavailable (Pi zeros are placeholders, not free). Native Pi/T3 history may retain safe diagnostics; no logger or raw-payload persistence is added. This source patch is not installation, activation, deployment or a live incident-fix claim.
-
-## Catalog-driven thinking (source candidate; not installed/deployed)
-
-Native `/thinking` choices now come only from supported authenticated catalog `reasoning_params`. Advertised `low/medium/high` maps retain the provider's actual effort strings; fixed enable templates expose an on toggle at `high`. Unsupported levels are explicitly null, and `off` is unavailable without a disable template. Unmapped `$EFFORT` (including the sample GPT-OSS metadata) supplies no effort allowlist; missing/unknown metadata leaves controls unavailable and inference at upstream defaults. No model-specific table is used.
-
-**Omission is path-specific:** Pi 1.0.4 represents native off by absent `reasoning`, so only `streamSimple` resolves that to an advertised disable template. Raw `stream`/API omission preserves upstream defaults even when disable is advertised. Without advertised disable, neither path invents off. Raw OpenAI options `reasoningEffort`/`chatTemplateKwargs` remain catalog-gated. Discovery opts in with `X-Possums-Reasoning-Metadata: true`; old default catalog JSON is unchanged, and a new client can use an old gateway with metadata absent. Renewals/hooks are revalidated before dispatch.
-
-Thinking is displayed separately from text with balanced native events, including interruption; null/empty traces are valid. It is never replayed into later inference or used as tool/billing authorization. Native history may retain thinking according to Pi/T3 settings. Maximum reservation, settlement, no inference replay and authenticated tool gates are unchanged. See [source-only checks, exact shipped decoder compatibility and remaining gaps](../../docs/catalog-thinking-verification.md).
-
-**Clean optional display names.** The same opt-in `X-Possums-Reasoning-Metadata: true` request also returns the authenticated upstream `name` (for example `DeepSeek V4.1 Flash`) and no longer builds the old `id · tools/text only · max $… (indicative)` label. The name is presentation-only, non-authorizing metadata: a missing, empty, oversized or control/escape/bidi-format name is dropped and the client falls back to the unchanged model id, never to catalog availability, pricing, tool or thinking authority. The default catalog JSON stays byte-for-byte identical for older strict decoders; discovery reuses only a bounded, safe cached name and never treats it as inference authorization.
-
-## Image input (source candidate; not installed/deployed)
-
-The paired candidate supports inline images for Tinfoil's documented vision models: `deepseek-v4-1-flash` (experimental upstream), `kimi-k3`, and `gemma4-31b`. Authenticated catalog membership still gates availability and pricing; the reviewed image profile is a source allowlist, not a new catalog field or live qualification. Other models remain text-only.
-
-Pi's supported OpenAI converter handles attachments and moves image tool results into user content parts while preserving matching text tool results. Possums does not decode, resize or inspect image pixels or impose additional image quotas. The gateway admits text/image user parts with inline JPEG/PNG/GIF/WebP data URLs only, under existing transport/parser bounds; it never fetches image URLs. The complete parts go unchanged to the existing verified tokenizer and inference path, after maximum-cost reservation. Existing context, settlement, no-replay and authenticated tool-completion rules remain.
-
-No live image inference or image-tokenizer qualification was performed. See [offline verification and runtime limits](../../docs/image-input-verification.md). Gateway rollout alone does not update an installed Pi bundle: build/install the matching client separately and activate it with a user-controlled restart.
-
-## Build and load
-
-The qualified build uses Go **1.27.2**, Node **24.13.0**, npm, and a pinned **Pi 1.3.0** package root (installed or scratch). Extension startup no longer rejects other Pi versions solely by version number; this is not qualification of other runtimes. Build-time checks require exactly 1.3.0 for all three Pi peers. The build creates a fresh scratch source/install/package tree, installs the locked verification dependencies with lifecycle scripts disabled, checks TypeScript, verifies the three Pi package versions, and emits `extension.mjs` plus a source/artifact hash report. It does not install into the repository or modify the Pi installation.
+`devenv shell`
 
 `POSSUMS_PI_ROOT="$HOME/.pi/agent/install/releases/1.3.0" sh clients/pi/build.sh`
 
-The command also prints a scratch-only **local checks** command. Run it for the synthetic reference/Pi and shared admission suites; it makes no live inference request and does not qualify production models. Test-only bundles remain outside the package directory.
+The build pulls in `@tinfoilsh/verifier`, `ehbp` and the Sigstore browser client,
+compiles the Go v3 verifier to WASM, builds the native SOCKS connector, typechecks,
+and prints a scratch directory. Register the package it produces:
 
-The build links the qualified installed Pi peers into its package. After separate installation approval, register the package:
+`pi install /absolute/path/to/possums-pi-build-XXXXXX/package`
 
-`pi install /absolute/path/to/package`
+Then restart Pi fully. `/reload` is not enough — the extension is loaded at
+startup.
 
-One initial **full Pi restart** activates this mechanism. Normal loading needs no manifest file or flag: every new trust session acquires fresh nonce-bound v3 evidence, verifies the serving release, selects its exact cached/downloaded public manifest, then verifies the complete artifact, publishing workflow, serving hardware/keys and freshness before authentication. The v3 manifest cache is separate from the historical public-evidence cache. A new trust session discovers compatible gateway updates without a client rebuild/restart; the locally installed expiry-renewal client below additionally supports renewal without resetting the conversation. Installation changes no providers, defaults, model filters, credentials or history settings. Use `pi --no-session` when you do not want Pi to save the conversation.
+To try it without installing:
+
+`pi --no-session --no-extensions -e /absolute/path/to/possums-pi-build-XXXXXX/package/extension.mjs`
 
-For an isolated one-session load, use the **package path printed by the build command**:
-
-`pi --no-session --no-extensions --no-tools -e /absolute/path/to/package/extension.mjs`
-
-An explicit `--possums-manifest /absolute/path/to/tinfoil-deployment.json` retains the independent compiled-approval path; the public manifest must match that client's pins. Never supply an account credential file.
-
-The current API approval is **v0.0.15**, with unchanged administrative expiry **2026-10-11**. Its independent image builds, exact signed release provenance and serving hardware/key binding through Pi's pinned JavaScript legacy-v2 verifier were checked. The patched gateway helper also passed strict v3 checks against public nonce evidence through the real Rust validator, including verified expiry and peer TLS key equality; this does not directly observe the deployed Unix socket or authenticate a catalog. That historical Pi build kept its accepted legacy-v2 path and freshness limitations; the source-only v3 migration above does not retrospectively qualify it. The separate native CLI platform-signer incompatibility remains unresolved. See the [scoped release evidence](../../docs/verification.md#2026-10-09--v0015-official-v3-helper-release-and-paired-pi-refresh). These are historical release-specific checks, not evidence of a deployed new update mechanism. The source candidate's default startup path separately passed real public v0.0.15 verification without credentials or inference; its new/resume lifecycle is locally qualified on Pi 1.0.4. See [session-update evidence](../../docs/pi-session-update-verification.md). Do not change pins to make a verification error disappear.
-
-1. Use `/login`, choose Possums, and paste the manually issued recovery credential into its masked prompt. Public evidence and key binding are verified **before** the credential is requested. Pi saves the recovery credential through its normal `auth.json` credential store; subsequent starts restore a fresh verified bearer/catalog without inference. The old memory-only marker needs one fresh `/login`. An optional `POSSUMS_RECOVERY_CREDENTIAL` environment variable is supported; a stored recovery credential takes precedence. Do not put credentials in shell commands or conversation messages.
-2. Select a live Possums model in Pi's usual model picker. With `enabledModels` patterns configured, Pi 1.0.4 resolves its scoped list at startup, before Possums can authenticate. After successful login or startup restoration, use `/model possums` and press **Tab** to switch from `scoped` to `all` if the results are empty. This changes the picker view, not your saved provider filter. Selecting a model adds it to the current session's scope. Pi's list rows show only the model ID/provider. The highlighted **Model Name** detail below the list shows `text only` or `tools` and an **indicative**, not promised, maximum reservation.
-3. For a text-only model, use the isolated launch above and run `/possums-text-only` explicitly. `--no-extensions` still permits the explicit Possums `-e` entry, but excludes other extensions that can re-enable tools before a turn (for example the interactive `ask_user_question` reconciler). `--no-tools` starts with no tool declarations. The command alone is a one-time loadout change, not a lock against another extension; a remaining tool declaration causes local `possums_tools_unsupported` before inference submission. Active tools are never silently removed, and models or output allowances are never substituted.
-4. All authenticated catalog models expose the shared OpenAI-functions wire profile. Their compatibility is assumed, not individually tested; unsupported upstream behavior fails closed without fallback or replay. For ordinary coding, omit `--no-tools`; `--tools read,bash,edit,write,grep,find,ls` enables the complete native coding-tool set. Select the desired model after login or startup restoration. No Possums-specific tool implementation or client-side spending reservation is installed. The gateway still reserves prepaid credit for the selected model's maximum before upstream prompt transmission and settles actual final usage.
-5. Use native `/logout` to remove the stored Possums credential and clear its local bearer/catalog. The obsolete `/possums-logout` alias is removed. Accepted work can still settle remotely. An environment credential remains configured until you remove it from the process environment. `/new` resets conversation/run authorization and verifies a fresh public trust context, then restores authentication without forgetting the saved login. Opening/resuming a transcript also starts fresh trust. Select Possums through the picker after startup; cold `--provider possums --model ...` selection occurs before the authenticated catalog is restored.
-
-## Historical legacy-v2 public evidence cache (not used by v3)
-
-Fresh processes first fetch the fixed public gateway attestation without credentials. Its SHA-256 is only an acquisition/invalidation hint. The earlier locally installed candidate reuses only GitHub manifest/provenance and downloads AMD on every new trust session. The subsequently authorized and locally installed AMD extension adds public AMD VCEK DER to that same entry. Complete matching entries reuse all three exact public byte fields without GitHub/AMD downloads; every process independently verifies the full SDK chain/date/TCB/HWID/current-report signature and measurement, Sigstore publisher/workflow/artifact associations, current gateway certificate and live endpoint-key binding, then authenticates independently. An unusable entry or changed hint acquires through the existing approved public paths. A cache hit is not newestness, quote freshness, revocation checking or anti-rollback. Legacy-v2 freshness limitations and the 12-hour/certificate-capped trust-session bound remain unchanged; no evidence TTL is added.
-
-One replaceable entry lives in `$XDG_CACHE_HOME/possums/pi-public-evidence-v1` when that root is absolute, otherwise `~/.cache/possums/pi-public-evidence-v1`. The AMD-inclusive source uses strict schema v2; well-formed matching v1 entries reuse GitHub fields under the same lock and acquire only AMD before full qualification and atomic upgrade. Malformed/missing/empty/oversized v2 certificate fields are full misses, not migration entries; invalid/expired/mismatched certificate verification is terminal with no fallback. Retained public VCEK DER includes its embedded **gateway hardware ID**, explicitly authorized by the narrow [public-certificate exception](../../PRIVACY.md#data-handling-boundaries). No raw attestation reports, bare chip IDs, full KDS URLs, verdicts, credentials, account/auth state, diagnostics or request/history data are retained. A bounded local owner-directory lock coordinates acquisition; dead/expired owners can be reclaimed. Lock deadlines bound acquisition, not evidence validity. Entries are untrusted and atomically published only after successful complete channel verification. Cache/storage failures stay closed; failed verification never falls back to older evidence. The explicit compiled-manifest path remains independent. No GitHub credentials, inference retry or existing-session recovery is added. See [offline source evidence](../../docs/pi-public-evidence-cache-verification.md) and [operator-authorized local installation and live smoke](../../docs/pi-client-cache-installation.md#subsequent-t3-acceptance-and-authorized-amd-cache-installation). The installed AMD-inclusive build passed two fresh Pi 1.1.0 SDK startups (warm zero-GitHub/zero-AMD fetches) and one ordinary T3 DeepSeek smoke run. New-build visual T3 rendering and activation in existing processes remain unverified; no gateway deployment occurred. The preceding actual T3 failure was `possums_evidence_unavailable`, stage `amd_certificate`, constraint `rate_limited`, observed HTTP 429. Warm reuse reduces duplicate acquisition; cold or changed-hint acquisition may still be rate limited.
-
-## Connection diagnostics
-
-Startup and model refresh show a transient, content-free warning when public verification, session establishment or catalog refresh fails. Repeated warnings for the same category are suppressed until authentication and catalog loading complete successfully; public verification alone does not clear a session/catalog failure. `/possums-status` repeats the last diagnostic or displays the session-pinned release/expiry **without a network call**; local information is not proof of a healthy connection. Pi may still show its generic cached-models warning, but cached entries do not authorize inference.
-
-- `possums_approval_expired` / `possums_approval_unavailable`: obtain a newly independently approved client release; do not extend expiry or bypass pins locally.
-- `possums_manifest_unavailable` / `possums_manifest_mismatch`: install the extension **and its matching approved public manifest together**, then `/reload` or restart. Re-entering credentials cannot repair this pair.
-- `possums_evidence_unavailable`: public evidence could not be retrieved within connection limits. Classified GitHub/AMD acquisition transport/HTTP/rate-limit failures produce a warning-only host stop, not an authenticity bypass. Wait for rate limits or check connectivity, then start a new Pi session; failures remain cached within the old trust session. No credentials or inference are sent through unverified trust, no inference is replayed, and cached models never authorize dispatch. The v3 path avoids GitHub API discovery and separate AMD fetches; a cold cache still needs the exact release asset.
-- `possums_verification_failed`: the artifact or serving gateway could not be verified. Start a new Pi session to retry public verification. Do not trust a version merely advertised by the server or bypass verification; explicit manifests still require their matching approved client pins.
-- `possums_session_unavailable`: session setup (challenge/login) did not complete. This does not establish that the credential is invalid. Check connectivity; a deliberate `/login` can establish a fresh session without inference.
-- `possums_catalog_request_failed` / `possums_catalog_http_rejected`: catalog transport failed before a response, or the gateway returned an HTTP rejection. The latter includes only the observed status and recognized gateway code/detail, never response text or billing claims.
-- `possums_catalog_body_invalid` / `possums_catalog_validation_failed` / `possums_catalog_conversion_failed`: response reading/JSON decoding, catalog schema/quote validation, or conversion to Pi metadata failed, respectively. Refresh models and share only the closed diagnostic if it persists.
-- `possums_catalog_unavailable`: fallback for an unexpected catalog-stage failure. A previously authenticated session is not proof that it remains valid now. None of these catalog errors establishes an inference charge or refund.
-
-## Bounded deployment recovery (local source candidate; NOT installed)
-
-The operator replaced the historical native-only recovery permission with **caller-wide eligibility for otherwise authorized model requests**. Ordinary turns, native tool continuations and retry *setup*, trusted nested extensions, queued steering/follow-up and manual/automatic/split compaction *setup* can use one provider-owned memory-only scope: at most **three public deployment-recovery attempts total**, with delays 0/250/1000 ms. The scope starts with a new run and lasts through `agent_settled`; an admitted direct/nested model invocation without that lifecycle creates a provider-owned scope retained until explicit settlement, logout or session replacement. An idle compaction operation gets one scope shared by both native summaries and closes it only after its other live model callers finish. Known-expiry renewal and public setup recovery spend from the same three-attempt budget (0/250/1000 ms); overlapping callers coalesce rather than multiplying attempts. Starting another auth callback, a model refresh or a later summary does not mint another budget. Logout, account/session/run replacement or Stop invalidates obsolete work. Cache warming remains stopped. The current warning-only client source policy supersedes historical native transient generation retries. It does not retry an already-dispatched generation. Existing bounded pre-dispatch setup recovery is separate from inference and is not triggered by missing billing/terminal evidence.
-
-Healthy model calls use cached verified trust and bearer without extra public requests. Known local trust/bearer expiry is renewed only for an authorized model invocation using the existing approved authority, not on status/check/list. The following acquisition/hash description is historical legacy-v2 behavior; v3 recovery now performs full nonce-bound qualification and compares stable verified identity plus advancing freshness as described above. On a validated catalog or authenticated submission HTTP 401/403 `unauthorized`, or a **locally observed** submission endpoint-binding HTTP 422 with affirmative proof that `Channel.chat` has not begun, legacy recovery probed only the fixed public attestation and 41-byte EHBP wire configuration (one format byte plus 40 key-configuration bytes), without credentials. A plaintext/missing-nonce 422 establishes neither stale keys nor refund. If both hashes are unchanged, it stops before GitHub/AMD work. A changed hint requires the complete existing published or explicitly pinned manifest verifier—including publisher, hardware, certificate, key binding and expiry—then a fresh login and validated live catalog before an atomic replacement. The actual verified snapshot, not the hint, becomes the new baseline. A changed fully verified key can qualify even with the same version/measurement. An explicit manifest never changes authority or extends its administrative expiry.
-
-The prepared invocation and Pi payload hook run once. Immediately before dispatch, a synchronous provider-owned guard rechecks cancellation, current account/run/client and session. Only a pre-dispatch catalog or narrow local binding observation can retry setup. The operator-approved v3 correction additionally admits `trust/peer_key_mismatch` from an actual TLS peer **after** parsing/hostname/date validation, before any HTTP headers/body, and only while the inference-dispatch latch is false. It invokes the same complete verifier and guarded fresh authentication/catalog, never trusts the mismatched peer directly or retries the socket. Public-certificate mismatch, malformed/expired/wrong-host peers and generic integrity failures remain fatal. See [offline real-TLS/provider qualification](../../docs/pi-deployment-session-recovery-investigation.md#implemented-correction-and-follow-up-qualification). Other malformed/unauthenticated exceptions, service quiescing, other transport/crypto/stream failures, revoked credentials, removed models/tool profiles and after-dispatch failures do not authorize setup recovery or inference replay. Non-trust failures stop gracefully with warnings and retain resident session state. Identity/authenticity failures remain latched and cannot fall back to unconfirmed trust. The selected model and output allowance are never substituted. An uncertain submission-control outcome remains **billing unknown**, even if a subsequent authenticated generation settles. A new request may incur another charge. Status and diagnostics initiate no inference or recovery.
-
-This is offline synthetic source evidence, **not** an installed Pi client, a deployed gateway, a public candidate verifier, production health check, paid E2E or confirmation of upstream accounting. Actual Pi 1.0.4 lifecycle/native tool/compaction fixtures and the full SDK verification-orchestration fixture passed locally; AMD hardware crypto, DSSE/Rekor crypto, X509 parsing and public network are mocked in the isolated release fixture, never in the production build. See [current local E policy and historical distinctions](../../docs/blue-green-runtime-plan.md#packet-e--bounded-pi-deployment-recovery-before-inference), [native-permission historical finding](../../docs/blue-green-pi-qualification.md), [privacy data handling](../../PRIVACY.md#data-handling-boundaries), [forbidden exports](../../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data) and [synthetic testing](../../PRIVACY.md#synthetic-testing-exception). Pi/T3 may still persist normal history and assistant errors according to host settings; these checks add no logs, telemetry, evidence verdict cache or diagnostic bundle.
-
-## Explicit-submit expiry renewal (historically installed; superseded in E source)
-
-A fresh idle **interactive or RPC submission** can now renew expired published
-trust and known bearer expiry without `/new`, transcript loss or a conversation
-lifetime cap. The client was [locally installed after integrated qualification and review](../../docs/pi-timeout-renewal-installation.md);
-activation and live expiry remain unverified, and no gateway deployment occurred.
-Valid trust/auth remain cached: no unconditional per-turn public verification or login.
-
-Input/before-start hooks only mark intent. Renewal waits for the first native
-API-key auth resolution with the active run's abort signal, before inference.
-Stop during verification/login cancels that attempt; late results cannot restore
-its bearer/catalog or send its prompt. Credentials are sent only after fresh
-verification. Auth-only expiry can reuse valid trust.
-
-In the *previously installed* expiry-only build, trust stayed fixed during a tool loop, native retry, queued steering/follow-up, compaction and extension-originated work. The local E source candidate above explicitly supersedes that eligibility rule; it has not been installed. Ambiguous overlapping/handled input or nested extension runs fail closed;
-a later unambiguous explicit submission can renew. Failed expiry renewal is not
-replayed: check the diagnostic and submit a **fresh explicit turn** to retry it.
-Initial startup verification failures still follow the existing cached-failure
-behavior; this is not a general startup/login/reconnect redesign.
-
-Published validity remains **at most 12 hours, capped by certificate expiry**.
-Expiry is a verified-context bound, not transcript deletion, quote freshness,
-immediate revocation, anti-rollback or newestness. Explicit compiled approvals
-remain terminal at administrative expiry; no pins or expired certificates are
-extended. In that previously installed build, restart/revocation before known bearer expiry could produce a terminal unauthorized response. The local E source may probe narrowly observed pre-dispatch unauthorized setup without replaying generation; this does not guarantee recovery or prove that a credential is valid.
-
-The original Stop-in-an-awaited-`before_agent_start` finding remains true for that
-placement. Renewal uses a different, qualified signal-bearing path—not a host
-patch. See [placement, limits and offline checks](../../docs/pi-expiry-renewal-verification.md)
-and the [historical blocker](../../docs/pi-renewal-boundary-blocker.md).
-
-Historical installation note: `/reload` alone did not activate an earlier
-replacement in the operator's session; a full Pi restart was needed. The new
-local installation likewise requires a user-controlled full restart with Pi 1.0.4;
-no running Pi 1.1.0 activation is claimed. Incompatible verifier/CVM changes still
-require a client update.
-
-Version wording comes from the verified context, not a hard-coded latest-version message or remote advertisement. Discovery uses public GitHub metadata and an exact artifact download with one bounded GitHub-to-asset-CDN redirect; authenticity comes from the existing Sigstore and hardware checks, not HTTPS/download metadata alone. That historical legacy path used ordinary HTTPS for headers/bodyless GETs and EHBP for encrypted bodies/replies, without Node TLS socket pinning. The v3 candidate instead positively binds every actual peer before HTTP transmission. These connection attempts send no inference and verify the channel before prompting for or transmitting a recovery credential. They do not establish earlier billing. Notifications/status do not log, export telemetry or append session entries; native Pi error handling and persistence remain separate. No automatic code installer or updater is introduced.
-
-## Content-free failure reports (source candidate)
-
-Failures now carry a closed code, failing component/stage and constraint, an observed HTTP status when available, and locally authored next steps. Share **only the code/stage/constraint/status**, never credentials, history, screenshots, stack traces or raw server messages. `/possums-status` remains offline; diagnosing an error never starts inference. After explicit authorization, this diagnostic build was merged into local main and installed through the existing stable package link; [offline installation checks](../../docs/pi-diagnostic-verification.md#operator-authorized-local-merge-and-installation) passed. Running-session activation/live startup remain unverified; no gateway deployment occurred, and this does not establish the cause of the reported generic client error.
-
-- Public evidence failures identify release discovery, manifest redirect/download, attestation, AMD certificate, gateway certificate, provenance or endpoint keys, plus request/HTTP/rate-limit/binding/body/schema/operation constraint. The recovery branch's closed evidence observations were reused without its lifecycle changes.
-- `possums_trust_expired` identifies elapsed **session-pinned trust**, not expired authentication. Verification failures distinguish manifest, attestation preflight, combined SDK verification, publisher, certificate and endpoint-key configuration. The diagnostic predecessor required a new Pi session to verify again. The integrated installed client adds the explicit-submit renewal described above; the existing 12-hour/certificate bound is unchanged. Do not weaken pins.
-- `possums_authentication_http` identifies an observed authentication HTTP rejection; `unauthorized` no longer assumes expiry. Challenge, credential selection/entry, catalog request/body/validation/conversion and submission failures remain distinct. An HTTP status alone does not establish credential validity or billing.
-- Request encoding, verified transport encryption/fetch/binding/frame/decryption/UTF-8, stream JSON/schema/choice/delta/tool/finish/usage/receipt validation and missing finish/usage/DONE/EOF have separate constraints. Invalid streams never authorize tool execution. Interrupted delivery does not confirm a bare refund claim. Actually received authenticated monetary fields remain billing evidence, but do not authorize successful generation or tools.
-- Unexpected failures use a stable component-specific fallback such as `possums_provider_unexpected`, explicitly say the cause is unknown, and request only the content-free code for support. Post-receipt display-precision failures retain the authenticated settled outcome; numeric display failure does not undo a charge.
-
-For example: `[possums_stream_usage_missing] Stage: stream; constraint: usage_missing` means terminal usage was not delivered/validated; charge is unknown, not refunded. `[possums_provider_unexpected] Stage: provider; constraint: unexpected` means an unexpected local failure, **not** established trust expiry. Both include next steps and warn that a new submission may incur another charge.
-
-Pi 1.0.4 preserves authored authentication causes and assistant errors in the offline SDK fixtures. Its retry-backoff abort does drop the final `errorMessage`; the prior retry callback/session assistant still retains the diagnostic. T3's inspected source forwards provider errors/retry messages, but installed T3 rendering and extension-load/process-loss paths are external, unqualified boundaries. No whole-app “never generic” guarantee is claimed. No diagnostic logger, telemetry export or support bundler is added. Connection/status/compaction notices are transient; ordinary assistant `errorMessage` persistence still follows native Pi/T3 history settings, which this patch does not change. See [scoped verification and failure map](../../docs/pi-diagnostic-verification.md).
-
-### Last-known selection metadata (locally installed)
-
-After successful verified login/catalog validation, this candidate stores bounded public model metadata in Pi's existing `models-store.json`. When startup fails, a previously known ID remains selectable with the name **last-known metadata · prices/limits not current · inference unavailable**. Historical numeric costs/limits are not current quotes or authorization; only a current verified connection and live authenticated catalog can authorize a submission. Catalog contents remain outside the gateway measurement. No IDs are fabricated and no model is substituted.
-
-Selecting that known model lets Pi's native auth/assistant-error path report the current closed setup failure rather than a secondary `Model not found`. Reporting/status sends no inference and does not repeat failed setup. Successful recovery replaces discovery with the live catalog; a removed selected ID fails closed. First use, missing metadata or deleted credentials can still fail before the provider reports. Ordinary assistant errors may enter native Pi/T3 saved history; no diagnostic journal, telemetry or new credential store is added.
-
-Actual offline SDK/RPC discovery tests and SDK regression groups passed on Pi **1.0.4 and 1.1.0**; the current production build pin is **1.3.0**, with [separate offline qualification](../../docs/pi-1.3.0-qualification.md). This is not installed-client activation, T3 UI, deployed trust, live catalog or billing qualification. See [baseline reproduction, exact evidence and limits](../../docs/possums-only-diagnostics-verification.md). The subsequent [authorized local installation](../../docs/pi-client-cache-installation.md) passed live Pi 1.1.0 SDK startup, selection and one receipted inference; failure presentation in the actual installed T3 UI remains unverified.
-
-## Timeout alignment (client installed; gateway pending)
-
-The client removes the five-minute **total** chat/stream timer at every
-reference-client layer. Application send/header waits and rolling HTTP-byte
-inactivity waits are 600 seconds; healthy encrypted fragments/heartbeats do not
-need to produce a visible model event to stay active. Control/bootstrap operations
-remain finite, and Stop still aborts the client operation without promising remote
-cancellation or a refund. Parser/memory limits and native retry policy are unchanged.
-
-These are application settings, not a Tinfoil platform guarantee. Lower-level
-fetch/SDK limits remain separate (including Node 24.13.0's default Undici
-300-second header/body timers). The client is installed locally; corresponding
-gateway source changes are not deployed by this operation.
-See [scope and local checks](../../docs/provider-timeout-alignment.md).
-
-## Stream quota normalization (historical source packet; superseded)
-
-The source candidate removes the cumulative 64-MiB response-byte and 65,536 frame/event quotas. Individual HTTP chunks, ciphertext frames, SSE events and unfinished parser state remain bounded; encrypted framing, SDK decryption, inactivity limits and ordered finish/receipt/DONE/authenticated EOF checks are unchanged. EHBP 0.3.2's separate 64-MiB **per-ciphertext-chunk** ceiling is not a cumulative response limit and remains unchanged. The inspected installed OpenAI SDK streaming path likewise has no cumulative byte/event quota; this is a comparison, not evidence of unlimited safe allocation.
-
-The separately requested [request alignment candidate](../../docs/request-limit-alignment.md) increases the history envelope to 32 MiB and total chat upload time to 600 seconds, with existing structural defenses retained independently of the selected model's context window. [Anthropic documents 32 MB](https://platform.claude.com/docs/en/api/errors#request-size-limits) for Messages and Token Counting requests; that provider-specific byte limit does not qualify a larger gateway envelope or prove Tinfoil equivalence. This stream packet itself changes no history limit. No client installation, gateway deployment or live inference occurred. The requested live-tool quota, chat admission and delivery-backpressure changes are not implemented in this packet. See [scoped verification](../../docs/verification.md#client-cumulative-stream-quota-removal-candidate).
-
-## Live-tool quota removal (historical source packet; superseded)
-
-The source removes the 64-call, 64-KiB-per-call and 256-KiB-total live tool quotas. The gateway forwards argument fragments without a cumulative argument counter. It still bounds retained identity metadata; the client must retain arguments until authenticated terminal validation and defensively charges that state against the 32-MiB request-envelope allowance, including conservative record/string overhead. This does not promise 32 MiB of raw argument storage or unlimited tools. Parser/frame, identity/index/order, object-argument and terminal receipt checks remain. `possums_stream_tool_state` identifies the local retained-state boundary; legacy gateway quota diagnostics remain recognizable during rollout. See [evidence and exact allowance scope](../../docs/verification.md#live-tool-quota-removal--source-candidate).
-
-## Delivery backpressure and chat admission (gateway source candidate)
-
-The gateway candidate removes fixed Heavy/Ingress chat admission without a replacement gate. The existing connection and per-request defenses remain, but connections do not bound accepted disconnected work; no shared workload-memory envelope remains. It also waits for the existing eight-frame/64-KiB delivery buffer instead of discarding delivery when temporarily full. Disconnect wakes capacity waits and the gateway continues consuming and settling the same upstream request. A connected stalled reader can delay final usage/settlement and graceful drain until it reads or disconnects; no new delivery timeout is added. Receipt delivery is still not guaranteed and absence of a receipt means client billing is unknown. These are [source-only local checks](../../docs/verification.md#bounded-delivery-backpressure-without-frame-full-cutoff--source-candidate), not gateway deployment or installed-client activation.
-
-## Safety and billing
-
-- The recovery credential is saved by ordinary Pi authentication, normally in `~/.pi/agent/auth.json` (or the configured Pi agent directory). It is **plaintext at rest**, accessible to local tools/extensions with your permissions. Pi creates new auth files with mode `0600` and parent directories with `0700`; existing modes/ACLs are preserved. Bearer/catalog state remains memory-only, and request hooks receive a non-secret marker rather than the recovery key or bearer.
-- Discovery failure clears the provider's usable catalog. Every invocation independently refreshes and validates the authenticated catalog before obtaining a model-bound submission.
-- Text content, OpenAI function declarations/results and inline images on the documented vision models are supported by the paired source candidate above. Mixed-model/provider history uses Pi's supported conversion; thinking/signatures are not replayed, and original history is not modified. Images on text-only models, grammar/custom namespaces, arbitrary fetch/sampling/output-cap overrides and unsupported models are not dispatched; the client explains these as warnings. Transcript semantic admission is left to supported Pi conversion and the gateway. Tool-only assistant history uses empty text instead of null for [upstream tokenizer compatibility](../../docs/verification.md#live-pi-tool-only-tokenizer-compatibility-fix); calls and results are preserved without filler text.
-- Tool deltas are provisional. Identity/arguments may arrive separately. Pi receives final calls only after complete native finish, usable settled accounting, DONE and authenticated EOF; Pi owns parsing and lookup/schema validation. On missing/incomplete/refunded/length/failed delivery, terminal tool blocks are suppressed and the turn stops with a warning. Historical [split-stream evidence](../../docs/verification.md#live-pi-split-tool-stream-compatibility-fix) remains historical.
-- Pi owns ordinary steering, follow-up and continuation. Steering is queued until the current response/tool batch finishes; follow-up runs when the current task would finish. The extension does not impose a separate receipt-based run/continuation authorization guard. Tools still require validated arguments and authenticated terminal receipts before execution; cache warming remains blocked.
-- Current operator-approved warning-only source behavior supersedes native generation retry classification. No retry settings are changed; non-trust warnings simply do not enter the native error/retry path. Deliberate follow-up is a new submission and may incur another charge.
-- Length-limited output becomes a graceful host stop with a warning, retained paid text/usage and no executable tools or automatic regeneration. The gateway finish remains in receipt diagnostics. Host stop does not turn partial output into a successfully completed backend generation.
-- Receipt charges are authoritative. Display the gateway total directly; do not recompute or allocate input/cache/output charges. The current gateway supplies no exact components; Pi component zeros are explicitly unavailable, not free. Exact authenticated microunit strings remain in native diagnostics; ordinary received charges use Pi's native accounting without an extra notification, while actionable turn and unknown-billing warnings remain.
-- A disconnect/abort does **not** promise server cancellation or a refund. Without a valid receipt, billing is **unknown**, even when Pi's numeric usage placeholders are zero. A deliberate new request may pay for both generations. Warnings never trigger automatic inference retry; Stop does not undo earlier accepted work.
-
-## Tinfoil-aligned disconnect/accounting candidate
-
-The paired source candidate closes upstream work when the gateway observes a client disconnect and settles validated cumulative running usage on interruption. It forwards supported native event grouping and adds a separate complete/incomplete monetary receipt; maximum reservations, submitted quote rates and 30% markup remain. The current client source preserves actually received authenticated charges/outcomes even when later delivery is interrupted, never manufacturing a refund from a bare interrupted error claim. DONE and authenticated EOF remain required for tool authorization, not for erasing received monetary evidence. It does not depend on HTTP usage trailers. Other clients may opt in with `X-Tinfoil-Request-Usage-Metrics: true`; the qualified HTTP/1.1 trailer path also requires `TE: trailers`. Those metrics preserve provider published-cost semantics, not the user's marked-up charge; the authenticated body receipt remains authoritative for Possums billing. Paid incomplete receipts cannot authorize tools, and missing/truncated receipts still mean unknown billing even if Pi displays zero usage placeholders. These are local source/fixture changes, not an installed-client or deployment claim; historical installed receipt ordering above remains historical. Closing transport does not establish immediate upstream compute termination. See [implementation and verification scope](../../docs/tinfoil-aligned-accounting.md).
-
-## Native steering and retry source candidate (historical; superseded)
-
-This operator-approved client change passed local qualification and was copied to the operator's stable local package link. A fresh isolated installed Pi 1.0.4 SDK startup verified v0.0.17 and restored six authenticated models without inference. Interactive full restart and paid steering/retry behavior remain unverified; it is not a gateway deployment. See [installation evidence](../../docs/pi-steering-retry-verification.md#operator-approved-local-installation). It uses Pi 1.0.4's native agent retry budget/backoff for closed gateway operational failures: unavailable inference, tokenizer/generation send or HTTP failures, and upstream stream transport/idle/deadline failures. Gateway HTTP-failure details do not preserve the upstream status; this is gateway-failure classification, not evidence of an upstream 429 or 503. Retried failures retain their content-free code and observed refund or unknown-charge status; they no longer promise “Not replayed.”
-
-Authentication, insufficient credit, rejected/duplicate submissions, catalog/attestation/integrity/decoding validation, settlement errors, aborts and paid length-limited answers remain terminal. Local `ChannelError(uncertain)` and the new classified client transport/parser/hook diagnostics remain terminal. This diagnostic packet separates their causes but does not expand the previously approved gateway-only transient retry allowlist. This is narrower than SDK connection-error retries. No SDK wire protocol, gateway replay rule, idempotency or settlement behavior changes. Native compaction's separate no-retry and overflow-recovery cancellation behavior remains unchanged.
-
-## Balance/reconciliation removal (source only)
-
-The client source no longer reads gateway balances or registers `/possums-reconcile`. Intake is the ledger authority; the client does not replace this with completion counters or direct intake credentials. Authenticated per-request settlement/refund/usage receipts, cost display, unknown-billing warnings and tool-completion gates remain unchanged. Existing shipped artifacts are untouched and may still call the retired gateway balance route; this source change is not client installation or activation.
-
-The operator includes these Pi and reference-client changes in the same gateway integration PR. Only operator test accounts exist; no customer-data migration is required. The subsequent gateway deployment request does not authorize client installation/activation; including source in the PR does not replace the installed extension. Existing artifacts' retired balance commands will receive the deliberate closed 404. Installing/activating the paired client requires separate authorization and qualification; this is not a claim of full installed-client compatibility.
-
-Current clients opt into closed intake diagnostics using `x-possums-intake-diagnostics: v1`. They render only locally authored messages from validated code/operation/stage/constraint/status, never raw server errors. Diagnostics cannot establish billing, successful completion or tool authorization, and cannot initiate inference/replay. The normal scratch `check.mjs` harness includes `tests/intake_diagnostics.mjs` through the existing test-only entry; the shipped bundle gains no fixture exports.
-
-Privacy scope remains [data handling](../../PRIVACY.md#data-handling-boundaries), [forbidden telemetry](../../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data) and [typed failures](../../PRIVACY.md#typed-interface-failures-and-token-aggregate-extension). The synthetic receipt, interrupted-delivery and no-replay regressions remain in `tests/phase01_client.mjs`, `tests/phase02_client.mjs`, `tests/phase02_pi.mjs` and `tests/tor_client_failures.mjs`; no telemetry or persistence is added. The source-only `tests/intake_review/clients.mjs` runner independently exercises the current reference/Pi, stream-limit, forwarding and intake-diagnostic fixtures using existing pinned dependencies without installation or a release build.
-
-## Quota simplification candidate
-
-The source candidate removes advertised-tool/message counts, historical tool-call/argument quotas, the three-reservation-per-account quota and the independent generation semaphore. Existing body/parser/context, memory-admission and live-completion bounds remain: this does **not** permit unlimited parallelism. It needs a paired gateway/client rollout; neither gateway deployment nor local installation is included. See [removed and retained bounds](../../docs/quota-simplification.md).
-
-## Request encoding diagnostics (historical; superseded)
-
-The local source candidate gives pre-submission validation failures specific closed codes for tool names/IDs, schema shape/references, tool choice and history structure/order/arguments. `possums_request_conversion` separately means Pi SDK conversion failed for an unknown cause. These local failures sent no inference from this attempt; they do not establish earlier billing. Generic request-envelope rejections retain `possums_request_schema`; retry policy is unchanged.
-
-Conversion reuses Pi's supported OpenAI helper. Local-reference/combinator schema roots need not repeat `type`, absent descriptions stay absent, and completed history can refer to retired tools. No constraints, tools or history are silently removed; live tool execution still requires current declarations and authenticated successful completion. A synthetic large reply plus simulated thirty-minute pause passed, but the live incident's cause remains unknown. This candidate is not installed. See [offline checks and 256-case fuzz evidence](../../docs/pi-request-admission-verification.md#requested-request-preparation-follow-up-steps-14).
-
-`possums_request_json_depth` means local request encoding exceeded the defensive **32-level** JSON nesting limit. Simplify deeply nested tool schemas or history; this attempt sent no inference request and was not replayed. Tool schemas count inside the full request envelope, not in isolation. Byte/node ceilings and live-completion tool bounds still apply; the source candidate above removes historical tool-count quotas. This diagnostic does not establish billing for earlier attempts; post-submission transport failures still report unknown billing. See the [offline fix evidence](../../docs/verification.md#local-pi-json-depth-compatibility-fix).
-
-## Compaction
-
-Manual `/compact` and automatic threshold compaction use **Pi's native `compact()` helper**, now source-qualified on **1.3.0**, with the selected model and ordinary native authentication. Pi owns serialization, prompts, previous-summary merging, split turns, file tracking, successful usage totals and checkpoint/context pruning. Other providers are unchanged; no settings are registered or changed.
-
-Compaction is paid harness summarization, not a new Tinfoil endpoint. It makes one summary call, or at most two sequential native calls for a split turn, with **no retry policy**. Only the private, model-bound summary callback ignores Pi's advisory output-token hint; ordinary output overrides remain rejected. The gateway still reserves the selected model's full output allowance at its submitted rate. Summary requests have no tools and cannot emit executable calls.
-
-Recovery compaction with `willRetry=true` is cancelled: compaction cannot authorize replay of an uncertain prior generation. Errors, length-limited/aborted/empty summaries, tool attempts and stale session/auth responses create **no checkpoint** and do not fall back to another summarizer. A short transient notification preserves the safe failure category/stage and observed settled charges, including a successful first summary when the second fails. Failed compaction does not undo settled charges; abort does not promise cancellation or refund. Failure charges are not added to a persistent local error ledger or checkpoint, so session totals need not include them. A deliberate `/compact` may incur new charges; `/new` starts fresh context instead.
-
-Offline actual-SDK regressions cover this path. No live summary or additional model qualification is claimed.
-
-## Local privacy boundary
-
-This is an ordinary Pi extension, outside the gateway measurement. Pi and its installed extensions/tools can see plaintext and have host authority. Pi normally saves plaintext sessions; `--no-session` disables that session file, not saved authentication or every possible cache, log, tool write, screenshot, bug report, or export. Do not use `/share`, `/export`, or transcript-bearing support artifacts for sensitive sessions. Do not paste credentials into conversation messages or shell commands.
-
-The custom provider uses no local prompt cache and makes no telemetry export. The session-cache integration candidate reuses upstream volatile prefixes within the existing API login using a server-owned random scope; conversation reset keeps it, separate login/restart does not. Cache warming remains stopped. Authenticated receipts preserve actual total charge; prompt input stays the gateway's inclusive count, while cache reads and total tokens are reported independently, not added to reconstruct usage or charges. Missing cache counts are unavailable, not a confirmed miss (`cacheUsageAvailable: false`); Pi's required numeric zero is only a fallback. Input/cache/output charge components are unavailable (`costComponentsAvailable: false`): their zeros are placeholders, not free inference. The client never reconstructs components from quotes or assigns rounding residue to output. These availability fields are in the native receipt diagnostic, including partial settlements; they do not authorize tools. See [source integration and privacy limits](../../docs/prompt-caching-plan.md). This does not establish a no-retention or no-telemetry guarantee for the whole Pi process, its other extensions, or the operating system. Changing away from Possums can send retained history through another provider; start a fresh session when changing trust boundaries.
+`build.sh` refuses to run unless `POSSUMS_PI_ROOT` is absolute, Node reports exactly
+`v24.13.0`, and all three `@earendil-works/pi-*` packages are present under that
+root. Those pins are load-bearing; do not relax them to get past an error.
+
+## Use
+
+`/login`, choose Possums, paste your recovery credential. Pi stores it through its
+normal `auth.json`, which is plaintext at rest — see [Credential](https://github.com/ajbt200128/possums#privacy).
+
+Public evidence and key binding are verified **before** the credential prompt
+appears, so a wrong or untrustworthy gateway never sees it.
+
+Then select a model with `/model possums`. With `enabledModels` patterns set, Pi
+resolves its scoped list at startup — press **Tab** in the picker to switch from
+`scoped` to `all` if the list is empty. That changes the view, not your saved filter.
+
+`/possums-status` repeats the last diagnostic or shows the session-pinned release
+and expiry. It makes no network call, so it is not proof the connection is healthy.
+
+`/possums-text-only` removes tool declarations for the current session if you pick
+an unqualified model. The command alone is not a lock — another extension can
+re-enable tools before a turn — and a remaining tool declaration fails closed as
+`possums_tools_unsupported` before any inference request.
+
+## Failures
+
+Non-trust failures stop the turn with a warning and never retry inference. Backend
+identity failures are fatal and block later requests. A deliberate new turn may
+incur another charge — an interrupted stream is **not** a refund, and billing is
+**unknown** without an authenticated receipt.
+
+Share only the code, stage, constraint and HTTP status. Never credentials, history,
+screenshots or raw server messages.
+
+| Code | Means |
+| --- | --- |
+| `possums_verification_failed` | Artifact or gateway could not be verified. Start a new Pi session. |
+| `possums_evidence_unavailable` | Public evidence could not be fetched. Often GitHub/AMD rate limiting. |
+| `possums_manifest_mismatch` | Extension and manifest must be installed together. Re-login cannot fix it. |
+| `possums_session_unavailable` | Challenge/login did not complete. Says nothing about credential validity. |
+| `possums_catalog_*` | Catalog transport, rejection, decoding or validation failed. Refresh models. |
+| `possums_stream_usage_missing` | No terminal usage delivered; charge unknown, not refunded. |
+
+Unexpected failures report a component-specific fallback that says the cause is
+unknown. That is the honest answer, not a placeholder.
+
+## Tor mode
+
+You need a SOCKS listener — Tor Browser on 9150 or a system Tor on 9050. The client
+never starts Tor, and never falls back to clearnet.
+
+`pi --possums-tor-onion <v3-onion> --possums-tor-proxy 127.0.0.1:19050`
+
+The proxy flag defaults to `127.0.0.1:19050` and must be numeric loopback
+(`127.x.x.x` or `::1`); destination DNS happens at the SOCKS layer. If your
+listener wants credentials, set both variables in the environment — never on the
+command line:
+
+`POSSUMS_TOR_PROXY_USERNAME=… POSSUMS_TOR_PROXY_PASSWORD=…`
+
+Selection is locked at first trust; changing it later fails closed. The full wire format and
+endorsement checks are in [`docs/tor-client-setup.md`](../../docs/tor-client-setup.md).
+
+## What it verifies
+
+- **Release provenance** — Sigstore-signed manifest tied to an exact
+  `repository@tag@sha256:digest`, with complete predicate JSON equality.
+- **Endpoint binding** — every GET and POST opens a fresh TLS socket that must prove
+  possession of the endorsed SPKI, with native hostname and date validation,
+  before any HTTP header or body is sent. No redirects, no proxies, no pooling,
+  no session resumption.
+- **Freshness** — a new 32-byte nonce per trust session; trust expires at the
+  minimum of 12 hours, certificate expiry and witness expiry, rechecked at handoff.
+- **Bodies** — EHBP encryption and stream decoding, using the supported library.
+
+A cache in `$XDG_CACHE_HOME/possums/` keeps the public manifest so warm startups
+need zero GitHub or AMD downloads. Every hit still runs the complete verifier. No
+evidence, verdict, nonce, credential or prompt is ever persisted.
+
+## Limits
+
+- Pi, its installed extensions and tools, and your OS are outside the attestation.
+  They can read plaintext and have host authority.
+- Pi saves plaintext sessions by default. `--no-session` disables the session file
+  only — not your auth file, tool writes, screenshots or exports. Never `/share`
+  or `/export` a sensitive session, and never paste a credential into a message.
+- Attestation proves a measured code identity. It does not prove retention is
+  impossible under runtime compromise.
+- The gateway reserves the selected model's maximum cost before sending your
+  prompt, and refuses unaffordable requests rather than substituting a model or
+  lowering the output cap.
+- Tool calls only execute after authenticated successful completion. Provisional
+  fragments never authorize execution.
+- Compaction uses Pi's native `compact()`, so it is paid harness summarization, not
+  a Tinfoil endpoint. It makes one summary call (two for a split turn) with **no
+  retry**.
+- Changing to another provider can send retained history to them. Start a fresh
+  session when changing trust boundaries.
+
+Client build pins: Go 1.27.2, Node 24.13.0, Pi 1.3.0, TypeScript 5.9.3, esbuild
+0.25.10, Rust 1.92.0. Evidence for each is in [`docs/`](../../docs/).
