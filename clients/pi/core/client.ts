@@ -436,9 +436,6 @@ export class ReferenceClient {
   #bearer: string | undefined;
   #authExpiresAt: number | undefined;
   constructor(readonly channel: Channel) { Channel.requireVerified(channel); }
-  static async verified(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array): Promise<ReferenceClient> {
-    return new ReferenceClient(await Channel.api(bundle, manifest, keyConfig));
-  }
   static async published(bundle: Uint8Array, manifest: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal): Promise<ReferenceClient> {
     return new ReferenceClient(await Channel.published(bundle, manifest, keyConfig, signal));
   }

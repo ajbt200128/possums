@@ -26,10 +26,11 @@ async function rejects(name, fn, code) {
 }
 const meta = await load(path.join(fixtureDir, 'fixture.json'));
 const key = new Uint8Array(Buffer.from(meta.config, 'hex'));
-const origin = prod.API_APPROVALS[0].origin;
-// Approval expiry is deterministic; incomplete API evidence must fail without network access.
-assert.throws(() => prod.checkApproval(prod.API_APPROVALS[0].expires, prod.API_APPROVALS[0].expires, false)); passed++;
-await rejects('incomplete production API evidence', () => prod.Channel.api(bytes({}), bytes({}), key));
+const origin = prod.PUBLISHER.origin;
+// Trust-session expiry is deterministic; the compiled-approval path is gone.
+assert.equal(prod.Channel.api, undefined, 'compiled-approval channel path removed'); passed++;
+assert.throws(() => prod.checkApproval(Date.now(), Date.now(), false)); passed++;
+await rejects('incomplete production API evidence', () => prod.Channel.published(bytes({}), bytes({}), key));
 for (const bad of [key.slice(0,40), new Uint8Array(42), Uint8Array.from(key, (v,i) => i===2 ? 0x21 : v), Uint8Array.from(key, (v,i) => i===40 ? 1 : v)]) {
   assert.throws(() => prod.validateKeyConfig(bad, meta.key)); passed++;
 }
@@ -37,7 +38,7 @@ const wrongKey = key.slice(); wrongKey[3] ^= 1;
 assert.throws(() => prod.validateKeyConfig(wrongKey, meta.key)); passed++;
 assert.throws(() => prod.checkApproval(Date.now(), Date.now()-1, false)); passed++;
 assert.throws(() => prod.checkApproval(Date.now(), Date.now()+1000, true)); passed++;
-await rejects('incomplete production API attestation input', () => prod.Channel.api());
+await rejects('incomplete production API attestation input', () => prod.Channel.published());
 assert.throws(()=>new prod.Channel(Symbol(),origin,{})); passed++;
 await rejects('fixture disabled in production build', () => prod.Channel.fixture('https://localhost:18443', key, meta.key));
 await rejects('fixture cannot select production', () => fixture.Channel.fixture(origin, key, meta.key));
@@ -98,9 +99,10 @@ async function admissionRegressions({productionURL, fixtureURL, meta}) {
     check(getterCalls === 0, name+' accessor invocation');
     checks++;
   }
-  await beforeWork('incomplete production API attestation input',()=>m.Channel.api());
+  await beforeWork('incomplete production API attestation input',()=>m.Channel.published());
   await beforeWork('production fixture disabled',()=>m.Channel.fixture(meta.origin,config,meta.key));
-  await beforeWork('fixture cannot select production',()=>f.Channel.fixture(m.API_APPROVALS[0].origin,config,meta.key));
+  await beforeWork('fixture cannot select production',()=>f.Channel.fixture(m.PUBLISHER.origin,config,meta.key));
+  check(m.PUBLISHER.origin === 'https://gateway.possums.dev', 'production origin is the published custom domain');
   await beforeWork('wide encodeChat',()=>m.encodeChat(wideChat),10);
   await beforeWork('wide public chat',()=>c.chat(wideChat,bearer),10);
   check(m.encodeChat({...chat,messages:[wideMessage]}).length>0,'native wide nested message'); checks++;
@@ -271,7 +273,7 @@ try {
     caches.open=()=>{persistenceCalls++;throw new Error('persistence forbidden');};
     const m=await import('/channel.mjs');
     let rejected=false;
-    try {await m.Channel.api(new TextEncoder().encode('{}'),new TextEncoder().encode('{}'),new Uint8Array(key));}catch{rejected=true;}
+    try {await m.Channel.published(new TextEncoder().encode('{}'),new TextEncoder().encode('{}'),new Uint8Array(key));}catch{rejected=true;}
     return {rejected,persistenceCalls,localStorage:localStorage.length,sessionStorage:sessionStorage.length};
   },{key:Array.from(key)});
   assert.deepEqual(result,{rejected:true,persistenceCalls:0,localStorage:0,sessionStorage:0});

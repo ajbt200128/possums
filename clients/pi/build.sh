@@ -44,15 +44,7 @@ mkdir "$S/verifier"
 cp "$V3/verifier.wasm" "$V3/wasm_exec.cjs" "$V3/GO-LICENSE" "$V3/verifier-build-report.json" "$S/verifier/"
 cp "$REPO/clients/pi/core"/*.ts "$S/source/clients/pi/core/"
 cp "$REPO/clients/pi/core"/*.json "$S/source/clients/pi/core/"
-# Retain the exact pre-migration acquisition fixture for legacy-v2 regression
-# tests only. The authorizing extension never imports this scratch-only file.
-cp "$REPO/tests/fixtures/pi-v2-bootstrap.ts" "$S/source/clients/pi/legacy-bootstrap.ts"
-"$NODE" -e 'const fs=require("node:fs"),crypto=require("node:crypto"); if(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex")!=="74a0d6e01fdbb60b9a4d959889f6a0eae62bdfc8d5cfc28efc1b47144eae9f61") throw new Error("possums_build_legacy_fixture: retained bootstrap bytes changed; restore the pinned fixture before building")' "$S/source/clients/pi/legacy-bootstrap.ts"
-# The pinned fixture's bytes are fixed by the hash above, so its historical
-# `../../examples/phase01/` imports cannot be edited. The client core moved to
-# clients/pi/core; provide only the old directory shape the fixture expects.
-ln -s ../clients/pi/core "$S/source/examples/phase01"
-for TEST in intake_diagnostics phase01_client phase01_transport phase01_stream_limits tinfoil_forwarding_client phase02_client phase02_pi phase02_thinking phase02_diagnostics phase02_release phase02_cache phase02_manifest_cache phase02_discovery phase02_v3 phase02_v3_package phase02_peer_recovery tor_channel tor_selection tor_diagnostics tor_client_failures tor_identity_verifier_wasm tor_setup; do
+for TEST in intake_diagnostics phase01_client phase01_transport phase01_stream_limits tinfoil_forwarding_client phase02_client phase02_pi phase02_thinking phase02_diagnostics phase02_cache phase02_manifest_cache phase02_discovery phase02_v3 phase02_v3_package phase02_peer_recovery tor_channel tor_selection tor_diagnostics tor_client_failures tor_identity_verifier_wasm tor_setup; do
   cp "$REPO/tests/$TEST.mjs" "$S/checks/source/"
 done
 mkdir -p "$S/checks/source/fixtures"

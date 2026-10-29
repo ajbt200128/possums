@@ -1,10 +1,10 @@
 // Explicit test entry only. build.mjs never emits or distributes this bundle.
 export { default as extension } from './index.js';
 export { PossumsProvider } from './provider.js';
-export { connect, connectPublished, recoverCompiled } from './bootstrap.js';
+export { connectPublished, recoverPublished } from './bootstrap.js';
 export { publicEvidence, publicManifest, evidenceDirectory } from './evidence-cache.js';
 export { ConnectionFailure, EvidenceObservation, connectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
-export { API_APPROVALS, PUBLISHER, qualifyPublished } from './core/approval.js';
+export { PUBLISHER, qualifyPublished } from './core/approval.js';
 export { invocation } from './wire.js';
 export { thinkingMetadata, simpleThinking } from './thinking.js';
 export { reasoningOptions, reasoningParams, admitReasoning } from './core/reasoning.js';

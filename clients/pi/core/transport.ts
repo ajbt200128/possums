@@ -3,14 +3,14 @@ import { qualifyV3, qualifyTorV3, V3_EVIDENCE_LIMIT, type V3Input, type TorV3Inp
 import { TorConnection, TorNativeTransportFailure, isTorConnectionFailure, collectTorBody } from '../tor-connection.js';
 import { CatalogFailure, GatewayError, gatewayError } from './client.js';
 import { IntakeFailure } from './intake-diagnostics.js';
-import { PUBLISHER, qualifyApi, qualifyPublished, requireApiApproval, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';
+import { PUBLISHER, qualifyPublished, validateKeyConfig, checkApproval, type PublishedRelease } from './approval.js';
 import { LIMITS, ChannelError, DiagnosticFailure, OperationFailure, type FailureConstraint, Operation, cleanup, collect, parseJSON, requireThat, serialize, utf8 } from './limits.js';
 import { admitInvocation, fields, type Chat } from './tools.js';
 export type { Chat, Invocation, Message, Tool, ToolChoice, ToolCall, JSONObject, JSONValue } from './tools.js';
 export type { LiveModel, Receipt, CompletionOptions, CompletionEvent, ChatOptions } from './client.js';
 export type ResponseInfo = Readonly<{ status: number; contentType: 'text/event-stream' | 'application/json' | null }>;
 export type ResponseOptions = { signal?: AbortSignal; onResponse?: (response: ResponseInfo) => void | Promise<void> };
-export { API_APPROVALS, validateKeyConfig, checkApproval } from './approval.js';
+export { PUBLISHER, validateKeyConfig, checkApproval } from './approval.js';
 export { LIMITS, serialize, parseJSON } from './limits.js';
 export { ReferenceClient, PreparedChat, consumeCompletion, validateModels } from './client.js';
 declare const __PHASE01_FIXTURE__: boolean;
@@ -136,16 +136,6 @@ export class Channel {
   }
   static requireVerified(value: unknown): asserts value is Channel {
     requireThat(typeof value === 'object' && value !== null && #identity in value);
-  }
-  static async api(bundleBytes?: Uint8Array, manifestBytes?: Uint8Array<ArrayBuffer>, keyConfig?: Uint8Array): Promise<Channel> {
-    const approval = requireApiApproval();
-    requireThat(bundleBytes && manifestBytes && keyConfig && bundleBytes.length <= LIMITS.bundle && manifestBytes.length <= LIMITS.provenance && keyConfig.length === LIMITS.key);
-    // Keep verification and channel construction on the SAME immutable snapshots.
-    const bundle = new Uint8Array(bundleBytes), manifest = new Uint8Array(manifestBytes), config = new Uint8Array(keyConfig);
-    await qualifyApi(bundle, manifest, config);
-    return new Channel(channelAuthority, approval.origin, await Identity.unmarshalPublicConfig(config), () => {
-      requireThat(requireApiApproval() === approval);
-    }, Object.freeze({ tag: approval.tag, expires: approval.expires }));
   }
   static async published(bundleBytes: Uint8Array, manifestBytes: Uint8Array<ArrayBuffer>, keyConfig: Uint8Array, signal?: AbortSignal): Promise<Channel> {
     let constraint: FailureConstraint = 'schema';

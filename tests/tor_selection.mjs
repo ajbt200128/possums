@@ -64,10 +64,8 @@ try {
       b.onResolve({ filter: /^\.\/tor-connection\.js$/ }, args => args.importer.endsWith('/index.ts') ? { path: 'scope', namespace: 'synthetic' } : undefined);
       b.onLoad({ filter: /.*/, namespace: 'synthetic' }, args => ({ contents: args.path === 'bootstrap' ? `
         export const connectPublished = signal => globalThis.__selectionConnect('clearnet', undefined, signal);
-        export const connect = (_manifest, signal) => globalThis.__selectionConnect('manifest', undefined, signal);
         export const connectTorPublished = (scope, signal) => globalThis.__selectionConnect('tor', scope, signal);
         export const recoverPublished = (previous, signal) => globalThis.__selectionConnect('clearnet', undefined, signal, previous);
-        export const recoverCompiled = (previous, _manifest, signal) => globalThis.__selectionConnect('manifest', undefined, signal, previous);
         export const recoverTorPublished = (previous, scope, signal) => globalThis.__selectionConnect('tor', scope, signal, previous);
       ` : `import { prepareTorConnection as actual } from ${JSON.stringify(realTor)};
         export function prepareTorConnection(proxy, onion) {
@@ -92,8 +90,8 @@ try {
       message: message => handlers.get('message_end')({ message }, ctx), refreshes: () => refreshes };
   }
   await check('pure parser requires explicit onion and bounded numeric loopback authority', async () => {
-    const input = { manifest: undefined, onion: undefined, proxy: undefined };
-    assert.deepEqual(m.parseTorSelection(input), { route: 'clearnet', manifest: undefined });
+    const input = { onion: undefined, proxy: undefined };
+    assert.deepEqual(m.parseTorSelection(input), { route: 'clearnet' });
     for (const [proxy, host, port] of [[undefined, '127.0.0.1', 19050], ['127.0.0.2:9050', '127.0.0.2', 9050], ['[::1]:19050', '::1', 19050]]) {
       const selected = m.parseTorSelection({ ...input, onion, proxy });
       assert.deepEqual(selected, { route: 'tor', onion, host, port }); assert(Object.isFrozen(selected));
@@ -103,28 +101,26 @@ try {
       '127.0.0.1:9050/path', 'socks5h://127.0.0.1:9050', '127.0.0.1:9050\n', hostile]) {
       assert.throws(() => m.parseTorSelection({ ...input, onion, proxy }), error => error.code === 'tor_selection_invalid' && !error.message.includes(hostile));
     }
-    for (const bad of [{ ...input, proxy: '127.0.0.1:19050' }, { ...input, onion, manifest: '/synthetic' },
+    for (const bad of [{ ...input, proxy: '127.0.0.1:19050' },
       { ...input, onion: onion.toUpperCase() }, { ...input, onion: 'http://' + onion }, { ...input, onion: hostile }]) {
       assert.throws(() => m.parseTorSelection(bad), error => error.code === 'tor_selection_invalid' && !error.message.includes(hostile));
     }
   });
   await check('selection factory locks all flags synchronously including rejected selections', async () => {
-    let input = { manifest: undefined, onion: undefined, proxy: undefined };
+    let input = { onion: undefined, proxy: undefined };
     const select = m.createTorSelection(() => input);
     input = { ...input, onion }; const selected = select(); assert.equal(selected.route, 'tor');
-    for (const field of ['manifest', 'onion', 'proxy']) {
+    for (const field of ['onion', 'proxy']) {
       const saved = input; input = { ...input, [field]: hostile };
       assert.throws(select, error => error.code === 'route_selection_changed' && !error.message.includes(hostile)); input = saved;
     }
     assert.equal(select(), selected);
-    let manifest;
-    const direct = m.createTorSelection(() => ({ manifest, onion: undefined, proxy: undefined }));
+    const direct = m.createTorSelection(() => ({ onion: undefined, proxy: undefined }));
     assert.equal(direct().route, 'clearnet');
-    manifest = '/synthetic-manifest';
-    assert.throws(direct, error => error.code === 'manifest_mismatch');
-    let rejected = { manifest: '/synthetic', onion, proxy: undefined };
+    // A rejected selection still locks: the retry reports the change, not a re-parse.
+    let rejected = { onion: hostile, proxy: undefined };
     const invalid = m.createTorSelection(() => rejected);
-    assert.throws(invalid, error => error.code === 'tor_selection_invalid'); rejected = { ...rejected, manifest: undefined };
+    assert.throws(invalid, error => error.code === 'tor_selection_invalid'); rejected = { onion: undefined, proxy: undefined };
     assert.throws(invalid, error => error.code === 'route_selection_changed');
   });
   await check('default extension factory/status do not read Tor secrets, create scopes or connect', async () => {
@@ -136,8 +132,8 @@ try {
     await ext.status(); await ext.shutdown();
     assert.equal(prepares, helpers); assert.equal(envReads, reads);
   });
-  await check('manifest plus Tor and proxy without onion reject before secret reads or traffic', async () => {
-    for (const flags of [{ 'possums-tor-onion': onion, 'possums-manifest': '/synthetic' }, { 'possums-tor-proxy': '127.0.0.1:19050' }]) {
+  await check('proxy without onion rejects before secret reads or traffic', async () => {
+    for (const flags of [{ 'possums-tor-proxy': '127.0.0.1:19050' }]) {
       const before = connects.length, reads = envReads, helpers = prepares;
       const ext = extension(flags); await ext.start();
       assert.equal(ext.provider.currentFailure.code, 'tor_selection_invalid'); assert.equal(connects.length, before);
@@ -157,15 +153,13 @@ try {
       assert(!ext.warnings.join('').includes(hostile)); await ext.shutdown();
     }
   });
-  await check('host route/manifest mutation cannot silently change subsequent sessions', async () => {
+  await check('host route mutation cannot silently change subsequent sessions', async () => {
     proxyEnv({});
     for (const initial of [{}, { 'possums-tor-onion': onion }]) {
-      for (const flag of ['possums-manifest', 'possums-tor-onion', 'possums-tor-proxy']) {
+      for (const flag of ['possums-tor-onion', 'possums-tor-proxy']) {
         const ext = extension(initial); await ext.start(); const before = connects.length;
         ext.flags.set(flag, hostile); await ext.start();
-        const expected = initial['possums-tor-onion'] === undefined && flag === 'possums-manifest'
-          ? 'manifest_mismatch' : 'route_selection_changed';
-        assert.equal(ext.provider.currentFailure.code, expected); assert.equal(connects.length, before);
+        assert.equal(ext.provider.currentFailure.code, 'route_selection_changed'); assert.equal(connects.length, before);
         await ext.status(); assert(!ext.warnings.join('').includes(hostile)); await ext.shutdown();
       }
     }
