@@ -285,6 +285,7 @@ try {
   for (const length of [0, 9, 10, 17, 18, 19]) badEnvelope.push([`truncated-${length}`, gzip.subarray(0, length)]);
   for (const [name, offset, value] of [
     ['magic', 0, 0], ['method', 2, 0], ['text-flag', 3, 1], ['reserved-flags', 3, 0xe0],
+    ['timestamp', 4, 1], ['unknown-compression-flag', 8, 0x41], ['unknown-platform', 9, 0x41],
     ['raw-invalid', 10, 7], ['crc', gzip.length - 8, gzip[gzip.length - 8] ^ 1],
     ['isize', gzip.length - 4, gzip[gzip.length - 4] ^ 1],
   ]) {

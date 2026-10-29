@@ -195,8 +195,9 @@ async function readTarball(file, inventory) {
     const archiveSize = Number(stat.size);
     const header = readEnvelopeBytes(fd, GZIP_HEADER_BYTES, 0);
     const footer = readEnvelopeBytes(fd, GZIP_FOOTER_BYTES, archiveSize - GZIP_FOOTER_BYTES);
-    // A fixed envelope forbids optional identifying text and extra fields.
-    if (!header.subarray(0, 4).equals(Buffer.from([0x1f, 0x8b, 8, 0]))) reject('archive');
+    // No optional text, timestamp, or unknown encoder/platform metadata may hide here.
+    if (!header.subarray(0, 4).equals(Buffer.from([0x1f, 0x8b, 8, 0])) || header.readUInt32LE(4) !== 0 ||
+        ![0, 2, 4].includes(header[8]) || ![3, 255].includes(header[9])) reject('archive');
     let tar;
     try {
       const require = createRequire(import.meta.url);
