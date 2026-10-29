@@ -238,6 +238,16 @@
           checks = self.checks.${system};
           packages = [ pkgs.tor ];
         };
+        # Compiler/inspection tools are opt-in. Select exact Node/npm separately
+        # (CI uses pinned setup-node); the producer checks both before building.
+        devShells.pi-client = pkgs.mkShellNoCC {
+          packages = [ piNativeToolchain attestationGo
+            pkgs.python312 (pkgs.lib.getBin pkgs.git)
+            (pkgs.lib.getBin pkgs.binutils-unwrapped) pkgs.cacert ];
+          POSSUMS_PI_NATIVE_TARGET = piNativeTarget;
+          SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+          GOTOOLCHAIN = "local";
+        };
         devShells.pi-native = pkgs.mkShellNoCC {
           packages = [ piNativeToolchain pkgs.python312 pkgs.cacert ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.binutils ];
