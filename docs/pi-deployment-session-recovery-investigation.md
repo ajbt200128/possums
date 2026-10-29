@@ -32,7 +32,7 @@ successful generation, settlement or refund. Earlier billing remains unknown.
   endpoint-binding 422 observations, with the prepared request not dispatched.
   `trust/certificate` is ineligible. `trustFailure()` makes it fatal and
   `recoveryBlocked` prevents subsequent dispatch in that resident context.
-- [`ReferenceClient.chatPrepared()`](../examples/phase01/client.ts): refresh the
+- [`ReferenceClient.chatPrepared()`](../clients/pi/core/client.ts): refresh the
   catalog, obtain a submission token, then set the monotonic dispatch latch before
   `Channel.chat`. A failure in that chat call is conservatively post-dispatch,
   even if TLS subsequently withholds HTTP. Never lower or reinterpret this latch.

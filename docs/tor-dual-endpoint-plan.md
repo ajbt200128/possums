@@ -43,8 +43,11 @@ successful early Tor binaries; the separate full rerun passed. Cause remains
 unknown, and no test was changed to hide it. The reviewer also reported its
 broader filtered command timeout; its eleven focused tests passed.
 
-The revised optional [developer helper](tor-development.md) passed seven offline
-stub checks. Nix now compiles the shipping gateway with Tor support, while runtime
+The optional foreground developer helper this plan anticipated was implemented,
+then removed and deliberately not restored: it only launched a Tor process the
+developer can start themselves, and the client's supported path is an existing
+SOCKS listener. Its design record is deleted rather than kept as dead
+instructions. Nix compiles the shipping gateway with Tor support, while runtime
 activation remains explicit/default-off. Nix parsing/evaluation and local checks
 are not measured Linux artifact qualification or deployment.
 

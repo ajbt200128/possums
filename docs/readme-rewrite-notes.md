@@ -63,7 +63,6 @@ a README quickstart that pretends otherwise.
 | `examples/phase01/README.md` | Rewrite — mostly historical | Contributor reviving the reference client |
 | `docs/development.md` | Good; needs setup gaps filled | Contributor |
 | `docs/tor-client-setup.md` | Right content, wrong shape | Pi user enabling Tor |
-| `docs/tor-development.md` | Fixed banners; helper is a design record | Contributor |
 | `docs/pi-client.md` | Leave — superseded plan, correctly labelled | — |
 | `vendor/tinfoil/README.md` | Leave — upstream, vendored | — |
 | `vendor/tor-*-0.47.0/README.md` | Leave — upstream, vendored | — |
@@ -187,12 +186,6 @@ format. Split it:
 Add to the user guide, because nothing says it today: *selecting Tor does not
 start Tor.* The client speaks to an existing listener; it never launches a daemon.
 
-### 3.6 `docs/tor-development.md` — banner fixed, one residual
-
-Banners now state that `possums-tor` is absent and that its test module was
-deleted. If the helper is going to be restored, this file should be rewritten as
-live docs; if not, the "Optional foreground client" section should probably be
-deleted outright rather than kept as a design record nobody reads.
 
 ### 3.7 `AGENTS.md` — not a README, but blocks the reader
 
@@ -422,8 +415,7 @@ Then §4.4's six calls.
 - `devenv.nix` reported "Rust 1.88" in its shell banner while `rust-toolchain.toml`
   pins 1.92.0; `docs/development.md` had the same stale number.
 - `docs/tor-development.md` presented `devenv shell possums-tor` as a working
-  command. The script does not exist in `devenv.nix`, and its test module
-  `tests/test_tor_development.py` was deleted in `28cbaf64`.
+  command. The script does not exist in `devenv.nix`; the page was deleted.
 
 ## 7. Found and deliberately not fixed
 
@@ -438,13 +430,10 @@ Then §4.4's six calls.
 - `AGENTS.md` structure (§3.7) — needs operator judgment on which dated
   authorizations are still live.
 
-## 8. Open questions for you
+## 8. Answered
 
-1. Is the reference client (`examples/phase01`) still meant to be usable, or purely
-   historical? Decides whether §3.3 is a rewrite or a retirement.
-2. Should `possums-tor` be restored, or should its design record be deleted?
-3. Is a local gateway run meant to be possible without intake? If yes, the README
-   needs a fixture or stub, and that is code work.
-4. Which artifact is "the client" for the failure-policy section — the installed
-   build or the current source? The Pi README cannot be rewritten coherently until
-   that is settled.
+1. The reference client is not kept as a usable entry point. `examples/phase01`
+   became `clients/pi/core` — it is the client library, not a sample.
+2. `possums-tor` is deleted, not restored.
+3. The gateway is not expected to run standalone yet. The root README says so.
+4. The Pi README describes the current source.
