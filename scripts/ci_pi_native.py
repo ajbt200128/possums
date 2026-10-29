@@ -44,9 +44,12 @@ def prepare(target, output):
             shutil.copyfile(REPO / "clients/pi/tor-native" / name, source / name)
         # Public dependency acquisition is separate from the locked offline build.
         # Do not discover Cargo credentials/config or walk the checkout's parents.
+        certificate = os.environ.get("SSL_CERT_FILE") or os.environ.get("NIX_SSL_CERT_FILE")
+        if not certificate or not Path(certificate).is_absolute() or not Path(certificate).is_file():
+            raise native.BuildFailure("possums_pi_native_ci_certificate: the public build CA bundle is unavailable. Enter the pinned pi-native shell and retain its certificate bundle; do not disable TLS verification.")
         env = {"PATH": os.environ["PATH"], "HOME": str(root / "home"), "CARGO_HOME": str(root / "cargo-home"),
                "RUSTC": str(compiler), "RUSTUP_AUTO_INSTALL": "0", "LC_ALL": "C",
-               "SSL_CERT_FILE": os.environ["SSL_CERT_FILE"]}
+               "SSL_CERT_FILE": certificate, "CARGO_HTTP_CAINFO": certificate}
         stage_run("prefetch", [str(cargo), "fetch", "--locked", "--target", target,
                                "--manifest-path", str(source / "Cargo.toml")], env=env, cwd=source)
         env["CARGO_NET_OFFLINE"] = "true"

@@ -35,7 +35,9 @@ class NativeCITests(unittest.TestCase):
         self.built = 0
         self.dirty = False
         self.dirty_after_tests = False
-        for context in [patch.dict(os.environ, {"GITHUB_SHA": COMMIT, "SSL_CERT_FILE": "/public-certificate-fixture",
+        self.certificate = self.root / "public-certificate-fixture"
+        self.certificate.write_text("synthetic-public-fixture")
+        for context in [patch.dict(os.environ, {"GITHUB_SHA": COMMIT, "SSL_CERT_FILE": str(self.certificate),
                                                 "NPM_TOKEN": "hostile-canary", "CARGO_REGISTRIES_CRATES_IO_TOKEN": "hostile-canary"}),
                         patch.object(ci.native, "toolchain", return_value=({"host": "aarch64-apple-darwin"}, self.root,
                                                                          self.root / "rustc", self.root / "cargo")),
@@ -80,6 +82,22 @@ class NativeCITests(unittest.TestCase):
                 else:
                     self.assertEqual(env["CARGO_NET_OFFLINE"], "true")
         self.assertFalse(any(stage == "image_preparation" for stage, *_ in self.calls))
+
+    def test_nix_exported_certificate_bundle_is_used_without_disabling_tls(self):
+        with patch.dict(os.environ, {"SSL_CERT_FILE": "", "NIX_SSL_CERT_FILE": str(self.certificate)}), patch.object(ci, "stage_run", side_effect=self.mock_stage):
+            ci.prepare("aarch64-apple-darwin", self.output)
+        prefetch = next(env for stage, _, env, _ in self.calls if stage == "prefetch")
+        self.assertEqual(prefetch["SSL_CERT_FILE"], str(self.certificate))
+        self.assertEqual(prefetch["CARGO_HTTP_CAINFO"], str(self.certificate))
+        self.assertNotIn("CARGO_HTTP_SSL_VERIFY", prefetch)
+
+    def test_missing_certificate_bundle_fails_closed_before_acquisition(self):
+        with (patch.dict(os.environ, {"SSL_CERT_FILE": "", "NIX_SSL_CERT_FILE": ""}),
+              patch.object(ci, "stage_run", side_effect=self.mock_stage),
+              self.assertRaisesRegex(ci.native.BuildFailure, "ci_certificate")):
+            ci.prepare("aarch64-apple-darwin", self.output)
+        self.assertNotIn("prefetch", [stage for stage, *_ in self.calls])
+        self.assertEqual(self.built, 0)
 
     def test_linux_requires_explicit_image_preparation_and_clean_userspace_success(self):
         result = {"execution": "synthetic_loopback_passed"}
