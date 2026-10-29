@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from tor_native_portability import PortabilityFailure, inspect
+
 TARGETS = {
     "aarch64-apple-darwin": ("darwin", "arm64", "apple"),
     "x86_64-apple-darwin": ("darwin", "x64", "apple"),
@@ -28,7 +30,9 @@ class BuildFailure(Exception):
 
 def run(command, *, env=None, cwd=None):
     try:
-        result = subprocess.run(command, env=env, cwd=cwd, capture_output=True, check=False)
+        # A rustup proxy must fail, not acquire a missing toolchain implicitly.
+        tool_env = dict(os.environ if env is None else env, RUSTUP_AUTO_INSTALL="0")
+        result = subprocess.run(command, env=tool_env, cwd=cwd, capture_output=True, check=False)
     except OSError:
         raise BuildFailure("possums_build_tor_tool_start: a required build tool could not start; cause unknown. Check the pinned toolchain and execution permissions.") from None
     if result.returncode:
@@ -88,6 +92,11 @@ def build_environment(scratch, root, rust, target):
         "PATH": os.pathsep.join([str(root / "bin"), str(root / "lib/rustlib" / rust["host"] / "bin"), "/usr/bin", "/bin"]),
         "CARGO_NET_OFFLINE": "true", "LC_ALL": "C",
     }
+    # Compiler locations otherwise embed the random scratch registry path in
+    # panic/source locations, changing executable bytes between clean builds.
+    flags = [f"--remap-path-prefix={scratch}=/possums-build"]
+    if registry.is_dir():
+        flags.append(f"--remap-path-prefix={registry.resolve()}=/cargo-registry")
     platform, _, abi = LOCAL_TARGETS[target]
     details = {"kind": "host", "abi": abi}
     if platform == "darwin":
@@ -111,11 +120,12 @@ def build_environment(scratch, root, rust, target):
         if not linker.is_file():
             raise BuildFailure("possums_build_tor_linker: the pinned Rust self-contained linker is unavailable. Provision the complete compiler toolchain separately.")
         # Do not inherit Nix compiler wrappers, RUSTFLAGS or dynamic libc defaults.
-        env["RUSTFLAGS"] = f"-C target-feature=+crt-static -C link-self-contained=yes -C linker={linker}"
+        flags.extend(["-C", "target-feature=+crt-static", "-C", "link-self-contained=yes", "-C", f"linker={linker}"])
         details = {"kind": "rust-lld", "abi": abi, "selfContained": True}
     else:
         # Local GNU host builds remain supported, but are not distributable targets.
         env["CARGO_TARGET_" + target.upper().replace("-", "_") + "_LINKER"] = "/usr/bin/cc"
+    env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
     return env, details
 
 
@@ -142,10 +152,13 @@ def build(arguments):
     artifact = output / "possums-tor-native"
     shutil.copyfile(scratch / "target" / target / "release/possums-tor-native", artifact)
     artifact.chmod(0o755)
+    portability = inspect(target, artifact) if target in TARGETS else {"execution": "not_tested", "linkage": "unchecked_local_host"}
+    for name in ("scripts/build-tor-native.sh", "scripts/tor_native_build.py", "scripts/tor_native_portability.py"):
+        sources[name] = sha(repo / name)
     report = {"rust": rust["release"], "tor": "0.47.0", "platform": platform, "arch": arch,
               "target": target, "distributionTarget": distribution, "rustHost": rust["host"],
               "rustCommit": rust["commit-hash"], "targetStdSha256": std_digest, "linker": linker,
-              "sources": sources, "artifacts": {"possums-tor-native": {"sha256": sha(artifact), "size": artifact.stat().st_size}}}
+              "portability": portability, "sources": sources, "artifacts": {"possums-tor-native": {"sha256": sha(artifact), "size": artifact.stat().st_size}}}
     (output / "tor-native-build-report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"torNativeBuild": str(output), "platform": platform, "arch": arch, "target": target}))
 
@@ -153,7 +166,7 @@ def build(arguments):
 if __name__ == "__main__":
     try:
         build(sys.argv[1:])
-    except BuildFailure as error:
+    except (BuildFailure, PortabilityFailure) as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
     except Exception:

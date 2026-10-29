@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("tor_native_build", ROOT / "scripts/tor_native_build.py")
 assert spec is not None and spec.loader is not None
 builder = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(builder)
+with patch.object(sys, "path", [str(ROOT / "scripts"), *sys.path]):
+    spec.loader.exec_module(builder)
 
 
 class NativeBuildTests(unittest.TestCase):
@@ -60,8 +61,10 @@ class NativeBuildTests(unittest.TestCase):
             with patch.dict(os.environ, {"CARGO_HOME": str(cache), "RUSTFLAGS": "hostile-canary", "NPM_TOKEN": "hostile-canary"}):
                 env, details = builder.build_environment(scratch, toolchain, {"host": "aarch64-apple-darwin"}, "aarch64-unknown-linux-musl")
             self.assertEqual(details, {"kind": "rust-lld", "abi": "musl", "selfContained": True})
-            self.assertIn("target-feature=+crt-static", env["RUSTFLAGS"])
-            self.assertIn("link-self-contained=yes", env["RUSTFLAGS"])
+            self.assertIn("target-feature=+crt-static", env["CARGO_ENCODED_RUSTFLAGS"])
+            self.assertIn("link-self-contained=yes", env["CARGO_ENCODED_RUSTFLAGS"])
+            self.assertIn(f"--remap-path-prefix={scratch}=/possums-build", env["CARGO_ENCODED_RUSTFLAGS"])
+            self.assertNotIn("RUSTFLAGS", env)
             self.assertNotIn("hostile-canary", json.dumps(env))
             self.assertNotIn("NPM_TOKEN", env)
             self.assertEqual({p.name for p in (scratch / "cargo-home").iterdir()}, {"registry"})
@@ -89,8 +92,9 @@ class NativeBuildTests(unittest.TestCase):
 
     def test_tool_failure_never_echoes_output_or_arguments(self):
         result = subprocess.CompletedProcess(["synthetic"], 1, b"hostile-canary", b"hostile-canary")
-        with patch.object(subprocess, "run", return_value=result), self.assertRaises(builder.BuildFailure) as failure:
+        with patch.object(subprocess, "run", return_value=result) as invoked, self.assertRaises(builder.BuildFailure) as failure:
             builder.run(["synthetic", "hostile-canary"])
+        self.assertEqual(invoked.call_args.kwargs["env"]["RUSTUP_AUTO_INSTALL"], "0")
         self.assertNotIn("hostile-canary", str(failure.exception))
         with patch.object(subprocess, "run", side_effect=OSError("hostile-canary")), self.assertRaises(builder.BuildFailure) as failure:
             builder.run(["synthetic"])
