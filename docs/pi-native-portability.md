@@ -9,9 +9,12 @@ live Tor/public-gateway probe or inference was performed.
 
 ## Build contract
 
-Run `scripts/build-tor-native.sh` inside the pinned `devenv` shell. It uses the
-active Rust/Cargo **1.92.0** toolchain rather than recursively opening the flake
-shell. Python 3.10+ and platform inspection tools must already be available.
+Run `scripts/build-tor-native.sh` inside the pinned `devenv` shell for an
+already-provisioned host build, or the opt-in `pi-native` flake shell for native
+qualification. It uses the active Rust/Cargo **1.92.0** toolchain rather than
+recursively opening a shell. Python 3.10+ and platform inspection tools must be
+available. The opt-in shell declaratively provisions its own runner's explicit
+distribution target; it does not change the gateway/default development shell.
 No arguments retains a local host build, including supported GNU Linux hosts;
 that mode does not designate a release artifact. Explicit distribution targets:
 
@@ -90,6 +93,68 @@ before client compilation. The pinned `devenv` shell worked; its default Node is
 not the client build pin, so the already-available exact Node 24.13.0 executable
 was selected explicitly. No dependency pins or lockfiles were relaxed.
 
+## Prepared native runner matrix — not yet executed
+
+`.github/workflows/check-pi-native.yml` is **manual-only**, with read-only
+repository permission, immutable action references, no persisted checkout
+credential, no npm cache/auth setup, no binary upload and no publisher. It has
+not been dispatched. All four `pi-native` shell definitions evaluated offline
+with the locked Rust **1.92.0**, Python **3.12.12** and Linux binutils **2.44**;
+evaluation does not provision targets or establish successful compilation.
+The existing gateway checks/default shell and lockfiles remain unchanged.
+
+The preparation driver `scripts/ci_pi_native.py` requires a clean exact-commit
+checkout and Node **24.13.0** already on PATH. It acquires locked public Cargo
+dependencies in an isolated scratch home, builds twice offline in fresh trees,
+requires identical helper hashes, then runs the existing actual-helper transport
+suite. Acquisition of public build dependencies is not runtime no-network proof.
+Only public metadata and passed-stage evidence enter its qualification report;
+raw compiler/test output and environments are withheld. macOS evidence records
+only the observed numeric OS version, never an inferred 14.0 support claim.
+
+Runner choices follow [GitHub's current runner table](https://docs.github.com/en/actions/reference/runners/github-hosted-runners):
+
+| Native target | Prepared runner | Still unproved |
+| --- | --- | --- |
+| Darwin arm64 | `macos-14` (arm64) | Actual run and exact observed patch; a current 14.x runner is not proof of 14.0 |
+| Darwin x64 | `macos-15-intel` | Actual run; macOS 14 x64 remains outside this prepared hosted matrix |
+| Linux arm64 musl | `ubuntu-24.04-arm` | Native build and clean glibc/musl execution |
+| Linux x64 musl | `ubuntu-24.04` | Native build and clean glibc/musl execution |
+
+For Linux, `scripts/tor_native_qualification.py` independently checks ELF
+linkage, source/report/artifact correspondence and matching native host/engine/
+image architectures. Its clean userspace smoke test needs no compiler or
+OpenSSL: the actual helper performs a synthetic SOCKS round trip. It mounts only
+the helper and two public fixture source files, read-only, into unprivileged
+network-none containers with no Nix tree, private home or credentials. Require
+both official Node 24.13.0 Debian bookworm-slim and Alpine 3.23 image indices,
+pinned by digest from [Debian tag metadata](https://hub.docker.com/v2/repositories/library/node/tags/24.13.0-bookworm-slim)
+and [Alpine tag metadata](https://hub.docker.com/v2/repositories/library/node/tags/24.13.0-alpine3.23).
+The qualifier itself never pulls; the explicitly invoked CI preparation driver
+provisions those public images separately. Docker context/auth discovery and
+emulation fallback are excluded. Both authoritative exit status and owned
+cleanup must pass; a cleanup fault cannot erase an earlier primary failure.
+Process/runner loss can still prevent cleanup or reporting.
+
+Additional local evidence for this preparation: **40** Python native policy/
+control-flow tests passed (including **18** new mocked runner/CI tests),
+**101** release tests passed with **3** skips, YAML parsed with the expected
+manual-only four-runner structure, and the new compiler-free smoke fixture
+passed with the previously compiled macOS arm64 helper. These are not Docker,
+Linux, Intel macOS, new SDK/toolchain or remote-CI execution evidence. Independent
+read-only review found no concrete defect in this scoped preparation; the
+existing public-assembly integration gap above remains unresolved.
+
+Future local procedure on a matching already-prepared macOS arm64 runner, with
+Node 24.13.0 selected and a new scratch output directory (not executed here):
+
+`nix develop --no-write-lock-file .#pi-native --command python3 scripts/ci_pi_native.py aarch64-apple-darwin /tmp/possums-pi-native-candidate`
+
+This can acquire public build dependencies. It does not install/activate a Pi
+client or authorize npm publication, redistribution or any live inference.
+A separate reviewed/authorized native-CI dispatch is still needed; it is not a
+release dispatch. Licensing continues to block public client binary uploads.
+
 ## Remaining gates and privacy scope
 
 All three absent target libraries require separately provisioned build runners.
@@ -103,6 +168,10 @@ Privacy references: [data handling](../PRIVACY.md#data-handling-boundaries),
 [forbidden exports](../PRIVACY.md#telemetry-permitted-signals-and-forbidden-data),
 [typed failures](../PRIVACY.md#mandatory-typed-interface-failures) and
 [synthetic testing](../PRIVACY.md#synthetic-testing-exception). Tests use synthetic
-local fixtures and public build inputs only. No telemetry, logs, crash reporting,
-support export or private runtime configuration was added. Pi/T3's own history
-is a separate persistence boundary; no whole-process transience claim is made.
+local fixtures and public build inputs only. No runtime telemetry, request logs,
+crash reporting, support export or private runtime configuration was added.
+GitHub, Nix caches, public package/image registries and CI may retain public
+acquisition/build metadata;
+external setup tools and host capture are separate boundaries, not a claim that
+all platform output is controlled here. Pi/T3's own history is also a separate
+persistence boundary; no whole-process transience claim is made.
