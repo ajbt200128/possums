@@ -261,6 +261,11 @@ def qualify(root):
     env = environment(root)
     commit = snapshot(env)
     target = tools(env)
+    # Preserve the selected wrapper path: Nix execPath can resolve to nodejs-slim
+    # without the paired npm that the scratch packing tests must locate.
+    node = shutil.which("node", path=env["PATH"])
+    if not node or not Path(node).is_absolute():
+        raise SourceFailure("tools_node")
     sdk = root / "sdk"
     sdk.mkdir()
     for name, contents in validate_sdk(REPO / "clients/pi/ci-sdk").items():
@@ -292,8 +297,8 @@ def qualify(root):
     check = package.parent / "source/clients/pi/check.mjs"
     report_program = ('import {clientReport,publicJSON} from "./clients/pi/distribution-reports.mjs";'
                       'const p=process.argv[1];clientReport(publicJSON(p+"/build-report.json"),p,p+"/../source/clients/pi",process.cwd());')
-    run("report", ["node", "--input-type=module", "-e", report_program, str(package)], offline)
-    run("checks", ["node", str(check)], build_env, timeout=1200)
+    run("report", [node, "--input-type=module", "-e", report_program, str(package)], offline)
+    run("checks", [node, str(check)], build_env, timeout=1200)
     if snapshot(env) != commit:
         raise SourceFailure("source")
     return {"schema": 1, "sourceCommit": commit, "node": "24.13.0", "npm": "11.6.2", "pi": "1.3.0",

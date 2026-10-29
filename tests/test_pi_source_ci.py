@@ -331,6 +331,9 @@ class SourceCITests(unittest.TestCase):
     def prepare_fixture(self, fail_stage=None, late_drift=False):
         calls = []
         outputs = {}
+        paired = self.root / "paired/node"
+        paired.parent.mkdir()
+        paired.symlink_to(sys.executable)
         for stage, key in (("verifier_build", "verifierBuild"), ("native_build", "torNativeBuild"), ("client_build", "output")):
             directory = self.root / stage
             directory.mkdir()
@@ -341,7 +344,7 @@ class SourceCITests(unittest.TestCase):
             if stage == fail_stage:
                 raise ci.SourceFailure(stage, "exit")
             return outputs.get(stage, "")
-        with patch.dict(os.environ, {"SSL_CERT_FILE": str(self.ca), "PATH": os.defpath, "GITHUB_TOKEN": HOSTILE, "HTTPS_PROXY": HOSTILE}, clear=True), patch.object(ci, "run", side_effect=fake_run), patch.object(ci, "tools", return_value="x86_64-unknown-linux-musl"), patch.object(ci, "snapshot", side_effect=[COMMIT, "b" * 40 if late_drift else COMMIT]) as snapshots:
+        with patch.dict(os.environ, {"SSL_CERT_FILE": str(self.ca), "PATH": os.defpath, "GITHUB_TOKEN": HOSTILE, "HTTPS_PROXY": HOSTILE}, clear=True), patch.object(ci, "run", side_effect=fake_run), patch.object(ci, "tools", return_value="x86_64-unknown-linux-musl"), patch.object(ci.shutil, "which", return_value=str(paired)), patch.object(ci, "snapshot", side_effect=[COMMIT, "b" * 40 if late_drift else COMMIT]) as snapshots:
             if fail_stage or late_drift:
                 self.safe_failure(ci.prepare, fail_stage or "source", "exit" if fail_stage else "validation")
                 receipt = None
@@ -369,6 +372,9 @@ class SourceCITests(unittest.TestCase):
         self.assertIn("clientReport(publicJSON", " ".join(report))
         checks = next(c[1] for c in calls if c[0] == "checks")
         self.assertTrue(checks[-1].endswith("source/clients/pi/check.mjs"))
+        # Do not resolve this symlink to the unpaired executable or pass bare node.
+        self.assertEqual(checks[0], str(self.root / "paired/node"))
+        self.assertEqual(report[0], checks[0])
         assert receipt is not None
         self.assertEqual(receipt["sourceCommit"], COMMIT)
         self.assertEqual(receipt["universalCandidate"], "not_established")
