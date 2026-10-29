@@ -61,9 +61,9 @@ class SourceFailure(Exception):
 
 def stop(process):
     # Own the fresh process group, not just a shell that can leave pipes open.
-    with suppress(OSError):
+    with suppress(OSError, KeyboardInterrupt):
         os.killpg(process.pid, signal.SIGKILL)
-    with suppress(OSError, subprocess.TimeoutExpired):
+    with suppress(OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
         process.communicate(timeout=5)
 
 
@@ -91,6 +91,8 @@ def run(stage, command, env, cwd=REPO, timeout=600):
                     failure = SourceFailure(stage, "decode")
     except OSError:
         failure = failure or SourceFailure(stage, "start" if process is None else "read")
+        if process is not None:
+            stop(process)
     except KeyboardInterrupt:
         interrupted = True
         if process is not None:
@@ -102,8 +104,11 @@ def run(stage, command, env, cwd=REPO, timeout=600):
                     continue
                 try:
                     pipe.close()
+                except KeyboardInterrupt:
+                    interrupted = True
                 except OSError:
-                    failure = failure or SourceFailure(stage, "cleanup")
+                    if not interrupted:
+                        failure = failure or SourceFailure(stage, "cleanup")
     if failure is not None:
         raise failure
     if interrupted:

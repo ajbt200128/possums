@@ -202,9 +202,51 @@ class SourceCITests(unittest.TestCase):
     def test_run_read_failure_preserves_typed_constraint(self):
         process = Mock(returncode=0)
         process.communicate.side_effect = OSError(HOSTILE)
-        with patch.object(ci.subprocess, "Popen", return_value=process):
+        with patch.object(ci.subprocess, "Popen", return_value=process), patch.object(ci.os, "killpg") as kill:
             self.safe_failure(lambda: ci.run("checks", ["never"], {}), "checks", "read")
+        kill.assert_called_once_with(process.pid, ci.signal.SIGKILL)
+        self.assertEqual(process.communicate.call_count, 2)
         process.stdout.close.assert_called_once()
+        process.stderr.close.assert_called_once()
+
+    def test_real_read_failure_terminates_and_reaps_owned_child(self):
+        env = self.isolated_env()
+        child = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"], env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        communicate = child.communicate
+        calls = 0
+        def fault(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError(HOSTILE)
+            return communicate(**kwargs)
+        try:
+            with patch.object(ci.subprocess, "Popen", return_value=child), patch.object(child, "communicate", side_effect=fault):
+                self.safe_failure(lambda: ci.run("checks", ["never"], env, timeout=3), "checks", "read")
+            self.assertIsNotNone(child.poll())
+            self.assertLess(child.returncode, 0)
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, ci.signal.SIGKILL)
+            child.communicate(timeout=3)
+
+    def test_cleanup_interrupt_preserves_primary_and_closes_remaining_pipe(self):
+        for constraint in ("exit", "timeout", "read"):
+            process = Mock(returncode=2)
+            process.communicate.side_effect = ([(b"", b"")] if constraint == "exit" else
+                                               [subprocess.TimeoutExpired("never", 1), (b"", b"")] if constraint == "timeout" else
+                                               [OSError(HOSTILE), (b"", b"")])
+            process.stdout.close.side_effect = KeyboardInterrupt(HOSTILE)
+            with self.subTest(constraint=constraint), patch.object(ci.subprocess, "Popen", return_value=process), patch.object(ci.os, "killpg"):
+                self.safe_failure(lambda: ci.run("checks", ["never"], {}), "checks", constraint)
+            process.stderr.close.assert_called_once()
+
+    def test_stop_interrupt_preserves_primary_failure(self):
+        process = Mock(returncode=None)
+        process.communicate.side_effect = [OSError(HOSTILE), KeyboardInterrupt(HOSTILE)]
+        with patch.object(ci.subprocess, "Popen", return_value=process), patch.object(ci.os, "killpg", side_effect=KeyboardInterrupt(HOSTILE)):
+            self.safe_failure(lambda: ci.run("checks", ["never"], {}), "checks", "read")
         process.stderr.close.assert_called_once()
 
     def test_interrupt_stops_owned_process_and_propagates(self):
