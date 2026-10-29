@@ -46,7 +46,10 @@ run('tinfoil_forwarding_client.mjs', { PHASE02_TEST_BUILD: path.join(output, 'pi
 run('phase02_v3.mjs', { PHASE02_RELEASE_SOURCE: packageSource });
 run('tor_identity_verifier_wasm.mjs', {}, [path.join(scratch, 'package')]);
 run('tor_setup.mjs', { PHASE02_RELEASE_SOURCE: packageSource }, [path.join(scratch, 'package')]);
+run('pi_release_metadata.mjs', {}, [packageSource]);
 run('pi_native_artifacts.mjs', {}, [packageSource]);
+run('pi_distribution.mjs', {}, [packageSource]);
+run('pi_pack.mjs', { PATH: `${path.dirname(process.argv0)}:${path.dirname(process.execPath)}:/usr/bin:/bin` }, [path.join(packageSource, 'pack.mjs')]);
 run('tor_channel.mjs', { PHASE02_RELEASE_SOURCE: packageSource,
   POSSUMS_TOR_NATIVE_HELPER: resolveNativeHelper(pathToFileURL(path.join(scratch, 'package') + '/')) });
 run('tor_selection.mjs', { PHASE02_RELEASE_SOURCE: packageSource });

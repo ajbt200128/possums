@@ -35,8 +35,9 @@ const MESSAGES = Object.freeze({
   approval: 'Metadata approval is unsupported: license must remain null and redistribution unapproved. A release requires separately reviewed source changes.',
   unknown: 'Metadata validation failed; cause unknown. Restore plain authored candidate metadata.',
 });
-class MetadataError extends Error {
+export class MetadataError extends Error {
   constructor(stage) {
+    stage = typeof stage === 'string' && Object.hasOwn(MESSAGES, stage) ? stage : 'unknown';
     const code = `possums_release_metadata_${stage}`;
     super(`${code}: ${MESSAGES[stage]}`);
     delete this.stack;

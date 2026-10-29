@@ -12,7 +12,7 @@ done
 # nix develop removes its own TMPDIR on exit; keep reviewable artifacts.
 S=$(mktemp -d /tmp/possums-pi-build-XXXXXX)
 mkdir -p "$S/source/clients/pi" "$S/source/clients/pi/core" "$S/home" "$S/tmp" "$S/cache" "$S/checks/source"
-cp "$SOURCE"/*.ts "$SOURCE"/*.mts "$SOURCE"/*.mjs "$SOURCE"/*.json "$S/source/clients/pi/"
+cp "$SOURCE"/*.ts "$SOURCE"/*.mts "$SOURCE"/*.mjs "$SOURCE"/*.json "$SOURCE/build.sh" "$S/source/clients/pi/"
 # Build the same pinned offline core, unless the parent supplied a scratch build.
 V3=${POSSUMS_VERIFIER_BUILD:-}
 if [ -z "$V3" ]; then
@@ -51,7 +51,7 @@ mkdir "$S/verifier"
 cp "$V3/verifier.wasm" "$V3/wasm_exec.cjs" "$V3/GO-LICENSE" "$V3/verifier-build-report.json" "$S/verifier/"
 cp "$REPO/clients/pi/core"/*.ts "$S/source/clients/pi/core/"
 cp "$REPO/clients/pi/core"/*.json "$S/source/clients/pi/core/"
-for TEST in intake_diagnostics phase01_client phase01_transport phase01_stream_limits tinfoil_forwarding_client phase02_client phase02_pi phase02_thinking phase02_diagnostics phase02_cache phase02_manifest_cache phase02_discovery phase02_v3 phase02_v3_package phase02_peer_recovery pi_native_artifacts tor_channel tor_selection tor_diagnostics tor_client_failures tor_identity_verifier_wasm tor_setup; do
+for TEST in intake_diagnostics phase01_client phase01_transport phase01_stream_limits tinfoil_forwarding_client phase02_client phase02_pi phase02_thinking phase02_diagnostics phase02_cache phase02_manifest_cache phase02_discovery phase02_v3 phase02_v3_package phase02_peer_recovery pi_release_metadata pi_native_artifacts pi_distribution pi_pack tor_channel tor_selection tor_diagnostics tor_client_failures tor_identity_verifier_wasm tor_setup; do
   cp "$REPO/tests/$TEST.mjs" "$S/checks/source/"
 done
 mkdir -p "$S/checks/source/fixtures"
@@ -60,7 +60,7 @@ cp "$REPO/tests/fixtures/tor_grant_rfc8032.json" "$S/checks/source/fixtures/"
 : > "$S/global.npmrc"
 cd "$S/source/clients/pi"
 env -i HOME="$S/home" TMPDIR="$S/tmp" PATH="$(dirname "$NODE"):$(dirname "$NPM"):/usr/bin:/bin" \
-  npm_config_userconfig="$S/user.npmrc" npm_config_globalconfig="$S/global.npmrc" \
+  npm_config_userconfig="$S/user.npmrc" npm_config_globalconfig="$S/global.npmrc" npm_config_logs_max=0 npm_config_update_notifier=false \
   "$NPM" ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org --cache="$S/cache"
 mkdir -p node_modules/@earendil-works
 for PACKAGE in pi-ai pi-coding-agent pi-agent-core; do

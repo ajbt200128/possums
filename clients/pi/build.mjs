@@ -6,12 +6,15 @@ import { readFile, writeFile, mkdir, realpath, access, symlink, chmod } from 'no
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NATIVE_TARGETS, inspectNativeHeader } from './native-artifacts.mjs';
+import { readReleaseMetadata, candidateManifest } from './release-metadata.mjs';
+import { RECIPE_FILES } from './distribution-reports.mjs';
 
 const root = await realpath('.');
 const source = path.resolve(root, '../..');
 const out = process.env.PHASE02_OUT;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
-const piVersion = '1.3.0';
+const release = readReleaseMetadata(root);
+const piVersion = release.piVersion;
 const runtimePins = {};
 const runtimeRoots = {};
 try {
@@ -101,8 +104,10 @@ verifierArtifacts['native-manifest.json'] = { sha256: sha(await readFile(path.jo
 const peers = path.join(out, 'node_modules', '@earendil-works');
 await mkdir(peers, { recursive: true });
 for (const [name, directory] of Object.entries(runtimeRoots)) await symlink(directory, path.join(peers, name));
+const recipe = { entry: 'index.ts', fixture: false, sources: Object.fromEntries(await Promise.all(
+  RECIPE_FILES.map(async name => ['clients/pi/' + name, sha(await readFile(name))]))) };
 const buildReport = { node: process.version, pi: piVersion, runtimePins, typescript: ts.version, esbuild: esbuildVersion,
-  lock: sha(await readFile('package-lock.json')), verifier: verifierReport, torNative: nativeReport,
+  lock: sha(await readFile('package-lock.json')), recipe, verifier: verifierReport, torNative: nativeReport,
   artifacts: { ...verifierArtifacts } };
 const file = path.join(out, 'extension.mjs');
 const result = await build({ entryPoints: ['index.ts'], outfile: file, bundle: true, platform: 'node',
@@ -115,10 +120,6 @@ for (const [name, details] of Object.entries(result.metafile.inputs).sort()) {
 }
 buildReport.artifacts.extension = { sha256: sha(await readFile(file)), modules,
   external: Object.values(result.metafile.outputs).flatMap(value => value.imports).filter(value => value.external) };
-await writeFile(path.join(out, 'package.json'), JSON.stringify({
-  name: 'possums-pi', version: '0.2.0', private: true, type: 'module',
-  pi: { extensions: ['./extension.mjs'] },
-  peerDependencies: { '@earendil-works/pi-ai': '*', '@earendil-works/pi-coding-agent': '*' },
-}, null, 2) + '\n');
+await writeFile(path.join(out, 'package.json'), JSON.stringify(candidateManifest(release), null, 2) + '\n');
 await writeFile(path.join(out, 'build-report.json'), JSON.stringify(buildReport, null, 2) + '\n');
 console.log(JSON.stringify({ output: out, pi: piVersion, artifacts: Object.keys(buildReport.artifacts) }));

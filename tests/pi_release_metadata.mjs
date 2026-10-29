@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { readReleaseMetadata, candidateManifest, DISTRIBUTION_FILES } from '../clients/pi/release-metadata.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+const source = process.argv[2] ?? fileURLToPath(new URL('../clients/pi/', import.meta.url));
+const { readReleaseMetadata, candidateManifest, DISTRIBUTION_FILES } = await import(pathToFileURL(join(source, 'release-metadata.mjs')));
 
 const canary = 'SYNTHETIC_PRIVATE_CANARY_do_not_echo';
-const source = fileURLToPath(new URL('../clients/pi/', import.meta.url));
 const metadata = readReleaseMetadata(source);
 const manifest = candidateManifest(metadata);
 function rejects(action, stage) {
