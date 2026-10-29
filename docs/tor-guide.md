@@ -43,7 +43,7 @@ Everything. Selecting Tor changes the route, not the trust model:
 
 | Symptom | Cause |
 | --- | --- |
-| `tor_selection_invalid` | Proxy host is not numeric loopback, onion is not a canonical v3 host, credentials are half-configured, or you combined Tor with `--possums-manifest`. |
+| `tor_selection_invalid` | Proxy host is not numeric loopback, onion is not a canonical v3 host, or credentials are half-configured. |
 | `route_selection_changed` | Flags changed after first trust. Restart Pi. |
 | Connection refused / no route | Nothing is listening on the selected port, or Tor has not bootstrapped. |
 | `possums_verification_failed` | The onion answered but the evidence did not verify. Do not retry into clearnet. |
@@ -57,8 +57,6 @@ deliberate new turn may incur another charge.
   Get a listener running yourself, then point the client at it.
 - No per-connection circuit isolation and no anonymity guarantee. SOCKS with
   optional credentials is not a circuit-isolation mechanism.
-- Tor cannot be combined with `--possums-manifest`; that path uses published
-  release discovery only.
 - Proxy credentials are read only after a valid explicit Tor selection and are
   never placed in flags, argv, diagnostics or persisted state.
 - Tor availability and routing can fail independently of Possums. A failure here

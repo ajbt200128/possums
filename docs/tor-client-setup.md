@@ -25,8 +25,7 @@ failure is not permission to bypass it.
 
 Source setup accepts `--possums-tor-onion` and optional
 `--possums-tor-proxy` (default `127.0.0.1:19050`, numeric loopback only). Selection
-is locked at first trust establishment, after Pi applies flags. Tor cannot be
-combined with the legacy `--possums-manifest` mode. Optional proxy-only
+is locked at first trust establishment, after Pi applies flags. Optional proxy-only
 `POSSUMS_TOR_PROXY_USERNAME` / `POSSUMS_TOR_PROXY_PASSWORD` are read only after
 valid explicit Tor selection, both present or both absent; do not pass them in
 flags or use Possums credentials. No daemon is launched by selection or status.

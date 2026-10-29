@@ -67,7 +67,6 @@ screenshots or raw server messages.
 | --- | --- |
 | `possums_verification_failed` | Artifact or gateway could not be verified. Start a new Pi session. |
 | `possums_evidence_unavailable` | Public evidence could not be fetched. Often GitHub/AMD rate limiting. |
-| `possums_approval_expired` | The installed client approval elapsed. Install a new approved release. |
 | `possums_manifest_mismatch` | Extension and manifest must be installed together. Re-login cannot fix it. |
 | `possums_session_unavailable` | Challenge/login did not complete. Says nothing about credential validity. |
 | `possums_catalog_*` | Catalog transport, rejection, decoding or validation failed. Refresh models. |
@@ -90,19 +89,8 @@ command line:
 
 `POSSUMS_TOR_PROXY_USERNAME=… POSSUMS_TOR_PROXY_PASSWORD=…`
 
-`--possums-tor-onion` cannot be combined with `--possums-manifest`. Selection is
-locked at first trust; changing it later fails closed. The full wire format and
+Selection is locked at first trust; changing it later fails closed. The full wire format and
 endorsement checks are in [`docs/tor-client-setup.md`](../../docs/tor-client-setup.md).
-
-## Advanced: pinned manifest
-
-`--possums-manifest /absolute/path/to/tinfoil-deployment.json` bypasses published
-release *discovery* and uses that exact public manifest. It is not a way to skip
-verification: the manifest must match this client's approved pins, and every
-attestation, provenance, hardware and key-binding check still runs. A stale or
-mismatched file fails closed before any credential is requested.
-
-The file is public — never point this at a credential.
 
 ## What it verifies
 
