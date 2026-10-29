@@ -210,6 +210,8 @@ async function readTarball(file, inventory) {
     let problem = false;
     let expanded = 0;
     let checksum = 0;
+    const expandedHash = createHash('sha256');
+    const canonicalHash = createHash('sha256');
     let size = header.length;
     const sha256 = createHash('sha256').update(header);
     const sha512 = createHash('sha512').update(header);
@@ -223,6 +225,7 @@ async function readTarball(file, inventory) {
       expanded += chunk.length;
       if (expanded > MAX_ARCHIVE) { callback(new PackError('archive')); return; }
       checksum = crc32(chunk, checksum);
+      expandedHash.update(chunk);
       callback(null, chunk);
     } });
     const listing = tar.t({ strict: true, maxMetaEntrySize: 16 * 1024, onReadEntry(entry) {
@@ -236,6 +239,13 @@ async function readTarball(file, inventory) {
         entry.resume();
         return;
       }
+      // The parser deliberately ignores padding and bytes after field terminators.
+      // Re-encode only accepted metadata, using the pinned library's public API.
+      const canonicalHeader = new tar.Header({ path: entry.path, type: 'File', mode: item.mode,
+        size: item.size, mtime: entry.mtime, uid: entry.uid, gid: entry.gid,
+        uname: '', gname: '', linkpath: '' });
+      if (canonicalHeader.encode()) { problem = true; listing.abort(new PackError('archive')); entry.resume(); return; }
+      canonicalHash.update(canonicalHeader.block);
       seen.add(entry.path);
       const hash = createHash('sha256');
       let size = 0;
@@ -243,6 +253,9 @@ async function readTarball(file, inventory) {
         size += chunk.length;
         if (size > item.size) { problem = true; listing.abort(new PackError('archive')); return; }
         hash.update(chunk);
+        canonicalHash.update(chunk);
+        // Finish padding with the final payload chunk, before another entry can emit.
+        if (size === item.size) canonicalHash.update(Buffer.alloc((TAR_BLOCK_BYTES - size % TAR_BLOCK_BYTES) % TAR_BLOCK_BYTES));
       });
       entry.on('end', () => { if (size !== item.size || hash.digest('hex') !== item.sha256) problem = true; });
     } });
@@ -260,11 +273,13 @@ async function readTarball(file, inventory) {
     } catch { reject('archive'); }
     size += footer.length;
     sha256.update(footer); sha512.update(footer);
+    canonicalHash.update(Buffer.alloc(2 * TAR_BLOCK_BYTES));
     // InflateRaw can ignore trailing input; require consumption of the entire
     // segment, not just a valid first stream or canonical expanded TAR geometry.
     if (inflater.bytesWritten !== archiveSize - GZIP_HEADER_BYTES - GZIP_FOOTER_BYTES ||
         checksum !== footer.readUInt32LE(0) || expanded !== footer.readUInt32LE(4) ||
-        problem || seen.size !== FILES.size || expanded !== canonicalSize || BigInt(size) !== stat.size) reject('archive');
+        problem || seen.size !== FILES.size || expanded !== canonicalSize || BigInt(size) !== stat.size ||
+        expandedHash.digest('hex') !== canonicalHash.digest('hex')) reject('archive');
     if (!sameFile(stat, fstatSync(fd, { bigint: true })) || !sameFile(stat, lstatSync(file, { bigint: true }))) reject('archive');
     result = { size, sha256: sha256.digest('hex'), integrity: `sha512-${sha512.digest('base64')}`,
       files: inventory.map((item) => ({ ...item })) };

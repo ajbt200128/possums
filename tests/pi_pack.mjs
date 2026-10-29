@@ -227,6 +227,38 @@ try {
   fs.writeFileSync(unsupported, gzipSync(Buffer.concat([plain.subarray(0, -1024), header.block, Buffer.alloc(1024)])));
   await assert.rejects(validateTarball(unsupported, inventory), (error) => diagnostic(error, 'archive'));
   count++;
+  // The supported Header decoder locates payload padding; only these hostile
+  // fixtures manually alter ignored bytes and repair the header checksum.
+  const first = new tar.Header(plain);
+  const hidden = Buffer.from('PRIVATE_CANARY/private/path');
+  assert.ok(first.size + hidden.length < 512);
+  for (const [name, offset] of [
+    ['file-padding', 512 + first.size], ['uname-tail', 266], ['gname-tail', 298],
+    ['path-tail', Buffer.byteLength(first.path) + 1], ['linkpath-tail', 158],
+    ['prefix-tail', 346], ['unused-header', 500],
+  ]) {
+    const bytes = Buffer.from(plain);
+    const canary = offset === 500 ? hidden.subarray(0, 12) : hidden;
+    canary.copy(bytes, offset);
+    if (offset < 512) {
+      bytes.fill(0x20, 148, 156);
+      const sum = bytes.subarray(0, 512).reduce((total, value) => total + value, 0);
+      bytes.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+      assert.equal(new tar.Header(bytes).cksumValid, true);
+    }
+    const file = join(root, `ignored-${name}.tgz`);
+    fs.writeFileSync(file, gzipSync(bytes));
+    await assert.rejects(validateTarball(file, inventory), (error) => diagnostic(error, 'archive'));
+    count++;
+  }
+  for (const length of [0, 512, 64 * 1024 + 17]) {
+    const payload = Buffer.alloc(length, 0x5a);
+    const file = await archive(`payload-${length}`, cwd => fs.writeFileSync(join(cwd, 'package/GO-LICENSE'), payload));
+    const expected = inventory.map(item => item.path === 'GO-LICENSE'
+      ? { ...item, size: payload.length, sha256: createHash('sha256').update(payload).digest('hex') } : item);
+    assert.deepEqual(await validateTarball(file, expected), expected);
+    count++;
+  }
   const gzip = fs.readFileSync(goodTar);
   function optionalField(bytes, flag, field) {
     const header = Buffer.from(bytes.subarray(0, 10));
