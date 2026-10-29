@@ -80,9 +80,9 @@ function localRead(file, limit, directory = false) {
     const before = lstatSync(file);
     requireMatch(!before.isSymbolicLink() && (directory ? before.isDirectory() : before.isFile()));
     if (directory) return;
-    descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const metadata = fstatSync(descriptor);
-    requireMatch(metadata.isFile() && metadata.size <= limit);
+    requireMatch(metadata.isFile() && metadata.dev === before.dev && metadata.ino === before.ino && metadata.size <= limit);
     // Fixed allocation also bounds reads if an installation changes concurrently.
     const buffer = Buffer.alloc(metadata.size + 1);
     let size = 0;

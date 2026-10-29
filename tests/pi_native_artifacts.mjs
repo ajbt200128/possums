@@ -7,6 +7,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
+import { execFileSync } from 'node:child_process';
 const moduleURL = process.argv[2] ? pathToFileURL(path.join(process.argv[2], 'native-artifacts.mjs'))
   : new URL('../clients/pi/native-artifacts.mjs', import.meta.url);
 const { NATIVE_TARGETS, MAX_NATIVE_BYTES, NativeArtifactFailure, nativeArtifactDiagnostic,
@@ -115,6 +116,24 @@ for (const [code, kind] of [['EACCES', 'artifact_unreadable'], ['EPERM', 'artifa
     finally { fs.openSync = original; syncBuiltinESMExports(); }
   });
 }
+for (const replacement of ['fifo', 'regular']) test(`descriptor rejects post-stat ${replacement} replacement without blocking`, t => {
+  const f = fixture(t), originalOpen = fs.openSync, originalClose = fs.closeSync;
+  let swapped = false, closed = 0;
+  fs.openSync = (file, flags, ...args) => {
+    if (file === f.helper && !swapped) {
+      // Assert before making the FIFO: a missing flag fails quickly rather than hanging the suite.
+      assert.equal(flags & fs.constants.O_NONBLOCK, fs.constants.O_NONBLOCK);
+      swapped = true; fs.renameSync(file, file + '.original');
+      if (replacement === 'fifo') execFileSync('/usr/bin/mkfifo', [file], { stdio: 'ignore' });
+      else fs.copyFileSync(file + '.original', file);
+    }
+    return originalOpen(file, flags, ...args);
+  };
+  fs.closeSync = descriptor => { closed++; return originalClose(descriptor); };
+  syncBuiltinESMExports();
+  try { rejects(f.resolve, 'artifact_mismatch'); assert.equal(swapped, true); assert.ok(closed >= 2); }
+  finally { fs.openSync = originalOpen; fs.closeSync = originalClose; syncBuiltinESMExports(); }
+});
 test('cleanup failure does not overwrite an observed primary filesystem category', t => {
   const f = fixture(t), originalRead = fs.readSync, originalClose = fs.closeSync;
   fs.readSync = () => { throw Object.assign(new Error(canary), { code: 'EACCES' }); };
