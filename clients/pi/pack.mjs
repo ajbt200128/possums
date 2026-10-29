@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { createGunzip } from 'node:zlib';
+import { createInflateRaw, crc32 } from 'node:zlib';
 import { DISTRIBUTION_FILES, candidateManifest, readReleaseMetadata } from './release-metadata.mjs';
 
 const SOURCE = dirname(fileURLToPath(import.meta.url));
@@ -16,6 +16,8 @@ const MAX_FILE = 64 * 1024 * 1024;
 const MAX_TOTAL = 512 * 1024 * 1024;
 const MAX_ARCHIVE = MAX_TOTAL + 1024 * 1024;
 const TAR_BLOCK_BYTES = 512;
+const GZIP_HEADER_BYTES = 10;
+const GZIP_FOOTER_BYTES = 8;
 const FILES = new Set(DISTRIBUTION_FILES);
 const DIRECTORIES = new Set(DISTRIBUTION_FILES.flatMap((path) => {
   const parts = path.split('/');
@@ -166,6 +168,17 @@ function sameFile(before, after) {
   return after.isFile() && ['dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].every((key) => before[key] === after[key]);
 }
 
+function readEnvelopeBytes(fd, length, position) {
+  const buffer = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const count = readSync(fd, buffer, offset, length - offset, position + offset);
+    if (!count) reject('archive');
+    offset += count;
+  }
+  return buffer;
+}
+
 // Own one nonblocking descriptor for validation AND the compressed-byte receipt.
 async function readTarball(file, inventory) {
   let fd;
@@ -175,10 +188,15 @@ async function readTarball(file, inventory) {
     file = localPath(file);
     const expected = checkedInventory(inventory);
     const before = lstatSync(file, { bigint: true });
-    if (!before.isFile() || before.nlink !== 1n || before.size > MAX_ARCHIVE) reject('archive');
+    if (!before.isFile() || before.nlink !== 1n || before.size < 20n || before.size > MAX_ARCHIVE) reject('archive');
     fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
     const stat = fstatSync(fd, { bigint: true });
     if (!sameFile(before, stat)) reject('archive');
+    const archiveSize = Number(stat.size);
+    const header = readEnvelopeBytes(fd, GZIP_HEADER_BYTES, 0);
+    const footer = readEnvelopeBytes(fd, GZIP_FOOTER_BYTES, archiveSize - GZIP_FOOTER_BYTES);
+    // A fixed envelope forbids optional identifying text and extra fields.
+    if (!header.subarray(0, 4).equals(Buffer.from([0x1f, 0x8b, 8, 0]))) reject('archive');
     let tar;
     try {
       const require = createRequire(import.meta.url);
@@ -191,9 +209,10 @@ async function readTarball(file, inventory) {
     const canonicalSize = inventory.reduce((size, item) => size + (1 + Math.ceil(item.size / TAR_BLOCK_BYTES)) * TAR_BLOCK_BYTES, 2 * TAR_BLOCK_BYTES);
     let problem = false;
     let expanded = 0;
-    let size = 0;
-    const sha256 = createHash('sha256');
-    const sha512 = createHash('sha512');
+    let checksum = 0;
+    let size = header.length;
+    const sha256 = createHash('sha256').update(header);
+    const sha512 = createHash('sha512').update(header);
     const compressed = new Transform({ transform(chunk, _encoding, callback) {
       size += chunk.length;
       if (size > MAX_ARCHIVE || BigInt(size) > stat.size) { callback(new PackError('archive')); return; }
@@ -202,7 +221,9 @@ async function readTarball(file, inventory) {
     } });
     const bounds = new Transform({ transform(chunk, _encoding, callback) {
       expanded += chunk.length;
-      callback(expanded > MAX_ARCHIVE ? new PackError('archive') : null, expanded > MAX_ARCHIVE ? undefined : chunk);
+      if (expanded > MAX_ARCHIVE) { callback(new PackError('archive')); return; }
+      checksum = crc32(chunk, checksum);
+      callback(null, chunk);
     } });
     const listing = tar.t({ strict: true, maxMetaEntrySize: 16 * 1024, onReadEntry(entry) {
       const item = expected.get(entry.path);
@@ -228,14 +249,22 @@ async function readTarball(file, inventory) {
     // The pinned parser reports unsupported entries and over-limit metadata separately.
     listing.on('ignoredEntry', () => { problem = true; listing.abort(new PackError('archive')); });
     listing.on('meta', () => { problem = true; listing.abort(new PackError('archive')); });
+    const inflater = createInflateRaw();
     try {
       // pipeline destroys streams on failure even with autoClose:false. Let the
       // ReadStream drain pending reads, but leave the actual close to finally.
-      const stream = createReadStream(null, { fd, autoClose: false, start: 0,
+      const stream = createReadStream(null, { fd, autoClose: false, start: GZIP_HEADER_BYTES,
+        end: archiveSize - GZIP_FOOTER_BYTES - 1,
         fs: { read, close(_fd, callback) { callback(null); } } });
-      await pipeline(stream, compressed, createGunzip(), bounds, listing);
+      await pipeline(stream, compressed, inflater, bounds, listing);
     } catch { reject('archive'); }
-    if (problem || seen.size !== FILES.size || expanded !== canonicalSize || BigInt(size) !== stat.size) reject('archive');
+    size += footer.length;
+    sha256.update(footer); sha512.update(footer);
+    // InflateRaw can ignore trailing input; require consumption of the entire
+    // segment, not just a valid first stream or canonical expanded TAR geometry.
+    if (inflater.bytesWritten !== archiveSize - GZIP_HEADER_BYTES - GZIP_FOOTER_BYTES ||
+        checksum !== footer.readUInt32LE(0) || expanded !== footer.readUInt32LE(4) ||
+        problem || seen.size !== FILES.size || expanded !== canonicalSize || BigInt(size) !== stat.size) reject('archive');
     if (!sameFile(stat, fstatSync(fd, { bigint: true })) || !sameFile(stat, lstatSync(file, { bigint: true }))) reject('archive');
     result = { size, sha256: sha256.digest('hex'), integrity: `sha512-${sha512.digest('base64')}`,
       files: inventory.map((item) => ({ ...item })) };

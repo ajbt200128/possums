@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import childProcess from 'node:child_process';
-import { gzipSync, gunzipSync } from 'node:zlib';
+import { gzipSync, gunzipSync, deflateRawSync } from 'node:zlib';
 
 const source = resolve(process.argv[2] ?? fileURLToPath(new URL('../clients/pi/pack.mjs', import.meta.url)));
 const { PackError, inspectDistribution, packDistribution, validateTarball } = await import(pathToFileURL(source));
@@ -179,7 +179,7 @@ try {
       if (stage) await assert.rejects(validateTarball(file, inventory), (error) => diagnostic(error, stage));
       else assert.deepEqual(await validateTarball(file, inventory), inventory);
       assert.equal(opens, 1);
-      assert.equal(streams, 1);
+      assert.equal(streams, valid ? 1 : 0);
       assert.equal(closes, 1);
       assert.throws(() => fs.fstatSync(descriptor), (error) => error.code === 'EBADF');
       count++;
@@ -227,6 +227,81 @@ try {
   fs.writeFileSync(unsupported, gzipSync(Buffer.concat([plain.subarray(0, -1024), header.block, Buffer.alloc(1024)])));
   await assert.rejects(validateTarball(unsupported, inventory), (error) => diagnostic(error, 'archive'));
   count++;
+  const gzip = fs.readFileSync(goodTar);
+  function optionalField(bytes, flag, field) {
+    const header = Buffer.from(bytes.subarray(0, 10));
+    header[3] = flag;
+    return Buffer.concat([header, field, bytes.subarray(10)]);
+  }
+  const emptyMember = gzipSync(Buffer.alloc(0));
+  const comment = Buffer.from('PRIVATE_CANARY password Bearer\0');
+  const badEnvelope = [
+    // These three reproduce acceptance by Gunzip despite unchanged TAR bytes.
+    ['zero-padding', Buffer.concat([gzip, Buffer.alloc(64)]), true],
+    ['empty-member', Buffer.concat([gzip, emptyMember]), true],
+    ['comment-member', Buffer.concat([gzip, optionalField(emptyMember, 16, comment)]), true],
+    ['first-filename', optionalField(gzip, 8, comment), true],
+    ['first-comment', optionalField(gzip, 16, comment), true],
+    ['first-extra', optionalField(gzip, 4, Buffer.concat([Buffer.from([comment.length, 0]), comment])), true],
+    ['raw-zero-padding', Buffer.concat([gzip.subarray(0, -8), Buffer.alloc(64), gzip.subarray(-8)])],
+    ['raw-extra-data', Buffer.concat([gzip.subarray(0, -8), comment, gzip.subarray(-8)])],
+    ['raw-second-stream', Buffer.concat([gzip.subarray(0, -8), deflateRawSync(Buffer.alloc(0)), gzip.subarray(-8)])],
+    ['raw-truncated', Buffer.concat([gzip.subarray(0, -9), gzip.subarray(-8)])],
+    ['footer-truncated', gzip.subarray(0, -1)],
+    ['trailing-data', Buffer.concat([gzip, comment])],
+  ];
+  for (const length of [0, 9, 10, 17, 18, 19]) badEnvelope.push([`truncated-${length}`, gzip.subarray(0, length)]);
+  for (const [name, offset, value] of [
+    ['magic', 0, 0], ['method', 2, 0], ['text-flag', 3, 1], ['reserved-flags', 3, 0xe0],
+    ['raw-invalid', 10, 7], ['crc', gzip.length - 8, gzip[gzip.length - 8] ^ 1],
+    ['isize', gzip.length - 4, gzip[gzip.length - 4] ^ 1],
+  ]) {
+    const bytes = Buffer.from(gzip);
+    bytes[offset] = value;
+    badEnvelope.push([name, bytes]);
+  }
+  for (const [name, bytes, gunzipAccepted] of badEnvelope) {
+    if (gunzipAccepted) assert.deepEqual(gunzipSync(bytes), plain);
+    const file = join(root, `envelope-${name}.tgz`);
+    fs.writeFileSync(file, bytes);
+    await assert.rejects(validateTarball(file, inventory), (error) => diagnostic(error, 'archive'));
+    count++;
+  }
+
+  // Fixed envelope reads must tolerate short reads, reject EOF/errors at either
+  // boundary, close the same descriptor, and preserve failure over cleanup.
+  for (const fault of ['short', 'header-eof', 'footer-eof', 'header-throw', 'footer-throw']) {
+    const originalOpen = fs.openSync, originalRead = fs.readSync, originalClose = fs.closeSync;
+    let descriptor, opens = 0, closes = 0;
+    fs.openSync = (path, ...args) => {
+      const fd = originalOpen(path, ...args);
+      if (path === goodTar) { descriptor = fd; opens++; }
+      return fd;
+    };
+    fs.readSync = (fd, buffer, offset, length, position) => {
+      assert.equal(fd, descriptor);
+      const boundary = position >= gzip.length - 8 ? 'footer' : 'header';
+      if (fault === `${boundary}-eof`) return 0;
+      if (fault === `${boundary}-throw`) throw new Error('PRIVATE_CANARY password Bearer');
+      return originalRead(fd, buffer, offset, Math.min(length, 2), position);
+    };
+    fs.closeSync = (fd) => {
+      assert.equal(fd, descriptor);
+      originalClose(fd); closes++;
+      if (fault !== 'short') throw new Error('PRIVATE_CANARY close');
+    };
+    syncBuiltinESMExports();
+    try {
+      if (fault === 'short') assert.deepEqual(await validateTarball(goodTar, inventory), inventory);
+      else await assert.rejects(validateTarball(goodTar, inventory), (error) => diagnostic(error, 'archive'));
+      assert.equal(opens, 1); assert.equal(closes, 1);
+      assert.throws(() => fs.fstatSync(descriptor), (error) => error.code === 'EBADF');
+      count++;
+    } finally {
+      fs.openSync = originalOpen; fs.readSync = originalRead; fs.closeSync = originalClose;
+      syncBuiltinESMExports();
+    }
+  }
   const trailing = join(root, 'trailing.tgz');
   fs.writeFileSync(trailing, gzipSync(Buffer.concat([plain, Buffer.from('PRIVATE_CANARY trailing bytes')])));
   await assert.rejects(validateTarball(trailing, inventory), (error) => diagnostic(error, 'archive'));
