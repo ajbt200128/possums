@@ -1,0 +1,20 @@
+PRIVATE BUILD-VERIFICATION CANDIDATE — INCOMPLETE — DO NOT REDISTRIBUTE
+
+No Possums project license has been selected and redistribution is not approved.
+This document grants no rights and is not a complete third-party notice or
+corresponding-source offer. The candidate remains private:true.
+
+The reviewed release must account for the exact bundled npm dependency closure,
+the Go/WASM verifier dependency closure and the statically distributed Rust/Tor
+closure, including attribution and any notice/source-offer requirements.
+The immutable source lockfiles and public build reports identify build inputs;
+they are not a legal approval or a substitute for required notices/license text.
+
+GO-LICENSE applies only to the Go runtime shim. It does not license Possums,
+relicense dependencies or establish compatibility of the complete distribution.
+Build-only npm/tar tooling is not shipped as a runtime dependency.
+
+A separately reviewed source change must replace this incomplete record with
+approved complete notices and supply the selected project LICENSE before any
+public binary upload or npm publication. Source preparation and synthetic pack
+checks do not satisfy that gate.

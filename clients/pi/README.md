@@ -9,16 +9,39 @@ It verifies the backend. It does not protect your machine — see [Limits](#limi
 
 ## Install
 
-You need a Pi **1.3.0** installation, Node **24.13.0**, and Go **1.27.2** for the
-verifier. Everything runs inside the pinned devenv shell:
+This is the maintainer source procedure, not npm onboarding. The authored
+`@possums/pi@0.3.0-rc.1` candidate is still private and not approved for
+redistribution; see [private assembly and packing](../../docs/pi-private-distribution.md).
+The read-only [source CI route](../../docs/pi-source-ci.md) acquires the pinned
+public SDK in isolated scratch and runs compiler/offline checks without requiring
+a personal Pi profile, npm credentials, or a Possums client installation.
 
-`devenv shell`
+You need Pi **1.3.0**, exact Node **24.13.0 / npm 11.6.2**, and the pinned
+compiler tools. The opt-in shell supplies Go **1.27.2**, Rust **1.92.0** and
+inspection tools; select Node/npm separately rather than assuming the shell's
+ambient runtime matches:
+
+`nix develop --no-write-lock-file .#pi-client`
+
+`node --version`
+
+`npm --version`
 
 `POSSUMS_PI_ROOT="$HOME/.pi/agent/install/releases/1.3.0" sh clients/pi/build.sh`
 
 The build pulls in `@tinfoilsh/verifier`, `ehbp` and the Sigstore browser client,
 compiles the Go v3 verifier to WASM, builds the native SOCKS connector, typechecks,
-and prints a scratch directory. Register the package it produces:
+and prints a private scratch directory. It now uses `native/<platform>-<arch>/`
+and a closed manifest, but includes only the build host's helper—not the proposed
+four-target public distribution. Linux source-client builds require the separately
+provisioned musl target: prepare the helper in the opt-in `pi-native` flake shell,
+then pass its package directory through `POSSUMS_TOR_NATIVE_BUILD` to this build.
+No script installs missing Rust targets. The standalone native builder still
+supports local GNU host builds, which are not client distribution artifacts.
+
+The npm release is not published or licensed for redistribution yet; the source
+procedure below does not establish public-package or installation qualification.
+For separately authorized source use, register the package it produces:
 
 `pi install /absolute/path/to/possums-pi-build-XXXXXX/package`
 
@@ -29,9 +52,11 @@ To try it without installing:
 
 `pi --no-session --no-extensions -e /absolute/path/to/possums-pi-build-XXXXXX/package/extension.mjs`
 
-`build.sh` refuses to run unless `POSSUMS_PI_ROOT` is absolute, Node reports exactly
-`v24.13.0`, and all three `@earendil-works/pi-*` packages are present under that
-root. Those pins are load-bearing; do not relax them to get past an error.
+Set `POSSUMS_PI_ROOT` to an absolute path. `build.sh` requires it to be nonempty,
+checks that Node reports exactly `v24.13.0`, and checks that all three
+`@earendil-works/pi-*` packages are present under that root; it does not explicitly
+check that the path is absolute. The separate `check.mjs` runner does enforce an
+absolute path. Those pins are load-bearing; do not relax them to get past an error.
 
 ## Use
 
@@ -71,6 +96,9 @@ screenshots or raw server messages.
 | `possums_session_unavailable` | Challenge/login did not complete. Says nothing about credential validity. |
 | `possums_catalog_*` | Catalog transport, rejection, decoding or validation failed. Refresh models. |
 | `possums_stream_usage_missing` | No terminal usage delivered; charge unknown, not refunded. |
+| `possums_tor_native_platform_unsupported` | Tor is unavailable on this platform; no HTTPS fallback occurred. |
+| `possums_tor_native_artifact_missing` / `artifact_mismatch` | Selected Tor package files are missing or inconsistent. Restore the exact approved package and fully restart; do not substitute a helper. |
+| `possums_tor_native_artifact_unreadable` / `inspection_unknown` | Local package inspection could not complete. Check permissions and share only the content-free code/stage/constraint. |
 
 Unexpected failures report a component-specific fallback that says the cause is
 unknown. That is the honest answer, not a placeholder.
@@ -89,6 +117,10 @@ command line:
 
 `POSSUMS_TOR_PROXY_USERNAME=… POSSUMS_TOR_PROXY_PASSWORD=…`
 
+Only valid explicit Tor selection reads the native manifest/helper and proxy
+credentials. Default HTTPS startup/status does not inspect them. The resolver
+checks the selected package-relative file's mode, size, hash and architecture;
+these checks detect corruption, not malicious replacement of code plus metadata.
 Selection is locked at first trust; changing it later fails closed. The full wire format and
 endorsement checks are in [`docs/tor-client-setup.md`](../../docs/tor-client-setup.md).
 

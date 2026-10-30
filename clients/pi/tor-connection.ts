@@ -1,6 +1,7 @@
 import type { Duplex } from 'node:stream';
 import { createTorNativeTransport, TorNativeTransportFailure, type TorNativeProxy, type TorNativeScope } from './tor-native-transport.mjs';
 import { parseTorOnionAddress, TorOnionFailure } from './tor-onion.mjs';
+import { NativeArtifactFailure } from './native-artifacts.mjs';
 import { TorSetupFailure, TorSetupBackendFailure } from './tor-setup.mjs';
 import { TorEndorsementFailure } from './tor-endorsement.mjs';
 import { publicTorRequest } from './v3.js';
@@ -11,10 +12,11 @@ import { collect, DiagnosticFailure, type Operation } from './core/limits.js';
 // no identifiers, proxy credentials, raw causes or socket facts in diagnostics.
 export { TorNativeTransportFailure, torNativeTransportDiagnostic } from './tor-native-transport.mjs';
 export { TorOnionFailure } from './tor-onion.mjs';
+export { NativeArtifactFailure, nativeArtifactDiagnostic } from './native-artifacts.mjs';
 export { TorSetupFailure, TorSetupBackendFailure } from './tor-setup.mjs';
 export { TorEndorsementFailure } from './tor-endorsement.mjs';
-export function isTorConnectionFailure(error: unknown): error is TorNativeTransportFailure | TorOnionFailure | TorSetupFailure | TorSetupBackendFailure | TorEndorsementFailure {
-  return error instanceof TorNativeTransportFailure || error instanceof TorOnionFailure || error instanceof TorSetupFailure
+export function isTorConnectionFailure(error: unknown): error is TorNativeTransportFailure | TorOnionFailure | TorSetupFailure | TorSetupBackendFailure | TorEndorsementFailure | NativeArtifactFailure {
+  return error instanceof NativeArtifactFailure || error instanceof TorNativeTransportFailure || error instanceof TorOnionFailure || error instanceof TorSetupFailure
     || error instanceof TorSetupBackendFailure || error instanceof TorEndorsementFailure;
 }
 // The shared collector deliberately projects unknown errors to ChannelError.

@@ -17,6 +17,7 @@
   "devDependencies": {
     "typescript": "5.9.3",
     "esbuild": "0.25.10",
+    "tar": "7.5.22",
     "@types/node": "22.19.19"
   }
 }

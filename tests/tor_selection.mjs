@@ -3,7 +3,7 @@
 // PRIVACY.md: data handling, forbidden telemetry, typed failures, synthetic tests.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm, readFile, symlink, realpath } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir, symlink, realpath, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -33,8 +33,24 @@ const proxyEnv = values => {
 };
 try {
   globalThis.fetch = async () => { assert.fail('no network permitted'); };
+  const { NATIVE_TARGETS } = await import(pathToFileURL(path.join(source, 'native-artifacts.mjs')));
+  const nativeKey = `${process.platform}-${process.arch}`, definition = NATIVE_TARGETS[nativeKey];
+  assert(definition, 'this offline source check requires a supported native build host');
+  // Header-only fixture: the real resolver runs, but the substituted scope never executes it.
+  const helperBytes = Buffer.alloc(64);
+  if (definition.format === 'macho') {
+    helperBytes.writeUInt32LE(0xfeedfacf, 0); helperBytes.writeUInt32LE(definition.cpu, 4); helperBytes.writeUInt32LE(2, 12);
+  } else {
+    Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1]).copy(helperBytes);
+    helperBytes.writeUInt16LE(2, 16); helperBytes.writeUInt16LE(definition.cpu, 18);
+  }
+  const helperPath = path.join(out, definition.path), manifestPath = path.join(out, 'native-manifest.json');
+  await mkdir(path.dirname(helperPath), { recursive: true });
+  await writeFile(helperPath, helperBytes, { mode: 0o755 });
+  await writeFile(manifestPath, JSON.stringify({ schema: 1, targets: { [nativeKey]: { target: definition.target,
+    path: definition.path, size: helperBytes.length, sha256: createHash('sha256').update(helperBytes).digest('hex') } } }));
   globalThis.__selectionPrepare = proxy => {
-    prepares++; assert.equal(proxy.helperPath, path.join(out, 'possums-tor-native'));
+    prepares++; assert.equal(proxy.helperPath, helperPath);
   };
   globalThis.__selectionScope = owned => {
     const item = { id: ++scopeId, closed: false, close: async () => {
@@ -126,11 +142,31 @@ try {
   await check('default extension factory/status do not read Tor secrets, create scopes or connect', async () => {
     proxyEnv({ POSSUMS_TOR_PROXY_USERNAME: hostile });
     const before = connects.length, helpers = prepares, reads = envReads;
-    const ext = extension(); await ext.status();
-    assert.equal(connects.length, before); assert.equal(prepares, helpers); assert.equal(envReads, reads);
-    await ext.start(); assert.equal(connects.at(-1).route, 'clearnet');
-    await ext.status(); await ext.shutdown();
-    assert.equal(prepares, helpers); assert.equal(envReads, reads);
+    // A corrupt native manifest cannot interfere with default HTTPS factory/start/status/shutdown.
+    await rename(manifestPath, manifestPath + '.saved');
+    await writeFile(manifestPath, hostile);
+    try {
+      const ext = extension(); await ext.status();
+      assert.equal(connects.length, before); assert.equal(prepares, helpers); assert.equal(envReads, reads);
+      await ext.start(); assert.equal(connects.at(-1).route, 'clearnet');
+      await ext.status(); await ext.shutdown();
+      assert.equal(prepares, helpers); assert.equal(envReads, reads);
+    } finally { await rename(manifestPath + '.saved', manifestPath); }
+  });
+  await check('Tor package failures warn without secret reads, direct fallback or traffic', async () => {
+    proxyEnv({ POSSUMS_TOR_PROXY_USERNAME: hostile });
+    for (const [asset, expected] of [[manifestPath, 'artifact_missing'], [helperPath, 'artifact_missing']]) {
+      await rename(asset, asset + '.saved');
+      const before = connects.length, reads = envReads, helpers = prepares;
+      try {
+        const ext = extension({ 'possums-tor-onion': onion }); await ext.start();
+        assert.equal(ext.provider.currentFailure.code, 'tor_transport_diagnostic');
+        assert.match(ext.provider.currentFailure.message, new RegExp('possums_tor_native_' + expected));
+        assert.equal(connects.length, before); assert.equal(prepares, helpers); assert.equal(envReads, reads);
+        assert(!ext.warnings.join('').includes(hostile));
+        await ext.status(); await ext.shutdown(); assert.equal(connects.length, before);
+      } finally { await rename(asset + '.saved', asset); }
+    }
   });
   await check('proxy without onion rejects before secret reads or traffic', async () => {
     for (const flags of [{ 'possums-tor-proxy': '127.0.0.1:19050' }]) {

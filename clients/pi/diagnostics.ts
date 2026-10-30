@@ -6,11 +6,15 @@ export function settlementDescription(receipt: Readonly<Receipt>): string {
 }
 import { DiagnosticFailure } from './core/limits.js';
 import { VerifierFailure } from './verifier.mjs';
-import { TorNativeTransportFailure, TorOnionFailure,
+import { TorNativeTransportFailure, TorOnionFailure, NativeArtifactFailure, nativeArtifactDiagnostic,
   TorSetupFailure, TorSetupBackendFailure, TorEndorsementFailure, isTorConnectionFailure } from './tor-connection.js';
-type TorFailure = TorNativeTransportFailure | TorOnionFailure | TorSetupFailure | TorSetupBackendFailure | TorEndorsementFailure;
+type TorFailure = TorNativeTransportFailure | TorOnionFailure | TorSetupFailure | TorSetupBackendFailure | TorEndorsementFailure | NativeArtifactFailure;
 
 function torDescription(error: TorFailure): string {
+  if (error instanceof NativeArtifactFailure) {
+    const safe = nativeArtifactDiagnostic(error);
+    return `[${safe.code}] Stage: ${safe.stage}; constraint: ${safe.constraint}. ${safe.action}`;
+  }
   if (error instanceof TorNativeTransportFailure) {
     const safe = safeTorNativeDiagnostic(error);
     return `[${safe.code}] Stage: ${safe.stage}; constraint: ${safe.constraint}. ${safe.action} ${safe.outcome}`;
@@ -182,6 +186,7 @@ export function catalogConnectionFailure(error: unknown): ConnectionFailure {
 }
 export function connectionFailure(error: unknown): ConnectionFailure {
   if (error instanceof ConnectionFailure) return error;
+  if (error instanceof NativeArtifactFailure) return new ConnectionFailure('tor_transport_diagnostic', error);
   if (error instanceof TorNativeTransportFailure) return new ConnectionFailure(
     safeTorNativeDiagnostic(error).code === 'possums_tor_native_configuration' ? 'tor_selection_invalid' : 'tor_transport_diagnostic', error);
   if (error instanceof TorOnionFailure) return new ConnectionFailure('tor_selection_invalid', error);

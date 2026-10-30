@@ -1,8 +1,8 @@
 # Pi client release plan
 
-**Status: design only; no implementation, build, installation, publication, activation, or deployment performed for this plan.** Repository inspected at `f608e8b9a09c66f7f0405443fb5357ff05dde8b2`, branch `t3/readme-security-setup-notes`. Commands below are future procedures, not execution evidence. Paths are repository-relative unless stated otherwise.
+**Status: private candidate metadata, lazy resolver, clean assembly/packing source gates and scoped offline checks; no installation, publication, activation or deployment.** Current-source four-platform handoff, a real universal archive, installed loader qualification and publishing remain incomplete. See the [private distribution implementation/evidence record](pi-private-distribution.md). Originally inspected at `f608e8b9a09c66f7f0405443fb5357ff05dde8b2`; factual corrections were checked against post-retirement baseline `0b3551f6` (PR #114). Subsequent native implementation, evidence and unresolved packaging integration are recorded in [native portability](pi-native-portability.md). Commands below remain future procedures except where that record explicitly establishes execution. Paths are repository-relative unless stated otherwise.
 
-**Reconciled after retirement landed.** While this plan was drafted, the operator separately authorised and landed the retirement of the compiled approval path: `refactor(client): remove the compiled approval and --possums-manifest` (commits `e40382e7`, `04c45517`). That removes `API_APPROVALS`, `requireApiApproval`, `qualifyApi`, `provenanceForTag`, `Channel.api`, `ReferenceClient.verified`, `connect`, `recoverCompiled`, the `--possums-manifest` flag, and the frozen `pi-v2-bootstrap` fixture together with `tests/phase02_release.mjs`.
+**Reconciled after retirement landed.** While this plan was drafted, the operator separately authorised and landed the retirement of the compiled approval path: `refactor(client): remove the compiled approval and --possums-manifest` (commits `e40382e7`, `04c45517`). That removes `API_APPROVALS`, `requireApiApproval`, `qualifyApi`, `Channel.api`, `ReferenceClient.verified`, `connect`, `recoverCompiled`, the `--possums-manifest` flag, and the frozen `pi-v2-bootstrap` fixture together with `tests/phase02_release.mjs`. The post-retirement baseline still exported `provenanceForTag` with zero callers. It was subsequently deleted independently in `8b7f6f4c`, including only its now-unused candidate limit and comments; all shared verification stayed intact. The fresh pinned scratch build, separate core typecheck and full offline client suites passed. Never reintroduce this retirement residue.
 
 §6 below has been rewritten to match. Do not resurrect the tombstone; where the original draft said "keep it for v1", this plan now records why removal was the right call and what it changed for packaging.
 
@@ -41,13 +41,15 @@ Tor Browser/system Tor may use a different port; supply the actual numeric loopb
 
 Reference: Pi 1.3.0's installed `docs/packages.md` and `docs/cli.md`, under `/Users/mb5/.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-coding-agent/`. Versioned npm specifications are pinned; package updates use `pi update --extensions` or a selected source, whereas bare `pi update` updates Pi itself.
 
-## 2. Verified current state and corrections to the brief
+## 2. Verified baseline and corrections to the brief
+
+The following observations describe `0b3551f6`, not subsequent native preparation. The new builder accepts explicit targets and the private JS packager uses the closed manifest/resolver with one host helper under `native/<key>/`. The separate assembler now requires all four matching-source targets and independently inspects originals and copies. Its synthetic/offline checks are not a real universal artifact acceptance. See [the scoped implementation record](pi-native-portability.md); no four-platform release acceptance is claimed.
 
 | Observation | Source and implication |
 | --- | --- |
 | Source package is `possums-pi`, `0.2.0`, `private: true`, with wildcard Pi peers. | `clients/pi/package.json`. This is a private build workspace, not an established public npm release contract. Registry name/version availability was not checked. |
 | Generated package already has `pi: { extensions: ['./extension.mjs'] }`. | `clients/pi/build.mjs` also writes `private: true`, `possums-pi`, `0.2.0`, wildcard peers. The Pi manifest half already exists; publication needs more than deleting `private`. |
-| Exact build qualification requires all three Pi packages at 1.3.0, Node 24.13.0, TypeScript 5.9.3, esbuild 0.25.10. | `clients/pi/build.sh` checks package presence and Node; `build.mjs` checks package versions and build tools. The shell requires a nonempty `POSSUMS_PI_ROOT`; it does not itself explicitly test that path is absolute, despite README wording. Continue requiring a canonical absolute path in the documented build procedure. |
+| Exact build qualification requires all three Pi packages at 1.3.0, Node 24.13.0, TypeScript 5.9.3, esbuild 0.25.10. | `clients/pi/build.sh` checks package presence and Node; `build.mjs` checks package versions and build tools. The shell requires a nonempty `POSSUMS_PI_ROOT` but does not explicitly test absoluteness; `check.mjs` does. The README now distinguishes those checks. Continue requiring a canonical absolute path in the documented build procedure. |
 | Go and Tor artifacts are built unless supplied, and reports/source hashes are checked. | `clients/pi/build.sh`, `scripts/build-v3-verifier.sh`, `scripts/build-tor-native.sh`, `clients/pi/build.mjs`. The native builder unsets `CARGO_BUILD_TARGET`; packaging requires its report's platform/arch to match the packaging host. Existing scripts cannot simply assemble four cross-target binaries. |
 | WASM is portable; the SOCKS connector is not. | The Go build explicitly uses `GOOS=js GOARCH=wasm`; Rust currently builds for the host. `clients/pi/tor-native/src/main.rs` uses Unix descriptors, `libc::fcntl`, and Tokio `unix::AsyncFd`; Windows is not just a missing `.exe` build. |
 | Only explicit Tor selection uses the native helper. | `clients/pi/index.ts` constructs `torScope` only for the Tor route; `tor-native-transport.mjs` spawns on connection. JS transport modules may be bundled/imported in HTTPS mode, but the native executable is not used there. |
@@ -55,20 +57,11 @@ Reference: Pi 1.3.0's installed `docs/packages.md` and `docs/cli.md`, under `/Us
 | No npm publisher or downloadable **Pi client** release exists in the workflows inspected. | All five files in `.github/workflows/` were read. `check.yml` has image/test artifact uploads, `publish-image.yml` uploads gateway image/digest artifacts, and `tinfoil-release-publish.yml` delegates public gateway manifest publication to the pinned measurement action. Thus “nothing uploads build artifacts to GitHub releases” is too broad: gateway release assets exist in the release design (`scripts/release.py`, `verify_public`); the missing channel is client artifacts. |
 | Default npm use is not blocked by any administrative expiry; that mechanism no longer exists. | `index.ts` always chooses `connectPublished` (cleartext) or `connectTorPublished`. `bootstrap.ts` uses fresh v3 evidence and its authenticated serving-release tag/digest against `PUBLISHER`. See §6. |
 
-### Current build repair is a prerequisite, not assumed historical qualification
-
-Source inspection found two concrete post-core-move path inconsistencies:
-
-- `clients/pi/build.sh` creates `$S/source/clients/pi/core`, but not `$S/source/examples`, before `ln -s ../clients/pi/core "$S/source/examples/phase01"`. The pinned legacy fixture needs that historical directory shape. A fresh scratch tree needs its parent directory created.
-- `clients/pi/check.mjs` builds `path.resolve(packageSource, './transport.ts')`, while the file is now `clients/pi/core/transport.ts`.
-
-These are static findings, not a newly executed failure log. Repair them in a small prerequisite PR and run the complete scratch suite against the moved core; do not cite the earlier qualification record as proof that the current checkout still builds. Preserve the frozen legacy fixture's bytes/hash rather than editing its historical imports.
-
-`.github/workflows/check.yml` plus `flake.nix` currently cover gateway/Rust/Go/image work, not the complete Pi scratch build and `clients/pi/check.mjs`. A green existing check is therefore necessary but insufficient for publishing this client.
+`.github/workflows/check.yml` plus the default flake checks cover gateway/Rust/Go/image work, not the complete Pi scratch build and `clients/pi/check.mjs`. A green existing check is therefore necessary but insufficient for publishing this client. The read-only PR/manual `check-pi-native.yml` and opt-in `pi-native` shell cover the native packet only and upload no client binaries. The first PR run stopped on all targets at CA preparation; after the setup fix, all four jobs succeeded at `9ac39772` (run `40925858145`). That older workflow status is not a current-source artifact receipt/handoff, full Pi CI or a releasable universal package. See [native runner scope and remaining gates](pi-native-portability.md#native-runner-matrix--source-checks-in-progress).
 
 ## 3. Published artifact contract
 
-Build a clean distribution directory, then `npm pack` **that directory**, never the repository or whole scratch tree. Keep the source workspace private if useful; generate a public distribution manifest from one reviewed name/version definition, avoiding today's two independently hardcoded metadata copies.
+Build a clean distribution directory, then validate and pack **that directory**, never the repository or whole scratch tree. `release.json` now authors candidate metadata once; `assemble.mjs` and `pack.mjs` implement the private gates. The candidate remains `private:true`, `license:null`, `redistributionApproved:false`; these helpers reject fabricated public/rights approval. The public manifest below remains a future separately reviewed change.
 
 ### Required manifest metadata
 
@@ -80,7 +73,9 @@ Build a clean distribution directory, then `npm pack` **that directory**, never 
 - No `preinstall`, `install`, `postinstall`, or `prepare` downloader/compiler. Packing/publishing must not implicitly rebuild reviewed bytes through lifecycle hooks.
 - Declare a Node runtime target separately from the build pin. Proposed initial `engines.node` is `>=24.13.0 <25`; qualify the minimum and the chosen current Node 24 patch before advertising that supported range. Only Node 24.13.0 is established by the existing client qualification record. If the matrix cannot establish the proposed range, narrow the initial documented support instead of pretending the build pin proves it.
 
-### Exact allowlist to implement
+### Implemented private inventory and future public additions
+
+**A real universal candidate remains unestablished.** The one-host scratch builder retains Pi peer links and is not a distribution. The separate assembler implements the exact **21-file** clean private inventory, all-four-target/report/linkage checks and bounded public projections. Its tests use synthetic headers and mocked inspections, not four real accepted inputs. The table's approved project `LICENSE` is a **future addition**, not a current file or grant; notices are explicitly incomplete. Any legally required additions need reviewed allowlist changes. Never publish the scratch package or the current private candidate.
 
 | Ship | Reason |
 | --- | --- |
@@ -97,9 +92,21 @@ Build a clean distribution directory, then `npm pack` **that directory**, never 
 
 **Must not ship:** Pi itself; `node_modules` peer symlinks or physical Pi copies; build homes/caches/`.npmrc`; npm/Cargo/Go caches; Rust `target`; Go native `possums-attestation`; test bundles or fixtures; any test-authorizing bundle or fixture (the legacy `pi-v2-bootstrap` fixture and its scratch copy are deleted; do not reintroduce them); source maps or full source trees not needed at runtime; production config, credentials, installed auth/history, runtime caches, VCEKs, raw attestation reports, nonces, verdicts, or diagnostic/support dumps. Keep lockfiles and full public source at the immutable source commit, rather than confusing source build inputs with runtime installation dependencies.
 
-The frozen legacy-v2 fixture and its hash pin are **deleted** along with the path they regressed (§6), so no test-authorizing bundle exists to accidentally ship. Never reintroduce one to make offline acceptance easier.
+The frozen legacy-v2 fixture and its hash pin are **deleted** along with the path they regressed (§6); never restore them. Other test-authorizing bundles still exist: `check.mjs` generates `fixture-node.mjs` and `pi-test.mjs` with `__PHASE01_FIXTURE__` set to true. Keep those outputs outside the distribution, and assert the production bundle uses the false define. Deletion of the legacy fixture is not evidence that all test artifacts are absent.
 
 Licensing must cover bundled npm libraries, the Go/WASM dependency closure, and the statically distributed Rust closure, not just `GO-LICENSE`. Derive notices from exact lockfiles and actual bundle/native inputs. If attribution or source-offer obligations require additional files, add a reviewed explicit allowlist entry before publishing; do not silently omit legally required material to keep the package small.
+
+### Open license blocker and operator shortlist
+
+**No project license is selected. Redistribution of the client remains blocked.** Source preparation and synthetic local qualification do not resolve rights or authorize public distribution. The operator must choose a license, establish authority to license the covered code, and identify who approves the exact dependency closure and required notices/source offers. A root license cannot relicense third-party code.
+
+| Candidate, not a selection | Trade-off for the operator |
+| --- | --- |
+| MIT | Short permissive terms and simple attribution; permits proprietary forks and has no express patent grant. |
+| Apache License 2.0 | Permissive with an express contributor patent grant/termination provision; more notice/change-marking obligations and compatibility review than MIT. |
+| Mozilla Public License 2.0 | File-level copyleft can keep modifications to covered files available while allowing larger proprietary combinations; requires a more involved source-availability and bundled-output review. |
+
+Recommend MIT if simplicity is the priority, Apache License 2.0 if explicit patent terms matter, or MPL 2.0 if file-level reciprocity is intentional. These are decision aids, not a legal compatibility determination; do not add an SPDX metadata value, license file or redistribution claim until the operator decides and the rights review is complete.
 
 ## 4. Tor in v1: concrete build and runtime design
 
@@ -109,22 +116,24 @@ Use one `@possums/pi` tarball containing all four binaries rather than four opti
 
 | Package key | Rust target | Build/test strategy | Intended support floor |
 | --- | --- | --- | --- |
-| `darwin-arm64` | `aarch64-apple-darwin` | Native arm64 macOS runner; exact Rust 1.92.0, locked dependencies, selected SDK | macOS 13+, arm64; qualify actual minimum before claiming it |
-| `darwin-x64` | `x86_64-apple-darwin` | Native Intel macOS runner, same pinned compiler/dependency policy | macOS 13+, x64; qualify actual minimum before claiming it |
+| `darwin-arm64` | `aarch64-apple-darwin` | Native arm64 macOS runner; exact Rust 1.92.0, locked dependencies, selected SDK | Proposed macOS 14 qualification floor, arm64; unqualified |
+| `darwin-x64` | `x86_64-apple-darwin` | Native Intel macOS runner, same pinned compiler/dependency policy | Proposed macOS 14 qualification floor, x64; unqualified |
 | `linux-x64` | `x86_64-unknown-linux-musl` | Native x64 Linux runner with pinned musl linker/sysroot and explicit Rust target | Static musl binary; no installed Nix store or glibc version requirement |
 | `linux-arm64` | `aarch64-unknown-linux-musl` | Native arm64 Linux runner with pinned musl linker/sysroot and explicit Rust target | Static musl binary; same constraints as x64 |
 
+Propose macOS 14 as a conservative first qualification floor for both Node and the native helper, rather than advertising an untested macOS 13+ range. No macOS distribution floor is qualified yet. If the available systems cannot exercise that floor, report only the exact OS versions tested and leave older-version support unqualified. Linux static ABI and both userspace execution cases are also unqualified at this baseline.
+
 Select exact available hosted runner images/architectures when implementing; do not assume `macos-latest` means Intel or that a cross-build is execution evidence. Prefer native architecture runners; Linux musl is a deliberate target ABI change. Native Linux execution tests must cover both glibc and musl userspaces on each architecture. Qualify macOS deployment targets and actual oldest supported systems separately; runner success alone does not prove older-OS compatibility. Windows, FreeBSD, 32-bit hosts and other unmatched tuples are not Tor-supported in v1.
 
-The current Nix-built host executable is **not proven portable outside Nix**. Merely copying it out of `$S/target/release` can retain a Nix ELF interpreter/library reference or macOS load paths. Distribution acceptance must inspect ELF interpreter/NEEDED entries and Mach-O architectures/load commands, reject `/nix/store` dependencies, and execute in a clean machine/container without the build closure. For Linux require genuinely static output; do not paper over a dynamic binary with a “musl” label. For macOS use platform SDK libraries only, with the chosen deployment floor; qualify download/quarantine behavior without disabling platform security. No Apple signing identity is assumed or invented.
+The baseline Nix-built host executable was **not proven portable outside Nix**. Subsequent local macOS arm64 inspection/execution is recorded separately; Linux and Intel macOS remain unqualified. Merely copying it out of `$S/target/release` can retain a Nix ELF interpreter/library reference or macOS load paths. Distribution acceptance must inspect ELF interpreter/NEEDED entries and Mach-O architectures/load commands, reject `/nix/store` dependencies, and execute in a clean machine/container without the build closure. For Linux require genuinely static output; do not paper over a dynamic binary with a “musl” label. For macOS use platform SDK libraries only, with the chosen deployment floor; qualify download/quarantine behavior without disabling platform security. No Apple signing identity is assumed or invented.
 
-Adjust `scripts/build-tor-native.sh` deliberately: accept only a closed approved target, stop unconditionally unsetting the build target, emit truthful target/ABI/compiler/source/artifact metadata, and locate the target-specific Cargo output. Cross-assembly must not require `nativeReport.platform/arch === process.platform/arch` as `build.mjs` does today. Replace that packaging check with validation against the four expected target records, their source hashes, executable formats, and artifact digests. Keep local host builds supported with the same layout/resolver; do not create a separate weaker source-build loader.
+Native source preparation now makes `scripts/build-tor-native.sh` accept a closed explicit target, uses the active pinned toolchain, emits target/ABI/compiler/source/artifact metadata, and locates target-specific Cargo output. The inspector rejects nonportable linkage without executing the binary. This does not complete cross-platform qualification. Cross-assembly must not require `nativeReport.platform/arch === process.platform/arch` as `build.mjs` still does. The packaging phase must independently validate all four expected target records, source hashes, executable formats, linkage and artifact digests; supplied reports or a `distributionTarget` boolean cannot bypass inspection. Keep local host builds supported with the same layout/resolver; do not create a separate weaker source-build loader.
 
 Build the portable JS/WASM payload with exact pinned tools once per candidate (plus its independent reproducibility build), then assemble only matching-source native artifacts by immutable CI artifact ID and hash. Never “take the latest successful” matrix member. Missing one required target blocks the **whole v1 release**, not a silent partial package.
 
 ### Selection and validation
 
-Replace the hardcoded `new URL('./possums-tor-native', import.meta.url)` in `clients/pi/index.ts` with a small closed resolver for the above layout, called only after valid explicit Tor selection. It should:
+The source candidate now replaces the hardcoded top-level helper URL with `native-artifacts.mjs`, called only after valid explicit Tor selection. Private source builds use the same subdirectory/manifest/resolver contract. The implemented local-integrity boundary follows these rules (full public linkage/package acceptance remains separate):
 
 1. Map `process.platform` and `process.arch` to one of the four literal keys; never use user strings as a path or executable override.
 2. Resolve only the expected package-relative binary and reviewed manifest entry. Require a regular executable file, matching declared size/hash and target identity. Avoid a PATH search, arbitrary URL, install-time fetch, fallback executable or shell invocation.
@@ -133,16 +142,23 @@ Replace the hardcoded `new URL('./possums-tor-native', import.meta.url)` in `cli
 
 The existing `possums_tor_native_helper`, stage `helper_start`, constraint `artifact_unavailable`, is a useful safe fallback for spawn failures (`clients/pi/tor-native-transport.mjs`), but **not sufficient as the only multi-platform diagnostic**: it tells npm users to build a helper and does not distinguish unsupported platform from a damaged installation.
 
-Add only the needed closed distinctions, preserving the existing fallback:
+The source candidate adds only the needed closed distinctions, preserving the existing spawn fallback:
 
 - Unsupported platform/architecture: proposed `possums_tor_native_platform_unsupported`, `helper_start` / `unsupported_platform`; explain Tor is unavailable on this platform, no direct fallback occurred, and name the supported platform families. Do not suggest a source build on Windows, where the Unix implementation is unsupported.
 - Supported target but missing file: proposed `possums_tor_native_artifact_missing`, `helper_start` / `artifact_missing`; instruct the user to reinstall the matching approved package and fully restart, not compile Rust.
 - Digest/declared-target/executable-format mismatch detected from local evidence: proposed `possums_tor_native_artifact_mismatch`, `helper_start` / `artifact_mismatch`; refuse execution and request an approved replacement.
 - A validated helper still cannot start: retain `possums_tor_native_helper`, `helper_start` / `artifact_unavailable`; cause unknown, inspect local execution permissions/platform requirements. Do not infer an ABI cause from raw exception text.
 
-Codes above are proposed, not existing API claims. Reuse the current transport diagnostic owner and closed message path; do not create a diagnostic framework. Include no local paths, onion, proxy credentials, raw OS errors or process output. Keep known primary failure/cleanup precedence and no-replay semantics intact. Offline tests must cover each category, wrong architecture, missing mode, corrupt bytes, arbitrary manifest paths, and no native access in HTTPS mode.
+The unsupported/missing/mismatch distinctions are implemented in the source candidate, with bounded unreadable-file and unknown-inspection fallbacks; they are not claims about a shipped public package. They reuse the current transport diagnostic owner and closed message path, not a diagnostic framework. Include no local paths, onion, proxy credentials, raw OS errors or process output. Keep known primary failure/cleanup precedence and no-replay semantics intact. Offline tests must cover each category, wrong architecture, missing mode, corrupt bytes, arbitrary manifest paths, and no native access in HTTPS mode.
 
 ## 5. Build pins versus host compatibility
+
+The read-only [source workflow and locked scratch SDK route](pi-source-ci.md) are
+now implemented. The actual isolated driver passed locally on Darwin arm64, and
+GitHub reported Ubuntu source plus all-four native-job success for PR head
+`e9458030`. The source suite includes synthetic exact packing, not a real
+universal archive or npm-managed loader/profile installation. Matching artifact
+handoff, minimum-OS and separately authorized installed acceptance remain gates.
 
 **Recommendation: retain `"*"` ranges for Pi host peers**, per Pi 1.3.0's package contract, and document a separate exact qualification matrix. Do not replace these with runtime dependencies or bundle Pi to force the build pin onto every installation.
 
@@ -202,9 +218,11 @@ If a latched integrity failure requires a fresh trust session, explain that sepa
 
 Client publication **does not require the gateway's `production` deployment ceremony**, Tinfoil credentials, configuration custody, or a gateway update. Those gates protect mutation of a live gateway. Reusing them would couple client availability to an unrelated deployment and expose unnecessary authority.
 
-It **does require its own deliberate protected publication approval**: propose a `pi-release` GitHub environment, verified to exist and require the named operator reviewer before a publishing job references it. Recheck approval, exact source/tag, successful checks and artifact digests after approval. This is a proposed client release policy requiring operator setup, not evidence that any environment currently exists.
+**Proposed minimum: protected immutable `pi-v*` tags, successful exact-source checks, npm provenance and a required human publication review.** Use a dedicated `pi-release` GitHub environment for that approval; first verify that it exists with required-review protection, so referencing it cannot silently create an unprotected environment. The operator must designate the reviewer and recovery owner; none is invented or configured by this plan. Revalidate current-main eligibility, source/tag, checks and artifact digests after approval. Keep the publisher disabled until these prerequisites are verified and one publication is separately authorized.
 
-Use a new dedicated workflow, proposed `.github/workflows/publish-pi.yml`, not `scripts/release.py prepare` or `publish-image.yml`. Preserve the principles in `docs/approved-main-releases.md` and `scripts/release.py`: reviewed source; exact successful CI; immutable artifact/source identity; public signed provenance; serialized mutation; no overwriting, blind retry, or automatic rollback. Gateway-specific release-only commit R, config transformation and A/B image digest logic are not reused as npm version allocation.
+**Does client publishing need the gateway ceremony? No—not the gateway deployment ceremony, but yes to a separate protected publication approval.** Publishing client code is an irreversible supply-chain mutation users may install, so prior PR review alone is insufficient authority for a particular upload. Reuse required human approval, exact-byte/source provenance and no-replay discipline, not the gateway's production environment, Tinfoil/admin credentials, configuration custody, secret-reference snapshots or live deployment checks. Protected tags plus npm provenance do not replace the human release decision. Additional Git-tag signing is not a proposed mandatory gate; use it only if the operator later selects an existing signing identity/policy.
+
+The reserved `.github/workflows/publish-pi.yml` is **hard disabled and not a functional publisher**. Its only dormant body prints a closed blocker and exits; it contains no checkout, upload, npm publication or staging operation. It does not establish that `pi-release` exists/protects approvals, mint OIDC, or implement artifact/tag/source/CI admission, mirror or uncertain-outcome reconciliation. Those remain incomplete, not “ready by flipping a switch.” Keep this separate from `scripts/release.py prepare` or `publish-image.yml`. Preserve the principles in `docs/approved-main-releases.md` and `scripts/release.py`: reviewed source; exact successful CI; immutable artifact/source identity; public signed provenance; serialized mutation; no overwriting, blind retry, or automatic rollback. Gateway-specific release-only commit R, config transformation and A/B image digest logic are not reused as npm version allocation.
 
 For each client-only PR, the user/agent may explicitly apply `no-rollout-needed` **after reviewing the complete diff and rollout impact**. Never auto-label by file path. The label skips ordinary gateway publication/deployment, not required CI, client publication review, or npm provenance. If gateway impact is uncertain, retain normal rollout. A docs plan is not merge/release authority.
 
@@ -212,9 +230,9 @@ For each client-only PR, the user/agent may explicitly apply `no-rollout-needed`
 
 1. Create the operator's npm account with 2FA and private recovery custody, then create/secure the `possums` organization and confirm ownership of the scope. If unavailable, stop for operator resolution; do not rename the chosen scope autonomously. Assign least-privilege maintainers and an account-recovery owner. No credential goes into chat, the repo, or build artifacts.
 2. Resolve the project license and redistribution rights before making a real client artifact public.
-3. Establish the `@possums/pi` package record. **This is a real bootstrap dependency:** npm's `npm trust` documentation says the package must already exist. An organization alone is insufficient to configure the per-package trusted publisher. No existing package record or trust relationship was verified for this plan.
-4. npm documents that staging a new package creates a public `0.0.0-stage` placeholder. This offers a possible **operator-interactive, 2FA-controlled name/package bootstrap**, without a long-lived automation token; it is not itself OIDC-first publication. Because the operator selected OIDC publishing, obtain explicit approval for that narrowly scoped bootstrap or arrange a registry-supported package reservation/bootstrap with npm. Do not claim the first package can already be created by an unconfigured OIDC workflow, silently perform a manual real-client publish, approve a staged client, or add an npm token fallback. If no acceptable bootstrap exists under the selected policy, first publication remains blocked.
-5. Once the org and package exist, bind `@possums/pi` to GitHub owner `ajbt200128`, repository `possums`, workflow filename `publish-pi.yml`, and environment `pi-release`. Select permission for the intended direct `npm publish` flow; do not assume it is enabled by default. Configure dist-tag permission separately if using OIDC for stable promotion.
+3. Outside CI, the operator must establish control of an existing `@possums/pi` package record before attaching its trusted publisher. Org creation and a named recovery owner come first; an org alone does not establish package-level trust. No existing package record or trust relationship was verified for this plan. **The non-placeholder method of establishing that record is unresolved and blocks publication:** the operator must obtain a registry-supported route with npm. Do not assume OIDC can create its own unconfigured trust relationship.
+4. **No placeholder publish is authorized or to be implemented.** For factual context only, npm documents that staging a new package publishes a public `0.0.0-stage` placeholder; staging itself does not require 2FA, while approval of the staged version does. That is not a selected bootstrap route. Do not add a placeholder/staging workflow, manual real-client publish, staged-client approval or token fallback. If npm offers no acceptable non-placeholder route, stop for a new operator decision; CI cannot resolve this prerequisite.
+5. Once the org, recovery custody and package record exist, the operator—not CI—must attach the trusted-publisher link to GitHub owner `ajbt200128`, repository `possums`, workflow filename `publish-pi.yml`, and the verified protected environment `pi-release`. Select permission for the intended direct `npm publish` flow; do not assume it is enabled by default. Configure dist-tag permission separately if using OIDC for stable promotion. Organization creation, account recovery and trust-link setup are operator-run steps outside this pipeline, not agent-authorized mutations.
 6. Use GitHub-hosted runners with `id-token: write` only in the publishing job; no `NPM_TOKEN` or `NODE_AUTH_TOKEN` long-lived write secret. Restrict token-based publishing after hosted OIDC qualification, keep maintainer 2FA, and document account recovery. npm currently documents expiry of an unused new trusted-publisher configuration after two days, so create it when the approved candidate is ready.
 
 A future operator-authenticated setup command, **only after the package exists and the environment/workflow are approved**, is:
@@ -250,7 +268,7 @@ For the client, require immutable protected `pi-v*` tags plus **OIDC-signed pack
 
 ## 8. Independent client versioning
 
-Keep client versions independent of gateway `v0.0.*`. Current private `possums-pi@0.2.0` is the source/build label in two files; it does not mean “compatible with gateway 0.2.0,” a published package, or a stable public API promise.
+Keep client versions independent of gateway `v0.0.*`. Private `possums-pi@0.2.0` remains the source workspace label; generated candidate metadata now comes from `release.json` as `@possums/pi@0.3.0-rc.1`. Neither label establishes publication, gateway-version compatibility or a stable public API promise.
 
 Propose first public candidate **`@possums/pi@0.3.0-rc.1`**, tagged `next`, then **`0.3.0`** after acceptance. “Tor in v1” means the first public distribution wave, not a forced SemVer `1.0.0` maturity claim. If the operator wants `1.0.0`, decide its stability/support promise explicitly before tagging.
 
@@ -264,20 +282,20 @@ Every step requires its own bounded review and evidence. Reverting source prepar
 
 | Step | Change | Proof required before advancing | Failure / reversal |
 | --- | --- | --- | --- |
-| 0. Repair current baseline | Fix only scratch legacy-fixture parent creation and moved-core check entry; verify other build inputs still resolve. | Fresh pinned source build and complete `check.mjs`, source-to-scratch byte correspondence. | Stop if any suite fails; keep source-only. Do not bypass tests or weaken pins. |
-| 1. Resolve ownership/legal prerequisites | Create npm account/org; choose license/notice policy and publication reviewers; resolve initial package bootstrap authority. | Operator-controlled ownership and recovery documented without secrets; licensed exact dependency closure; package bootstrap outcome reconciled. | No org/package/trust means no publish. Do not change scope, add a token or publish an unlicensed placeholder client. |
-| 2. Introduce distributable layout | Single name/version source; generated public metadata/allowlist; portable WASM assets and public reports; no lifecycle scripts or host symlinks. | `npm pack` inventory, report/artifact checks, extracted runtime loading with Pi host mapping. | Remains a local candidate. Revert metadata/layout independently of trust behavior. |
-| 3. Make native target builds portable | Explicit four-target Rust builds, static Linux outputs, macOS deployment floor and truthful target reports. | ELF/Mach-O inspection and each binary executed on its actual architecture without Nix/build closure. Locked sources match. | Any missing/unportable target blocks v1; do not quietly omit Tor or label cross-compilation as execution coverage. |
+| 0. Correct documentation | Remove obsolete baseline repairs, distinguish proposed inventory from current output, and record open decisions without selecting a license or bootstrap workaround. | Documentation diff against `0b3551f6`; no source/runtime changes or new build claims. | Revert documentation independently; no publication effect. |
+| 1. Make native target builds portable | Explicit four-target Rust builds, static Linux outputs, macOS deployment floor and truthful target reports. | Fresh pinned build/check baseline, ELF/Mach-O inspection and each binary executed on its actual architecture without Nix/build closure. Locked sources match. | Any missing/unportable target blocks v1; do not quietly omit Tor or label cross-compilation as execution coverage. |
+| 2. Delete retirement residue separately | Delete the zero-caller `provenanceForTag` helper and only imports/constants made unused by that deletion; do not remove shared verification code. | Focused source diff, typechecks and existing trust suites; no policy weakening. | Independently revertible cleanup, not a packaging or trust redesign. |
+| 3. Introduce distributable layout | Single name/version source; generated public metadata/allowlist; portable WASM assets and public reports; no lifecycle scripts or host symlinks. Leave license metadata unresolved until approved. | Local `npm pack` inventory, report/artifact checks, extracted runtime loading with Pi host mapping only within separately authorized installation scope. | Remains a local candidate; no public redistribution before license/rights approval. Revert metadata/layout independently of trust behavior. |
 | 4. Add closed lazy resolver/diagnostics | Package-relative target selection; hash/target checks; unsupported/missing/mismatch distinctions; unchanged byte transport and trust policy. | HTTPS never accesses/spawns helpers; explicit Tor never falls back; wrong-target/corrupt/missing/error/cleanup fixtures pass. | Revert selector separately; no arbitrary helper path/download workaround. |
 | 5. Add exact client CI and compatibility gates | Dedicated client matrix and actual packed Pi loader tests; extend package reports/tests; keep ordinary repository CI. | Full suites on four targets, fresh WASM Worker tests, synthetic renewal/history/no-replay/receipt/tool/privacy checks; prior shipped decoders exercised where affected. | Failed or unavailable coverage remains explicit; no client publish on gateway-only green CI. |
 | 6. Add disabled protected publisher/mirror | Dedicated workflow, exact artifact-ID handoff, protected environment, tag/version guard, OIDC/provenance, no-replay reconciliation. | Offline negative tests for stale/unreviewed/wrong-source artifacts, absent environment/trust, collisions, uncertain outcomes; independent workflow/security review. | Leave disabled. No credentials or mutation granted to build/PR jobs. |
-| 7. Establish trust and release one RC | After approved bootstrap, configure package↔repo/workflow/environment trust; separately authorize one protected RC publication and mirror. | Registry version/bytes/provenance match; all four installed package cases qualified in clean test profiles; no automatic live inference. | Stop on unknown publication outcome; reconcile exact state. A mirror failure does not authorize npm replay. |
+| 7. Resolve operator prerequisites; release only with new authority | Operator establishes org/recovery custody, license/rights approval, a non-placeholder package-record route and protected reviewers, then attaches the trusted-publisher link outside CI. Separately authorize one protected RC publication and mirror. | Prerequisites reconciled without secrets; registry version/bytes/provenance match; all four installed package cases qualified only with separate installation authority; no automatic live inference. | Blocked until resolved. No placeholder or token fallback. Stop on unknown publication outcome; a mirror failure does not authorize npm replay. |
 | 8. Separately qualify user experience | Authorize test-profile installation, activation and bounded public verification; separately authorize auth/catalog or paid canary if wanted. | Distinct installed/activated/public-verified/authenticated/catalog/inference results, including Tor prerequisites and actual host presentation. | Stop at the failing stage with safe diagnostics. No paid probe assumed; offline fixtures are not live Tor/gateway evidence. |
 | 9. Release stable and update onboarding | Gate exact stable package, set stable discovery intentionally, replace source-first README with npm-first instructions and maintenance policy. | Verified stable registry/mirror bytes and documented supported runtime matrix; readable failure/renewal guidance; no false guarantee of universal host compatibility. | Deprecate/redirect a bad version with operator approval; retain immutable evidence and let users choose a compatible replacement. No silent update/rollback. |
 
 ### Concrete acceptance commands to retain
 
-After step 0, in the repository's pinned developer environment with the exact Node executable selected (the environment's default Node must be checked, not assumed):
+For fresh baseline qualification before native-target changes, use the repository's pinned developer environment with the exact Node executable selected (the environment's default Node must be checked, not assumed). The PR #114 path repairs are already present; do not restore the deleted fixture or add an `examples/phase01` symlink:
 
 `node --version`
 
@@ -287,13 +305,13 @@ Use the exact scratch directory printed by that invocation, not a prior convenie
 
 `POSSUMS_PI_ROOT="$HOME/.pi/agent/install/releases/1.3.0" node /absolute/printed/scratch/source/clients/pi/check.mjs`
 
-For the proposed clean assembled distribution, with `DIST` and `ARTIFACTS` set to approved absolute scratch paths:
+For the implemented private gates, provide matching current inputs at absolute `SOURCE_PACKAGE`/`NATIVE_ROOT` paths and fresh absolute `DIST`/`ARTIFACTS` output paths. No complete real all-four-target invocation is claimed. See [inputs and limits](pi-private-distribution.md#build-only-commands):
 
-`npm pack "$DIST" --dry-run --json --ignore-scripts`
+`node clients/pi/assemble.mjs "$SOURCE_PACKAGE" "$NATIVE_ROOT" "$DIST"`
 
-`npm pack "$DIST" --pack-destination "$ARTIFACTS" --ignore-scripts`
+`node clients/pi/pack.mjs "$DIST" "$ARTIFACTS"`
 
-`tar -tzf "$PACKAGE_TARBALL"`
+A raw npm/TAR listing is not a substitute for source/report correspondence, eight linkage inspections, or exact compressed/expanded byte validation. These commands neither install nor publish.
 
 Also run existing repository gates, not only packaging tests:
 
@@ -322,7 +340,7 @@ Apply [data handling boundaries](../PRIVACY.md#data-handling-boundaries), [forbi
 - Follow `docs/pi-client-failure-policy.md`: warning-only non-trust stops do not establish successful generation/settlement; fatal identity failures remain closed. Existing host interception and T3 rendering limits remain explicit.
 - Future bounded routine implementation/test packets can use the live-catalog Possums Flash model when authorized and suitable under `AGENTS.md`. Keep privacy, trust, concurrency and release-authority decisions with the stronger lead. Dogfood inference is real service usage, not synthetic release evidence or implicit authorization for paid calls. No extra agent/dogfood calls were required for this design.
 
-Keep a per-candidate evidence record distinguishing **source read → built → offline qualified → packed → published → installed → activated → public verified → authenticated/catalog qualified → inference observed**. Do not infer later stages from earlier ones. No fresh test result is claimed by this plan.
+Keep a per-candidate evidence record distinguishing **source read → built → offline qualified → packed → published → installed → activated → public verified → authenticated/catalog qualified → inference observed**. Do not infer later stages from earlier ones. Fresh scoped native/build checks are claimed only as recorded in [native portability](pi-native-portability.md); the remaining release and live phases are unqualified.
 
 ## 11. Non-goals and remaining operator decisions
 
@@ -334,10 +352,10 @@ Do not silently repair old client incompatibility by broadening CVM acceptance. 
 
 ### Still requiring a real decision or prerequisite
 
-1. **License and rights:** which project license is authorized, and who approves bundled dependency notices/redistribution? The repository is currently unlicensed.
-2. **Account custody and bootstrap:** who creates/recovers the npm account and owns the `possums` org? Approve a narrowly bounded interactive placeholder bootstrap or obtain a registry-supported alternative, since per-package OIDC requires an existing package. All actual client publishing remains OIDC; no long-lived token fallback.
-3. **Publication approvers and signing policy:** name `pi-release` reviewers and recovery owners. Decide whether OIDC-signed provenance plus protected immutable tags is sufficient, or identify an already-controlled Git-tag signing identity.
-4. **Runtime support floor:** confirm the proposed macOS 13+/Node 24 baseline and fund/provide actual four-architecture qualification runners. Node/Pi support expansion follows tests, not peer ranges. Tor on all four named targets is already decided.
+1. **License and rights — open redistribution blocker:** select from the shortlist in §3 (or provide another license) and name the rights/notices approver. No license or SPDX value is selected.
+2. **Account custody and bootstrap — operator-only blocker:** establish the `possums` org and recovery owner, obtain a non-placeholder route to the package record, then attach the protected workflow's trusted-publisher link outside CI. No placeholder publish will be implemented; no token fallback. A registry-supported route remains unresolved.
+3. **Publication approval — proposed minimum:** protected immutable client tags, exact successful CI, npm provenance and required human approval in a dedicated `pi-release` environment, not the gateway deployment ceremony (§7). The operator must name reviewers/recovery owners and approve this policy; no additional Git-signing identity is assumed.
+4. **Runtime support — proposed qualification targets, not qualified ranges:** retain exact Pi 1.3.0 and Node 24.13.0 build qualification. Propose `>=24.13.0 <25` only after minimum/current-patch testing; otherwise advertise only the exact tested runtime. Target macOS 14 initially and report only exact tested OS versions until the floor is exercised. Linux static musl and glibc/musl execution on both architectures remain unqualified. Confirm/provide runners; all four Tor targets remain required.
 5. **Version/support cadence:** confirm the proposed `0.3.0-rc.1` → `0.3.0` sequence, maintainer upgrade/security-notice ownership, and which prior shipped artifacts remain in the compatibility matrix. No auto-update policy is proposed.
 6. **Live acceptance authority:** separately authorize any clean-profile installation/activation, public Tor/HTTPS verification, authentication/catalog exercise or paid test. Until then, report offline/package evidence only.
 

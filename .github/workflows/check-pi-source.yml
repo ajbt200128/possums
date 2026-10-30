@@ -1,0 +1,41 @@
+name: check-pi-source
+run-name: check-pi-source.yml:${{ github.sha }}
+# Public acquisition then offline-flagged source checks, not a publisher.
+# No artifact handoff, installed-profile qualification or universal acceptance.
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pi-source-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+      # setup-node v6.0.0; no shared package cache or registry authentication.
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+        with:
+          node-version: 24.13.0
+          package-manager-cache: false
+      # v17; immutable action reference cannot be line-wrapped.
+      # yamllint disable-line rule:line-length
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3
+        with:
+          diagnostic-endpoint: ""
+      - name: Check source preparation policy offline
+        run: |
+          python3 -m unittest discover -s tests -p 'test_pi_source_*.py'
+          python3 -m unittest discover -s tests \
+            -p 'test_pi_publisher_disabled.py'
+      - name: Acquire public inputs; compile and check the source client offline
+        run: >-
+          nix develop --no-write-lock-file .#pi-client --command
+          python3 scripts/ci_pi_source.py
+      # No binary uploads until rights/redistribution and handoff review.
+      # Offline tool flags are not an OS-level network or filesystem sandbox.

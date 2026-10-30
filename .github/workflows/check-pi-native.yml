@@ -1,0 +1,55 @@
+name: check-pi-native
+run-name: check-pi-native.yml:${{ github.sha }}
+# Read-only source qualification; no redistribution or publisher.
+# PR checks and manual native runs are not client release approval.
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pi-native-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native:
+    name: native (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+      # setup-node v6.0.0
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+        with:
+          node-version: 24.13.0
+          package-manager-cache: false
+      # v17; immutable action reference cannot be line-wrapped.
+      # yamllint disable-line rule:line-length
+      - uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3
+        with:
+          diagnostic-endpoint: ""
+      - name: Check native preparation policy offline
+        run: python3 -m unittest discover -s tests -p 'test_tor_native*.py'
+      - name: Provision pinned tools; build twice and qualify the actual helper
+        env:
+          NATIVE_TARGET: ${{ matrix.target }}
+        run: >-
+          nix develop --no-write-lock-file .#pi-native --command
+          python3 scripts/ci_pi_native.py
+          "$NATIVE_TARGET" "$RUNNER_TEMP/pi-native"
+      # Do not upload client binaries before licensing/redistribution approval.
+      # The driver prints only closed public qualification metadata.
+      # JS/WASM packaging and actual Pi loading remain separate release gates.

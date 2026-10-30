@@ -1,4 +1,4 @@
-import { fileURLToPath } from 'node:url';
+import { resolveNativeHelper } from './native-artifacts.mjs';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { connectPublished, recoverPublished, connectTorPublished, recoverTorPublished } from './bootstrap.js';
 import { ConnectionFailure, connectionFailure, catalogConnectionFailure, approvalSummary } from './diagnostics.js';
@@ -22,7 +22,7 @@ export default function possums(pi: ExtensionAPI): void {
       // Native configuration validates optional pairing/UTF-8 bounds; no secret
       // is placed in flags, argv, diagnostics or persisted extension state.
       try {
-        scope = prepareTorConnection({ helperPath: fileURLToPath(new URL('./possums-tor-native', import.meta.url)),
+        scope = prepareTorConnection({ helperPath: resolveNativeHelper(),
           host: selection.host, port: selection.port,
           username: process.env.POSSUMS_TOR_PROXY_USERNAME, password: process.env.POSSUMS_TOR_PROXY_PASSWORD }, selection.onion);
       } catch (error) { throw connectionFailure(error); }

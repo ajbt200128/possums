@@ -5,12 +5,16 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, realpath, access, symlink, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { NATIVE_TARGETS, inspectNativeHeader } from './native-artifacts.mjs';
+import { readReleaseMetadata, candidateManifest } from './release-metadata.mjs';
+import { RECIPE_FILES } from './distribution-reports.mjs';
 
 const root = await realpath('.');
 const source = path.resolve(root, '../..');
 const out = process.env.PHASE02_OUT;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
-const piVersion = '1.3.0';
+const release = readReleaseMetadata(root);
+const piVersion = release.piVersion;
 const runtimePins = {};
 const runtimeRoots = {};
 try {
@@ -67,7 +71,10 @@ try { nativeReport = JSON.parse(await readFile(path.join(nativeBuild, 'tor-nativ
 catch { throw new Error('possums_build_tor_native_report: native helper report could not be read/decoded; cause unknown. Rebuild the matching helper.'); }
 if (!nativeReport || typeof nativeReport !== 'object' || Array.isArray(nativeReport))
   throw new Error('possums_build_tor_native_schema: helper report must be an object; rebuild the matching helper.');
-if (nativeReport.rust !== '1.92.0' || nativeReport.tor !== '0.47.0' ||
+const nativeKey = `${process.platform}-${process.arch}`;
+const nativeDefinition = NATIVE_TARGETS[nativeKey];
+if (!nativeDefinition || nativeReport.target !== nativeDefinition.target ||
+    nativeReport.rust !== '1.92.0' || nativeReport.tor !== '0.47.0' ||
     nativeReport.platform !== process.platform || nativeReport.arch !== process.arch)
   throw new Error('possums_build_tor_native_platform: helper toolchain/platform differs from this package; rebuild for the intended host.');
 for (const name of ['Cargo.toml', 'Cargo.lock', 'src/main.rs']) {
@@ -82,17 +89,25 @@ try { nativeBytes = await readFile(path.join(nativeBuild, 'possums-tor-native'))
 catch { throw new Error('possums_build_tor_native_artifact_read: helper artifact could not be read; cause unknown. Rebuild for this host.'); }
 if (sha(nativeBytes) !== nativeReport.artifacts?.['possums-tor-native']?.sha256)
   throw new Error('possums_build_tor_native_artifact_hash: helper artifact differs from its report; rebuild before packaging.');
+inspectNativeHeader(nativeBytes, nativeKey);
+const nativeManifest = { schema: 1, targets: { [nativeKey]: { target: nativeDefinition.target,
+  path: nativeDefinition.path, size: nativeBytes.length, sha256: sha(nativeBytes) } } };
 try {
-  await writeFile(path.join(out, 'possums-tor-native'), nativeBytes);
-  await chmod(path.join(out, 'possums-tor-native'), 0o755);
-  await writeFile(path.join(out, 'tor-native-build-report.json'), JSON.stringify(nativeReport, null, 2) + '\n');
+  await mkdir(path.join(out, 'native', nativeKey), { recursive: true });
+  await writeFile(path.join(out, nativeDefinition.path), nativeBytes);
+  await chmod(path.join(out, nativeDefinition.path), 0o755);
+  await writeFile(path.join(out, 'native', nativeKey, 'tor-native-build-report.json'), JSON.stringify(nativeReport, null, 2) + '\n');
+  await writeFile(path.join(out, 'native-manifest.json'), JSON.stringify(nativeManifest, null, 2) + '\n');
 } catch { throw new Error('possums_build_tor_native_output: helper packaging failed; cause unknown. Check the scratch output directory before rebuilding.'); }
-verifierArtifacts['possums-tor-native'] = { sha256: sha(nativeBytes) };
+verifierArtifacts[nativeDefinition.path] = { sha256: sha(nativeBytes) };
+verifierArtifacts['native-manifest.json'] = { sha256: sha(await readFile(path.join(out, 'native-manifest.json'))) };
 const peers = path.join(out, 'node_modules', '@earendil-works');
 await mkdir(peers, { recursive: true });
 for (const [name, directory] of Object.entries(runtimeRoots)) await symlink(directory, path.join(peers, name));
+const recipe = { entry: 'index.ts', fixture: false, sources: Object.fromEntries(await Promise.all(
+  RECIPE_FILES.map(async name => ['clients/pi/' + name, sha(await readFile(name))]))) };
 const buildReport = { node: process.version, pi: piVersion, runtimePins, typescript: ts.version, esbuild: esbuildVersion,
-  lock: sha(await readFile('package-lock.json')), verifier: verifierReport, torNative: nativeReport,
+  lock: sha(await readFile('package-lock.json')), recipe, verifier: verifierReport, torNative: nativeReport,
   artifacts: { ...verifierArtifacts } };
 const file = path.join(out, 'extension.mjs');
 const result = await build({ entryPoints: ['index.ts'], outfile: file, bundle: true, platform: 'node',
@@ -105,10 +120,6 @@ for (const [name, details] of Object.entries(result.metafile.inputs).sort()) {
 }
 buildReport.artifacts.extension = { sha256: sha(await readFile(file)), modules,
   external: Object.values(result.metafile.outputs).flatMap(value => value.imports).filter(value => value.external) };
-await writeFile(path.join(out, 'package.json'), JSON.stringify({
-  name: 'possums-pi', version: '0.2.0', private: true, type: 'module',
-  pi: { extensions: ['./extension.mjs'] },
-  peerDependencies: { '@earendil-works/pi-ai': '*', '@earendil-works/pi-coding-agent': '*' },
-}, null, 2) + '\n');
+await writeFile(path.join(out, 'package.json'), JSON.stringify(candidateManifest(release), null, 2) + '\n');
 await writeFile(path.join(out, 'build-report.json'), JSON.stringify(buildReport, null, 2) + '\n');
 console.log(JSON.stringify({ output: out, pi: piVersion, artifacts: Object.keys(buildReport.artifacts) }));
