@@ -12,6 +12,9 @@ It verifies the backend. It does not protect your machine — see [Limits](#limi
 This is the maintainer source procedure, not npm onboarding. The authored
 `@possums/pi@0.3.0-rc.1` candidate is still private and not approved for
 redistribution; see [private assembly and packing](../../docs/pi-private-distribution.md).
+The read-only [source CI route](../../docs/pi-source-ci.md) acquires the pinned
+public SDK in isolated scratch and runs compiler/offline checks without requiring
+a personal Pi profile, npm credentials, or a Possums client installation.
 
 You need Pi **1.3.0**, exact Node **24.13.0 / npm 11.6.2**, and the pinned
 compiler tools. The opt-in shell supplies Go **1.27.2**, Rust **1.92.0** and

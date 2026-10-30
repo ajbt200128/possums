@@ -162,9 +162,9 @@ Node 24.13.0 selected and a new scratch output directory (not executed here):
 
 This can acquire public build dependencies. It does not install/activate a Pi
 client or authorize npm publication, redistribution or any live inference.
-Actual native-CI success is still needed; a source PR run or manual native check
-is not a release dispatch. Licensing continues to block public client binary
-uploads.
+Native-CI statuses are recorded below; a source PR run or manual native check
+is not a release dispatch or an immutable artifact handoff. Licensing continues
+to block public client binary uploads.
 
 ## Lazy native selection and private source layout
 
@@ -216,19 +216,26 @@ and strict tarball validation; synthetic assembly is not real universal acceptan
 The inspector's typed JSON CLI supports expected public artifact SHA-256 binding,
 nonblocking owned descriptors, inherited-FD SDK tool paths and bounded timeouts.
 A refreshed actual Darwin arm64 build and static Node-to-Python inspection passed;
-**67** pinned Python native tests and **35** resolver tests passed. These do not
-establish current Linux inherited-FD/tool behavior or older-OS execution.
+**67** pinned Python native tests and **35** resolver tests passed. Local Darwin
+evidence alone does not establish Linux inherited-FD/tool or older-OS behavior.
 
 Read-only native workflow run **40925858145** succeeded for all four jobs at
 `9ac39772724b95e741ec53885f0ef4e469f1c9b8`, after the earlier CA preparation
 failure/fix. This is queried older-head CI status, not a current-source artifact
 receipt/handoff or a real universal package. Fresh exact-source CI and matching
-artifacts remain required after inspector changes; do not reuse old source receipts.
+artifacts are required after inspector changes; do not reuse old source receipts.
 
-All three absent local target libraries require separately provisioned build runners.
-Both Linux architectures still need execution in clean glibc and musl userspaces
-without Nix/build closures. Intel macOS and the proposed minimum macOS systems
-still need real execution; signing/quarantine behavior remains unqualified.
+The later native run **40975281886** reported **SUCCESS** for all four jobs at PR
+head `e9458030870bb9f58a880853d3e2eabd37dbedee`, including the reviewed native
+inspection/actual-helper and Linux glibc/musl harness paths. Source CI run
+**40975281859** also reported Ubuntu source-job success; the actual driver passed
+locally on Darwin arm64. See [source CI evidence](pi-source-ci.md). PR statuses
+can describe synthetic merge checkouts; they are not handed-off artifact/report
+bytes, immutable artifact IDs or universal package acceptance.
+
+Three target libraries/outputs remain absent locally; approved matching-source
+artifact delivery is still needed. The Intel runner does not establish the
+proposed macOS 14 floor; signing/quarantine behavior remains unqualified.
 No target is silently dropped, and inspection alone cannot satisfy those gates.
 Licensing, npm ownership/bootstrap and protected release approvers remain open.
 
