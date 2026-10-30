@@ -1,0 +1,30 @@
+name: pi-publisher-disabled
+# Reserved OIDC identity only. This is NOT a functional or enabled publisher.
+# Activation and artifact/publication logic require reviewed source work.
+on:
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: pi-npm-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    # Literal source gate; no input, variable or tag can enable this job.
+    if: ${{ false && startsWith(github.ref, 'refs/tags/pi-v') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    environment: pi-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # A second fail-closed boundary remains even if the job guard is removed.
+      - name: Publication is not implemented or authorized
+        run: |
+          printf '%s\n' \
+            'possums_pi_publish_blocked: stage=admission;' \
+            'constraint=operator_prerequisites. No publication was attempted.' \
+            'Resolve rights, org/package custody and protected approval.' \
+            'Exact artifact handoff and reviewed implementation are required.' \
+            'Separate release authority is still required.' >&2
+          exit 1

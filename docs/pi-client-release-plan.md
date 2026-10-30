@@ -153,6 +153,13 @@ The unsupported/missing/mismatch distinctions are implemented in the source cand
 
 ## 5. Build pins versus host compatibility
 
+The read-only [source workflow and locked scratch SDK route](pi-source-ci.md) are
+now implemented. The actual isolated driver passed locally on Darwin arm64, and
+GitHub reported Ubuntu source plus all-four native-job success for PR head
+`e9458030`. The source suite includes synthetic exact packing, not a real
+universal archive or npm-managed loader/profile installation. Matching artifact
+handoff, minimum-OS and separately authorized installed acceptance remain gates.
+
 **Recommendation: retain `"*"` ranges for Pi host peers**, per Pi 1.3.0's package contract, and document a separate exact qualification matrix. Do not replace these with runtime dependencies or bundle Pi to force the build pin onto every installation.
 
 `build.mjs` must continue requiring **Pi 1.3.0** for all three build peers and the exact toolchain. The `pi-agent-core` import in `provider.ts` is type-only today; maintain its build pin. Declare runtime host peers according to actual emitted imports (`pi-ai`, `pi-coding-agent` currently); if the bundle acquires a runtime `pi-agent-core` import, declare that peer as well. The bundle report already records external imports: assert every external package is a documented host peer or an explicitly reviewed runtime dependency.
@@ -215,7 +222,7 @@ Client publication **does not require the gateway's `production` deployment cere
 
 **Does client publishing need the gateway ceremony? No—not the gateway deployment ceremony, but yes to a separate protected publication approval.** Publishing client code is an irreversible supply-chain mutation users may install, so prior PR review alone is insufficient authority for a particular upload. Reuse required human approval, exact-byte/source provenance and no-replay discipline, not the gateway's production environment, Tinfoil/admin credentials, configuration custody, secret-reference snapshots or live deployment checks. Protected tags plus npm provenance do not replace the human release decision. Additional Git-tag signing is not a proposed mandatory gate; use it only if the operator later selects an existing signing identity/policy.
 
-Use a new dedicated workflow, proposed `.github/workflows/publish-pi.yml`, not `scripts/release.py prepare` or `publish-image.yml`. Preserve the principles in `docs/approved-main-releases.md` and `scripts/release.py`: reviewed source; exact successful CI; immutable artifact/source identity; public signed provenance; serialized mutation; no overwriting, blind retry, or automatic rollback. Gateway-specific release-only commit R, config transformation and A/B image digest logic are not reused as npm version allocation.
+The reserved `.github/workflows/publish-pi.yml` is **hard disabled and not a functional publisher**. Its only dormant body prints a closed blocker and exits; it contains no checkout, upload, npm publication or staging operation. It does not establish that `pi-release` exists/protects approvals, mint OIDC, or implement artifact/tag/source/CI admission, mirror or uncertain-outcome reconciliation. Those remain incomplete, not “ready by flipping a switch.” Keep this separate from `scripts/release.py prepare` or `publish-image.yml`. Preserve the principles in `docs/approved-main-releases.md` and `scripts/release.py`: reviewed source; exact successful CI; immutable artifact/source identity; public signed provenance; serialized mutation; no overwriting, blind retry, or automatic rollback. Gateway-specific release-only commit R, config transformation and A/B image digest logic are not reused as npm version allocation.
 
 For each client-only PR, the user/agent may explicitly apply `no-rollout-needed` **after reviewing the complete diff and rollout impact**. Never auto-label by file path. The label skips ordinary gateway publication/deployment, not required CI, client publication review, or npm provenance. If gateway impact is uncertain, retain normal rollout. A docs plan is not merge/release authority.
 

@@ -29,7 +29,10 @@ jobs:
         with:
           diagnostic-endpoint: ""
       - name: Check source preparation policy offline
-        run: python3 -m unittest discover -s tests -p 'test_pi_source_*.py'
+        run: |
+          python3 -m unittest discover -s tests -p 'test_pi_source_*.py'
+          python3 -m unittest discover -s tests \
+            -p 'test_pi_publisher_disabled.py'
       - name: Acquire public inputs; compile and check the source client offline
         run: >-
           nix develop --no-write-lock-file .#pi-client --command

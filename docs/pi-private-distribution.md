@@ -4,8 +4,8 @@
 `private:true`, with `license:null` and `redistributionApproved:false`. No public
 client package, universal real candidate, installation, activation, publication or
 live verification is established by this work. Licensing/notices, current-source
-four-target qualification and operator-owned release prerequisites remain gates.
-See the [release plan](pi-client-release-plan.md) and
+four-target artifact handoff and operator-owned release prerequisites remain gates.
+See the [release plan](pi-client-release-plan.md), [source CI](pi-source-ci.md) and
 [native evidence](pi-native-portability.md).
 
 ## Implemented boundary
@@ -133,8 +133,26 @@ PR #115's native workflow run **40925858145** succeeded for all four targets at
 **`9ac39772724b95e741ec53885f0ef4e469f1c9b8`**. The earlier CA preparation fix
 also had a successful run, **40922458945**. This records queried GitHub workflow
 status, not a current-source artifact receipt/handoff or universal package
-acceptance. The newer inspector source invalidates older native report source
-hashes; rerun/reconcile current exact-source jobs before release acceptance.
+acceptance. The newer inspector source invalidates those older report hashes.
+
+Subsequently, source CI run **40975281859** and all four native jobs in run
+**40975281886** reported **SUCCESS** for PR head **`e9458030`**. A fresh actual
+source-driver run also passed locally on Darwin arm64 after the offline-cache
+recipe change and the selected-Node-wrapper correction. It acquired public SDK/
+compiler/Go/Cargo inputs, compiled the actual verifier/helper/client and passed
+report checks plus the full offline suite. **47** source-policy tests passed
+with pinned Python **3.12.12**. See [source CI evidence and limits](pi-source-ci.md).
+PR statuses may describe synthetic merge checkouts; neither status nor local
+source success supplies approved matching four-target artifact/report bytes.
+The real universal candidate and managed-loader acceptance remain unestablished.
+
+`publish-pi.yml` only reserves a hard-disabled workflow identity: its sole dormant
+body exits with a closed blocker, even if its false job guard were removed.
+**4** offline static/shell tests and bounded independent review accepted this
+boundary. No functional publisher/mirror, exact artifact handoff or publication
+admission/reconciliation is implemented. Referencing the dormant environment does
+not verify protection; changing the guard would cross its privilege boundary.
+Do not enable it, configure a token/placeholder path, or treat it as ready to publish.
 
 ## Privacy and remaining limits
 
